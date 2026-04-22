@@ -459,7 +459,7 @@ def upload_smro():
         col_qty     = find_column(df, ['SO Quantity','SO Qty','Qty','Quantity'])
         col_sunit   = find_column(df, ['Sales Unit','Unit','UOM'])
         col_sprice  = find_column(df, ['Sales Price','Price','Unit Price'])
-        col_samt    = find_column(df, ['Sales Amount','Amount','Total'])
+        col_samt    = find_column(df, ['Sales Amount(Exclude Tax)','Sales Amount','Amount','Total'])
         col_cur     = find_column(df, ['Currency','Curr'])
         col_pprice  = find_column(df, ['Purchasing Price','Purchase Price','PO Price'])
         col_pamt    = find_column(df, ['Purchasing Amount','Purchase Amount','PO Amount'])
