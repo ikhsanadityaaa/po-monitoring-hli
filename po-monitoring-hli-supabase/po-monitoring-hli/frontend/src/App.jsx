@@ -273,9 +273,9 @@ const App = () => {
   };
 
   const updateSOCell = async (soId, field, value) => {
+    setEditingCell(null); // selalu tutup input dulu sebelum request
     try {
       await api.put(`/api/data/so/${soId}`, { [field]: value });
-      setEditingCell(null);
       setAllSOData(prev => prev.map(s => s.id === soId ? { ...s, [field]: value } : s));
     } catch (e) { addToast(`❌ Gagal update: ${e.message}`, 'error'); }
   };
@@ -540,15 +540,64 @@ const App = () => {
           <div className="grid gap-4 flex-1" style={{gridTemplateColumns:'3fr 2fr'}}>
             <div className={`p-5 rounded-2xl shadow ${card}`}>
               <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><BarChart3 className="w-4 h-4 text-orange-600"/> SO Status (Pie)</h3>
-              <ResponsiveContainer width="100%" height={300}>
-                <PieChart>
-                  <Pie data={stats?.so_status||[]} cx="50%" cy="42%" innerRadius={52} outerRadius={88} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
-                    {(stats?.so_status||[]).map((_,i)=><Cell key={i} fill={PIE_COLORS[i%PIE_COLORS.length]}/>)}
-                  </Pie>
-                  <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v),n]}/>
-                  <Legend layout="horizontal" align="center" verticalAlign="bottom" iconSize={8} formatter={(v)=><span className="text-xs">{v}</span>}/>
-                </PieChart>
-              </ResponsiveContainer>
+              {(() => {
+                const rawStatus = stats?.so_status || [];
+                // Sort by value desc, take top 5, rest into "Etc"
+                const sorted = [...rawStatus].sort((a,b) => b.value - a.value);
+                const top5 = sorted.slice(0, 5);
+                const rest = sorted.slice(5);
+                const etcValue = rest.reduce((s, d) => s + d.value, 0);
+                const pieData = etcValue > 0
+                  ? [...top5, { name: `Etc (${rest.length} lainnya)`, value: etcValue, isEtc: true, etcItems: rest }]
+                  : top5;
+                const [etcHover, setEtcHover] = React.useState(false);
+                const [etcPos, setEtcPos] = React.useState({x:0,y:0});
+                return (
+                  <div style={{width:'100%', height:300}}>
+                    <ResponsiveContainer width="100%" height={300}>
+                      <PieChart>
+                        <Pie data={pieData} cx="50%" cy="42%" innerRadius={52} outerRadius={88}
+                          paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
+                          {pieData.map((d,i)=>(
+                            <Cell key={i} fill={d.isEtc ? '#9CA3AF' : PIE_COLORS[i % PIE_COLORS.length]}/>
+                          ))}
+                        </Pie>
+                        <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}}
+                          formatter={(v,n,p)=> p.payload.isEtc
+                            ? [fmtNum(v), `Etc: ${p.payload.etcItems?.map(x=>x.name).join(', ')}`]
+                            : [fmtNum(v), n]}/>
+                        <Legend iconSize={8} layout="horizontal" align="center" verticalAlign="bottom"
+                          formatter={(v, entry) => {
+                            if (entry.payload?.isEtc) {
+                              return (
+                                <span
+                                  className="text-xs relative"
+                                  style={{cursor:'pointer', color: darkMode?'#D1D5DB':'#374151'}}
+                                  onMouseEnter={e=>{setEtcHover(true);setEtcPos({x:e.clientX,y:e.clientY});}}
+                                  onMouseLeave={()=>setEtcHover(false)}>
+                                  {v}
+                                </span>
+                              );
+                            }
+                            return <span className="text-xs" style={{color: darkMode?'#D1D5DB':'#374151'}}>{v}</span>;
+                          }}/>
+                      </PieChart>
+                    </ResponsiveContainer>
+                    {etcHover && rest.length > 0 && (
+                      <div className="fixed z-[200] bg-gray-900 text-white text-xs rounded-lg px-3 py-2 shadow-xl pointer-events-none max-w-xs"
+                        style={{left: etcPos.x + 12, top: etcPos.y - 10}}>
+                        <div className="font-bold mb-1">Etc ({rest.length} status):</div>
+                        {rest.map((r,i)=>(
+                          <div key={i} className="flex justify-between gap-3">
+                            <span>{r.name}</span>
+                            <span className="font-semibold">{fmtNum(r.value)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
             {(() => {
               const agingPieData = [
@@ -589,18 +638,38 @@ const App = () => {
               ))}</tr>
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
-              {agingData.slice(0,15).map((v,i)=>(
-                <tr key={i} className={`${trHov} cursor-pointer`}
-                  onClick={()=>openModal(`Aging Detail: ${v.vendor}`, `/api/data/aging-detail/${encodeURIComponent(v.vendor)}`)}>
-                  <td className={`p-3 font-medium text-xs ${txt}`}>{v.vendor}</td>
-                  <td className="p-3 text-center font-semibold text-green-600">{fmtNum(v.less_30)}</td>
-                  <td className="p-3 text-center font-semibold text-yellow-600">{fmtNum(v.days_30_90)}</td>
-                  <td className="p-3 text-center font-semibold text-orange-600">{fmtNum(v.days_90_180)}</td>
-                  <td className="p-3 text-center font-semibold text-red-600">{fmtNum(v.more_180)}</td>
-                  <td className="p-3 text-center font-bold text-purple-600">{fmtNum(v.total_open)}</td>
-                  <td className="p-3 text-right font-semibold text-orange-600 text-xs">{fmtCurShort(v.sales_amount)}</td>
-                </tr>
-              ))}
+              {agingData.slice(0,15).map((v,i)=>{
+                const openDetail = (bucket) => {
+                  const url = bucket
+                    ? `/api/data/aging-detail/${encodeURIComponent(v.vendor)}?aging_bucket=${encodeURIComponent(bucket)}`
+                    : `/api/data/aging-detail/${encodeURIComponent(v.vendor)}`;
+                  const label = bucket ? `${v.vendor} — ${bucket} hari` : `Aging Detail: ${v.vendor}`;
+                  openModal(label, url);
+                };
+                const cellBtn = (val, bucket, colorClass) => val > 0 ? (
+                  <button onClick={e=>{e.stopPropagation();openDetail(bucket);}}
+                    className={`font-semibold underline-offset-2 hover:underline cursor-pointer ${colorClass}`}>
+                    {fmtNum(val)}
+                  </button>
+                ) : <span className={`${colorClass} opacity-40`}>0</span>;
+                return (
+                  <tr key={i} className={`${trHov}`}>
+                    <td className={`p-3 font-medium text-xs cursor-pointer hover:text-purple-600 ${txt}`}
+                      onClick={()=>openDetail(null)}>{v.vendor}</td>
+                    <td className="p-3 text-center">{cellBtn(v.less_30,'0-30','text-green-600')}</td>
+                    <td className="p-3 text-center">{cellBtn(v.days_30_90,'30-90','text-yellow-600')}</td>
+                    <td className="p-3 text-center">{cellBtn(v.days_90_180,'90-180','text-orange-600')}</td>
+                    <td className="p-3 text-center">{cellBtn(v.more_180,'180+','text-red-600')}</td>
+                    <td className="p-3 text-center">
+                      <button onClick={()=>openDetail(null)}
+                        className="font-bold text-purple-600 hover:underline cursor-pointer">
+                        {fmtNum(v.total_open)}
+                      </button>
+                    </td>
+                    <td className="p-3 text-right font-semibold text-orange-600 text-xs">{fmtCurShort(v.sales_amount)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
             <tfoot className={`${tblHd} font-bold text-sm`}>
               {(() => {
@@ -813,10 +882,15 @@ const App = () => {
                         <input type="date" defaultValue={so.delivery_plan_date}
                           className={`px-2 py-1 rounded text-xs border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                           onChange={e=>setEditValue(e.target.value)}
-                          onBlur={()=>updateSOCell(so.id,'delivery_plan_date',editValue)}
-                          onKeyDown={e=>{if(e.key==='Enter')updateSOCell(so.id,'delivery_plan_date',editValue);if(e.key==='Escape')setEditingCell(null);}}
+                          onKeyDown={e=>{
+                            if(e.key==='Enter'){e.preventDefault();updateSOCell(so.id,'delivery_plan_date',editValue);}
+                            if(e.key==='Escape'){e.preventDefault();setEditingCell(null);}
+                          }}
                           autoFocus/>
-                        <button onClick={()=>updateSOCell(so.id,'delivery_plan_date','')} className="text-red-400 hover:text-red-600 p-0.5"><X className="w-3.5 h-3.5"/></button>
+                        <button onMouseDown={e=>{e.preventDefault();updateSOCell(so.id,'delivery_plan_date',editValue);}}
+                          className="text-green-500 hover:text-green-700 p-0.5 text-xs font-bold">✓</button>
+                        <button onMouseDown={e=>{e.preventDefault();setEditingCell(null);}}
+                          className="text-red-400 hover:text-red-600 p-0.5"><X className="w-3.5 h-3.5"/></button>
                       </div>
                     ) : (
                       <div className="flex items-center justify-center gap-1 group">
