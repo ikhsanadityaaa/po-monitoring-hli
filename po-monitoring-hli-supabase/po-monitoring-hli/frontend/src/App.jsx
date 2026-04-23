@@ -531,14 +531,34 @@ const App = () => {
             </div>
           </div>
 
-          {/* 2 Pie Charts side by side - equal size */}
+          {/* ┌─────────────────────────────────────────────────────────────┐
+               │  2 PIE CHARTS — PANDUAN KUSTOMISASI                         │
+               │                                                              │
+               │  LEBAR CHART  → ubah minHeight di kedua <div style>         │
+               │  DIAMETER     → outerRadius (jari-jari luar donut)          │
+               │  LUBANG TENGAH→ innerRadius (0 = pie penuh, > 0 = donut)   │
+               │  POSISI VERTIKAL → cy="44%" (naik = kecilkan, turun = besar)│
+               │  POSISI HORIZ → cx="50%" (biasanya biarkan 50%)            │
+               │  JARAK ANTAR SLICE → paddingAngle                           │
+               └─────────────────────────────────────────────────────────────┘ */}
           <div className="grid grid-cols-2 gap-4 flex-1">
+
+            {/* ── PIE 1: SO Status ── */}
             <div className={`p-5 rounded-2xl shadow ${card} flex flex-col`}>
               <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><BarChart3 className="w-4 h-4 text-orange-600"/> SO Status (Pie)</h3>
-              <div className="flex-1" style={{minHeight:260}}>
+              {/* minHeight = tinggi area chart dalam pixel — naikkan untuk chart lebih besar */}
+              <div className="flex-1" style={{minHeight: 300}}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <PieChart margin={{top:8,right:8,bottom:8,left:8}}>
-                    <Pie data={stats?.so_status||[]} cx="50%" cy="44%" innerRadius={48} outerRadius={78} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
+                  {/* margin = jarak antara tepi chart dan tepi container, cegah label terpotong */}
+                  <PieChart margin={{top: 10, right: 10, bottom: 10, left: 10}}>
+                    <Pie
+                      data={stats?.so_status||[]}
+                      cx="50%"          /* posisi horizontal center donut */
+                      cy="42%"          /* posisi vertikal center donut — kecilkan % = naik */
+                      innerRadius={50}  /* jari-jari dalam (lubang tengah). 0 = pie penuh */
+                      outerRadius={85}  /* jari-jari luar (ukuran donut). Naikkan = lebih besar */
+                      paddingAngle={2}  /* jarak antar slice dalam derajat */
+                      dataKey="value" labelLine={false} label={renderPctLabel}>
                       {(stats?.so_status||[]).map((_,i)=><Cell key={i} fill={PIE_COLORS[i%PIE_COLORS.length]}/>)}
                     </Pie>
                     <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v),n]}/>
@@ -547,6 +567,8 @@ const App = () => {
                 </ResponsiveContainer>
               </div>
             </div>
+
+            {/* ── PIE 2: SO Aging ── */}
             {(() => {
               const agingPieData = [
                 { name:'< 30 Hari', value:agingData.reduce((s,v)=>s+(v.less_30||0),0), fill:'#10B981' },
@@ -557,10 +579,18 @@ const App = () => {
               return (
                 <div className={`p-5 rounded-2xl shadow ${card} flex flex-col`}>
                   <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><Calendar className="w-4 h-4 text-red-500"/> SO Aging (Pie)</h3>
-                  <div className="flex-1" style={{minHeight:260}}>
+                  {/* minHeight = tinggi area chart dalam pixel — samakan dengan Pie 1 */}
+                  <div className="flex-1" style={{minHeight: 300}}>
                     <ResponsiveContainer width="100%" height="100%">
-                      <PieChart margin={{top:8,right:8,bottom:8,left:8}}>
-                        <Pie data={agingPieData} cx="50%" cy="44%" innerRadius={40} outerRadius={65} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
+                      <PieChart margin={{top: 10, right: 10, bottom: 10, left: 10}}>
+                        <Pie
+                          data={agingPieData}
+                          cx="50%"          /* posisi horizontal center donut */
+                          cy="42%"          /* posisi vertikal center donut */
+                          innerRadius={50}  /* jari-jari dalam (lubang tengah) */
+                          outerRadius={85}  /* jari-jari luar — samakan dengan Pie 1 */
+                          paddingAngle={2}
+                          dataKey="value" labelLine={false} label={renderPctLabel}>
                           {agingPieData.map((d,i)=><Cell key={i} fill={d.fill}/>)}
                         </Pie>
                         <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v)+' SO',n]}/>
@@ -598,7 +628,7 @@ const App = () => {
                   <td className="p-3 text-center font-semibold text-orange-600 cursor-pointer hover:underline"
                     onClick={()=>openModal(`Aging Detail: ${v.vendor} — 90-180 Hari`, `/api/data/aging-detail/${encodeURIComponent(v.vendor)}?bucket=90-180`)}>{fmtNum(v.days_90_180)}</td>
                   <td className="p-3 text-center font-semibold text-red-600 cursor-pointer hover:underline"
-                    onClick={()=>openModal(`Aging Detail: ${v.vendor} — > 180 Hari`, `/api/data/aging-detail/${encodeURIComponent(v.vendor)}?bucket=180+`)}>{fmtNum(v.more_180)}</td>
+                    onClick={()=>openModal(`Aging Detail: ${v.vendor} — > 180 Hari`, `/api/data/aging-detail/${encodeURIComponent(v.vendor)}?bucket=180%2B`)}>{fmtNum(v.more_180)}</td>
                   <td className="p-3 text-center font-bold text-purple-600 cursor-pointer hover:underline"
                     onClick={()=>openModal(`Aging Detail: ${v.vendor}`, `/api/data/aging-detail/${encodeURIComponent(v.vendor)}`)}>{fmtNum(v.total_open)}</td>
                   <td className="p-3 text-right font-semibold text-orange-600 text-xs">{fmtCurShort(v.sales_amount)}</td>
@@ -622,7 +652,7 @@ const App = () => {
                     <td className="p-3 text-center font-bold text-orange-700 cursor-pointer hover:underline"
                       onClick={()=>openModal('TOTAL — 90-180 Hari (Semua Vendor)', '/api/data/aging-detail-all?bucket=90-180')}>{fmtNum(tot.days_90_180)}</td>
                     <td className="p-3 text-center font-bold text-red-700 cursor-pointer hover:underline"
-                      onClick={()=>openModal('TOTAL — > 180 Hari (Semua Vendor)', '/api/data/aging-detail-all?bucket=180+')}>{fmtNum(tot.more_180)}</td>
+                      onClick={()=>openModal('TOTAL — > 180 Hari (Semua Vendor)', '/api/data/aging-detail-all?bucket=180%2B')}>{fmtNum(tot.more_180)}</td>
                     <td className="p-3 text-center font-bold text-purple-700 cursor-pointer hover:underline"
                       onClick={()=>openModal('TOTAL — Semua Aging (Semua Vendor)', '/api/data/aging-detail-all')}>{fmtNum(tot.total_open)}</td>
                     <td className="p-3 text-right font-bold text-orange-700 text-xs">{fmtCurShort(tot.sales_amount)}</td>
