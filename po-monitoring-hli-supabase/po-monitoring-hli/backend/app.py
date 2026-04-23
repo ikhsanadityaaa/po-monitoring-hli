@@ -447,18 +447,20 @@ def get_aging_detail_all():
 @app.route('/api/data/all-so', methods=['GET'])
 def get_all_so():
     try:
-        op_units = request.args.getlist('op_unit')   # multi-value
-        vendors  = request.args.getlist('vendor')    # multi-value
-        statuses = request.args.getlist('status')    # multi-value
-        aging    = request.args.getlist('aging')
-        page     = max(1, int(request.args.get('page', 1)))
-        per_page = min(500, int(request.args.get('per_page', 20)))
+        op_units  = request.args.getlist('op_unit')   # multi-value
+        vendors   = request.args.getlist('vendor')    # multi-value
+        statuses  = request.args.getlist('status')    # multi-value
+        aging     = request.args.getlist('aging')
+        so_items  = request.args.getlist('so_item')   # search by SO item numbers
+        page      = max(1, int(request.args.get('page', 1)))
+        per_page  = min(500, int(request.args.get('per_page', 20)))
 
         today = date.today()
         q = SOData.query
-        if op_units: q = q.filter(SOData.operation_unit_name.in_(op_units))
-        if vendors:  q = q.filter(SOData.vendor_name.in_(vendors))
-        if statuses: q = q.filter(SOData.so_status.in_(statuses))
+        if op_units:  q = q.filter(SOData.operation_unit_name.in_(op_units))
+        if vendors:   q = q.filter(SOData.vendor_name.in_(vendors))
+        if statuses:  q = q.filter(SOData.so_status.in_(statuses))
+        if so_items:  q = q.filter(SOData.so_item.in_(so_items))
 
         all_sos = q.order_by(SOData.so_create_date.desc()).all()
 
