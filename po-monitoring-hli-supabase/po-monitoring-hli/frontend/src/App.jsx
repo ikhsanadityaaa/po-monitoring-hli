@@ -557,7 +557,7 @@ const App = () => {
                       cy="42%"          /* posisi vertikal center donut — kecilkan % = naik */
                       innerRadius={50}  /* jari-jari dalam (lubang tengah). 0 = pie penuh */
                       outerRadius={85}  /* jari-jari luar (ukuran donut). Naikkan = lebih besar */
-                      paddingAngle={2}  /* jarak antar slice dalam derajat */
+                      paddingAngle={0}  /* jarak antar slice dalam derajat */
                       dataKey="value" labelLine={false} label={renderPctLabel}>
                       {(stats?.so_status||[]).map((_,i)=><Cell key={i} fill={PIE_COLORS[i%PIE_COLORS.length]}/>)}
                     </Pie>
@@ -589,7 +589,7 @@ const App = () => {
                           cy="42%"          /* posisi vertikal center donut */
                           innerRadius={50}  /* jari-jari dalam (lubang tengah) */
                           outerRadius={85}  /* jari-jari luar — samakan dengan Pie 1 */
-                          paddingAngle={2}
+                          paddingAngle={0}
                           dataKey="value" labelLine={false} label={renderPctLabel}>
                           {agingPieData.map((d,i)=><Cell key={i} fill={d.fill}/>)}
                         </Pie>
