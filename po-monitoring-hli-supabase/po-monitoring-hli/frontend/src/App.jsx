@@ -531,19 +531,21 @@ const App = () => {
             </div>
           </div>
 
-          {/* 2 Pie Charts side by side - SO Status wider */}
-          <div className="grid gap-4 flex-1" style={{gridTemplateColumns:'3fr 2fr'}}>
-            <div className={`p-5 rounded-2xl shadow ${card}`}>
+          {/* 2 Pie Charts side by side - equal size */}
+          <div className="grid grid-cols-2 gap-4 flex-1">
+            <div className={`p-5 rounded-2xl shadow ${card} flex flex-col`}>
               <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><BarChart3 className="w-4 h-4 text-orange-600"/> SO Status (Pie)</h3>
-              <ResponsiveContainer width="100%" height={300}>
-                <PieChart>
-                  <Pie data={stats?.so_status||[]} cx="50%" cy="42%" innerRadius={52} outerRadius={88} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
-                    {(stats?.so_status||[]).map((_,i)=><Cell key={i} fill={PIE_COLORS[i%PIE_COLORS.length]}/>)}
-                  </Pie>
-                  <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v),n]}/>
-                  <Legend layout="horizontal" align="center" verticalAlign="bottom" iconSize={8} formatter={(v)=><span className="text-xs">{v}</span>}/>
-                </PieChart>
-              </ResponsiveContainer>
+              <div className="flex-1" style={{minHeight:260}}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart margin={{top:8,right:8,bottom:8,left:8}}>
+                    <Pie data={stats?.so_status||[]} cx="50%" cy="44%" innerRadius={48} outerRadius={78} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
+                      {(stats?.so_status||[]).map((_,i)=><Cell key={i} fill={PIE_COLORS[i%PIE_COLORS.length]}/>)}
+                    </Pie>
+                    <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v),n]}/>
+                    <Legend layout="horizontal" align="center" verticalAlign="bottom" iconSize={8} formatter={(v)=><span className="text-xs">{v}</span>}/>
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
             </div>
             {(() => {
               const agingPieData = [
@@ -553,17 +555,19 @@ const App = () => {
                 { name:'> 180 Hari', value:agingData.reduce((s,v)=>s+(v.more_180||0),0), fill:'#EF4444' },
               ].filter(d=>d.value>0);
               return (
-                <div className={`p-5 rounded-2xl shadow ${card}`}>
+                <div className={`p-5 rounded-2xl shadow ${card} flex flex-col`}>
                   <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><Calendar className="w-4 h-4 text-red-500"/> SO Aging (Pie)</h3>
-                  <ResponsiveContainer width="100%" height={300}>
-                    <PieChart>
-                      <Pie data={agingPieData} cx="50%" cy="40%" innerRadius={44} outerRadius={72} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
-                        {agingPieData.map((d,i)=><Cell key={i} fill={d.fill}/>)}
-                      </Pie>
-                      <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v)+' SO',n]}/>
-                      <Legend layout="horizontal" align="center" verticalAlign="bottom" iconSize={8} formatter={(v)=><span className="text-xs">{v}</span>}/>
-                    </PieChart>
-                  </ResponsiveContainer>
+                  <div className="flex-1" style={{minHeight:260}}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart margin={{top:8,right:8,bottom:8,left:8}}>
+                        <Pie data={agingPieData} cx="50%" cy="44%" innerRadius={40} outerRadius={65} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
+                          {agingPieData.map((d,i)=><Cell key={i} fill={d.fill}/>)}
+                        </Pie>
+                        <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v)+' SO',n]}/>
+                        <Legend layout="horizontal" align="center" verticalAlign="bottom" iconSize={8} formatter={(v)=><span className="text-xs">{v}</span>}/>
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
                 </div>
               );
             })()}
@@ -611,11 +615,16 @@ const App = () => {
                 return (
                   <tr>
                     <td className={`p-3 font-bold ${txt}`}>TOTAL</td>
-                    <td className="p-3 text-center font-bold text-green-700">{fmtNum(tot.less_30)}</td>
-                    <td className="p-3 text-center font-bold text-yellow-700">{fmtNum(tot.days_30_90)}</td>
-                    <td className="p-3 text-center font-bold text-orange-700">{fmtNum(tot.days_90_180)}</td>
-                    <td className="p-3 text-center font-bold text-red-700">{fmtNum(tot.more_180)}</td>
-                    <td className="p-3 text-center font-bold text-purple-700">{fmtNum(tot.total_open)}</td>
+                    <td className="p-3 text-center font-bold text-green-700 cursor-pointer hover:underline"
+                      onClick={()=>openModal('TOTAL — < 30 Hari (Semua Vendor)', '/api/data/aging-detail-all?bucket=0-30')}>{fmtNum(tot.less_30)}</td>
+                    <td className="p-3 text-center font-bold text-yellow-700 cursor-pointer hover:underline"
+                      onClick={()=>openModal('TOTAL — 30-90 Hari (Semua Vendor)', '/api/data/aging-detail-all?bucket=30-90')}>{fmtNum(tot.days_30_90)}</td>
+                    <td className="p-3 text-center font-bold text-orange-700 cursor-pointer hover:underline"
+                      onClick={()=>openModal('TOTAL — 90-180 Hari (Semua Vendor)', '/api/data/aging-detail-all?bucket=90-180')}>{fmtNum(tot.days_90_180)}</td>
+                    <td className="p-3 text-center font-bold text-red-700 cursor-pointer hover:underline"
+                      onClick={()=>openModal('TOTAL — > 180 Hari (Semua Vendor)', '/api/data/aging-detail-all?bucket=180+')}>{fmtNum(tot.more_180)}</td>
+                    <td className="p-3 text-center font-bold text-purple-700 cursor-pointer hover:underline"
+                      onClick={()=>openModal('TOTAL — Semua Aging (Semua Vendor)', '/api/data/aging-detail-all')}>{fmtNum(tot.total_open)}</td>
                     <td className="p-3 text-right font-bold text-orange-700 text-xs">{fmtCurShort(tot.sales_amount)}</td>
                   </tr>
                 );
