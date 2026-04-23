@@ -133,6 +133,100 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
   );
 };
 
+// ─── MultiSelect dropdown component ───────────────────────────────────────
+const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => {
+  const [open, setOpen] = useState(false);
+  const ref = React.useRef(null);
+  useEffect(() => {
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+  const toggle = (val) => onChange(selected.includes(val) ? selected.filter(x=>x!==val) : [...selected, val]);
+  return (
+    <div className="relative flex-1 min-w-[180px]" ref={ref}>
+      <label className={`block text-xs font-medium mb-1 ${txt2}`}>{label}</label>
+      <button onClick={()=>setOpen(o=>!o)}
+        className={`w-full px-3 py-2 rounded-lg text-sm border text-left flex justify-between items-center ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300 text-gray-700'}`}>
+        <span className="truncate">{selected.length === 0 ? `All ${label}` : `${selected.length} dipilih`}</span>
+        <ChevronDown className="w-4 h-4 flex-shrink-0 ml-1"/>
+      </button>
+      {open && (
+        <div className={`absolute z-50 mt-1 w-full max-h-56 overflow-auto rounded-lg shadow-xl border ${darkMode?'bg-gray-700 border-gray-600':'bg-white border-gray-200'}`}>
+          {selected.length > 0 && (
+            <button onClick={()=>onChange([])}
+              className={`w-full px-3 py-2 text-xs text-left text-red-500 border-b ${darkMode?'border-gray-600 hover:bg-gray-600':'border-gray-100 hover:bg-red-50'}`}>
+              ✕ Reset pilihan
+            </button>
+          )}
+          {options.map(opt => (
+            <label key={opt} className={`flex items-center gap-2 px-3 py-2 text-xs cursor-pointer ${darkMode?'hover:bg-gray-600 text-white':'hover:bg-purple-50 text-gray-700'}`}>
+              <input type="checkbox" checked={selected.includes(opt)} onChange={()=>toggle(opt)} className="accent-purple-600"/>
+              <span className="truncate" title={opt}>{opt}</span>
+            </label>
+          ))}
+          {options.length === 0 && <div className={`px-3 py-2 text-xs ${txt2}`}>Tidak ada opsi</div>}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── SO Status Pie with Top-5 legend + Etc tooltip ─────────────────────────
+const StatusPie = ({ data, darkMode }) => {
+  const [etcHover, setEtcHover] = useState(false);
+  const [etcPos, setEtcPos] = useState({x:0, y:0});
+  const sorted = [...(data||[])].sort((a,b) => b.value - a.value);
+  const top5 = sorted.slice(0, 5);
+  const rest = sorted.slice(5);
+  const etcValue = rest.reduce((s, d) => s + d.value, 0);
+  const pieData = etcValue > 0
+    ? [...top5, { name: `Etc (${rest.length} lainnya)`, value: etcValue, isEtc: true, etcItems: rest }]
+    : top5;
+  return (
+    <div style={{position:'relative'}}>
+      <ResponsiveContainer width="100%" height={300}>
+        <PieChart>
+          <Pie data={pieData} cx="50%" cy="42%" innerRadius={52} outerRadius={88}
+            paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
+            {pieData.map((d,i)=>(
+              <Cell key={i} fill={d.isEtc ? '#9CA3AF' : PIE_COLORS[i % PIE_COLORS.length]}/>
+            ))}
+          </Pie>
+          <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}}
+            formatter={(v,n,p)=> p.payload.isEtc
+              ? [fmtNum(v), `${p.payload.etcItems?.map(x=>x.name).join(', ')}`]
+              : [fmtNum(v), n]}/>
+          <Legend iconSize={8} layout="horizontal" align="center" verticalAlign="bottom"
+            formatter={(v, entry) => {
+              if (entry.payload?.isEtc) {
+                return (
+                  <span className="text-xs" style={{cursor:'help', color: darkMode?'#D1D5DB':'#374151'}}
+                    onMouseEnter={e=>{setEtcHover(true);setEtcPos({x:e.clientX,y:e.clientY});}}
+                    onMouseLeave={()=>setEtcHover(false)}>
+                    {v}
+                  </span>
+                );
+              }
+              return <span className="text-xs" style={{color: darkMode?'#D1D5DB':'#374151'}}>{v}</span>;
+            }}/>
+        </PieChart>
+      </ResponsiveContainer>
+      {etcHover && rest.length > 0 && (
+        <div className="fixed z-[200] bg-gray-900 text-white text-xs rounded-lg px-3 py-2 shadow-xl pointer-events-none max-w-xs"
+          style={{left: etcPos.x + 12, top: etcPos.y - 10}}>
+          <div className="font-bold mb-1">Etc ({rest.length} status):</div>
+          {rest.map((r,i)=>(
+            <div key={i} className="flex justify-between gap-3">
+              <span>{r.name}</span><span className="font-semibold">{fmtNum(r.value)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ═══════════════════════════════════════════════════════════════════
 // MAIN APP
 // ═══════════════════════════════════════════════════════════════════
@@ -540,64 +634,7 @@ const App = () => {
           <div className="grid gap-4 flex-1" style={{gridTemplateColumns:'3fr 2fr'}}>
             <div className={`p-5 rounded-2xl shadow ${card}`}>
               <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><BarChart3 className="w-4 h-4 text-orange-600"/> SO Status (Pie)</h3>
-              {(() => {
-                const rawStatus = stats?.so_status || [];
-                // Sort by value desc, take top 5, rest into "Etc"
-                const sorted = [...rawStatus].sort((a,b) => b.value - a.value);
-                const top5 = sorted.slice(0, 5);
-                const rest = sorted.slice(5);
-                const etcValue = rest.reduce((s, d) => s + d.value, 0);
-                const pieData = etcValue > 0
-                  ? [...top5, { name: `Etc (${rest.length} lainnya)`, value: etcValue, isEtc: true, etcItems: rest }]
-                  : top5;
-                const [etcHover, setEtcHover] = React.useState(false);
-                const [etcPos, setEtcPos] = React.useState({x:0,y:0});
-                return (
-                  <div style={{width:'100%', height:300}}>
-                    <ResponsiveContainer width="100%" height={300}>
-                      <PieChart>
-                        <Pie data={pieData} cx="50%" cy="42%" innerRadius={52} outerRadius={88}
-                          paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
-                          {pieData.map((d,i)=>(
-                            <Cell key={i} fill={d.isEtc ? '#9CA3AF' : PIE_COLORS[i % PIE_COLORS.length]}/>
-                          ))}
-                        </Pie>
-                        <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}}
-                          formatter={(v,n,p)=> p.payload.isEtc
-                            ? [fmtNum(v), `Etc: ${p.payload.etcItems?.map(x=>x.name).join(', ')}`]
-                            : [fmtNum(v), n]}/>
-                        <Legend iconSize={8} layout="horizontal" align="center" verticalAlign="bottom"
-                          formatter={(v, entry) => {
-                            if (entry.payload?.isEtc) {
-                              return (
-                                <span
-                                  className="text-xs relative"
-                                  style={{cursor:'pointer', color: darkMode?'#D1D5DB':'#374151'}}
-                                  onMouseEnter={e=>{setEtcHover(true);setEtcPos({x:e.clientX,y:e.clientY});}}
-                                  onMouseLeave={()=>setEtcHover(false)}>
-                                  {v}
-                                </span>
-                              );
-                            }
-                            return <span className="text-xs" style={{color: darkMode?'#D1D5DB':'#374151'}}>{v}</span>;
-                          }}/>
-                      </PieChart>
-                    </ResponsiveContainer>
-                    {etcHover && rest.length > 0 && (
-                      <div className="fixed z-[200] bg-gray-900 text-white text-xs rounded-lg px-3 py-2 shadow-xl pointer-events-none max-w-xs"
-                        style={{left: etcPos.x + 12, top: etcPos.y - 10}}>
-                        <div className="font-bold mb-1">Etc ({rest.length} status):</div>
-                        {rest.map((r,i)=>(
-                          <div key={i} className="flex justify-between gap-3">
-                            <span>{r.name}</span>
-                            <span className="font-semibold">{fmtNum(r.value)}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
+              <StatusPie data={stats?.so_status} darkMode={darkMode}/>
             </div>
             {(() => {
               const agingPieData = [
@@ -611,7 +648,7 @@ const App = () => {
                   <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><Calendar className="w-4 h-4 text-red-500"/> SO Aging (Pie)</h3>
                   <ResponsiveContainer width="100%" height={300}>
                     <PieChart>
-                      <Pie data={agingPieData} cx="50%" cy="40%" innerRadius={52} outerRadius={88} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
+                      <Pie data={agingPieData} cx="50%" cy="40%" innerRadius={44} outerRadius={72} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
                         {agingPieData.map((d,i)=><Cell key={i} fill={d.fill}/>)}
                       </Pie>
                       <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v)+' SO',n]}/>
@@ -743,95 +780,55 @@ const App = () => {
         </div>
 
         {/* Multi-select Filters */}
-        {(() => {
-          const MultiSelect = ({ label, options, selected, onChange }) => {
-            const [open, setOpen] = React.useState(false);
-            const ref = React.useRef(null);
-            React.useEffect(() => {
-              const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
-              document.addEventListener('mousedown', handler);
-              return () => document.removeEventListener('mousedown', handler);
-            }, []);
-            const toggle = (val) => onChange(selected.includes(val) ? selected.filter(x=>x!==val) : [...selected, val]);
-            return (
-              <div className="relative flex-1 min-w-[180px]" ref={ref}>
-                <label className={`block text-xs font-medium mb-1 ${txt2}`}>{label}</label>
-                <button onClick={()=>setOpen(o=>!o)}
-                  className={`w-full px-3 py-2 rounded-lg text-sm border text-left flex justify-between items-center ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300 text-gray-700'}`}>
-                  <span className="truncate">
-                    {selected.length === 0 ? `All ${label}` : `${selected.length} dipilih`}
-                  </span>
-                  <ChevronDown className="w-4 h-4 flex-shrink-0 ml-1"/>
-                </button>
-                {open && (
-                  <div className={`absolute z-50 mt-1 w-full max-h-56 overflow-auto rounded-lg shadow-xl border ${darkMode?'bg-gray-700 border-gray-600':'bg-white border-gray-200'}`}>
-                    {selected.length > 0 && (
-                      <button onClick={()=>onChange([])}
-                        className={`w-full px-3 py-2 text-xs text-left text-red-500 hover:bg-red-50 border-b ${darkMode?'border-gray-600 hover:bg-gray-600':'border-gray-100'}`}>
-                        ✕ Reset pilihan
-                      </button>
-                    )}
-                    {options.map(opt => (
-                      <label key={opt} className={`flex items-center gap-2 px-3 py-2 text-xs cursor-pointer ${darkMode?'hover:bg-gray-600 text-white':'hover:bg-purple-50 text-gray-700'}`}>
-                        <input type="checkbox" checked={selected.includes(opt)} onChange={()=>toggle(opt)} className="accent-purple-600"/>
-                        <span className="truncate" title={opt}>{opt}</span>
-                      </label>
-                    ))}
-                    {options.length === 0 && <div className={`px-3 py-2 text-xs ${txt2}`}>Tidak ada opsi</div>}
-                  </div>
-                )}
-              </div>
-            );
-          };
-          return (
-            <div className={`p-4 rounded-xl mb-4 ${darkMode?'bg-gray-700':'bg-gray-50'}`}>
-              <div className="flex flex-wrap gap-3 items-end">
-                <MultiSelect label="Operation Unit" options={soFilterOptions.op_units}
-                  selected={soFilters.op_units} onChange={v=>setSoFilters(f=>({...f,op_units:v}))}/>
-                <MultiSelect label="Vendor Name" options={soFilterOptions.vendors}
-                  selected={soFilters.vendors} onChange={v=>setSoFilters(f=>({...f,vendors:v}))}/>
-                <MultiSelect label="SO Status" options={soFilterOptions.statuses}
-                  selected={soFilters.statuses} onChange={v=>setSoFilters(f=>({...f,statuses:v}))}/>
-                <div className="flex-1 min-w-[100px]">
-                  <label className={`block text-xs font-medium mb-1 ${txt2}`}>Baris per Halaman</label>
-                  <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
-                    value={soPerPage} onChange={e=>setSoPerPage(Number(e.target.value))}>
-                    <option value={20}>20</option>
-                    <option value={50}>50</option>
-                    <option value={100}>100</option>
-                    <option value={200}>200</option>
-                  </select>
-                </div>
-                <div className="flex gap-2">
-                  <button onClick={()=>{ setSoPage(1); fetchSOData(soFilters,1,soPerPage); }}
-                    className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-sm font-medium">Apply</button>
-                  <button onClick={()=>{ const f={op_units:[],vendors:[],statuses:[],aging:[]}; setSoFilters(f); setSoPage(1); fetchSOData(f,1,soPerPage); }}
-                    className={`px-4 py-2 rounded-lg text-sm font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>Reset</button>
-                </div>
-              </div>
-              {/* Active filter tags */}
-              {(soFilters.op_units.length + soFilters.vendors.length + soFilters.statuses.length) > 0 && (
-                <div className="mt-3 flex flex-wrap gap-1.5">
-                  {soFilters.op_units.map(v=>(
-                    <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full text-xs">
-                      {v}<button onClick={()=>setSoFilters(f=>({...f,op_units:f.op_units.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
-                    </span>
-                  ))}
-                  {soFilters.vendors.map(v=>(
-                    <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">
-                      {v}<button onClick={()=>setSoFilters(f=>({...f,vendors:f.vendors.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
-                    </span>
-                  ))}
-                  {soFilters.statuses.map(v=>(
-                    <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs">
-                      {v}<button onClick={()=>setSoFilters(f=>({...f,statuses:f.statuses.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
-                    </span>
-                  ))}
-                </div>
-              )}
+        <div className={`p-4 rounded-xl mb-4 ${darkMode?'bg-gray-700':'bg-gray-50'}`}>
+          <div className="flex flex-wrap gap-3 items-end">
+            <MultiSelect label="Operation Unit" options={soFilterOptions.op_units}
+              selected={soFilters.op_units} onChange={v=>setSoFilters(f=>({...f,op_units:v}))}
+              darkMode={darkMode} txt2={txt2}/>
+            <MultiSelect label="Vendor Name" options={soFilterOptions.vendors}
+              selected={soFilters.vendors} onChange={v=>setSoFilters(f=>({...f,vendors:v}))}
+              darkMode={darkMode} txt2={txt2}/>
+            <MultiSelect label="SO Status" options={soFilterOptions.statuses}
+              selected={soFilters.statuses} onChange={v=>setSoFilters(f=>({...f,statuses:v}))}
+              darkMode={darkMode} txt2={txt2}/>
+            <div className="flex-1 min-w-[100px]">
+              <label className={`block text-xs font-medium mb-1 ${txt2}`}>Baris per Halaman</label>
+              <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                value={soPerPage} onChange={e=>setSoPerPage(Number(e.target.value))}>
+                <option value={20}>20</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+                <option value={200}>200</option>
+              </select>
             </div>
-          );
-        })()}
+            <div className="flex gap-2">
+              <button onClick={()=>{ setSoPage(1); fetchSOData(soFilters,1,soPerPage); }}
+                className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-sm font-medium">Apply</button>
+              <button onClick={()=>{ const f={op_units:[],vendors:[],statuses:[],aging:[]}; setSoFilters(f); setSoPage(1); fetchSOData(f,1,soPerPage); }}
+                className={`px-4 py-2 rounded-lg text-sm font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>Reset</button>
+            </div>
+          </div>
+          {/* Active filter tags */}
+          {(soFilters.op_units.length + soFilters.vendors.length + soFilters.statuses.length) > 0 && (
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {soFilters.op_units.map(v=>(
+                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full text-xs">
+                  {v}<button onClick={()=>setSoFilters(f=>({...f,op_units:f.op_units.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                </span>
+              ))}
+              {soFilters.vendors.map(v=>(
+                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">
+                  {v}<button onClick={()=>setSoFilters(f=>({...f,vendors:f.vendors.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                </span>
+              ))}
+              {soFilters.statuses.map(v=>(
+                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs">
+                  {v}<button onClick={()=>setSoFilters(f=>({...f,statuses:f.statuses.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
 
         {/* SO Table */}
         <div className="overflow-x-auto rounded-lg border border-gray-200">
