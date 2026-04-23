@@ -1,676 +1,956 @@
-from flask import Flask, request, jsonify, send_file
-from flask_sqlalchemy import SQLAlchemy
-from flask_cors import CORS
-import pandas as pd
-import re
-import os
-from datetime import datetime, date
-import io
-from sqlalchemy import func, text
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment
-from openpyxl.utils import get_column_letter
+import React, { useState, useEffect, useCallback } from 'react';
+import {
+  LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area
+} from 'recharts';
+import {
+  Upload, Download, AlertCircle, CheckCircle, XCircle,
+  Package, DollarSign, TrendingUp, Calendar, ChevronLeft,
+  ChevronRight, Moon, Sun, FileText, BarChart3, FileSpreadsheet,
+  Filter, X, ChevronDown, ChevronUp, Building2
+} from 'lucide-react';
+import axios from 'axios';
+import { format, parseISO } from 'date-fns';
+import * as XLSX from 'xlsx';
+import { saveAs } from 'file-saver';
 
-app = Flask(__name__)
-CORS(app, resources={r"/api/*": {
-    "origins": "*",
-    "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    "allow_headers": ["Content-Type", "Authorization", "Accept"]
-}})
+const BACKEND = import.meta.env.VITE_API_URL || 'http://127.0.0.1:5000';
+const api = axios.create({ baseURL: BACKEND, timeout: 600000 });
 
-_db_url = os.environ.get('DATABASE_URL', '')
-if _db_url:
-    if _db_url.startswith('postgres://'):
-        _db_url = _db_url.replace('postgres://', 'postgresql://', 1)
-    app.config['SQLALCHEMY_DATABASE_URI'] = _db_url
-    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-        'pool_pre_ping': True, 'pool_recycle': 300, 'pool_size': 5, 'max_overflow': 10,
+const PIE_COLORS = ['#8B5CF6','#F97316','#10B981','#EF4444','#3B82F6',
+                    '#EC4899','#14B8A6','#F59E0B','#6366F1','#84CC16'];
+
+const AGING_LABELS = ['0-30','30-90','90-180','180+'];
+const AGING_COLORS = { '0-30':'#10B981','30-90':'#F59E0B','90-180':'#F97316','180+':'#EF4444' };
+
+const renderPctLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent }) => {
+  if (percent < 0.04) return null;
+  const RAD = Math.PI / 180;
+  const r = innerRadius + (outerRadius - innerRadius) * 0.58;
+  const x = cx + r * Math.cos(-midAngle * RAD);
+  const y = cy + r * Math.sin(-midAngle * RAD);
+  return (
+    <text x={x} y={y} fill="white" textAnchor="middle" dominantBaseline="central"
+      fontSize={11} fontWeight="bold" style={{textShadow:'0 1px 2px rgba(0,0,0,0.4)'}}>
+      {`${(percent*100).toFixed(0)}%`}
+    </text>
+  );
+};
+
+const fmtNum  = (v) => new Intl.NumberFormat('id-ID').format(v || 0);
+const fmtCur  = (v) => `IDR ${new Intl.NumberFormat('id-ID', {maximumFractionDigits:0}).format(v || 0)}`;
+const fmtCurShort = (v) => {
+  const n = parseFloat(v) || 0;
+  if (n >= 1e12) return `IDR ${(n/1e12).toFixed(1)}T`;
+  if (n >= 1e9)  return `IDR ${(n/1e9).toFixed(1)}B`;
+  if (n >= 1e6)  return `IDR ${(n/1e6).toFixed(1)}M`;
+  if (n >= 1e3)  return `IDR ${(n/1e3).toFixed(1)}K`;
+  return `IDR ${n.toLocaleString('id-ID')}`;
+};
+const fmtDate = (d) => { try { return d ? format(parseISO(d),'dd MMM yyyy') : '-'; } catch { return d||'-'; } };
+
+const Toast = ({ message, type, onClose }) => {
+  useEffect(() => { const t = setTimeout(onClose, 3000); return () => clearTimeout(t); }, [onClose]);
+  const bg = type === 'success' ? 'bg-green-600' : type === 'error' ? 'bg-red-600' : 'bg-blue-600';
+  return (
+    <div className={`fixed top-5 right-5 z-[100] flex items-center gap-3 px-5 py-3 rounded-xl shadow-2xl text-white ${bg} max-w-sm`}>
+      {type === 'success' ? <CheckCircle className="w-5 h-5 flex-shrink-0" /> : <AlertCircle className="w-5 h-5 flex-shrink-0" />}
+      <span className="text-sm font-medium">{message}</span>
+      <button onClick={onClose} className="ml-2 hover:opacity-70"><X className="w-4 h-4" /></button>
+    </div>
+  );
+};
+
+const SOModal = ({ title, data, onClose, darkMode }) => {
+  const [dlPage, setDlPage] = useState(1);
+  const PER = 50;
+  const pages = Math.ceil((data?.length || 0) / PER);
+  const rows = (data || []).slice((dlPage-1)*PER, dlPage*PER);
+  const downloadExcel = () => {
+    const ws = XLSX.utils.json_to_sheet(data.map(s => ({
+      'SO Number': s.so_number, 'SO Item': s.so_item, 'Status': s.so_status,
+      'Op Unit': s.operation_unit_name, 'Vendor': s.vendor_name, 'Product': s.product_name,
+      'SO Qty': s.so_qty, 'Sales Price': s.sales_price, 'Sales Amount': s.sales_amount,
+      'Customer PO': s.customer_po_number, 'Delivery Memo': s.delivery_memo,
+      'SO Date': s.so_create_date, 'Delivery Plan Date': s.delivery_plan_date, 'Remarks': s.remarks
+    })));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Detail');
+    saveAs(new Blob([XLSX.write(wb,{bookType:'xlsx',type:'array'})],
+      {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),
+      `${title.replace(/\s+/g,'_')}.xlsx`);
+  };
+  return (
+    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
+      <div role="dialog" aria-modal="true" aria-label={title} className={`rounded-2xl shadow-2xl w-full max-w-6xl max-h-[85vh] flex flex-col ${darkMode?'bg-gray-800 text-white':'bg-white'}`} onClick={e=>e.stopPropagation()}>
+        <div className={`flex justify-between items-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
+          <h3 className="font-bold text-lg">{title} <span className={`text-sm font-normal ml-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>({fmtNum(data?.length)} records)</span></h3>
+          <div className="flex gap-2">
+            <button onClick={downloadExcel} className="flex items-center gap-1 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm"><FileSpreadsheet className="w-4 h-4"/>Excel</button>
+            <button onClick={onClose} className={`p-1.5 rounded-lg ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`}><X className="w-5 h-5"/></button>
+          </div>
+        </div>
+        <div className="overflow-auto flex-1">
+          <table className="w-full text-sm">
+            <thead className={`sticky top-0 ${darkMode?'bg-gray-700':'bg-purple-50'}`}>
+              <tr>{['SO Number','SO Item','Status','Op Unit','Vendor','Product','Qty','Sales Amount','Cust PO','Delivery Memo','SO Date','Plan Date','Remarks'].map(h=>(
+                <th key={h} className={`px-3 py-2 text-left font-semibold whitespace-nowrap ${darkMode?'text-gray-200':'text-gray-700'}`}>{h}</th>
+              ))}</tr>
+            </thead>
+            <tbody className={`divide-y ${darkMode?'divide-gray-700':'divide-gray-100'}`}>
+              {rows.map((s,i)=>(
+                <tr key={i} className={darkMode?'hover:bg-gray-700':'hover:bg-purple-50'}>
+                  <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{s.so_number}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">{s.so_item}</td>
+                  <td className="px-3 py-2 whitespace-nowrap"><span className={`px-2 py-0.5 rounded-full text-xs font-medium ${s.so_status==='Delivery Completed'?'bg-green-100 text-green-700':s.so_status==='SO Cancel'?'bg-red-100 text-red-700':'bg-blue-100 text-blue-700'}`}>{s.so_status||'-'}</span></td>
+                  <td className="px-3 py-2 whitespace-nowrap min-w-[180px]">{s.operation_unit_name}</td>
+                  <td className="px-3 py-2 whitespace-nowrap max-w-[140px] truncate">{s.vendor_name}</td>
+                  <td className="px-3 py-2 max-w-[160px] truncate">{s.product_name}</td>
+                  <td className="px-3 py-2 text-right">{fmtNum(s.so_qty)}</td>
+                  <td className="px-3 py-2 text-right font-semibold text-orange-600 whitespace-nowrap">{fmtCur(s.sales_amount)}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">{s.customer_po_number||'-'}</td>
+                  <td className="px-3 py-2 max-w-[160px] truncate">{s.delivery_memo||'-'}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">{s.so_create_date||'-'}</td>
+                  <td className="px-3 py-2 whitespace-nowrap text-purple-600">{s.delivery_plan_date||'-'}</td>
+                  <td className="px-3 py-2 max-w-[140px] truncate">{s.remarks||'-'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {pages > 1 && (
+          <div className={`flex justify-between items-center px-6 py-3 border-t ${darkMode?'border-gray-700':'border-gray-100'}`}>
+            <span className={`text-sm ${darkMode?'text-gray-400':'text-gray-600'}`}>{(dlPage-1)*PER+1}–{Math.min(dlPage*PER,data.length)} / {fmtNum(data.length)}</span>
+            <div className="flex gap-2">
+              <button disabled={dlPage===1} onClick={()=>setDlPage(p=>p-1)} className={`p-1.5 rounded ${dlPage===1?'opacity-40':'hover:bg-gray-200'}`}><ChevronLeft className="w-4 h-4"/></button>
+              <span className="px-3 py-1 bg-purple-100 rounded text-sm text-purple-700">{dlPage}/{pages}</span>
+              <button disabled={dlPage===pages} onClick={()=>setDlPage(p=>p+1)} className={`p-1.5 rounded ${dlPage===pages?'opacity-40':'hover:bg-gray-200'}`}><ChevronRight className="w-4 h-4"/></button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// MAIN APP
+// ═══════════════════════════════════════════════════════════════════
+const App = () => {
+  const [darkMode, setDarkMode] = useState(false);
+  const [activePage, setActivePage] = useState('dashboard');
+
+  const [stats, setStats] = useState(null);
+  const [poWithoutSO, setPoWithoutSO] = useState([]);
+  const [agingData, setAgingData] = useState([]);
+  const [allSOData, setAllSOData] = useState([]);
+  const [soTotal, setSoTotal] = useState(0);
+  const [soFilterOptions, setSoFilterOptions] = useState({ op_units: [], vendors: [] });
+
+  // SO filters with aging
+  const [soFilters, setSoFilters] = useState({ op_unit: '', vendor: '', aging: [] });
+  const [soPage, setSoPage] = useState(1);
+  const [soPerPage, setSoPerPage] = useState(20);
+
+  const [poPage, setPoPage] = useState(1);
+  const [poPerPage, setPoPerPage] = useState(20);
+
+  const [loading, setLoading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(null);
+  const [toasts, setToasts] = useState([]);
+  const [modal, setModal] = useState(null);
+  const [editingCell, setEditingCell] = useState(null);
+  const [editValue, setEditValue] = useState('');
+
+  const addToast = useCallback((message, type='success') => {
+    const id = Date.now(); setToasts(t => [...t, { id, message, type }]);
+  }, []);
+  const removeToast = useCallback((id) => setToasts(t => t.filter(x => x.id !== id)), []);
+
+  const fetchDashboard = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [sRes, pRes, aRes] = await Promise.all([
+        api.get('/api/dashboard/stats'),
+        api.get('/api/data/po-without-so'),
+        api.get('/api/data/aging')
+      ]);
+      setStats(sRes.data);
+      setPoWithoutSO(Array.isArray(pRes.data) ? pRes.data : []);
+      setAgingData(Array.isArray(aRes.data) ? aRes.data : []);
+    } catch (e) {
+      addToast(`Error: ${e.response?.data?.error || e.message}`, 'error');
+    } finally { setLoading(false); }
+  }, [addToast]);
+
+  const fetchSOData = useCallback(async (filters, page, perPage) => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ op_unit: filters.op_unit, vendor: filters.vendor, page, per_page: perPage });
+      (filters.aging || []).forEach(a => params.append('aging', a));
+      const res = await api.get(`/api/data/all-so?${params}`);
+      setAllSOData(Array.isArray(res.data.data) ? res.data.data : []);
+      setSoTotal(res.data.total || 0);
+      setSoFilterOptions(res.data.filters || { op_units: [], vendors: [] });
+    } catch (e) {
+      addToast(`Gagal memuat SO: ${e.message}`, 'error');
+    } finally { setLoading(false); }
+  }, [addToast]);
+
+  useEffect(() => { fetchDashboard(); }, []);
+  useEffect(() => { if (activePage === 'all-so') fetchSOData(soFilters, soPage, soPerPage); }, [activePage]);
+
+  const handleUpload = async (e, type) => {
+    const file = e.target.files[0]; if (!file) return;
+    e.target.value = '';
+    const label = type === 'po' ? 'PO List' : 'SMRO';
+    const endpoint = type === 'po' ? '/api/upload/po-list' : '/api/upload/smro';
+    const fd = new FormData(); fd.append('file', file);
+    setUploadProgress({ label, pct: 0 });
+    try {
+      const res = await api.post(endpoint, fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (ev) => setUploadProgress({ label, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
+      });
+      setUploadProgress(null);
+      addToast(`✅ ${res.data.message}`, 'success');
+      fetchDashboard();
+      if (activePage === 'all-so') fetchSOData(soFilters, 1, soPerPage);
+      setSoPage(1);
+    } catch (e) {
+      setUploadProgress(null);
+      addToast(`❌ Gagal upload ${label}: ${e.response?.data?.error || e.message}`, 'error');
     }
-else:
-    _inst = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance')
-    os.makedirs(_inst, exist_ok=True)
-    app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{_inst}/po_database.db'
+  };
 
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
-db = SQLAlchemy(app)
-
-class POData(db.Model):
-    __tablename__ = 'po_data'
-    id = db.Column(db.Integer, primary_key=True)
-    po_number = db.Column(db.String(50), index=True)
-    item_no = db.Column(db.String(50))
-    po_item_detail = db.Column(db.Text)
-    item_code = db.Column(db.String(50))
-    supplier = db.Column(db.String(200))
-    vendor_name_smro = db.Column(db.String(200))
-    qty = db.Column(db.Float)
-    unit = db.Column(db.String(20))
-    price = db.Column(db.Float)
-    amount = db.Column(db.Float)
-    currency = db.Column(db.String(10))
-    po_date = db.Column(db.Date)
-    purchase_member = db.Column(db.String(200))
-    request_delivery = db.Column(db.Date)
-    delivery_plan_date = db.Column(db.Date)
-    remarks = db.Column(db.Text)
-    uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-class SOData(db.Model):
-    __tablename__ = 'so_data'
-    id = db.Column(db.Integer, primary_key=True)
-    so_number = db.Column(db.String(50), index=True)
-    so_item = db.Column(db.String(100))
-    so_status = db.Column(db.String(50))
-    operation_unit_name = db.Column(db.String(200))
-    vendor_name = db.Column(db.String(200))
-    customer_po_number = db.Column(db.String(200))
-    delivery_memo = db.Column(db.Text)
-    product_name = db.Column(db.Text)
-    so_qty = db.Column(db.Float)
-    sales_unit = db.Column(db.String(20))
-    sales_price = db.Column(db.Float)
-    sales_amount = db.Column(db.Float)
-    currency = db.Column(db.String(10))
-    purchasing_price = db.Column(db.Float)
-    purchasing_amount = db.Column(db.Float)
-    so_create_date = db.Column(db.Date)
-    delivery_possible_date = db.Column(db.Date)
-    matched_po_number = db.Column(db.String(50))
-    delivery_plan_date = db.Column(db.Date)
-    remarks = db.Column(db.Text)
-    uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-class UploadLog(db.Model):
-    __tablename__ = 'upload_log'
-    id = db.Column(db.Integer, primary_key=True)
-    file_type = db.Column(db.String(50))
-    filename = db.Column(db.String(255))
-    records_count = db.Column(db.Integer)
-    uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-with app.app_context():
-    db.create_all()
-    print('DB schema ready.')
-
-CLOSED_STATUSES = {
-    'Delivery Completed', 'SO Cancel',
-    'Approval Apply', 'Approval Complete Step', 'Approval Reject'
-}
-
-PO_HLI_RE = re.compile(r'\b\d{7,}(?:-\d+)?\b')
-
-def extract_po_hli(val):
-    if not val: return []
-    return PO_HLI_RE.findall(str(val))
-
-def open_so_filter():
-    return db.or_(SOData.so_status.is_(None), ~SOData.so_status.in_(list(CLOSED_STATUSES)))
-
-def clean(val):
-    if val is None: return None
-    try:
-        if pd.isna(val): return None
-    except (TypeError, ValueError): pass
-    s = str(val).strip()
-    return None if s.lower() in ('nan', 'none', '') else s
-
-def parse_date(val):
-    if val is None: return None
-    try:
-        if pd.isna(val): return None
-    except (TypeError, ValueError): pass
-    try: return pd.to_datetime(val).date()
-    except: return None
-
-def safe_float(val, default=0.0):
-    try:
-        if pd.isna(val): return default
-    except (TypeError, ValueError): pass
-    try: return float(val)
-    except: return default
-
-def find_column(df, names):
-    low = {c.lower().strip(): c for c in df.columns}
-    for n in names:
-        if n.lower().strip() in low: return low[n.lower().strip()]
-    return None
-
-def df_val(row, col):
-    return row.get(col) if col else None
-
-def get_aging_label(days):
-    if days is None: return 'No Date'
-    if days >= 180: return '180+'
-    if days >= 90: return '90-180'
-    if days >= 30: return '30-90'
-    return '0-30'
-
-def so_dict(s):
-    today = date.today()
-    age_days = (today - s.so_create_date).days if s.so_create_date else None
-    return {
-        'id': s.id, 'so_number': s.so_number, 'so_item': s.so_item,
-        'so_status': s.so_status, 'operation_unit_name': s.operation_unit_name,
-        'vendor_name': s.vendor_name, 'customer_po_number': s.customer_po_number,
-        'delivery_memo': s.delivery_memo, 'product_name': s.product_name,
-        'so_qty': s.so_qty, 'sales_price': s.sales_price, 'sales_amount': s.sales_amount,
-        'purchasing_price': s.purchasing_price, 'purchasing_amount': s.purchasing_amount,
-        'so_create_date': s.so_create_date.isoformat() if s.so_create_date else '',
-        'delivery_possible_date': s.delivery_possible_date.isoformat() if s.delivery_possible_date else '',
-        'delivery_plan_date': s.delivery_plan_date.isoformat() if s.delivery_plan_date else '',
-        'remarks': s.remarks or '',
-        'aging_days': age_days,
-        'aging_label': get_aging_label(age_days)
+  const handleBatchUpload = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    e.target.value = '';
+    const fd = new FormData(); fd.append('file', file);
+    setUploadProgress({ label: 'Batch Update', pct: 0 });
+    try {
+      const res = await api.post('/api/data/so/batch-upload', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (ev) => setUploadProgress({ label: 'Batch Update', pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
+      });
+      setUploadProgress(null);
+      addToast(`✅ Batch update: ${res.data.updated} records diperbarui`, 'success');
+      fetchSOData(soFilters, soPage, soPerPage);
+    } catch (e) {
+      setUploadProgress(null);
+      addToast(`❌ Gagal batch upload: ${e.response?.data?.error || e.message}`, 'error');
     }
+  };
 
-@app.route('/api/dashboard/stats', methods=['GET'])
-def get_dashboard_stats():
-    try:
-        po_count = db.session.query(func.count(POData.id)).scalar() or 0
-        total_po_amount = db.session.query(func.sum(POData.amount)).scalar() or 0
-        total_so_count = db.session.query(func.count(SOData.id)).filter(open_so_filter()).scalar() or 0
+  const downloadBlob = async (url, filename) => {
+    try {
+      const res = await api.get(url, { responseType: 'blob' });
+      const link = document.createElement('a');
+      link.href = window.URL.createObjectURL(new Blob([res.data]));
+      link.setAttribute('download', filename);
+      document.body.appendChild(link); link.click(); link.remove();
+      addToast(`✅ File "${filename}" berhasil didownload`, 'success');
+    } catch (e) { addToast('❌ Gagal download file', 'error'); }
+  };
 
-        po_numbers = {r[0] for r in db.session.query(POData.po_number).all() if r[0]}
+  const downloadSOExcel = () => {
+    const p = new URLSearchParams({ op_unit: soFilters.op_unit, vendor: soFilters.vendor });
+    downloadBlob(`/api/export/all-so?${p}`, `SO_List_${new Date().toISOString().slice(0,10)}.xlsx`);
+  };
+  const downloadPOExcel = () => downloadBlob('/api/export/po-without-so', `PO_Without_SO_${new Date().toISOString().slice(0,10)}.xlsx`);
+  const downloadSOTemplate = () => {
+    const ws = XLSX.utils.json_to_sheet(allSOData.map(s=>({'SO Number':s.so_number,'Delivery Plan Date':s.delivery_plan_date||'','Remarks':s.remarks||''})));
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Template');
+    saveAs(new Blob([XLSX.write(wb,{bookType:'xlsx',type:'array'})],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),`SO_Template_${new Date().toISOString().slice(0,10)}.xlsx`);
+    addToast('✅ Template berhasil didownload', 'success');
+  };
 
-        matched_set = set()
-        for cpn, memo in db.session.query(SOData.customer_po_number, SOData.delivery_memo).all():
-            for n in extract_po_hli(cpn): matched_set.add(n)
-            for n in extract_po_hli(memo): matched_set.add(n)
+  const updateSOCell = async (soId, field, value) => {
+    try {
+      await api.put(`/api/data/so/${soId}`, { [field]: value });
+      setEditingCell(null);
+      setAllSOData(prev => prev.map(s => s.id === soId ? { ...s, [field]: value } : s));
+    } catch (e) { addToast(`❌ Gagal update: ${e.message}`, 'error'); }
+  };
 
-        po_without_so_count = sum(1 for p in po_numbers if p not in matched_set)
+  const openModal = async (title, endpointOrData) => {
+    if (Array.isArray(endpointOrData)) { setModal({ title, data: endpointOrData }); return; }
+    try {
+      const res = await api.get(endpointOrData);
+      setModal({ title, data: Array.isArray(res.data) ? res.data : [] });
+    } catch (e) { addToast(`❌ Gagal memuat detail: ${e.message}`, 'error'); }
+  };
 
-        so_without_po_count = 0
-        for cpn, memo in db.session.query(SOData.customer_po_number, SOData.delivery_memo)\
-                                   .filter(open_so_filter()).all():
-            candidates = extract_po_hli(cpn) + extract_po_hli(memo)
-            if not candidates or not any(c in po_numbers for c in candidates):
-                so_without_po_count += 1
+  const toggleAgingFilter = (label) => {
+    setSoFilters(f => {
+      const aging = f.aging.includes(label) ? f.aging.filter(a=>a!==label) : [...f.aging, label];
+      return {...f, aging};
+    });
+  };
 
-        monthly = {}
-        for d, amt in db.session.query(SOData.so_create_date, SOData.sales_amount)\
-                                 .filter(open_so_filter()).all():
-            if d:
-                k = d.strftime('%b %Y')
-                if k not in monthly:
-                    monthly[k] = {'month': k, 'so_count': 0, 'amount': 0.0, '_s': d.replace(day=1)}
-                monthly[k]['so_count'] += 1
-                monthly[k]['amount'] += round((amt or 0) / 1_000_000, 2)
-        monthly_trend = sorted(monthly.values(), key=lambda x: x['_s'])
-        for m in monthly_trend: del m['_s']
+  const poTotalPages = Math.max(1, Math.ceil(poWithoutSO.length / poPerPage));
+  const poRows = poWithoutSO.slice((poPage-1)*poPerPage, poPage*poPerPage);
+  const soTotalPages = Math.max(1, Math.ceil(soTotal / soPerPage));
 
-        top_vendors = [
-            {'vendor': r[0], 'so_count': r[1], 'total_amount': round(r[2] or 0, 2)}
-            for r in db.session.query(
-                SOData.vendor_name, func.count(SOData.id), func.sum(SOData.sales_amount)
-            ).filter(open_so_filter(), SOData.vendor_name.isnot(None))
-             .group_by(SOData.vendor_name)
-             .order_by(func.sum(SOData.sales_amount).desc()).limit(5).all()
-        ]
+  const card  = darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-100';
+  const txt   = darkMode ? 'text-white' : 'text-gray-900';
+  const txt2  = darkMode ? 'text-gray-400' : 'text-gray-600';
+  const tblHd = darkMode ? 'bg-gray-700' : 'bg-purple-50';
+  const tblDv = darkMode ? 'divide-gray-700' : 'divide-gray-100';
+  const trHov = darkMode ? 'hover:bg-gray-700' : 'hover:bg-purple-50';
 
-        # Top Operation Units
-        top_op_units = [
-            {'op_unit': r[0], 'so_count': r[1], 'total_amount': round(r[2] or 0, 2)}
-            for r in db.session.query(
-                SOData.operation_unit_name, func.count(SOData.id), func.sum(SOData.sales_amount)
-            ).filter(open_so_filter(), SOData.operation_unit_name.isnot(None))
-             .group_by(SOData.operation_unit_name)
-             .order_by(func.sum(SOData.sales_amount).desc()).limit(10).all()
-        ]
+  // ── Date range helper ──
+  const fmtDateRange = (range) => {
+    if (!range?.min) return 'Belum ada data';
+    return `${fmtDate(range.min)} — ${fmtDate(range.max)}`;
+  };
 
-        total_open_for_pct = total_so_count or 1
-        so_status = [{'name': r[0], 'value': r[1],
-            'percentage': round(r[1] / total_open_for_pct * 100, 1),
-            'amount': round(r[2] or 0, 2)
-        } for r in db.session.query(
-            SOData.so_status, func.count(SOData.id), func.sum(SOData.sales_amount)
-        ).filter(open_so_filter(), SOData.so_status.isnot(None))
-         .group_by(SOData.so_status)
-         .order_by(func.count(SOData.id).desc()).all()]
+  // ══════════════════════════════════════════════════════════════
+  // RENDER DASHBOARD
+  // ══════════════════════════════════════════════════════════════
+  const renderDashboard = () => (
+    <>
+      {/* Date Range Info Bar */}
+      <div className={`mb-4 px-5 py-3 rounded-xl flex flex-wrap gap-6 text-xs ${darkMode?'bg-gray-800 border border-gray-700':'bg-white border border-gray-100'} shadow`}>
+        <div className="flex items-center gap-2">
+          <Calendar className="w-4 h-4 text-purple-500"/>
+          <span className={txt2}>PO Date Range:</span>
+          <span className={`font-semibold ${txt}`}>{fmtDateRange(stats?.po_date_range)}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <Calendar className="w-4 h-4 text-blue-500"/>
+          <span className={txt2}>SO Create Date Range:</span>
+          <span className={`font-semibold ${txt}`}>{fmtDateRange(stats?.so_date_range)}</span>
+        </div>
+      </div>
 
-        monthly_by_status = {}
-        all_months_set = set()
-        for s_status, s_date, s_amt in db.session.query(
-                SOData.so_status, SOData.so_create_date, SOData.sales_amount
-        ).filter(open_so_filter()).all():
-            st = s_status or 'Unknown'
-            amt_v = float(s_amt or 0)
-            if s_date:
-                mk = s_date.strftime('%b %Y')
-                all_months_set.add((s_date.replace(day=1), mk))
-            else:
-                mk = None
-            if st not in monthly_by_status:
-                monthly_by_status[st] = {'monthly': {}, 'total': 0, 'amount': 0.0}
-            monthly_by_status[st]['total'] += 1
-            monthly_by_status[st]['amount'] += amt_v
-            if mk:
-                monthly_by_status[st]['monthly'][mk] = monthly_by_status[st]['monthly'].get(mk, 0) + 1
+      {/* KPI Row */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <div className={`p-5 rounded-2xl shadow hover:shadow-lg transition-all cursor-pointer ${card}`}
+          onClick={() => setActivePage('all-so')}>
+          <div className="flex justify-between items-start">
+            <div>
+              <p className={`text-sm font-medium ${txt2}`}>PO HLI tanpa SO</p>
+              <h3 className="text-3xl font-bold mt-1 text-red-500">{fmtNum(stats?.po_without_so)}</h3>
+              <p className={`text-xs mt-1 ${txt2}`}>Klik untuk detail</p>
+            </div>
+            <div className="p-3 bg-red-100 rounded-xl"><AlertCircle className="w-6 h-6 text-red-500"/></div>
+          </div>
+        </div>
 
-        sorted_months = [mk for _, mk in sorted(all_months_set)]
-        so_status_monthly = sorted(
-            [{'name': st, 'monthly': d['monthly'], 'total': d['total'],
-              'percentage': round(d['total'] / total_open_for_pct * 100, 1),
-              'amount': round(d['amount'], 2)}
-             for st, d in monthly_by_status.items()],
-            key=lambda x: x['total'], reverse=True
-        )
+        <div className={`p-5 rounded-2xl shadow hover:shadow-lg transition-all cursor-pointer ${card}`}
+          onClick={() => openModal('SO Tanpa PO HLI', '/api/data/so-without-po')}>
+          <div className="flex justify-between items-start">
+            <div>
+              <p className={`text-sm font-medium ${txt2}`}>SO tanpa PO HLI</p>
+              <h3 className="text-3xl font-bold mt-1 text-orange-500">{fmtNum(stats?.so_without_po)}</h3>
+              <p className={`text-xs mt-1 ${txt2}`}>Klik untuk detail</p>
+            </div>
+            <div className="p-3 bg-orange-100 rounded-xl"><XCircle className="w-6 h-6 text-orange-500"/></div>
+          </div>
+        </div>
 
-        total_open_so_amount = db.session.query(func.sum(SOData.sales_amount))\
-                                          .filter(open_so_filter()).scalar() or 0
+        <div className={`p-5 rounded-2xl shadow hover:shadow-lg transition-all ${card}`}>
+          <div className="flex justify-between items-start">
+            <div>
+              <p className={`text-sm font-medium ${txt2}`}>Total PO HLI Amount</p>
+              <h3 className={`text-xl font-bold mt-1 text-purple-600`}>{fmtCurShort(stats?.total_po_amount)}</h3>
+              <p className={`text-xs mt-1 ${txt2}`}>{fmtCur(stats?.total_po_amount)}</p>
+            </div>
+            <div className="p-3 bg-purple-100 rounded-xl"><DollarSign className="w-6 h-6 text-purple-600"/></div>
+          </div>
+        </div>
 
-        # Date ranges
-        po_date_range = db.session.query(func.min(POData.po_date), func.max(POData.po_date)).first()
-        so_date_range = db.session.query(func.min(SOData.so_create_date), func.max(SOData.so_create_date)).first()
+        <div className={`p-5 rounded-2xl shadow hover:shadow-lg transition-all ${card}`}>
+          <div className="flex justify-between items-start">
+            <div>
+              <p className={`text-sm font-medium ${txt2}`}>Total SO (Open)</p>
+              <h3 className="text-3xl font-bold mt-1 text-green-600">{fmtNum(stats?.total_so_count)}</h3>
+              <p className={`text-xs mt-1 ${txt2}`}>{stats?.so_date_range?.max ? fmtDate(stats.so_date_range.max) : 'Belum ada upload'}</p>
+            </div>
+            <div className="p-3 bg-green-100 rounded-xl"><CheckCircle className="w-6 h-6 text-green-600"/></div>
+          </div>
+        </div>
+      </div>
 
-        return jsonify({
-            'po_without_so': po_without_so_count,
-            'so_without_po': so_without_po_count,
-            'total_po_amount': total_po_amount,
-            'total_open_so_amount': total_open_so_amount,
-            'total_po_count': po_count,
-            'total_so_count': total_so_count,
-            'monthly_trend': monthly_trend,
-            'top_vendors': top_vendors,
-            'top_op_units': top_op_units,
-            'so_status': so_status,
-            'so_status_monthly': so_status_monthly,
-            'status_months': sorted_months,
-            'po_date_range': {
-                'min': po_date_range[0].isoformat() if po_date_range[0] else None,
-                'max': po_date_range[1].isoformat() if po_date_range[1] else None,
-            },
-            'so_date_range': {
-                'min': so_date_range[0].isoformat() if so_date_range[0] else None,
-                'max': so_date_range[1].isoformat() if so_date_range[1] else None,
-            },
-        })
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+      {/* Charts Row 1 — Monthly Trend (kiri) | Top 5 Vendor + Top Op Unit (kanan) */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+        {/* Monthly Trend */}
+        <div className={`p-6 rounded-2xl shadow ${card}`}>
+          <h3 className={`text-base font-bold mb-4 flex items-center gap-2 ${txt}`}>
+            <TrendingUp className="w-5 h-5 text-purple-600"/> Monthly Open SO Trend
+          </h3>
+          <ResponsiveContainer width="100%" height={280}>
+            <AreaChart data={stats?.monthly_trend||[]}>
+              <defs>
+                <linearGradient id="cSO" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#8B5CF6" stopOpacity={0.3}/><stop offset="95%" stopColor="#8B5CF6" stopOpacity={0}/>
+                </linearGradient>
+                <linearGradient id="cAmt" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#F97316" stopOpacity={0.3}/><stop offset="95%" stopColor="#F97316" stopOpacity={0}/>
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={darkMode?'#374151':'#E5E7EB'}/>
+              <XAxis dataKey="month" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={11}/>
+              <YAxis yAxisId="left" stroke="#8B5CF6" fontSize={11}/>
+              <YAxis yAxisId="right" orientation="right" stroke="#F97316" fontSize={11}/>
+              <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}}/>
+              <Legend/>
+              <Area yAxisId="left" type="monotone" dataKey="so_count" name="Jumlah SO" stroke="#8B5CF6" strokeWidth={2} fill="url(#cSO)"/>
+              <Area yAxisId="right" type="monotone" dataKey="amount" name="Nilai (IDR Juta)" stroke="#F97316" strokeWidth={2} fill="url(#cAmt)"/>
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
 
-@app.route('/api/data/po-without-so', methods=['GET'])
-def get_po_without_so():
-    try:
-        matched_set = set()
-        for cpn, memo in db.session.query(SOData.customer_po_number, SOData.delivery_memo).all():
-            for n in extract_po_hli(cpn): matched_set.add(n)
-            for n in extract_po_hli(memo): matched_set.add(n)
-        today = date.today()
-        result = []
-        for p in POData.query.all():
-            if p.po_number not in matched_set:
-                days_remaining = (p.request_delivery - today).days if p.request_delivery else None
-                result.append({
-                    'id': p.id, 'po_no': p.po_number, 'item_no': p.item_no,
-                    'item_code': p.item_code,
-                    'description': p.po_item_detail, 'qty': p.qty, 'unit': p.unit or '',
-                    'price': p.price or 0, 'amount': p.amount,
-                    'currency': p.currency, 'supplier': p.supplier,
-                    'po_date': p.po_date.isoformat() if p.po_date else '',
-                    'purchase_member': p.purchase_member or '',
-                    'req_delivery': p.request_delivery.isoformat() if p.request_delivery else '',
-                    'days_remaining': days_remaining,
-                    'delivery_plan_date': p.delivery_plan_date.isoformat() if p.delivery_plan_date else '',
-                    'remarks': p.remarks or ''
-                })
-        return jsonify(result)
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        {/* Right column — Top 5 Vendor (atas) + Top Op Unit (bawah) */}
+        <div className="flex flex-col gap-4">
+          {/* Top 5 Vendors */}
+          <div className={`p-5 rounded-2xl shadow ${card} flex-1`}>
+            <h3 className={`text-sm font-bold mb-3 flex items-center gap-2 ${txt}`}>
+              <BarChart3 className="w-4 h-4 text-blue-600"/> Top 5 Vendors (Open SO)
+            </h3>
+            <table className="w-full text-xs">
+              <thead className={tblHd}>
+                <tr>
+                  <th className={`p-1.5 text-left font-semibold ${txt2}`}>#</th>
+                  <th className={`p-1.5 text-left font-semibold ${txt2}`}>Vendor</th>
+                  <th className={`p-1.5 text-right font-semibold ${txt2}`}>SO</th>
+                  <th className={`p-1.5 text-right font-semibold ${txt2}`}>Amount</th>
+                </tr>
+              </thead>
+              <tbody className={`divide-y ${tblDv}`}>
+                {(stats?.top_vendors||[]).map((v,i)=>(
+                  <tr key={i} className={`${trHov} cursor-pointer`}
+                    onClick={()=>openModal(`Vendor: ${v.vendor}`, `/api/data/top-vendor-detail/${encodeURIComponent(v.vendor)}`)}>
+                    <td className="p-1.5">
+                      <span className={`inline-flex items-center justify-center w-6 h-6 rounded text-xs font-bold ${i===0?'bg-yellow-100 text-yellow-700':i===1?'bg-gray-200 text-gray-700':i===2?'bg-orange-100 text-orange-700':'bg-purple-100 text-purple-700'}`}>#{i+1}</span>
+                    </td>
+                    <td className={`p-1.5 font-medium ${txt} max-w-[120px] truncate`} title={v.vendor}>{v.vendor}</td>
+                    <td className="p-1.5 text-right font-semibold text-purple-600">{fmtNum(v.so_count)}</td>
+                    <td className="p-1.5 text-right font-semibold text-orange-600">{fmtCurShort(v.total_amount)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
 
-@app.route('/api/data/so-without-po', methods=['GET'])
-def get_so_without_po():
-    try:
-        po_numbers = {r[0] for r in db.session.query(POData.po_number).all() if r[0]}
-        result = []
-        for s in db.session.query(SOData).filter(open_so_filter()).all():
-            candidates = extract_po_hli(s.customer_po_number) + extract_po_hli(s.delivery_memo)
-            if not candidates or not any(c in po_numbers for c in candidates):
-                result.append(so_dict(s))
-        return jsonify(result)
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+          {/* Top Operation Units */}
+          <div className={`p-5 rounded-2xl shadow ${card} flex-1`}>
+            <h3 className={`text-sm font-bold mb-3 flex items-center gap-2 ${txt}`}>
+              <Building2 className="w-4 h-4 text-green-600"/> Total Open PO per Operation Unit
+            </h3>
+            <div className="overflow-auto max-h-40">
+              <table className="w-full text-xs">
+                <thead className={`sticky top-0 ${tblHd}`}>
+                  <tr>
+                    <th className={`p-1.5 text-left font-semibold ${txt2}`}>Operation Unit</th>
+                    <th className={`p-1.5 text-right font-semibold ${txt2}`}>Jumlah Open SO</th>
+                    <th className={`p-1.5 text-right font-semibold ${txt2}`}>Amount</th>
+                  </tr>
+                </thead>
+                <tbody className={`divide-y ${tblDv}`}>
+                  {(stats?.top_op_units||[]).map((u,i)=>(
+                    <tr key={i} className={`${trHov} transition-colors`}>
+                      <td className={`p-1.5 font-medium ${txt} max-w-[160px] truncate`} title={u.op_unit}>{u.op_unit}</td>
+                      <td className="p-1.5 text-right font-semibold text-purple-600">{fmtNum(u.so_count)}</td>
+                      <td className="p-1.5 text-right font-semibold text-orange-600">{fmtCurShort(u.total_amount)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
 
-@app.route('/api/data/aging', methods=['GET'])
-def get_aging_data():
-    try:
-        today = date.today()
-        vendors = {}
-        for s in db.session.query(SOData).filter(open_so_filter(), SOData.so_create_date.isnot(None)).all():
-            v = s.vendor_name or 'Unknown'
-            if v not in vendors:
-                vendors[v] = {'vendor': v, 'less_30': 0, 'days_30_90': 0,
-                              'days_90_180': 0, 'more_180': 0, 'total_open': 0, 'sales_amount': 0.0}
-            age = (today - s.so_create_date).days
-            if age < 30:      vendors[v]['less_30']     += 1
-            elif age < 90:    vendors[v]['days_30_90']  += 1
-            elif age < 180:   vendors[v]['days_90_180'] += 1
-            else:             vendors[v]['more_180']    += 1
-            vendors[v]['total_open'] += 1
-            vendors[v]['sales_amount'] += float(s.sales_amount or 0)
-        return jsonify(sorted(vendors.values(), key=lambda x: x['total_open'], reverse=True))
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+      {/* Charts Row 2 */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6 items-start">
+        <div className={`p-6 rounded-2xl shadow ${card}`}>
+          <h3 className={`text-base font-bold mb-4 flex items-center gap-2 ${txt}`}>
+            <FileText className="w-5 h-5 text-green-600"/> SO Status Distribution
+          </h3>
+          {(() => {
+            const months = stats?.status_months || [];
+            const rows   = stats?.so_status_monthly || [];
+            const totByMonth = months.reduce((acc, m) => { acc[m] = rows.reduce((s, r) => s + (r.monthly?.[m] || 0), 0); return acc; }, {});
+            const grandTotal  = rows.reduce((s, r) => s + r.total, 0);
+            const grandAmount = rows.reduce((s, r) => s + (r.amount || 0), 0);
+            return (
+              <div className="overflow-auto max-h-72">
+                <table className="w-full text-xs" style={{minWidth: months.length > 4 ? `${160 + months.length * 72 + 200}px` : undefined}}>
+                  <thead className={`sticky top-0 ${tblHd}`}>
+                    <tr>
+                      <th className={`px-3 py-2 text-left font-semibold whitespace-nowrap ${txt2} sticky left-0 ${darkMode?'bg-gray-700':'bg-purple-50'}`}>Status</th>
+                      {months.map(m => <th key={m} className={`px-2 py-2 text-center font-semibold whitespace-nowrap ${txt2}`}>{m}</th>)}
+                      <th className={`px-3 py-2 text-right font-semibold whitespace-nowrap ${txt2}`}>Total</th>
+                      <th className={`px-3 py-2 text-right font-semibold whitespace-nowrap ${txt2}`}>%</th>
+                      <th className={`px-3 py-2 text-right font-semibold whitespace-nowrap ${txt2}`}>Sales Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody className={`divide-y ${tblDv}`}>
+                    {rows.map((s, i) => (
+                      <tr key={i} className={`${trHov} cursor-pointer`}
+                        onClick={() => openModal(`SO Status: ${s.name}`, `/api/data/so-status-detail/${encodeURIComponent(s.name)}`)}>
+                        <td className={`px-3 py-2 font-medium whitespace-nowrap sticky left-0 ${darkMode?'bg-gray-800':'bg-white'} ${txt}`}>{s.name}</td>
+                        {months.map(m => {
+                          const val = s.monthly?.[m];
+                          return val ? (
+                            <td key={m} className="px-2 py-2 text-center font-semibold text-white" style={{backgroundColor:'#7C3AED'}}>{fmtNum(val)}</td>
+                          ) : (
+                            <td key={m} className="px-2 py-2 text-center" style={{backgroundColor: darkMode?'rgba(59,130,246,0.08)':'rgba(219,234,254,0.45)'}}></td>
+                          );
+                        })}
+                        <td className="px-3 py-2 text-right font-bold text-purple-600">{fmtNum(s.total)}</td>
+                        <td className="px-3 py-2 text-right text-green-600">{s.percentage}%</td>
+                        <td className="px-3 py-2 text-right text-orange-600 whitespace-nowrap">{fmtCurShort(s.amount)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot className={`${tblHd} font-bold`}>
+                    <tr>
+                      <td className={`px-3 py-2 sticky left-0 ${darkMode?'bg-gray-700':'bg-purple-50'} ${txt}`}>TOTAL</td>
+                      {months.map(m => <td key={m} className="px-2 py-2 text-center text-purple-600">{totByMonth[m]?fmtNum(totByMonth[m]):''}</td>)}
+                      <td className="px-3 py-2 text-right text-purple-600">{fmtNum(grandTotal)}</td>
+                      <td className="px-3 py-2 text-right text-green-600">100%</td>
+                      <td className="px-3 py-2 text-right text-orange-600 whitespace-nowrap">{fmtCurShort(grandAmount)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            );
+          })()}
+        </div>
 
-@app.route('/api/data/aging-detail/<path:vendor_name>', methods=['GET'])
-def get_aging_detail(vendor_name):
-    try:
-        sos = db.session.query(SOData).filter(
-            open_so_filter(), SOData.vendor_name == vendor_name
-        ).order_by(SOData.so_create_date.asc()).all()
-        return jsonify([so_dict(s) for s in sos])
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        <div className="grid grid-cols-[3fr_2fr] gap-4 items-start">
+          <div className={`p-5 rounded-2xl shadow ${card}`}>
+            <h3 className={`text-base font-bold mb-2 flex items-center gap-2 ${txt}`}><BarChart3 className="w-5 h-5 text-orange-600"/> SO Status (Pie)</h3>
+            <ResponsiveContainer width="100%" height={320}>
+              <PieChart>
+                <Pie data={stats?.so_status||[]} cx="50%" cy="42%" innerRadius={52} outerRadius={88} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
+                  {(stats?.so_status||[]).map((_,i)=><Cell key={i} fill={PIE_COLORS[i%PIE_COLORS.length]}/>)}
+                </Pie>
+                <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v),n]}/>
+                <Legend layout="horizontal" align="center" verticalAlign="bottom" iconSize={8} formatter={(v)=><span className="text-xs">{v}</span>}/>
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+          {(() => {
+            const agingPieData = [
+              { name:'< 30 Hari', value:agingData.reduce((s,v)=>s+(v.less_30||0),0), fill:'#10B981' },
+              { name:'30–90 Hari', value:agingData.reduce((s,v)=>s+(v.days_30_90||0),0), fill:'#F59E0B' },
+              { name:'90–180 Hari', value:agingData.reduce((s,v)=>s+(v.days_90_180||0),0), fill:'#F97316' },
+              { name:'> 180 Hari', value:agingData.reduce((s,v)=>s+(v.more_180||0),0), fill:'#EF4444' },
+            ].filter(d=>d.value>0);
+            return (
+              <div className={`p-5 rounded-2xl shadow ${card}`}>
+                <h3 className={`text-base font-bold mb-2 flex items-center gap-2 ${txt}`}><Calendar className="w-5 h-5 text-red-500"/> SO Aging (Pie)</h3>
+                <ResponsiveContainer width="100%" height={320}>
+                  <PieChart>
+                    <Pie data={agingPieData} cx="50%" cy="35%" innerRadius={52} outerRadius={88} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
+                      {agingPieData.map((d,i)=><Cell key={i} fill={d.fill}/>)}
+                    </Pie>
+                    <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v)+' SO',n]}/>
+                    <Legend layout="horizontal" align="center" verticalAlign="bottom" iconSize={8} formatter={(v)=><span className="text-xs">{v}</span>}/>
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+            );
+          })()}
+        </div>
+      </div>
 
-@app.route('/api/data/all-so', methods=['GET'])
-def get_all_so():
-    try:
-        op_unit  = request.args.get('op_unit', '').strip()
-        vendor   = request.args.get('vendor', '').strip()
-        aging    = request.args.getlist('aging')  # e.g. ['180+','90-180']
-        page     = max(1, int(request.args.get('page', 1)))
-        per_page = min(500, int(request.args.get('per_page', 20)))
+      {/* SO Aging Table */}
+      <div className={`p-6 rounded-2xl shadow mb-6 ${card}`}>
+        <h3 className={`text-base font-bold mb-4 flex items-center gap-2 ${txt}`}>
+          <Calendar className="w-5 h-5 text-red-600"/> SO Aging — Open SO by Vendor
+        </h3>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className={tblHd}>
+              <tr>{['Vendor (SMRO)','< 30 Hari','30–90 Hari','90–180 Hari','> 180 Hari','Total Open','Sales Amount'].map(h=>(
+                <th key={h} className={`p-3 text-center font-semibold ${txt2} first:text-left`}>{h}</th>
+              ))}</tr>
+            </thead>
+            <tbody className={`divide-y ${tblDv}`}>
+              {agingData.slice(0,15).map((v,i)=>(
+                <tr key={i} className={`${trHov} cursor-pointer`}
+                  onClick={()=>openModal(`Aging Detail: ${v.vendor}`, `/api/data/aging-detail/${encodeURIComponent(v.vendor)}`)}>
+                  <td className={`p-3 font-medium text-xs ${txt}`}>{v.vendor}</td>
+                  <td className="p-3 text-center font-semibold text-green-600">{fmtNum(v.less_30)}</td>
+                  <td className="p-3 text-center font-semibold text-yellow-600">{fmtNum(v.days_30_90)}</td>
+                  <td className="p-3 text-center font-semibold text-orange-600">{fmtNum(v.days_90_180)}</td>
+                  <td className="p-3 text-center font-semibold text-red-600">{fmtNum(v.more_180)}</td>
+                  <td className="p-3 text-center font-bold text-purple-600">{fmtNum(v.total_open)}</td>
+                  <td className="p-3 text-right font-semibold text-orange-600 text-xs">{fmtCurShort(v.sales_amount)}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot className={`${tblHd} font-bold text-sm`}>
+              {(() => {
+                const tot = agingData.reduce((acc,v)=>({
+                  less_30:acc.less_30+(v.less_30||0), days_30_90:acc.days_30_90+(v.days_30_90||0),
+                  days_90_180:acc.days_90_180+(v.days_90_180||0), more_180:acc.more_180+(v.more_180||0),
+                  total_open:acc.total_open+(v.total_open||0), sales_amount:acc.sales_amount+(v.sales_amount||0),
+                }), {less_30:0,days_30_90:0,days_90_180:0,more_180:0,total_open:0,sales_amount:0});
+                return (
+                  <tr>
+                    <td className={`p-3 font-bold ${txt}`}>TOTAL</td>
+                    <td className="p-3 text-center font-bold text-green-700">{fmtNum(tot.less_30)}</td>
+                    <td className="p-3 text-center font-bold text-yellow-700">{fmtNum(tot.days_30_90)}</td>
+                    <td className="p-3 text-center font-bold text-orange-700">{fmtNum(tot.days_90_180)}</td>
+                    <td className="p-3 text-center font-bold text-red-700">{fmtNum(tot.more_180)}</td>
+                    <td className="p-3 text-center font-bold text-purple-700">{fmtNum(tot.total_open)}</td>
+                    <td className="p-3 text-right font-bold text-orange-700 text-xs">{fmtCurShort(tot.sales_amount)}</td>
+                  </tr>
+                );
+              })()}
+            </tfoot>
+          </table>
+        </div>
+      </div>
+    </>
+  );
 
-        today = date.today()
-        q = SOData.query
-        if op_unit: q = q.filter(SOData.operation_unit_name == op_unit)
-        if vendor:  q = q.filter(SOData.vendor_name == vendor)
+  // ══════════════════════════════════════════════════════════════
+  // RENDER ALL SO PAGE
+  // ══════════════════════════════════════════════════════════════
+  const renderAllSO = () => (
+    <div>
+      {/* All SO Table */}
+      <div className={`p-6 rounded-2xl shadow mb-6 ${card}`}>
+        <div className="flex flex-wrap justify-between items-center gap-3 mb-5">
+          <div>
+            <h2 className={`text-xl font-bold ${txt}`}>All Sales Orders (SO)</h2>
+            <p className={`text-sm ${txt2}`}>{fmtNum(soTotal)} total records — halaman {soPage} dari {soTotalPages}</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <label className="flex items-center gap-1 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm cursor-pointer">
+              <Upload className="w-4 h-4"/>Batch Upload
+              <input type="file" accept=".xlsx,.xls" onChange={handleBatchUpload} className="hidden"/>
+            </label>
+            <button onClick={downloadSOTemplate} className="flex items-center gap-1 px-3 py-1.5 bg-yellow-500 hover:bg-yellow-600 text-white rounded-lg text-sm">
+              <FileSpreadsheet className="w-4 h-4"/>Template
+            </button>
+            <button onClick={downloadSOExcel} className="flex items-center gap-1 px-3 py-1.5 bg-gradient-to-r from-purple-600 to-purple-500 text-white rounded-lg text-sm shadow">
+              <Download className="w-4 h-4"/>Download Excel
+            </button>
+          </div>
+        </div>
 
-        # Apply aging filter in Python after fetching (simpler than SQL CASE)
-        all_sos = q.order_by(SOData.so_create_date.desc()).all()
+        {/* Aging Filter Chips */}
+        <div className="mb-3 flex flex-wrap gap-2 items-center">
+          <span className={`text-xs font-medium ${txt2}`}>Filter Aging:</span>
+          {AGING_LABELS.map(label => {
+            const active = soFilters.aging.includes(label);
+            return (
+              <button key={label} onClick={()=>toggleAgingFilter(label)}
+                className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${active?'text-white border-transparent':'border-gray-300 ' + txt2}`}
+                style={active ? {backgroundColor: AGING_COLORS[label], borderColor: AGING_COLORS[label]} : {}}>
+                {label} hari
+              </button>
+            );
+          })}
+          {soFilters.aging.length > 0 && (
+            <button onClick={()=>setSoFilters(f=>({...f,aging:[]}))}
+              className={`px-2 py-1 rounded text-xs ${txt2} hover:text-red-500`}>Reset Aging</button>
+          )}
+        </div>
 
-        if aging:
-            def matches_aging(s):
-                age = (today - s.so_create_date).days if s.so_create_date else None
-                label = get_aging_label(age)
-                return label in aging
-            all_sos = [s for s in all_sos if matches_aging(s)]
+        {/* Other Filters */}
+        <div className={`p-4 rounded-xl mb-4 ${darkMode?'bg-gray-700':'bg-gray-50'}`}>
+          <div className="flex flex-wrap gap-3 items-end">
+            <div className="flex-1 min-w-[180px]">
+              <label className={`block text-xs font-medium mb-1 ${txt2}`}>Operation Unit</label>
+              <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                value={soFilters.op_unit} onChange={e=>setSoFilters(f=>({...f,op_unit:e.target.value}))}>
+                <option value="">All Op Units</option>
+                {soFilterOptions.op_units.map(u=><option key={u} value={u}>{u}</option>)}
+              </select>
+            </div>
+            <div className="flex-1 min-w-[180px]">
+              <label className={`block text-xs font-medium mb-1 ${txt2}`}>Vendor Name</label>
+              <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                value={soFilters.vendor} onChange={e=>setSoFilters(f=>({...f,vendor:e.target.value}))}>
+                <option value="">All Vendors</option>
+                {soFilterOptions.vendors.map(v=><option key={v} value={v}>{v}</option>)}
+              </select>
+            </div>
+            <div className="flex-1 min-w-[100px]">
+              <label className={`block text-xs font-medium mb-1 ${txt2}`}>Baris per Halaman</label>
+              <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                value={soPerPage} onChange={e=>setSoPerPage(Number(e.target.value))}>
+                <option value={20}>20</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+                <option value={200}>200</option>
+              </select>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={()=>{ setSoPage(1); fetchSOData(soFilters,1,soPerPage); }}
+                className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-sm font-medium">Apply</button>
+              <button onClick={()=>{ const f={op_unit:'',vendor:'',aging:[]}; setSoFilters(f); setSoPage(1); fetchSOData(f,1,soPerPage); }}
+                className={`px-4 py-2 rounded-lg text-sm font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>Reset</button>
+            </div>
+          </div>
+        </div>
 
-        total = len(all_sos)
-        paged = all_sos[(page-1)*per_page : page*per_page]
+        {/* SO Table */}
+        <div className="overflow-x-auto rounded-lg border border-gray-200">
+          <table className="w-full text-sm">
+            <thead className={tblHd}>
+              <tr>
+                {['Aging','SO Number','SO Item','Item Name','Status','Op Unit','Vendor','Qty',
+                  'Sales Price','Sales Amount','PO Price','PO Amount',
+                  'Possible Delivery','Plan Date','Remarks'].map(h=>(
+                  <th key={h} className={`px-3 py-2.5 text-left font-semibold whitespace-nowrap ${txt2}`}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className={`divide-y ${tblDv}`}>
+              {allSOData.length === 0 ? (
+                <tr><td colSpan={15} className={`px-4 py-10 text-center ${txt2}`}>
+                  <FileText className="w-10 h-10 mx-auto mb-2 opacity-40"/>Tidak ada data
+                </td></tr>
+              ) : allSOData.map((so)=>(
+                <tr key={so.id} className={`${trHov} transition-colors`}>
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    <span className={`px-2 py-0.5 rounded-full text-xs font-bold text-white`}
+                      style={{backgroundColor: AGING_COLORS[so.aging_label] || '#6B7280'}}>
+                      {so.aging_label||'-'}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{so.so_number}</td>
+                  <td className={`px-3 py-2 whitespace-nowrap ${txt2}`}>{so.so_item}</td>
+                  <td className={`px-3 py-2 max-w-[160px] truncate ${txt2}`} title={so.product_name}>{so.product_name}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                      so.so_status==='Delivery Completed'?'bg-green-100 text-green-700':
+                      so.so_status==='SO Cancel'?'bg-red-100 text-red-700':'bg-blue-100 text-blue-700'}`}>
+                      {so.so_status||'-'}
+                    </span>
+                  </td>
+                  <td className={`px-3 py-2 min-w-[180px] truncate ${txt2}`} title={so.operation_unit_name}>{so.operation_unit_name}</td>
+                  <td className={`px-3 py-2 max-w-[120px] truncate ${txt2}`} title={so.vendor_name}>{so.vendor_name}</td>
+                  <td className={`px-3 py-2 text-right ${txt2}`}>{fmtNum(so.so_qty)}</td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap">{fmtCur(so.sales_price)}</td>
+                  <td className="px-3 py-2 text-right font-semibold text-orange-600 whitespace-nowrap">{fmtCur(so.sales_amount)}</td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap">{fmtCur(so.purchasing_price)}</td>
+                  <td className="px-3 py-2 text-right font-semibold text-green-600 whitespace-nowrap">{fmtCur(so.purchasing_amount)}</td>
+                  <td className={`px-3 py-2 text-center text-xs ${txt2}`}>{so.delivery_possible_date||'-'}</td>
+                  <td className="px-3 py-2 text-center">
+                    {editingCell?.id===so.id && editingCell.field==='delivery_plan_date' ? (
+                      <div className="flex items-center gap-1">
+                        <input type="date" defaultValue={so.delivery_plan_date}
+                          className={`px-2 py-1 rounded text-xs border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                          onChange={e=>setEditValue(e.target.value)}
+                          onBlur={()=>updateSOCell(so.id,'delivery_plan_date',editValue)}
+                          onKeyDown={e=>{if(e.key==='Enter')updateSOCell(so.id,'delivery_plan_date',editValue);if(e.key==='Escape')setEditingCell(null);}}
+                          autoFocus/>
+                        <button onClick={()=>updateSOCell(so.id,'delivery_plan_date','')} className="text-red-400 hover:text-red-600 p-0.5"><X className="w-3.5 h-3.5"/></button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-center gap-1 group">
+                        <span className="cursor-pointer text-purple-600 hover:underline text-xs whitespace-nowrap"
+                          onClick={()=>{setEditingCell({id:so.id,field:'delivery_plan_date'});setEditValue(so.delivery_plan_date||'');}}>
+                          {so.delivery_plan_date||'✏️ Set'}
+                        </span>
+                        {so.delivery_plan_date && (
+                          <button onClick={e=>{e.stopPropagation();updateSOCell(so.id,'delivery_plan_date','');}}
+                            className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-600 transition-all p-0.5"><X className="w-3 h-3"/></button>
+                        )}
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-3 py-2">
+                    {editingCell?.id===so.id && editingCell.field==='remarks' ? (
+                      <input type="text" defaultValue={so.remarks}
+                        className={`w-full px-2 py-1 rounded text-xs border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                        onChange={e=>setEditValue(e.target.value)}
+                        onBlur={()=>updateSOCell(so.id,'remarks',editValue)}
+                        onKeyDown={e=>e.key==='Enter'&&updateSOCell(so.id,'remarks',editValue)}
+                        autoFocus/>
+                    ) : (
+                      <span className={`cursor-pointer text-xs ${so.remarks?txt2:'text-orange-500 hover:underline'}`}
+                        onClick={()=>{setEditingCell({id:so.id,field:'remarks'});setEditValue(so.remarks||'');}}>
+                        {so.remarks||'✏️ Add'}
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
 
-        # Dynamic filters based on filtered results
-        op_units = sorted({s.operation_unit_name for s in all_sos if s.operation_unit_name})
-        vendors  = sorted({s.vendor_name for s in all_sos if s.vendor_name})
+        {/* Pagination */}
+        <div className={`mt-4 pt-3 border-t ${darkMode?'border-gray-700':'border-gray-200'} flex justify-between items-center`}>
+          <span className={`text-sm ${txt2}`}>
+            Menampilkan {((soPage-1)*soPerPage)+1}–{Math.min(soPage*soPerPage,soTotal)} dari {fmtNum(soTotal)}
+          </span>
+          <div className="flex gap-1 items-center">
+            <button disabled={soPage===1} onClick={()=>{ const p=soPage-1; setSoPage(p); fetchSOData(soFilters,p,soPerPage); }}
+              className={`p-1.5 rounded ${soPage===1?'opacity-40':'hover:bg-purple-100'}`}><ChevronLeft className="w-4 h-4"/></button>
+            <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-purple-100 text-purple-700'}`}>{soPage}/{soTotalPages}</span>
+            <button disabled={soPage===soTotalPages} onClick={()=>{ const p=soPage+1; setSoPage(p); fetchSOData(soFilters,p,soPerPage); }}
+              className={`p-1.5 rounded ${soPage===soTotalPages?'opacity-40':'hover:bg-purple-100'}`}><ChevronRight className="w-4 h-4"/></button>
+          </div>
+        </div>
+      </div>
 
-        return jsonify({
-            'data': [so_dict(s) for s in paged],
-            'total': total, 'page': page, 'per_page': per_page,
-            'filters': {'op_units': list(op_units), 'vendors': list(vendors)}
-        })
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+      {/* PO HLI Without SO Table */}
+      <div className={`rounded-2xl shadow overflow-hidden ${card}`}>
+        <div className={`p-5 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-5 h-5 text-yellow-600"/>
+            <h3 className={`text-base font-bold ${txt}`}>PO HLI yang Belum Ada SO-nya</h3>
+            <span className={`text-sm ${txt2}`}>({fmtNum(poWithoutSO.length)} items)</span>
+          </div>
+          <div className="flex gap-2 items-center">
+            <select className={`px-3 py-1.5 rounded-lg text-sm ${darkMode?'bg-gray-700 text-white':'bg-gray-100 text-gray-700'}`}
+              value={poPerPage} onChange={e=>{ setPoPerPage(Number(e.target.value)); setPoPage(1); }}>
+              <option value={20}>20 Baris</option>
+              <option value={50}>50 Baris</option>
+              <option value={100}>100 Baris</option>
+              <option value={500}>500 Baris</option>
+            </select>
+            <button onClick={downloadPOExcel} className="flex items-center gap-1 px-4 py-1.5 bg-gradient-to-r from-purple-600 to-purple-500 text-white rounded-lg text-sm shadow">
+              <Download className="w-4 h-4"/>Download Excel
+            </button>
+          </div>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className={tblHd}>
+              <tr>
+                {['PO HLI NUMBER','ITEM NO','ITEM CODE','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','HARI TERSISA'].map(h=>(
+                  <th key={h} className={`px-4 py-3 text-left font-semibold whitespace-nowrap ${txt2}`}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className={`divide-y ${tblDv}`}>
+              {poRows.length === 0 ? (
+                <tr><td colSpan={13} className={`px-4 py-10 text-center ${txt2}`}>
+                  <Package className="w-10 h-10 mx-auto mb-2 opacity-40"/>Tidak ada data
+                </td></tr>
+              ) : poRows.map((row,i)=>{
+                const daysLeft = row.days_remaining;
+                const daysColor = daysLeft === null ? txt2 : daysLeft < 0 ? 'text-red-600 font-bold' : daysLeft <= 7 ? 'text-orange-600 font-semibold' : daysLeft <= 30 ? 'text-yellow-600' : 'text-green-600';
+                return (
+                  <tr key={i} className={`${trHov} transition-colors`}>
+                    <td className="px-4 py-3 text-purple-600 font-medium whitespace-nowrap">{row.po_no}</td>
+                    <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.item_no||'-'}</td>
+                    <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.item_code||'-'}</td>
+                    <td className={`px-4 py-3 ${txt2} max-w-xs truncate`} title={row.description}>{row.description}</td>
+                    <td className={`px-4 py-3 text-right ${txt2}`}>{fmtNum(row.qty)}</td>
+                    <td className={`px-4 py-3 ${txt2}`}>{row.unit||'-'}</td>
+                    <td className="px-4 py-3 text-right">{fmtCur(row.price)}</td>
+                    <td className="px-4 py-3 text-right font-semibold text-orange-600">{fmtCur(row.amount)}</td>
+                    <td className={`px-4 py-3 ${txt2}`}>{row.currency||'IDR'}</td>
+                    <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.po_date||'-'}</td>
+                    <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.purchase_member||'-'}</td>
+                    <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.req_delivery||'-'}</td>
+                    <td className={`px-4 py-3 text-center whitespace-nowrap ${daysColor}`}>
+                      {daysLeft === null ? '-' : daysLeft < 0 ? `${Math.abs(daysLeft)} hari lewat` : `${daysLeft} hari`}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div className={`p-4 border-t ${darkMode?'border-gray-700':'border-gray-100'} flex justify-between items-center`}>
+          <span className={`text-sm ${txt2}`}>{(poPage-1)*poPerPage+1}–{Math.min(poPage*poPerPage,poWithoutSO.length)} dari {fmtNum(poWithoutSO.length)}</span>
+          <div className="flex gap-1 items-center">
+            <button disabled={poPage===1} onClick={()=>setPoPage(p=>p-1)} className={`p-1.5 rounded ${poPage===1?'opacity-40':'hover:bg-purple-100'}`}><ChevronLeft className="w-4 h-4"/></button>
+            <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-purple-100 text-purple-700'}`}>{poPage}/{poTotalPages}</span>
+            <button disabled={poPage===poTotalPages} onClick={()=>setPoPage(p=>p+1)} className={`p-1.5 rounded ${poPage===poTotalPages?'opacity-40':'hover:bg-purple-100'}`}><ChevronRight className="w-4 h-4"/></button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 
-@app.route('/api/data/so-status-detail/<path:status>', methods=['GET'])
-def get_so_status_detail(status):
-    try:
-        sos = SOData.query.filter_by(so_status=status).all()
-        return jsonify([so_dict(s) for s in sos])
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+  // ══════════════════════════════════════════════════════════════
+  // MAIN RENDER
+  // ══════════════════════════════════════════════════════════════
+  return (
+    <div className={`min-h-screen font-sans ${darkMode?'bg-gray-900':'bg-gray-50'}`}>
+      <div className="fixed top-4 right-4 z-[100] flex flex-col gap-2">
+        {toasts.map(t=><Toast key={t.id} message={t.message} type={t.type} onClose={()=>removeToast(t.id)}/>)}
+      </div>
 
-@app.route('/api/data/top-vendor-detail/<path:vendor_name>', methods=['GET'])
-def get_top_vendor_detail(vendor_name):
-    try:
-        sos = db.session.query(SOData).filter(
-            open_so_filter(), SOData.vendor_name == vendor_name).all()
-        return jsonify([so_dict(s) for s in sos])
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+      {/* Sidebar */}
+      <aside className={`fixed left-0 top-0 h-full w-20 flex flex-col items-center py-8 shadow-2xl z-40 ${darkMode?'bg-gray-800 border-r border-gray-700':'bg-gradient-to-b from-purple-600 to-purple-700'}`}>
+        <div className="mb-8 p-3 bg-white/20 rounded-2xl"><Package className="w-8 h-8 text-white"/></div>
+        <nav className="flex-1 flex flex-col gap-4 w-full px-2">
+          <button onClick={()=>setActivePage('dashboard')}
+            className={`p-3 rounded-xl flex justify-center transition-all ${activePage==='dashboard'?'bg-white/30 text-white shadow-lg':'text-purple-100 hover:bg-white/20'}`} title="Dashboard">
+            <BarChart3 className="w-6 h-6"/>
+          </button>
+          <button onClick={()=>{ setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters,1,soPerPage); }}
+            className={`p-3 rounded-xl flex justify-center transition-all ${activePage==='all-so'?'bg-white/30 text-white shadow-lg':'text-purple-100 hover:bg-white/20'}`} title="All Sales Orders">
+            <FileText className="w-6 h-6"/>
+          </button>
+        </nav>
+        <button onClick={()=>setDarkMode(d=>!d)} className="p-3 rounded-xl text-white hover:bg-white/20 transition-all">
+          {darkMode?<Sun className="w-6 h-6"/>:<Moon className="w-6 h-6"/>}
+        </button>
+      </aside>
 
-CHUNK_SIZE = 200
+      {/* Main */}
+      <main className="ml-20 p-6">
+        <header className="mb-6 flex flex-wrap justify-between items-center gap-4">
+          <div>
+            <h1 className={`text-2xl font-bold tracking-tight ${txt}`}>
+              PO HLI Monitoring <span className="text-purple-600">Dashboard</span>
+            </h1>
+            <p className={`mt-0.5 text-sm ${txt2}`}>
+              {activePage==='dashboard'?'Purchase Orders & Sales Orders Overview':'Manage All Sales Orders & PO Without SO'}
+            </p>
+          </div>
+          <div className="flex gap-3">
+            <label className={`flex items-center gap-2 px-4 py-2 rounded-xl cursor-pointer shadow hover:shadow-md transition-all ${darkMode?'bg-purple-600 text-white':'bg-gradient-to-r from-purple-600 to-purple-500 text-white'}`}>
+              <Upload className="w-4 h-4"/><span className="text-sm font-medium">Upload PO List</span>
+              <input type="file" accept=".xlsx,.xls" onChange={e=>handleUpload(e,'po')} className="hidden"/>
+            </label>
+            <label className={`flex items-center gap-2 px-4 py-2 rounded-xl cursor-pointer shadow hover:shadow-md transition-all ${darkMode?'bg-blue-600 text-white':'bg-gradient-to-r from-blue-500 to-blue-600 text-white'}`}>
+              <Upload className="w-4 h-4"/><span className="text-sm font-medium">Upload SMRO</span>
+              <input type="file" accept=".xlsx,.xls" onChange={e=>handleUpload(e,'smro')} className="hidden"/>
+            </label>
+          </div>
+        </header>
 
-@app.route('/api/upload/po-list', methods=['POST'])
-def upload_po_list():
-    try:
-        if 'file' not in request.files: return jsonify({'error': 'No file'}), 400
-        file = request.files['file']
-        df = pd.read_excel(file, engine='openpyxl')
-        df.columns = [str(c).strip() for c in df.columns]
+        {activePage==='dashboard' ? renderDashboard() : renderAllSO()}
+      </main>
 
-        col_po   = find_column(df, ['PO No.','PO No','PO Number','PO'])
-        if not col_po:
-            return jsonify({'error': f'Kolom PO Number tidak ditemukan. Kolom: {df.columns.tolist()}'}), 400
+      {modal && <SOModal title={modal.title} data={modal.data} darkMode={darkMode} onClose={()=>setModal(null)}/>}
 
-        col_itemno = find_column(df, ['Item No.','Item No','Item Number','No. Item'])
-        col_desc = find_column(df, ['PO Item Detail','Description','Item Description','Deskripsi'])
-        col_item = find_column(df, ['Item Code','Material','Item No','Item'])
-        col_supp = find_column(df, ['Supplier','Vendor','Supplier Name'])
-        col_vndr = find_column(df, ['Vendor Name SMRO','Vendor Name'])
-        col_qty  = find_column(df, ['Qty.','Qty','Quantity'])
-        col_unit = find_column(df, ['Unit','UOM'])
-        col_price= find_column(df, ['Price','Unit Price'])
-        col_amt  = find_column(df, ['Amount','Total Amount','Total'])
-        col_cur  = find_column(df, ['Currency','Curr'])
-        col_pdt  = find_column(df, ['PO Date','Order Date','Tanggal PO'])
-        col_pm   = find_column(df, ['Purchase Member','Purchasing Member','PIC','Buyer'])
-        col_rdd  = find_column(df, ['Request Delivery Date','Delivery Date','Req Delivery'])
+      {uploadProgress && (
+        <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center backdrop-blur-sm">
+          <div className={`${darkMode?'bg-gray-800':'bg-white'} p-8 rounded-2xl shadow-2xl flex flex-col items-center gap-4 w-80`}>
+            <div className="w-14 h-14 border-4 border-purple-600 border-t-transparent rounded-full animate-spin"/>
+            <div className="w-full text-center">
+              <p className={`font-bold text-lg mb-1 ${txt}`}>Mengupload {uploadProgress.label}...</p>
+              <p className={`text-xs mb-3 ${txt2}`}>Mohon tunggu, jangan tutup browser</p>
+              <div className={`w-full rounded-full h-3 ${darkMode?'bg-gray-700':'bg-gray-200'}`}>
+                <div className="bg-gradient-to-r from-purple-600 to-purple-400 h-3 rounded-full transition-all duration-300" style={{width:`${uploadProgress.pct}%`}}/>
+              </div>
+              <p className="text-purple-600 font-semibold mt-2">{uploadProgress.pct}%</p>
+            </div>
+          </div>
+        </div>
+      )}
 
-        db.session.execute(text('DELETE FROM po_data'))
-        db.session.flush()
-        records, count = [], 0
-        for _, row in df.iterrows():
-            po_num = clean(df_val(row, col_po))
-            if not po_num: continue
-            records.append({
-                'po_number': po_num,
-                'item_no': clean(df_val(row, col_itemno)),
-                'po_item_detail': clean(df_val(row, col_desc)),
-                'item_code': clean(df_val(row, col_item)),
-                'supplier': clean(df_val(row, col_supp)),
-                'vendor_name_smro': clean(df_val(row, col_vndr)),
-                'qty': safe_float(df_val(row, col_qty)),
-                'unit': clean(df_val(row, col_unit)),
-                'price': safe_float(df_val(row, col_price)),
-                'amount': safe_float(df_val(row, col_amt)),
-                'currency': clean(df_val(row, col_cur)) or 'IDR',
-                'po_date': parse_date(df_val(row, col_pdt)),
-                'purchase_member': clean(df_val(row, col_pm)),
-                'request_delivery': parse_date(df_val(row, col_rdd)),
-                'uploaded_at': datetime.utcnow()
-            })
-            count += 1
-            if len(records) >= CHUNK_SIZE:
-                db.session.bulk_insert_mappings(POData, records); db.session.commit(); records = []
-        if records: db.session.bulk_insert_mappings(POData, records)
-        db.session.add(UploadLog(file_type='PO', filename=file.filename, records_count=count))
-        db.session.commit()
-        return jsonify({'message': f'Berhasil upload {count} PO items', 'uploaded': count})
-    except Exception as e:
-        db.session.rollback(); import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+      {loading && !uploadProgress && (
+        <div className="fixed inset-0 bg-black/30 z-[55] flex items-center justify-center">
+          <div className={`${darkMode?'bg-gray-800':'bg-white'} px-6 py-4 rounded-xl shadow-xl flex items-center gap-3`}>
+            <div className="w-6 h-6 border-3 border-purple-600 border-t-transparent rounded-full animate-spin"/>
+            <p className={`text-sm font-semibold ${txt}`}>Memuat data...</p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
 
-@app.route('/api/upload/smro', methods=['POST'])
-def upload_smro():
-    try:
-        if 'file' not in request.files: return jsonify({'error': 'No file'}), 400
-        file = request.files['file']
-        df = pd.read_excel(file, engine='openpyxl')
-        df.columns = [str(c).strip() for c in df.columns]
-
-        col_so = find_column(df, ['SO Number','SO No','SO No.','SO','SO Item',
-                                   'Sales Order','Sales Order Number','No SO','Nomor SO'])
-        if not col_so:
-            return jsonify({'error': f'Kolom SO Number tidak ditemukan. Kolom: {df.columns.tolist()}'}), 400
-
-        col_soitem  = find_column(df, ['SO Item No','Item No','Line','SO Line','SO Item'])
-        col_status  = find_column(df, ['SO Status','Status','Order Status'])
-        col_opunit  = find_column(df, ['Operation Unit Name','Op Unit','Client Name','Client','Operation Unit'])
-        col_vendor  = find_column(df, ['Vendor Name','Vendor','Supplier'])
-        col_custpo  = find_column(df, ['Customer PO Number','Customer PO','PO Ref','PO Reference'])
-        col_memo    = find_column(df, ['Delivery Memo','Memo','Delivery Note'])
-        col_prod    = find_column(df, ['Product Name','Item Name','Description','Product'])
-        col_qty     = find_column(df, ['SO Quantity','SO Qty','Qty','Quantity'])
-        col_sunit   = find_column(df, ['Sales Unit','Unit','UOM'])
-        col_sprice  = find_column(df, ['Sales Price(Exclude Tax)','Sales Price','Price','Unit Price'])
-        col_samt    = find_column(df, ['Sales Amount(Exclude Tax)','Sales Amount','Amount','Total'])
-        col_cur     = find_column(df, ['Currency','Curr'])
-        col_pprice  = find_column(df, ['Purchasing Price','Purchase Price','PO Price'])
-        col_pamt    = find_column(df, ['Purchasing Amount','Purchase Amount','PO Amount'])
-        col_sodate  = find_column(df, ['SO Create Date','Order Date','SO Date','Create Date'])
-        col_delposs = find_column(df, ['Delivery Possible Date','Possible Delivery Date','Est Delivery'])
-        col_matchpo = find_column(df, ['Matched PO Number','Matched PO','PO HLI','PO HLI Number'])
-
-        db.session.execute(text('DELETE FROM so_data'))
-        db.session.flush()
-        records, count = [], 0
-        for _, row in df.iterrows():
-            so_val = clean(df_val(row, col_so))
-            if not so_val: continue
-            records.append({
-                'so_number': so_val, 'so_item': clean(df_val(row, col_soitem)),
-                'so_status': clean(df_val(row, col_status)),
-                'operation_unit_name': clean(df_val(row, col_opunit)),
-                'vendor_name': clean(df_val(row, col_vendor)),
-                'customer_po_number': clean(df_val(row, col_custpo)),
-                'delivery_memo': clean(df_val(row, col_memo)),
-                'product_name': clean(df_val(row, col_prod)),
-                'so_qty': safe_float(df_val(row, col_qty)),
-                'sales_unit': clean(df_val(row, col_sunit)),
-                'sales_price': safe_float(df_val(row, col_sprice)),
-                'sales_amount': safe_float(df_val(row, col_samt)),
-                'currency': clean(df_val(row, col_cur)) or 'IDR',
-                'purchasing_price': safe_float(df_val(row, col_pprice)),
-                'purchasing_amount': safe_float(df_val(row, col_pamt)),
-                'so_create_date': parse_date(df_val(row, col_sodate)),
-                'delivery_possible_date': parse_date(df_val(row, col_delposs)),
-                'matched_po_number': clean(df_val(row, col_matchpo)),
-                'uploaded_at': datetime.utcnow()
-            })
-            count += 1
-            if len(records) >= CHUNK_SIZE:
-                db.session.bulk_insert_mappings(SOData, records); db.session.commit(); records = []
-        if records: db.session.bulk_insert_mappings(SOData, records)
-        db.session.add(UploadLog(file_type='SO', filename=file.filename, records_count=count))
-        db.session.commit()
-        return jsonify({'message': f'Berhasil upload {count} SO items', 'uploaded': count})
-    except Exception as e:
-        db.session.rollback(); import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/data/so/<int:so_id>', methods=['PUT'])
-def update_so(so_id):
-    try:
-        data = request.json
-        so = db.session.get(SOData, so_id)
-        if not so: return jsonify({'error': 'Not found'}), 404
-        if 'delivery_plan_date' in data: so.delivery_plan_date = parse_date(data['delivery_plan_date'])
-        if 'remarks' in data: so.remarks = data['remarks']
-        db.session.commit()
-        return jsonify({'success': True})
-    except Exception as e:
-        db.session.rollback(); return jsonify({'error': str(e)}), 500
-
-@app.route('/api/data/so/batch-upload', methods=['POST'])
-def batch_upload_so():
-    try:
-        if 'file' not in request.files: return jsonify({'error': 'No file'}), 400
-        file = request.files['file']
-        df = pd.read_excel(file, engine='openpyxl')
-        df.columns = [str(c).strip() for c in df.columns]
-        col_so   = find_column(df, ['SO Number','SO No','SO Item'])
-        col_plan = find_column(df, ['Delivery Plan Date','Plan Date'])
-        col_rem  = find_column(df, ['Remarks','Remark'])
-        updated = 0
-        for _, row in df.iterrows():
-            so_num = clean(df_val(row, col_so)) if col_so else None
-            if not so_num: continue
-            so = SOData.query.filter_by(so_number=so_num).first()
-            if so:
-                if col_plan:
-                    d = parse_date(df_val(row, col_plan))
-                    if d: so.delivery_plan_date = d
-                if col_rem:
-                    r = clean(df_val(row, col_rem))
-                    if r: so.remarks = r
-                updated += 1
-        db.session.commit()
-        return jsonify({'updated': updated})
-    except Exception as e:
-        db.session.rollback(); import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-def _style_wb(ws, headers, num_cols=None):
-    ws.append(headers)
-    fill = PatternFill(start_color="8B5CF6", end_color="8B5CF6", fill_type="solid")
-    for i, cell in enumerate(ws[1], 1):
-        cell.fill = fill
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.alignment = Alignment(horizontal='center')
-        ws.column_dimensions[get_column_letter(i)].width = 20
-    if num_cols:
-        for row in ws.iter_rows(min_row=2):
-            for ci in num_cols:
-                row[ci-1].number_format = '#,##0.00'
-
-@app.route('/api/export/all-so', methods=['GET'])
-def export_all_so():
-    try:
-        q = SOData.query
-        op = request.args.get('op_unit','').strip()
-        vn = request.args.get('vendor','').strip()
-        if op: q = q.filter(SOData.operation_unit_name == op)
-        if vn: q = q.filter(SOData.vendor_name == vn)
-        sos = q.all()
-        today = date.today()
-        wb = Workbook(); ws = wb.active; ws.title = "SO List"
-        _style_wb(ws, ['Aging','SO Number','SO Item','Status','Op Unit','Vendor','Product',
-                       'SO Qty','Sales Price','Sales Amount','PO Price','PO Amount',
-                       'SO Date','Delivery Possible','Customer PO','Delivery Memo',
-                       'Delivery Plan Date','Remarks'], num_cols=[8,9,10,11,12])
-        for s in sos:
-            age = (today - s.so_create_date).days if s.so_create_date else None
-            ws.append([get_aging_label(age), s.so_number, s.so_item, s.so_status,
-                s.operation_unit_name, s.vendor_name, s.product_name,
-                s.so_qty or 0, s.sales_price or 0, s.sales_amount or 0,
-                s.purchasing_price or 0, s.purchasing_amount or 0,
-                s.so_create_date.isoformat() if s.so_create_date else '',
-                s.delivery_possible_date.isoformat() if s.delivery_possible_date else '',
-                s.customer_po_number or '', s.delivery_memo or '',
-                s.delivery_plan_date.isoformat() if s.delivery_plan_date else '',
-                s.remarks or ''])
-        output = io.BytesIO(); wb.save(output); output.seek(0)
-        return send_file(output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True, download_name=f"SO_List_{datetime.now().strftime('%Y%m%d')}.xlsx")
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/export/po-without-so', methods=['GET'])
-def export_po_without_so():
-    try:
-        matched_set = set()
-        for cpn, memo in db.session.query(SOData.customer_po_number, SOData.delivery_memo).all():
-            for n in extract_po_hli(cpn): matched_set.add(n)
-            for n in extract_po_hli(memo): matched_set.add(n)
-        pos = [p for p in POData.query.all() if p.po_number not in matched_set]
-        today = date.today()
-        wb = Workbook(); ws = wb.active; ws.title = "PO Without SO"
-        _style_wb(ws, ['PO Number','Item No','Item Code','Description','Supplier',
-                       'Qty','Unit','Price','Amount','Currency',
-                       'PO Date','Purchase Member','Request Delivery','Days Remaining',
-                       'Delivery Plan Date','Remarks'], num_cols=[6,8,9])
-        for p in pos:
-            days_rem = (p.request_delivery - today).days if p.request_delivery else ''
-            ws.append([p.po_number, p.item_no or '', p.item_code, p.po_item_detail, p.supplier,
-                p.qty or 0, p.unit or '', p.price or 0, p.amount or 0, p.currency or 'IDR',
-                p.po_date.isoformat() if p.po_date else '',
-                p.purchase_member or '',
-                p.request_delivery.isoformat() if p.request_delivery else '',
-                days_rem,
-                p.delivery_plan_date.isoformat() if p.delivery_plan_date else '',
-                p.remarks or ''])
-        output = io.BytesIO(); wb.save(output); output.seek(0)
-        return send_file(output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True, download_name=f"PO_Without_SO_{datetime.now().strftime('%Y%m%d')}.xlsx")
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-if __name__ == '__main__':
-    print("Backend: http://127.0.0.1:5000")
-    app.run(debug=True, host='0.0.0.0', port=5000)
+export default App;
