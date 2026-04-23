@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area
@@ -7,7 +7,7 @@ import {
   Upload, Download, AlertCircle, CheckCircle, XCircle,
   Package, DollarSign, TrendingUp, Calendar, ChevronLeft,
   ChevronRight, Moon, Sun, FileText, BarChart3, FileSpreadsheet,
-  Filter, X, ChevronDown, ChevronUp, Building2
+  Filter, X, ChevronDown, ChevronUp, Building2, Search, Loader2
 } from 'lucide-react';
 import axios from 'axios';
 import { format, parseISO } from 'date-fns';
@@ -22,6 +22,9 @@ const PIE_COLORS = ['#8B5CF6','#F97316','#10B981','#EF4444','#3B82F6',
 
 const AGING_LABELS = ['0-30','30-90','90-180','180+'];
 const AGING_COLORS = { '0-30':'#10B981','30-90':'#F59E0B','90-180':'#F97316','180+':'#EF4444' };
+
+// ─── Excluded from PO HLI without SO calculation ──────────────────────────
+const EXCLUDED_OP_UNITS = new Set(['HLI GREEN POWER (CONSUMABLE)']);
 
 const renderPctLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent }) => {
   if (percent < 0.04) return null;
@@ -49,6 +52,16 @@ const fmtCurShort = (v) => {
 };
 const fmtDate = (d) => { try { return d ? format(parseISO(d),'dd MMM yyyy') : '-'; } catch { return d||'-'; } };
 
+// ─── Download Toast ────────────────────────────────────────────────────────
+const DownloadToast = ({ message, onClose }) => {
+  return (
+    <div className="fixed top-5 right-5 z-[200] flex items-center gap-3 px-5 py-3 rounded-xl shadow-2xl text-white bg-purple-700 max-w-sm animate-slide-in">
+      <Loader2 className="w-5 h-5 flex-shrink-0 animate-spin"/>
+      <span className="text-sm font-medium">{message}</span>
+    </div>
+  );
+};
+
 const Toast = ({ message, type, onClose }) => {
   useEffect(() => { const t = setTimeout(onClose, 3000); return () => clearTimeout(t); }, [onClose]);
   const bg = type === 'success' ? 'bg-green-600' : type === 'error' ? 'bg-red-600' : 'bg-blue-600';
@@ -61,6 +74,26 @@ const Toast = ({ message, type, onClose }) => {
   );
 };
 
+// ─── Download Button with press animation ─────────────────────────────────
+const DownloadButton = ({ onClick, className, children, disabled }) => {
+  const [pressed, setPressed] = useState(false);
+  const handleClick = () => {
+    setPressed(true);
+    setTimeout(() => setPressed(false), 200);
+    onClick && onClick();
+  };
+  return (
+    <button
+      onClick={handleClick}
+      disabled={disabled}
+      className={`${className} transition-all duration-100 ${pressed ? 'scale-95 brightness-90 shadow-inner' : 'scale-100'}`}
+      style={{ transform: pressed ? 'scale(0.95)' : 'scale(1)' }}
+    >
+      {children}
+    </button>
+  );
+};
+
 const SOModal = ({ title, data, onClose, darkMode }) => {
   const [dlPage, setDlPage] = useState(1);
   const PER = 50;
@@ -68,7 +101,7 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
   const rows = (data || []).slice((dlPage-1)*PER, dlPage*PER);
   const downloadExcel = () => {
     const ws = XLSX.utils.json_to_sheet(data.map(s => ({
-      'SO Number': s.so_number, 'SO Item': s.so_item, 'Status': s.so_status,
+      'SO Item': s.so_item, 'SO Number': s.so_number, 'Status': s.so_status,
       'Op Unit': s.operation_unit_name, 'Vendor': s.vendor_name, 'Product': s.product_name,
       'SO Qty': s.so_qty, 'Sales Price': s.sales_price, 'Sales Amount': s.sales_amount,
       'Customer PO': s.customer_po_number, 'Delivery Memo': s.delivery_memo,
@@ -93,15 +126,15 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
         <div className="overflow-auto flex-1">
           <table className="w-full text-sm">
             <thead className={`sticky top-0 ${darkMode?'bg-gray-700':'bg-purple-50'}`}>
-              <tr>{['SO Number','SO Item','Status','Op Unit','Vendor','Product','Qty','Sales Amount','Cust PO','Delivery Memo','SO Date','Plan Date','Remarks'].map(h=>(
+              <tr>{['SO Item','SO Number','Status','Op Unit','Vendor','Product','Qty','Sales Amount','Cust PO','Delivery Memo','SO Date','Plan Date','Remarks'].map(h=>(
                 <th key={h} className={`px-3 py-2 text-left font-semibold whitespace-nowrap ${darkMode?'text-gray-200':'text-gray-700'}`}>{h}</th>
               ))}</tr>
             </thead>
             <tbody className={`divide-y ${darkMode?'divide-gray-700':'divide-gray-100'}`}>
               {rows.map((s,i)=>(
                 <tr key={i} className={darkMode?'hover:bg-gray-700':'hover:bg-purple-50'}>
-                  <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{s.so_number}</td>
-                  <td className="px-3 py-2 whitespace-nowrap">{s.so_item}</td>
+                  <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{s.so_item}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">{s.so_number}</td>
                   <td className="px-3 py-2 whitespace-nowrap"><span className={`px-2 py-0.5 rounded-full text-xs font-medium ${s.so_status==='Delivery Completed'?'bg-green-100 text-green-700':s.so_status==='SO Cancel'?'bg-red-100 text-red-700':'bg-blue-100 text-blue-700'}`}>{s.so_status||'-'}</span></td>
                   <td className="px-3 py-2 whitespace-nowrap min-w-[180px]">{s.operation_unit_name}</td>
                   <td className="px-3 py-2 whitespace-nowrap max-w-[140px] truncate">{s.vendor_name}</td>
@@ -133,35 +166,54 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
   );
 };
 
-// ─── MultiSelect dropdown component ───────────────────────────────────────
+// ─── MultiSelect dropdown — Excel-style (all checked by default) ─────────
 const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => {
   const [open, setOpen] = useState(false);
-  const ref = React.useRef(null);
+  const ref = useRef(null);
+  // "all selected" means selected is empty (no filter applied = show all)
+  const allSelected = selected.length === 0 || selected.length === options.length;
+
   useEffect(() => {
     const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, []);
-  const toggle = (val) => onChange(selected.includes(val) ? selected.filter(x=>x!==val) : [...selected, val]);
+
+  const toggle = (val) => {
+    if (allSelected) {
+      // When all are selected and user clicks one, deselect all others (keep only this one)
+      onChange(options.filter(o => o !== val));
+    } else {
+      const next = selected.includes(val) ? selected.filter(x=>x!==val) : [...selected, val];
+      // If all options are selected, reset to empty (= all)
+      onChange(next.length === options.length ? [] : next);
+    }
+  };
+
+  const toggleAll = () => {
+    onChange([]); // empty = all selected
+  };
+
+  const isChecked = (val) => allSelected || selected.includes(val);
+
   return (
     <div className="relative flex-1 min-w-[180px]" ref={ref}>
       <label className={`block text-xs font-medium mb-1 ${txt2}`}>{label}</label>
       <button onClick={()=>setOpen(o=>!o)}
         className={`w-full px-3 py-2 rounded-lg text-sm border text-left flex justify-between items-center ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300 text-gray-700'}`}>
-        <span className="truncate">{selected.length === 0 ? `All ${label}` : `${selected.length} dipilih`}</span>
+        <span className="truncate">{allSelected ? `Semua ${label}` : `${selected.length} dipilih`}</span>
         <ChevronDown className="w-4 h-4 flex-shrink-0 ml-1"/>
       </button>
       {open && (
         <div className={`absolute z-50 mt-1 w-full max-h-56 overflow-auto rounded-lg shadow-xl border ${darkMode?'bg-gray-700 border-gray-600':'bg-white border-gray-200'}`}>
-          {selected.length > 0 && (
-            <button onClick={()=>onChange([])}
-              className={`w-full px-3 py-2 text-xs text-left text-red-500 border-b ${darkMode?'border-gray-600 hover:bg-gray-600':'border-gray-100 hover:bg-red-50'}`}>
-              ✕ Reset pilihan
-            </button>
-          )}
+          {/* Select All row — like Excel */}
+          <label className={`flex items-center gap-2 px-3 py-2 text-xs cursor-pointer font-semibold border-b ${darkMode?'border-gray-600 hover:bg-gray-600 text-white':'border-gray-100 hover:bg-purple-50 text-gray-700'}`}>
+            <input type="checkbox" checked={allSelected} onChange={toggleAll} className="accent-purple-600"/>
+            <span>(Pilih Semua)</span>
+          </label>
           {options.map(opt => (
             <label key={opt} className={`flex items-center gap-2 px-3 py-2 text-xs cursor-pointer ${darkMode?'hover:bg-gray-600 text-white':'hover:bg-purple-50 text-gray-700'}`}>
-              <input type="checkbox" checked={selected.includes(opt)} onChange={()=>toggle(opt)} className="accent-purple-600"/>
+              <input type="checkbox" checked={isChecked(opt)} onChange={()=>toggle(opt)} className="accent-purple-600"/>
               <span className="truncate" title={opt}>{opt}</span>
             </label>
           ))}
@@ -172,7 +224,73 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
   );
 };
 
-// ─── SO Status Pie with Top-5 legend + Etc tooltip ─────────────────────────
+// ─── Search Input for SO / PO numbers ─────────────────────────────────────
+const SearchInput = ({ placeholder, onSearch, darkMode, txt2, label }) => {
+  const [open, setOpen] = useState(false);
+  const [value, setValue] = useState('');
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const handleSearch = () => {
+    const numbers = value.split('\n').map(s=>s.trim()).filter(Boolean);
+    onSearch(numbers);
+    setOpen(false);
+  };
+
+  const handleClear = () => {
+    setValue('');
+    onSearch([]);
+    setOpen(false);
+  };
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        title={`Search ${label}`}
+        className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm border font-medium transition-all
+          ${darkMode ? 'bg-gray-600 border-gray-500 text-white hover:bg-gray-500' : 'bg-white border-gray-300 text-gray-700 hover:bg-purple-50 hover:border-purple-400'}`}
+      >
+        <Search className="w-4 h-4"/>
+        <span>Search {label}</span>
+        <ChevronDown className="w-3.5 h-3.5 ml-0.5 opacity-60"/>
+      </button>
+      {open && (
+        <div className={`absolute left-0 top-full mt-1 z-50 rounded-xl shadow-2xl border p-3 w-64 ${darkMode?'bg-gray-800 border-gray-700':'bg-white border-gray-200'}`}>
+          <p className={`text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>
+            Masukkan {label} (satu per baris):
+          </p>
+          <textarea
+            value={value}
+            onChange={e => setValue(e.target.value)}
+            placeholder={placeholder}
+            rows={4}
+            className={`w-full px-2 py-1.5 rounded-lg text-xs border resize-none font-mono
+              ${darkMode?'bg-gray-700 border-gray-600 text-white placeholder-gray-500':'bg-gray-50 border-gray-300 text-gray-800 placeholder-gray-400'}`}
+            autoFocus
+          />
+          <div className="flex gap-2 mt-2">
+            <button onClick={handleSearch}
+              className="flex-1 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-semibold">
+              Cari
+            </button>
+            <button onClick={handleClear}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>
+              Reset
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── SO Status Pie ─────────────────────────────────────────────────────────
 const StatusPie = ({ data, darkMode }) => {
   const [etcHover, setEtcHover] = useState(false);
   const [etcPos, setEtcPos] = useState({x:0, y:0});
@@ -236,18 +354,26 @@ const App = () => {
 
   const [stats, setStats] = useState(null);
   const [poWithoutSO, setPoWithoutSO] = useState([]);
+  const [poFiltered, setPoFiltered] = useState([]); // after local filters
   const [agingData, setAgingData] = useState([]);
   const [allSOData, setAllSOData] = useState([]);
   const [soTotal, setSoTotal] = useState(0);
   const [soFilterOptions, setSoFilterOptions] = useState({ op_units: [], vendors: [], statuses: [] });
 
-  // SO filters — semua multi-select
+  // SO filters
   const [soFilters, setSoFilters] = useState({ op_units: [], vendors: [], statuses: [], aging: [] });
+  const [soSearchNums, setSoSearchNums] = useState([]); // search SO Item
   const [soPage, setSoPage] = useState(1);
   const [soPerPage, setSoPerPage] = useState(20);
 
+  // PO filters
   const [poPage, setPoPage] = useState(1);
   const [poPerPage, setPoPerPage] = useState(20);
+  const [poSearchNums, setPoSearchNums] = useState([]); // search PO HLI Number
+  const [poFilterItemType, setPoFilterItemType] = useState([]); // multi-select
+  const [poFilterOpUnit, setPoFilterOpUnit] = useState([]);   // multi-select
+  const [poItemTypeOptions, setPoItemTypeOptions] = useState([]);
+  const [poOpUnitOptions, setPoOpUnitOptions] = useState([]);
 
   const [loading, setLoading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(null);
@@ -255,7 +381,8 @@ const App = () => {
   const [modal, setModal] = useState(null);
   const [editingCell, setEditingCell] = useState(null);
   const [editValue, setEditValue] = useState('');
-  const poTableRef = React.useRef(null);
+  const [downloadToast, setDownloadToast] = useState(null);
+  const poTableRef = useRef(null);
 
   const addToast = useCallback((message, type='success') => {
     const id = Date.now(); setToasts(t => [...t, { id, message, type }]);
@@ -271,14 +398,23 @@ const App = () => {
         api.get('/api/data/aging')
       ]);
       setStats(sRes.data);
-      setPoWithoutSO(Array.isArray(pRes.data) ? pRes.data : []);
+      const poData = Array.isArray(pRes.data) ? pRes.data : [];
+      // Filter out EXCLUDED op units on client side
+      const poFiltered = poData.filter(p => !EXCLUDED_OP_UNITS.has(p.operation_unit));
+      setPoWithoutSO(poFiltered);
+      setPoFiltered(poFiltered);
+      // Build filter options from PO data
+      const itemTypes = [...new Set(poFiltered.map(p=>p.po_item_type).filter(Boolean))].sort();
+      const opUnits   = [...new Set(poFiltered.map(p=>p.operation_unit).filter(Boolean))].sort();
+      setPoItemTypeOptions(itemTypes);
+      setPoOpUnitOptions(opUnits);
       setAgingData(Array.isArray(aRes.data) ? aRes.data : []);
     } catch (e) {
       addToast(`Error: ${e.response?.data?.error || e.message}`, 'error');
     } finally { setLoading(false); }
   }, [addToast]);
 
-  const fetchSOData = useCallback(async (filters, page, perPage) => {
+  const fetchSOData = useCallback(async (filters, page, perPage, searchNums) => {
     setLoading(true);
     try {
       const params = new URLSearchParams({ page, per_page: perPage });
@@ -286,6 +422,8 @@ const App = () => {
       (filters.vendors || []).forEach(v => params.append('vendor', v));
       (filters.statuses || []).forEach(v => params.append('status', v));
       (filters.aging || []).forEach(a => params.append('aging', a));
+      // Search by SO item
+      (searchNums || []).forEach(n => params.append('so_item', n));
       const res = await api.get(`/api/data/all-so?${params}`);
       setAllSOData(Array.isArray(res.data.data) ? res.data.data : []);
       setSoTotal(res.data.total || 0);
@@ -295,8 +433,25 @@ const App = () => {
     } finally { setLoading(false); }
   }, [addToast]);
 
+  // Apply PO local filters whenever dependencies change
+  useEffect(() => {
+    let filtered = [...poWithoutSO];
+    if (poSearchNums.length > 0) {
+      const nums = poSearchNums.map(n=>n.toLowerCase());
+      filtered = filtered.filter(p => nums.some(n => (p.po_no||'').toLowerCase().includes(n)));
+    }
+    if (poFilterItemType.length > 0) {
+      filtered = filtered.filter(p => poFilterItemType.includes(p.po_item_type));
+    }
+    if (poFilterOpUnit.length > 0) {
+      filtered = filtered.filter(p => poFilterOpUnit.includes(p.operation_unit));
+    }
+    setPoFiltered(filtered);
+    setPoPage(1);
+  }, [poWithoutSO, poSearchNums, poFilterItemType, poFilterOpUnit]);
+
   useEffect(() => { fetchDashboard(); }, []);
-  useEffect(() => { if (activePage === 'all-so') fetchSOData(soFilters, soPage, soPerPage); }, [activePage]);
+  useEffect(() => { if (activePage === 'all-so') fetchSOData(soFilters, soPage, soPerPage, soSearchNums); }, [activePage]);
 
   const handleUpload = async (e, type) => {
     const file = e.target.files[0]; if (!file) return;
@@ -313,7 +468,7 @@ const App = () => {
       setUploadProgress(null);
       addToast(`✅ ${res.data.message}`, 'success');
       fetchDashboard();
-      if (activePage === 'all-so') fetchSOData(soFilters, 1, soPerPage);
+      if (activePage === 'all-so') fetchSOData(soFilters, 1, soPerPage, soSearchNums);
       setSoPage(1);
     } catch (e) {
       setUploadProgress(null);
@@ -333,22 +488,28 @@ const App = () => {
       });
       setUploadProgress(null);
       addToast(`✅ Batch update: ${res.data.updated} records diperbarui`, 'success');
-      fetchSOData(soFilters, soPage, soPerPage);
+      fetchSOData(soFilters, soPage, soPerPage, soSearchNums);
     } catch (e) {
       setUploadProgress(null);
       addToast(`❌ Gagal batch upload: ${e.response?.data?.error || e.message}`, 'error');
     }
   };
 
-  const downloadBlob = async (url, filename) => {
+  const downloadBlob = async (url, filename, label) => {
+    const toastId = Date.now();
+    setDownloadToast({ id: toastId, message: `Mengunduh ${label || filename}...` });
     try {
       const res = await api.get(url, { responseType: 'blob' });
       const link = document.createElement('a');
       link.href = window.URL.createObjectURL(new Blob([res.data]));
       link.setAttribute('download', filename);
       document.body.appendChild(link); link.click(); link.remove();
+      setDownloadToast(null);
       addToast(`✅ File "${filename}" berhasil didownload`, 'success');
-    } catch (e) { addToast('❌ Gagal download file', 'error'); }
+    } catch (e) {
+      setDownloadToast(null);
+      addToast('❌ Gagal download file', 'error');
+    }
   };
 
   const downloadSOExcel = () => {
@@ -356,18 +517,22 @@ const App = () => {
     (soFilters.op_units||[]).forEach(v => p.append('op_unit', v));
     (soFilters.vendors||[]).forEach(v => p.append('vendor', v));
     (soFilters.statuses||[]).forEach(v => p.append('status', v));
-    downloadBlob(`/api/export/all-so?${p}`, `SO_List_${new Date().toISOString().slice(0,10)}.xlsx`);
+    downloadBlob(`/api/export/all-so?${p}`, `SO_List_${new Date().toISOString().slice(0,10)}.xlsx`, 'SO List');
   };
-  const downloadPOExcel = () => downloadBlob('/api/export/po-without-so', `PO_Without_SO_${new Date().toISOString().slice(0,10)}.xlsx`);
+  const downloadPOExcel = () => downloadBlob('/api/export/po-without-so', `PO_Without_SO_${new Date().toISOString().slice(0,10)}.xlsx`, 'PO Without SO');
   const downloadSOTemplate = () => {
-    const ws = XLSX.utils.json_to_sheet(allSOData.map(s=>({'SO Number':s.so_number,'Delivery Plan Date':s.delivery_plan_date||'','Remarks':s.remarks||''})));
-    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Template');
-    saveAs(new Blob([XLSX.write(wb,{bookType:'xlsx',type:'array'})],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),`SO_Template_${new Date().toISOString().slice(0,10)}.xlsx`);
-    addToast('✅ Template berhasil didownload', 'success');
+    setDownloadToast({ message: 'Menyiapkan template...' });
+    setTimeout(() => {
+      const ws = XLSX.utils.json_to_sheet(allSOData.map(s=>({'SO Number':s.so_number,'Delivery Plan Date':s.delivery_plan_date||'','Remarks':s.remarks||''})));
+      const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Template');
+      saveAs(new Blob([XLSX.write(wb,{bookType:'xlsx',type:'array'})],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),`SO_Template_${new Date().toISOString().slice(0,10)}.xlsx`);
+      setDownloadToast(null);
+      addToast('✅ Template berhasil didownload', 'success');
+    }, 300);
   };
 
   const updateSOCell = async (soId, field, value) => {
-    setEditingCell(null); // selalu tutup input dulu sebelum request
+    setEditingCell(null);
     try {
       await api.put(`/api/data/so/${soId}`, { [field]: value });
       setAllSOData(prev => prev.map(s => s.id === soId ? { ...s, [field]: value } : s));
@@ -389,9 +554,12 @@ const App = () => {
     });
   };
 
-  const poTotalPages = Math.max(1, Math.ceil(poWithoutSO.length / poPerPage));
-  const poRows = poWithoutSO.slice((poPage-1)*poPerPage, poPage*poPerPage);
+  const poTotalPages = Math.max(1, Math.ceil(poFiltered.length / poPerPage));
+  const poRows = poFiltered.slice((poPage-1)*poPerPage, poPage*poPerPage);
   const soTotalPages = Math.max(1, Math.ceil(soTotal / soPerPage));
+
+  // PO KPI — unique PO numbers from filtered set (excluding consumable)
+  const uniquePOCount = new Set(poFiltered.map(p=>p.po_no)).size;
 
   const card  = darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-100';
   const txt   = darkMode ? 'text-white' : 'text-gray-900';
@@ -400,7 +568,6 @@ const App = () => {
   const tblDv = darkMode ? 'divide-gray-700' : 'divide-gray-100';
   const trHov = darkMode ? 'hover:bg-gray-700' : 'hover:bg-purple-50';
 
-  // ── Date range helper ──
   const fmtDateRange = (range) => {
     if (!range?.min) return 'Belum ada data';
     return `${fmtDate(range.min)} — ${fmtDate(range.max)}`;
@@ -431,13 +598,14 @@ const App = () => {
           onClick={() => {
             setActivePage('all-so');
             setSoPage(1);
-            fetchSOData(soFilters, 1, soPerPage);
+            fetchSOData(soFilters, 1, soPerPage, soSearchNums);
             setTimeout(() => { poTableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 300);
           }}>
           <div className="flex justify-between items-start">
             <div>
               <p className={`text-sm font-medium ${txt2}`}>PO HLI tanpa SO</p>
-              <h3 className="text-3xl font-bold mt-1 text-red-500">{fmtNum(stats?.po_without_so)}</h3>
+              {/* Use client-side filtered count which excludes CONSUMABLE */}
+              <h3 className="text-3xl font-bold mt-1 text-red-500">{fmtNum(uniquePOCount)}</h3>
               <p className={`text-xs mt-1 ${txt2}`}>nomor PO unik · klik untuk detail</p>
             </div>
             <div className="p-3 bg-red-100 rounded-xl"><AlertCircle className="w-6 h-6 text-red-500"/></div>
@@ -479,9 +647,8 @@ const App = () => {
         </div>
       </div>
 
-      {/* Charts Row 1 — Monthly Trend (kiri) | Top 5 Vendor + Top Op Unit (kanan) */}
+      {/* Charts Row 1 */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6 items-start">
-        {/* Monthly Trend */}
         <div className={`p-6 rounded-2xl shadow ${card}`}>
           <h3 className={`text-base font-bold mb-4 flex items-center gap-2 ${txt}`}>
             <TrendingUp className="w-5 h-5 text-purple-600"/> Monthly Open SO Trend
@@ -508,9 +675,7 @@ const App = () => {
           </ResponsiveContainer>
         </div>
 
-        {/* Right column — Top 5 Vendor */}
         <div className="flex flex-col gap-4">
-          {/* Top 5 Vendors */}
           <div className={`p-5 rounded-2xl shadow ${card}`}>
             <h3 className={`text-sm font-bold mb-3 flex items-center gap-2 ${txt}`}>
               <BarChart3 className="w-4 h-4 text-blue-600"/> Top 5 Vendors (Open SO)
@@ -542,9 +707,8 @@ const App = () => {
         </div>
       </div>
 
-      {/* Charts Row 2 — SO Status Distribution (kiri, stretch penuh) | kolom kanan (Op Unit + 2 Pie) */}
+      {/* Charts Row 2 */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6 items-stretch">
-        {/* SO Status Distribution — stretch mengikuti tinggi kolom kanan */}
         <div className={`p-6 rounded-2xl shadow flex flex-col ${card}`}>
           <h3 className={`text-base font-bold mb-4 flex items-center gap-2 ${txt}`}>
             <FileText className="w-5 h-5 text-green-600"/> SO Status Distribution
@@ -601,9 +765,7 @@ const App = () => {
           })()}
         </div>
 
-        {/* Kolom kanan: Op Unit (atas) + 2 Pie (bawah, side by side) */}
         <div className="flex flex-col gap-4">
-          {/* Total Open SO per Operation Unit */}
           <div className={`p-5 rounded-2xl shadow ${card}`}>
             <h3 className={`text-sm font-bold mb-3 flex items-center gap-2 ${txt}`}>
               <Building2 className="w-4 h-4 text-green-600"/> Total Open SO per Operation Unit
@@ -630,7 +792,6 @@ const App = () => {
             </div>
           </div>
 
-          {/* 2 Pie Charts side by side - SO Status wider */}
           <div className="grid gap-4 flex-1" style={{gridTemplateColumns:'3fr 2fr'}}>
             <div className={`p-5 rounded-2xl shadow ${card}`}>
               <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><BarChart3 className="w-4 h-4 text-orange-600"/> SO Status (Pie)</h3>
@@ -751,12 +912,12 @@ const App = () => {
               <Upload className="w-4 h-4"/>Batch Upload
               <input type="file" accept=".xlsx,.xls" onChange={handleBatchUpload} className="hidden"/>
             </label>
-            <button onClick={downloadSOTemplate} className="flex items-center gap-1 px-3 py-1.5 bg-yellow-500 hover:bg-yellow-600 text-white rounded-lg text-sm">
+            <DownloadButton onClick={downloadSOTemplate} className="flex items-center gap-1 px-3 py-1.5 bg-yellow-500 hover:bg-yellow-600 text-white rounded-lg text-sm">
               <FileSpreadsheet className="w-4 h-4"/>Template
-            </button>
-            <button onClick={downloadSOExcel} className="flex items-center gap-1 px-3 py-1.5 bg-gradient-to-r from-purple-600 to-purple-500 text-white rounded-lg text-sm shadow">
+            </DownloadButton>
+            <DownloadButton onClick={downloadSOExcel} className="flex items-center gap-1 px-3 py-1.5 bg-gradient-to-r from-purple-600 to-purple-500 text-white rounded-lg text-sm shadow">
               <Download className="w-4 h-4"/>Download Excel
-            </button>
+            </DownloadButton>
           </div>
         </div>
 
@@ -779,9 +940,23 @@ const App = () => {
           )}
         </div>
 
-        {/* Multi-select Filters */}
+        {/* Multi-select Filters row — Search SO leftmost */}
         <div className={`p-4 rounded-xl mb-4 ${darkMode?'bg-gray-700':'bg-gray-50'}`}>
           <div className="flex flex-wrap gap-3 items-end">
+            {/* Search SO Item — paling kiri */}
+            <div>
+              <label className={`block text-xs font-medium mb-1 ${txt2}`}>Search SO Item</label>
+              <SearchInput
+                label="SO Item"
+                placeholder={"e.g.\n1234-10\n1234-20"}
+                onSearch={(nums) => {
+                  setSoSearchNums(nums);
+                  setSoPage(1);
+                  fetchSOData(soFilters, 1, soPerPage, nums);
+                }}
+                darkMode={darkMode} txt2={txt2}
+              />
+            </div>
             <MultiSelect label="Operation Unit" options={soFilterOptions.op_units}
               selected={soFilters.op_units} onChange={v=>setSoFilters(f=>({...f,op_units:v}))}
               darkMode={darkMode} txt2={txt2}/>
@@ -798,19 +973,28 @@ const App = () => {
                 <option value={20}>20</option>
                 <option value={50}>50</option>
                 <option value={100}>100</option>
-                <option value={200}>200</option>
+                <option value={500}>500</option>
               </select>
             </div>
             <div className="flex gap-2">
-              <button onClick={()=>{ setSoPage(1); fetchSOData(soFilters,1,soPerPage); }}
+              <button onClick={()=>{ setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums); }}
                 className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-sm font-medium">Apply</button>
-              <button onClick={()=>{ const f={op_units:[],vendors:[],statuses:[],aging:[]}; setSoFilters(f); setSoPage(1); fetchSOData(f,1,soPerPage); }}
+              <button onClick={()=>{
+                const f={op_units:[],vendors:[],statuses:[],aging:[]};
+                setSoFilters(f); setSoSearchNums([]); setSoPage(1);
+                fetchSOData(f,1,soPerPage,[]);
+              }}
                 className={`px-4 py-2 rounded-lg text-sm font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>Reset</button>
             </div>
           </div>
           {/* Active filter tags */}
-          {(soFilters.op_units.length + soFilters.vendors.length + soFilters.statuses.length) > 0 && (
+          {(soSearchNums.length + soFilters.op_units.length + soFilters.vendors.length + soFilters.statuses.length) > 0 && (
             <div className="mt-3 flex flex-wrap gap-1.5">
+              {soSearchNums.map(v=>(
+                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-xs">
+                  SO: {v}<button onClick={()=>{ const next=soSearchNums.filter(x=>x!==v); setSoSearchNums(next); setSoPage(1); fetchSOData(soFilters,1,soPerPage,next); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                </span>
+              ))}
               {soFilters.op_units.map(v=>(
                 <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full text-xs">
                   {v}<button onClick={()=>setSoFilters(f=>({...f,op_units:f.op_units.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
@@ -830,12 +1014,12 @@ const App = () => {
           )}
         </div>
 
-        {/* SO Table */}
+        {/* SO Table — removed SO Number column, SO Item is leftmost */}
         <div className="overflow-x-auto rounded-lg border border-gray-200">
           <table className="w-full text-sm">
             <thead className={tblHd}>
               <tr>
-                {['Aging','SO Number','SO Item','Item Name','Status','Op Unit','Vendor','Qty',
+                {['Aging','SO Item','Item Name','Status','Op Unit','Vendor','Qty',
                   'Sales Price','Sales Amount','PO Price','PO Amount',
                   'Possible Delivery','Plan Date','Remarks'].map(h=>(
                   <th key={h} className={`px-3 py-2.5 text-left font-semibold whitespace-nowrap ${txt2}`}>{h}</th>
@@ -844,7 +1028,7 @@ const App = () => {
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
               {allSOData.length === 0 ? (
-                <tr><td colSpan={15} className={`px-4 py-10 text-center ${txt2}`}>
+                <tr><td colSpan={14} className={`px-4 py-10 text-center ${txt2}`}>
                   <FileText className="w-10 h-10 mx-auto mb-2 opacity-40"/>Tidak ada data
                 </td></tr>
               ) : allSOData.map((so)=>(
@@ -855,8 +1039,8 @@ const App = () => {
                       {so.aging_label||'-'}
                     </span>
                   </td>
-                  <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{so.so_number}</td>
-                  <td className={`px-3 py-2 whitespace-nowrap ${txt2}`}>{so.so_item}</td>
+                  {/* SO Item first, no SO Number column */}
+                  <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{so.so_item}</td>
                   <td className={`px-3 py-2 max-w-[160px] truncate ${txt2}`} title={so.product_name}>{so.product_name}</td>
                   <td className="px-3 py-2 whitespace-nowrap">
                     <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
@@ -868,10 +1052,10 @@ const App = () => {
                   <td className={`px-3 py-2 min-w-[180px] truncate ${txt2}`} title={so.operation_unit_name}>{so.operation_unit_name}</td>
                   <td className={`px-3 py-2 max-w-[120px] truncate ${txt2}`} title={so.vendor_name}>{so.vendor_name}</td>
                   <td className={`px-3 py-2 text-right ${txt2}`}>{fmtNum(so.so_qty)}</td>
-                  <td className="px-3 py-2 text-right whitespace-nowrap">{fmtCur(so.sales_price)}</td>
-                  <td className="px-3 py-2 text-right font-semibold text-orange-600 whitespace-nowrap">{fmtCur(so.sales_amount)}</td>
-                  <td className="px-3 py-2 text-right whitespace-nowrap">{fmtCur(so.purchasing_price)}</td>
-                  <td className="px-3 py-2 text-right font-semibold text-green-600 whitespace-nowrap">{fmtCur(so.purchasing_amount)}</td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap min-w-[130px]">{fmtCur(so.sales_price)}</td>
+                  <td className="px-3 py-2 text-right font-semibold text-orange-600 whitespace-nowrap min-w-[130px]">{fmtCur(so.sales_amount)}</td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap min-w-[130px]">{fmtCur(so.purchasing_price)}</td>
+                  <td className="px-3 py-2 text-right font-semibold text-green-600 whitespace-nowrap min-w-[130px]">{fmtCur(so.purchasing_amount)}</td>
                   <td className={`px-3 py-2 text-center text-xs ${txt2}`}>{so.delivery_possible_date||'-'}</td>
                   <td className="px-3 py-2 text-center">
                     {editingCell?.id===so.id && editingCell.field==='delivery_plan_date' ? (
@@ -929,10 +1113,10 @@ const App = () => {
             Menampilkan {((soPage-1)*soPerPage)+1}–{Math.min(soPage*soPerPage,soTotal)} dari {fmtNum(soTotal)}
           </span>
           <div className="flex gap-1 items-center">
-            <button disabled={soPage===1} onClick={()=>{ const p=soPage-1; setSoPage(p); fetchSOData(soFilters,p,soPerPage); }}
+            <button disabled={soPage===1} onClick={()=>{ const p=soPage-1; setSoPage(p); fetchSOData(soFilters,p,soPerPage,soSearchNums); }}
               className={`p-1.5 rounded ${soPage===1?'opacity-40':'hover:bg-purple-100'}`}><ChevronLeft className="w-4 h-4"/></button>
             <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-purple-100 text-purple-700'}`}>{soPage}/{soTotalPages}</span>
-            <button disabled={soPage===soTotalPages} onClick={()=>{ const p=soPage+1; setSoPage(p); fetchSOData(soFilters,p,soPerPage); }}
+            <button disabled={soPage===soTotalPages} onClick={()=>{ const p=soPage+1; setSoPage(p); fetchSOData(soFilters,p,soPerPage,soSearchNums); }}
               className={`p-1.5 rounded ${soPage===soTotalPages?'opacity-40':'hover:bg-purple-100'}`}><ChevronRight className="w-4 h-4"/></button>
           </div>
         </div>
@@ -945,7 +1129,7 @@ const App = () => {
             <AlertCircle className="w-5 h-5 text-yellow-600"/>
             <h3 className={`text-base font-bold ${txt}`}>PO HLI yang Belum Ada SO-nya</h3>
             <span className={`text-sm ${txt2}`}>
-              ({fmtNum(new Set(poWithoutSO.map(p=>p.po_no)).size)} PO · {fmtNum(poWithoutSO.length)} item baris)
+              ({fmtNum(new Set(poFiltered.map(p=>p.po_no)).size)} PO · {fmtNum(poFiltered.length)} item baris)
             </span>
           </div>
           <div className="flex gap-2 items-center">
@@ -956,17 +1140,73 @@ const App = () => {
               <option value={100}>100 Baris</option>
               <option value={500}>500 Baris</option>
             </select>
-            <button onClick={downloadPOExcel} className="flex items-center gap-1 px-4 py-1.5 bg-gradient-to-r from-purple-600 to-purple-500 text-white rounded-lg text-sm shadow">
+            <DownloadButton onClick={downloadPOExcel} className="flex items-center gap-1 px-4 py-1.5 bg-gradient-to-r from-purple-600 to-purple-500 text-white rounded-lg text-sm shadow">
               <Download className="w-4 h-4"/>Download Excel
-            </button>
+            </DownloadButton>
           </div>
         </div>
+
+        {/* PO Filters row */}
+        <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700 bg-gray-750':'border-gray-100 bg-gray-50'} flex flex-wrap gap-3 items-end`}>
+          {/* Search PO HLI Number — paling kiri */}
+          <div>
+            <label className={`block text-xs font-medium mb-1 ${txt2}`}>Search PO Number</label>
+            <SearchInput
+              label="PO HLI Number"
+              placeholder={"e.g.\n4570226161\n4570226162"}
+              onSearch={(nums) => { setPoSearchNums(nums); setPoPage(1); }}
+              darkMode={darkMode} txt2={txt2}
+            />
+          </div>
+          <MultiSelect
+            label="PO Item Type"
+            options={poItemTypeOptions}
+            selected={poFilterItemType}
+            onChange={v => { setPoFilterItemType(v); setPoPage(1); }}
+            darkMode={darkMode} txt2={txt2}
+          />
+          <MultiSelect
+            label="Operation Unit"
+            options={poOpUnitOptions}
+            selected={poFilterOpUnit}
+            onChange={v => { setPoFilterOpUnit(v); setPoPage(1); }}
+            darkMode={darkMode} txt2={txt2}
+          />
+          {(poSearchNums.length > 0 || poFilterItemType.length > 0 || poFilterOpUnit.length > 0) && (
+            <button onClick={()=>{ setPoSearchNums([]); setPoFilterItemType([]); setPoFilterOpUnit([]); setPoPage(1); }}
+              className={`px-4 py-2 rounded-lg text-sm font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>
+              Reset Filter
+            </button>
+          )}
+        </div>
+
+        {/* Active PO filter tags */}
+        {(poSearchNums.length > 0 || poFilterItemType.length > 0 || poFilterOpUnit.length > 0) && (
+          <div className={`px-5 py-2 flex flex-wrap gap-1.5 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
+            {poSearchNums.map(v=>(
+              <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-xs">
+                PO: {v}<button onClick={()=>setPoSearchNums(prev=>prev.filter(x=>x!==v))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+              </span>
+            ))}
+            {poFilterItemType.map(v=>(
+              <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">
+                {v}<button onClick={()=>setPoFilterItemType(prev=>prev.filter(x=>x!==v))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+              </span>
+            ))}
+            {poFilterOpUnit.map(v=>(
+              <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full text-xs">
+                {v}<button onClick={()=>setPoFilterOpUnit(prev=>prev.filter(x=>x!==v))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+              </span>
+            ))}
+          </div>
+        )}
+
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className={tblHd}>
               <tr>
                 {['PO HLI NUMBER','PO ITEM TYPE','ITEM NO','ITEM CODE','OPERATION UNIT','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','HARI TERSISA'].map(h=>(
-                  <th key={h} className={`px-4 py-3 text-left font-semibold whitespace-nowrap ${txt2}`}>{h}</th>
+                  <th key={h} className={`px-4 py-3 text-left font-semibold whitespace-nowrap ${txt2} ${h==='PRICE'||h==='AMOUNT'?'min-w-[140px]':''}`}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -995,8 +1235,8 @@ const App = () => {
                     <td className={`px-4 py-3 ${txt2} max-w-xs truncate`} title={row.description}>{row.description}</td>
                     <td className={`px-4 py-3 text-right ${txt2}`}>{fmtNum(row.qty)}</td>
                     <td className={`px-4 py-3 ${txt2}`}>{row.unit||'-'}</td>
-                    <td className="px-4 py-3 text-right">{fmtCur(row.price)}</td>
-                    <td className="px-4 py-3 text-right font-semibold text-orange-600">{fmtCur(row.amount)}</td>
+                    <td className="px-4 py-3 text-right whitespace-nowrap min-w-[140px]">{fmtCur(row.price)}</td>
+                    <td className="px-4 py-3 text-right font-semibold text-orange-600 whitespace-nowrap min-w-[140px]">{fmtCur(row.amount)}</td>
                     <td className={`px-4 py-3 ${txt2}`}>{row.currency||'IDR'}</td>
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.po_date||'-'}</td>
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.purchase_member||'-'}</td>
@@ -1011,7 +1251,7 @@ const App = () => {
           </table>
         </div>
         <div className={`p-4 border-t ${darkMode?'border-gray-700':'border-gray-100'} flex justify-between items-center`}>
-          <span className={`text-sm ${txt2}`}>{(poPage-1)*poPerPage+1}–{Math.min(poPage*poPerPage,poWithoutSO.length)} dari {fmtNum(poWithoutSO.length)}</span>
+          <span className={`text-sm ${txt2}`}>{(poPage-1)*poPerPage+1}–{Math.min(poPage*poPerPage,poFiltered.length)} dari {fmtNum(poFiltered.length)}</span>
           <div className="flex gap-1 items-center">
             <button disabled={poPage===1} onClick={()=>setPoPage(p=>p-1)} className={`p-1.5 rounded ${poPage===1?'opacity-40':'hover:bg-purple-100'}`}><ChevronLeft className="w-4 h-4"/></button>
             <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-purple-100 text-purple-700'}`}>{poPage}/{poTotalPages}</span>
@@ -1027,9 +1267,20 @@ const App = () => {
   // ══════════════════════════════════════════════════════════════
   return (
     <div className={`min-h-screen font-sans ${darkMode?'bg-gray-900':'bg-gray-50'}`}>
-      <div className="fixed top-4 right-4 z-[100] flex flex-col gap-2">
+      <style>{`
+        @keyframes slide-in {
+          from { transform: translateX(100%); opacity: 0; }
+          to   { transform: translateX(0);    opacity: 1; }
+        }
+        .animate-slide-in { animation: slide-in 0.25s ease-out forwards; }
+      `}</style>
+
+      <div className="fixed top-5 right-5 z-[100] flex flex-col gap-2">
         {toasts.map(t=><Toast key={t.id} message={t.message} type={t.type} onClose={()=>removeToast(t.id)}/>)}
       </div>
+
+      {/* Download progress toast */}
+      {downloadToast && <DownloadToast message={downloadToast.message} />}
 
       {/* Sidebar */}
       <aside className={`fixed left-0 top-0 h-full w-20 flex flex-col items-center py-8 shadow-2xl z-40 ${darkMode?'bg-gray-800 border-r border-gray-700':'bg-gradient-to-b from-purple-600 to-purple-700'}`}>
@@ -1038,7 +1289,7 @@ const App = () => {
             className={`p-3 rounded-xl flex justify-center transition-all ${activePage==='dashboard'?'bg-white/30 text-white shadow-lg':'text-purple-100 hover:bg-white/20'}`} title="Dashboard">
             <BarChart3 className="w-6 h-6"/>
           </button>
-          <button onClick={()=>{ setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters,1,soPerPage); window.scrollTo({top:0, behavior:'smooth'}); }}
+          <button onClick={()=>{ setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums); window.scrollTo({top:0, behavior:'smooth'}); }}
             className={`p-3 rounded-xl flex justify-center transition-all ${activePage==='all-so'?'bg-white/30 text-white shadow-lg':'text-purple-100 hover:bg-white/20'}`} title="All Sales Orders">
             <FileText className="w-6 h-6"/>
           </button>
