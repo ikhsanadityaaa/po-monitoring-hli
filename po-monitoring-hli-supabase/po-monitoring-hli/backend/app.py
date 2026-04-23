@@ -98,6 +98,9 @@ CLOSED_STATUSES = {
     'Approval Apply', 'Approval Complete Step', 'Approval Reject'
 }
 
+# Operation units yang dikecualikan dari matching PO HLI vs SO
+EXCLUDED_OP_UNITS = {'HLI GREEN POWER (CONSUMABLE)'}
+
 PO_HLI_RE = re.compile(r'\b(?:[A-Za-z]{0,4}[-]?)?\d{7,}(?:-\d+)?\b')
 
 def extract_po_hli(val):
@@ -191,7 +194,8 @@ def get_dashboard_stats():
 
         so_without_po_count = 0
         for cpn, memo in db.session.query(SOData.customer_po_number, SOData.delivery_memo)\
-                                   .filter(open_so_filter()).all():
+                                   .filter(open_so_filter(),
+                                           ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
             candidates = extract_po_hli(cpn) + extract_po_hli(memo)
             if not candidates or not any(c in po_numbers for c in candidates):
                 so_without_po_count += 1
@@ -299,9 +303,10 @@ def get_dashboard_stats():
         return jsonify({'error': str(e)}), 500
 
 def build_matched_set():
-    """Build set of PO numbers that already have a matching SO."""
+    """Build set of PO numbers that already have a matching SO (excluding consumable op unit)."""
     matched = set()
-    for cpn, memo in db.session.query(SOData.customer_po_number, SOData.delivery_memo).all():
+    for cpn, memo in db.session.query(SOData.customer_po_number, SOData.delivery_memo)\
+            .filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
         for n in extract_po_hli(cpn): matched.add(n)
         for n in extract_po_hli(memo): matched.add(n)
     return matched
@@ -345,7 +350,9 @@ def get_so_without_po():
     try:
         po_numbers = {r[0] for r in db.session.query(POData.po_number).all() if r[0]}
         result = []
-        for s in db.session.query(SOData).filter(open_so_filter()).all():
+        for s in db.session.query(SOData).filter(
+                open_so_filter(),
+                ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
             candidates = extract_po_hli(s.customer_po_number) + extract_po_hli(s.delivery_memo)
             if not candidates or not any(c in po_numbers for c in candidates):
                 result.append(so_dict(s))
