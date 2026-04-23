@@ -541,7 +541,7 @@ const App = () => {
                │  POSISI HORIZ → cx="50%" (biasanya biarkan 50%)            │
                │  JARAK ANTAR SLICE → paddingAngle                           │
                └─────────────────────────────────────────────────────────────┘ */}
-          <div className="grid gap-4 flex-1" style={{gridTemplateColumns: '7fr 3fr'}}>
+          <div className="grid gap-4 flex-1" style={{gridTemplateColumns: '6fr 4fr'}}>
 
             {/* ── PIE 1: SO Status ── */}
             <div className={`p-5 rounded-2xl shadow ${card} flex flex-col`}>
