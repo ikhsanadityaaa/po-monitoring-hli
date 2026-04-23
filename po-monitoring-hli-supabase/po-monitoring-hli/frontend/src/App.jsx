@@ -554,7 +554,7 @@ const App = () => {
                     <Pie
                       data={stats?.so_status||[]}
                       cx="50%"          /* posisi horizontal center donut */
-                      cy="42%"          /* posisi vertikal center donut — kecilkan % = naik */
+                      cy="44%"          /* posisi vertikal center donut — kecilkan % = naik */
                       innerRadius={50}  /* jari-jari dalam (lubang tengah). 0 = pie penuh */
                       outerRadius={85}  /* jari-jari luar (ukuran donut). Naikkan = lebih besar */
                       paddingAngle={0}  /* jarak antar slice dalam derajat */
