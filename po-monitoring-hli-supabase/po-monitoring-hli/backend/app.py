@@ -379,9 +379,13 @@ def get_aging_data():
 @app.route('/api/data/aging-detail/<path:vendor_name>', methods=['GET'])
 def get_aging_detail(vendor_name):
     try:
+        bucket = request.args.get('bucket')  # '0-30', '30-90', '90-180', '180+', or None for all
+        today = date.today()
         sos = db.session.query(SOData).filter(
             open_so_filter(), SOData.vendor_name == vendor_name
         ).order_by(SOData.so_create_date.asc()).all()
+        if bucket:
+            sos = [s for s in sos if get_aging_label((today - s.so_create_date).days if s.so_create_date else None) == bucket]
         return jsonify([so_dict(s) for s in sos])
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -471,15 +475,24 @@ def upload_po_list():
         col_pm   = find_column(df, ['Purchase Member','Purchasing Member','PIC','Buyer'])
         col_rdd  = find_column(df, ['Request Delivery Date','Delivery Date','Req Delivery'])
 
-        db.session.execute(text('DELETE FROM po_data'))
-        db.session.flush()
-        records, count = [], 0
+        # Build lookup of existing PO records (po_number + item_no) -> existing record
+        existing_po = {}
+        for p in POData.query.all():
+            key = (p.po_number, p.item_no)
+            existing_po[key] = p
+
+        new_keys_in_file = set()
+        count = 0
         for _, row in df.iterrows():
             po_num = clean(df_val(row, col_po))
             if not po_num: continue
-            records.append({
+            item_no = clean(df_val(row, col_itemno))
+            key = (po_num, item_no)
+            new_keys_in_file.add(key)
+
+            new_data = {
                 'po_number': po_num,
-                'item_no': clean(df_val(row, col_itemno)),
+                'item_no': item_no,
                 'po_item_detail': clean(df_val(row, col_desc)),
                 'item_code': clean(df_val(row, col_item)),
                 'supplier': clean(df_val(row, col_supp)),
@@ -493,11 +506,28 @@ def upload_po_list():
                 'purchase_member': clean(df_val(row, col_pm)),
                 'request_delivery': parse_date(df_val(row, col_rdd)),
                 'uploaded_at': datetime.utcnow()
-            })
+            }
+
+            if key in existing_po:
+                # Update existing, preserve remarks & delivery_plan_date
+                existing = existing_po[key]
+                for field, val in new_data.items():
+                    setattr(existing, field, val)
+                # remarks & delivery_plan_date already preserved (not in new_data update)
+            else:
+                new_rec = POData(**new_data)
+                db.session.add(new_rec)
+
             count += 1
-            if len(records) >= CHUNK_SIZE:
-                db.session.bulk_insert_mappings(POData, records); db.session.commit(); records = []
-        if records: db.session.bulk_insert_mappings(POData, records)
+            if count % CHUNK_SIZE == 0:
+                db.session.flush()
+
+        # Delete records not in the new file
+        keys_to_delete = set(existing_po.keys()) - new_keys_in_file
+        if keys_to_delete:
+            for key in keys_to_delete:
+                db.session.delete(existing_po[key])
+
         db.session.add(UploadLog(file_type='PO', filename=file.filename, records_count=count))
         db.session.commit()
         return jsonify({'message': f'Berhasil upload {count} PO items', 'uploaded': count})
@@ -536,14 +566,23 @@ def upload_smro():
         col_delposs = find_column(df, ['Delivery Possible Date','Possible Delivery Date','Est Delivery'])
         col_matchpo = find_column(df, ['Matched PO Number','Matched PO','PO HLI','PO HLI Number'])
 
-        db.session.execute(text('DELETE FROM so_data'))
-        db.session.flush()
-        records, count = [], 0
+        # Build lookup of existing SO records by so_item (unique key)
+        existing_so = {}
+        for s in SOData.query.all():
+            if s.so_item:
+                existing_so[s.so_item] = s
+
+        new_soitems_in_file = set()
+        count = 0
         for _, row in df.iterrows():
             so_val = clean(df_val(row, col_so))
             if not so_val: continue
-            records.append({
-                'so_number': so_val, 'so_item': clean(df_val(row, col_soitem)),
+            so_item_val = clean(df_val(row, col_soitem))
+            new_soitems_in_file.add(so_item_val)
+
+            new_data = {
+                'so_number': so_val,
+                'so_item': so_item_val,
                 'so_status': clean(df_val(row, col_status)),
                 'operation_unit_name': clean(df_val(row, col_opunit)),
                 'vendor_name': clean(df_val(row, col_vendor)),
@@ -561,11 +600,32 @@ def upload_smro():
                 'delivery_possible_date': parse_date(df_val(row, col_delposs)),
                 'matched_po_number': clean(df_val(row, col_matchpo)),
                 'uploaded_at': datetime.utcnow()
-            })
+            }
+
+            if so_item_val and so_item_val in existing_so:
+                # Update existing record, preserve remarks & delivery_plan_date
+                existing = existing_so[so_item_val]
+                preserved_remarks = existing.remarks
+                preserved_plan_date = existing.delivery_plan_date
+                for field, val in new_data.items():
+                    setattr(existing, field, val)
+                # Restore preserved fields
+                existing.remarks = preserved_remarks
+                existing.delivery_plan_date = preserved_plan_date
+            else:
+                new_rec = SOData(**new_data)
+                db.session.add(new_rec)
+
             count += 1
-            if len(records) >= CHUNK_SIZE:
-                db.session.bulk_insert_mappings(SOData, records); db.session.commit(); records = []
-        if records: db.session.bulk_insert_mappings(SOData, records)
+            if count % CHUNK_SIZE == 0:
+                db.session.flush()
+
+        # Delete records not in the new file (by so_item)
+        keys_to_delete = set(existing_so.keys()) - new_soitems_in_file
+        if keys_to_delete:
+            for key in keys_to_delete:
+                db.session.delete(existing_so[key])
+
         db.session.add(UploadLog(file_type='SO', filename=file.filename, records_count=count))
         db.session.commit()
         return jsonify({'message': f'Berhasil upload {count} SO items', 'uploaded': count})
