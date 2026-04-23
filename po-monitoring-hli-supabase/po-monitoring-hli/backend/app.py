@@ -185,16 +185,9 @@ def get_dashboard_stats():
 
         po_numbers = {r[0] for r in db.session.query(POData.po_number).all() if r[0]}
 
-        matched_set = set()
-        for cpn, memo in db.session.query(SOData.customer_po_number, SOData.delivery_memo).all():
-            for n in extract_po_hli(cpn): matched_set.add(n)
-            for n in extract_po_hli(memo): matched_set.add(n)
+        matched_set = build_matched_set()
 
-        po_without_so_count = 0
-        for p in po_numbers:
-            p_clean = re.sub(r'^[A-Za-z]{0,4}[-]?', '', p) if p else ''
-            if p not in matched_set and p_clean not in matched_set:
-                po_without_so_count += 1
+        po_without_so_count = sum(1 for p in po_numbers if not po_is_matched(p, matched_set))
 
         so_without_po_count = 0
         for cpn, memo in db.session.query(SOData.customer_po_number, SOData.delivery_memo)\
@@ -305,18 +298,29 @@ def get_dashboard_stats():
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+def build_matched_set():
+    """Build set of PO numbers that already have a matching SO."""
+    matched = set()
+    for cpn, memo in db.session.query(SOData.customer_po_number, SOData.delivery_memo).all():
+        for n in extract_po_hli(cpn): matched.add(n)
+        for n in extract_po_hli(memo): matched.add(n)
+    return matched
+
+def po_is_matched(po_number, matched_set):
+    """Check if a PO number exists in the matched set (with normalization)."""
+    if not po_number:
+        return False
+    po_clean = re.sub(r'^[A-Za-z]{0,4}[-]?', '', po_number)
+    return po_number in matched_set or po_clean in matched_set
+
 @app.route('/api/data/po-without-so', methods=['GET'])
 def get_po_without_so():
     try:
-        matched_set = set()
-        for cpn, memo in db.session.query(SOData.customer_po_number, SOData.delivery_memo).all():
-            for n in extract_po_hli(cpn): matched_set.add(n)
-            for n in extract_po_hli(memo): matched_set.add(n)
+        matched_set = build_matched_set()
         today = date.today()
         result = []
         for p in POData.query.all():
-            po_num_clean = re.sub(r'^[A-Za-z]{0,4}[-]?', '', p.po_number) if p.po_number else ''
-            if p.po_number not in matched_set and po_num_clean not in matched_set:
+            if not po_is_matched(p.po_number, matched_set):
                 days_remaining = (p.request_delivery - today).days if p.request_delivery else None
                 result.append({
                     'id': p.id, 'po_no': p.po_number, 'item_no': p.item_no,
@@ -385,38 +389,38 @@ def get_aging_detail(vendor_name):
 @app.route('/api/data/all-so', methods=['GET'])
 def get_all_so():
     try:
-        op_unit  = request.args.get('op_unit', '').strip()
-        vendor   = request.args.get('vendor', '').strip()
-        aging    = request.args.getlist('aging')  # e.g. ['180+','90-180']
+        op_units = request.args.getlist('op_unit')   # multi-value
+        vendors  = request.args.getlist('vendor')    # multi-value
+        statuses = request.args.getlist('status')    # multi-value
+        aging    = request.args.getlist('aging')
         page     = max(1, int(request.args.get('page', 1)))
         per_page = min(500, int(request.args.get('per_page', 20)))
 
         today = date.today()
         q = SOData.query
-        if op_unit: q = q.filter(SOData.operation_unit_name == op_unit)
-        if vendor:  q = q.filter(SOData.vendor_name == vendor)
+        if op_units: q = q.filter(SOData.operation_unit_name.in_(op_units))
+        if vendors:  q = q.filter(SOData.vendor_name.in_(vendors))
+        if statuses: q = q.filter(SOData.so_status.in_(statuses))
 
-        # Apply aging filter in Python after fetching (simpler than SQL CASE)
         all_sos = q.order_by(SOData.so_create_date.desc()).all()
 
         if aging:
             def matches_aging(s):
                 age = (today - s.so_create_date).days if s.so_create_date else None
-                label = get_aging_label(age)
-                return label in aging
+                return get_aging_label(age) in aging
             all_sos = [s for s in all_sos if matches_aging(s)]
 
         total = len(all_sos)
         paged = all_sos[(page-1)*per_page : page*per_page]
 
-        # Dynamic filters based on filtered results
-        op_units = sorted({s.operation_unit_name for s in all_sos if s.operation_unit_name})
-        vendors  = sorted({s.vendor_name for s in all_sos if s.vendor_name})
+        op_units_opts = sorted({s.operation_unit_name for s in all_sos if s.operation_unit_name})
+        vendors_opts  = sorted({s.vendor_name for s in all_sos if s.vendor_name})
+        statuses_opts = sorted({s.so_status for s in all_sos if s.so_status})
 
         return jsonify({
             'data': [so_dict(s) for s in paged],
             'total': total, 'page': page, 'per_page': per_page,
-            'filters': {'op_units': list(op_units), 'vendors': list(vendors)}
+            'filters': {'op_units': list(op_units_opts), 'vendors': list(vendors_opts), 'statuses': list(statuses_opts)}
         })
     except Exception as e:
         import traceback; traceback.print_exc()
@@ -628,10 +632,12 @@ def _style_wb(ws, headers, num_cols=None):
 def export_all_so():
     try:
         q = SOData.query
-        op = request.args.get('op_unit','').strip()
-        vn = request.args.get('vendor','').strip()
-        if op: q = q.filter(SOData.operation_unit_name == op)
-        if vn: q = q.filter(SOData.vendor_name == vn)
+        op_units = request.args.getlist('op_unit')
+        vendors  = request.args.getlist('vendor')
+        statuses = request.args.getlist('status')
+        if op_units: q = q.filter(SOData.operation_unit_name.in_(op_units))
+        if vendors:  q = q.filter(SOData.vendor_name.in_(vendors))
+        if statuses: q = q.filter(SOData.so_status.in_(statuses))
         sos = q.all()
         today = date.today()
         wb = Workbook(); ws = wb.active; ws.title = "SO List"
@@ -660,11 +666,8 @@ def export_all_so():
 @app.route('/api/export/po-without-so', methods=['GET'])
 def export_po_without_so():
     try:
-        matched_set = set()
-        for cpn, memo in db.session.query(SOData.customer_po_number, SOData.delivery_memo).all():
-            for n in extract_po_hli(cpn): matched_set.add(n)
-            for n in extract_po_hli(memo): matched_set.add(n)
-        pos = [p for p in POData.query.all() if p.po_number not in matched_set]
+        matched_set = build_matched_set()
+        pos = [p for p in POData.query.all() if not po_is_matched(p.po_number, matched_set)]
         today = date.today()
         wb = Workbook(); ws = wb.active; ws.title = "PO Without SO"
         _style_wb(ws, ['PO Number','Item No','Item Code','Description','Supplier',
