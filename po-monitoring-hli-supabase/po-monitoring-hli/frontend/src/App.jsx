@@ -402,7 +402,7 @@ const App = () => {
           </ResponsiveContainer>
         </div>
 
-        {/* Right column — Top 5 Vendor (atas) + Top Op Unit (bawah) */}
+        {/* Right column — Top 5 Vendor */}
         <div className="flex flex-col gap-4">
           {/* Top 5 Vendors */}
           <div className={`p-5 rounded-2xl shadow ${card}`}>
@@ -433,39 +433,13 @@ const App = () => {
               </tbody>
             </table>
           </div>
-
-          {/* Top Operation Units */}
-          <div className={`p-5 rounded-2xl shadow ${card}`}>
-            <h3 className={`text-sm font-bold mb-3 flex items-center gap-2 ${txt}`}>
-              <Building2 className="w-4 h-4 text-green-600"/> Total Open SO per Operation Unit
-            </h3>
-            <div className="overflow-auto max-h-40">
-              <table className="w-full text-xs">
-                <thead className={`sticky top-0 ${tblHd}`}>
-                  <tr>
-                    <th className={`p-1.5 text-left font-semibold ${txt2}`}>Operation Unit</th>
-                    <th className={`p-1.5 text-right font-semibold ${txt2}`}>Open SO</th>
-                    <th className={`p-1.5 text-right font-semibold ${txt2}`}>Amount</th>
-                  </tr>
-                </thead>
-                <tbody className={`divide-y ${tblDv}`}>
-                  {(stats?.top_op_units||[]).map((u,i)=>(
-                    <tr key={i} className={`${trHov} transition-colors`}>
-                      <td className={`p-1.5 font-medium ${txt} max-w-[160px] truncate`} title={u.op_unit}>{u.op_unit}</td>
-                      <td className="p-1.5 text-right font-semibold text-purple-600">{fmtNum(u.so_count)}</td>
-                      <td className="p-1.5 text-right font-semibold text-orange-600">{fmtCurShort(u.total_amount)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
         </div>
       </div>
 
-      {/* Charts Row 2 */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6 items-start">
-        <div className={`p-6 rounded-2xl shadow ${card}`}>
+      {/* Charts Row 2 — SO Status Distribution (kiri, stretch penuh) | kolom kanan (Op Unit + 2 Pie) */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6 items-stretch">
+        {/* SO Status Distribution — stretch mengikuti tinggi kolom kanan */}
+        <div className={`p-6 rounded-2xl shadow flex flex-col ${card}`}>
           <h3 className={`text-base font-bold mb-4 flex items-center gap-2 ${txt}`}>
             <FileText className="w-5 h-5 text-green-600"/> SO Status Distribution
           </h3>
@@ -476,7 +450,7 @@ const App = () => {
             const grandTotal  = rows.reduce((s, r) => s + r.total, 0);
             const grandAmount = rows.reduce((s, r) => s + (r.amount || 0), 0);
             return (
-              <div className="overflow-auto max-h-96">
+              <div className="overflow-auto flex-1">
                 <table className="w-full text-xs" style={{minWidth: months.length > 4 ? `${160 + months.length * 72 + 200}px` : undefined}}>
                   <thead className={`sticky top-0 ${tblHd}`}>
                     <tr>
@@ -521,41 +495,72 @@ const App = () => {
           })()}
         </div>
 
-        <div className="grid grid-cols-[3fr_2fr] gap-4 items-start">
+        {/* Kolom kanan: Op Unit (atas) + 2 Pie (bawah, side by side) */}
+        <div className="flex flex-col gap-4">
+          {/* Total Open SO per Operation Unit */}
           <div className={`p-5 rounded-2xl shadow ${card}`}>
-            <h3 className={`text-base font-bold mb-2 flex items-center gap-2 ${txt}`}><BarChart3 className="w-5 h-5 text-orange-600"/> SO Status (Pie)</h3>
-            <ResponsiveContainer width="100%" height={320}>
-              <PieChart>
-                <Pie data={stats?.so_status||[]} cx="50%" cy="42%" innerRadius={52} outerRadius={88} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
-                  {(stats?.so_status||[]).map((_,i)=><Cell key={i} fill={PIE_COLORS[i%PIE_COLORS.length]}/>)}
-                </Pie>
-                <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v),n]}/>
-                <Legend layout="horizontal" align="center" verticalAlign="bottom" iconSize={8} formatter={(v)=><span className="text-xs">{v}</span>}/>
-              </PieChart>
-            </ResponsiveContainer>
+            <h3 className={`text-sm font-bold mb-3 flex items-center gap-2 ${txt}`}>
+              <Building2 className="w-4 h-4 text-green-600"/> Total Open SO per Operation Unit
+            </h3>
+            <div className="overflow-auto max-h-40">
+              <table className="w-full text-xs">
+                <thead className={`sticky top-0 ${tblHd}`}>
+                  <tr>
+                    <th className={`p-1.5 text-left font-semibold ${txt2}`}>Operation Unit</th>
+                    <th className={`p-1.5 text-right font-semibold ${txt2}`}>Open SO</th>
+                    <th className={`p-1.5 text-right font-semibold ${txt2}`}>Amount</th>
+                  </tr>
+                </thead>
+                <tbody className={`divide-y ${tblDv}`}>
+                  {(stats?.top_op_units||[]).map((u,i)=>(
+                    <tr key={i} className={`${trHov} transition-colors`}>
+                      <td className={`p-1.5 font-medium ${txt} max-w-[160px] truncate`} title={u.op_unit}>{u.op_unit}</td>
+                      <td className="p-1.5 text-right font-semibold text-purple-600">{fmtNum(u.so_count)}</td>
+                      <td className="p-1.5 text-right font-semibold text-orange-600">{fmtCurShort(u.total_amount)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
-          {(() => {
-            const agingPieData = [
-              { name:'< 30 Hari', value:agingData.reduce((s,v)=>s+(v.less_30||0),0), fill:'#10B981' },
-              { name:'30–90 Hari', value:agingData.reduce((s,v)=>s+(v.days_30_90||0),0), fill:'#F59E0B' },
-              { name:'90–180 Hari', value:agingData.reduce((s,v)=>s+(v.days_90_180||0),0), fill:'#F97316' },
-              { name:'> 180 Hari', value:agingData.reduce((s,v)=>s+(v.more_180||0),0), fill:'#EF4444' },
-            ].filter(d=>d.value>0);
-            return (
-              <div className={`p-5 rounded-2xl shadow ${card}`}>
-                <h3 className={`text-base font-bold mb-2 flex items-center gap-2 ${txt}`}><Calendar className="w-5 h-5 text-red-500"/> SO Aging (Pie)</h3>
-                <ResponsiveContainer width="100%" height={320}>
-                  <PieChart>
-                    <Pie data={agingPieData} cx="50%" cy="35%" innerRadius={52} outerRadius={88} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
-                      {agingPieData.map((d,i)=><Cell key={i} fill={d.fill}/>)}
-                    </Pie>
-                    <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v)+' SO',n]}/>
-                    <Legend layout="horizontal" align="center" verticalAlign="bottom" iconSize={8} formatter={(v)=><span className="text-xs">{v}</span>}/>
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
-            );
-          })()}
+
+          {/* 2 Pie Charts side by side */}
+          <div className="grid grid-cols-2 gap-4 flex-1">
+            <div className={`p-5 rounded-2xl shadow ${card}`}>
+              <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><BarChart3 className="w-4 h-4 text-orange-600"/> SO Status (Pie)</h3>
+              <ResponsiveContainer width="100%" height={280}>
+                <PieChart>
+                  <Pie data={stats?.so_status||[]} cx="50%" cy="40%" innerRadius={48} outerRadius={80} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
+                    {(stats?.so_status||[]).map((_,i)=><Cell key={i} fill={PIE_COLORS[i%PIE_COLORS.length]}/>)}
+                  </Pie>
+                  <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v),n]}/>
+                  <Legend layout="horizontal" align="center" verticalAlign="bottom" iconSize={8} formatter={(v)=><span className="text-xs">{v}</span>}/>
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+            {(() => {
+              const agingPieData = [
+                { name:'< 30 Hari', value:agingData.reduce((s,v)=>s+(v.less_30||0),0), fill:'#10B981' },
+                { name:'30–90 Hari', value:agingData.reduce((s,v)=>s+(v.days_30_90||0),0), fill:'#F59E0B' },
+                { name:'90–180 Hari', value:agingData.reduce((s,v)=>s+(v.days_90_180||0),0), fill:'#F97316' },
+                { name:'> 180 Hari', value:agingData.reduce((s,v)=>s+(v.more_180||0),0), fill:'#EF4444' },
+              ].filter(d=>d.value>0);
+              return (
+                <div className={`p-5 rounded-2xl shadow ${card}`}>
+                  <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><Calendar className="w-4 h-4 text-red-500"/> SO Aging (Pie)</h3>
+                  <ResponsiveContainer width="100%" height={280}>
+                    <PieChart>
+                      <Pie data={agingPieData} cx="50%" cy="38%" innerRadius={48} outerRadius={80} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
+                        {agingPieData.map((d,i)=><Cell key={i} fill={d.fill}/>)}
+                      </Pie>
+                      <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v)+' SO',n]}/>
+                      <Legend layout="horizontal" align="center" verticalAlign="bottom" iconSize={8} formatter={(v)=><span className="text-xs">{v}</span>}/>
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+              );
+            })()}
+          </div>
         </div>
       </div>
 
