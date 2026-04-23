@@ -965,14 +965,14 @@ const App = () => {
           <table className="w-full text-sm">
             <thead className={tblHd}>
               <tr>
-                {['PO HLI NUMBER','ITEM NO','ITEM CODE','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','HARI TERSISA'].map(h=>(
+                {['PO HLI NUMBER','PO ITEM TYPE','ITEM NO','ITEM CODE','OPERATION UNIT','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','HARI TERSISA'].map(h=>(
                   <th key={h} className={`px-4 py-3 text-left font-semibold whitespace-nowrap ${txt2}`}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
               {poRows.length === 0 ? (
-                <tr><td colSpan={13} className={`px-4 py-10 text-center ${txt2}`}>
+                <tr><td colSpan={15} className={`px-4 py-10 text-center ${txt2}`}>
                   <Package className="w-10 h-10 mx-auto mb-2 opacity-40"/>Tidak ada data
                 </td></tr>
               ) : poRows.map((row,i)=>{
@@ -981,8 +981,17 @@ const App = () => {
                 return (
                   <tr key={i} className={`${trHov} transition-colors`}>
                     <td className="px-4 py-3 text-purple-600 font-medium whitespace-nowrap">{row.po_no}</td>
+                    <td className={`px-4 py-3 whitespace-nowrap`}>
+                      {row.po_item_type ? (
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                          row.po_item_type.toUpperCase()==='MRO' ? 'bg-blue-100 text-blue-700' :
+                          row.po_item_type.toUpperCase()==='EQUIPMENT' ? 'bg-green-100 text-green-700' :
+                          'bg-gray-100 text-gray-700'}`}>{row.po_item_type}</span>
+                      ) : <span className={`${txt2} text-xs`}>-</span>}
+                    </td>
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.item_no||'-'}</td>
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.item_code||'-'}</td>
+                    <td className={`px-4 py-3 ${txt2} whitespace-nowrap text-xs`} title={row.operation_unit}>{row.operation_unit||'-'}</td>
                     <td className={`px-4 py-3 ${txt2} max-w-xs truncate`} title={row.description}>{row.description}</td>
                     <td className={`px-4 py-3 text-right ${txt2}`}>{fmtNum(row.qty)}</td>
                     <td className={`px-4 py-3 ${txt2}`}>{row.unit||'-'}</td>
@@ -1024,13 +1033,12 @@ const App = () => {
 
       {/* Sidebar */}
       <aside className={`fixed left-0 top-0 h-full w-20 flex flex-col items-center py-8 shadow-2xl z-40 ${darkMode?'bg-gray-800 border-r border-gray-700':'bg-gradient-to-b from-purple-600 to-purple-700'}`}>
-        <div className="mb-8 p-3 bg-white/20 rounded-2xl"><Package className="w-8 h-8 text-white"/></div>
-        <nav className="flex-1 flex flex-col gap-4 w-full px-2">
+        <nav className="flex-1 flex flex-col gap-4 w-full px-2 pt-0">
           <button onClick={()=>setActivePage('dashboard')}
             className={`p-3 rounded-xl flex justify-center transition-all ${activePage==='dashboard'?'bg-white/30 text-white shadow-lg':'text-purple-100 hover:bg-white/20'}`} title="Dashboard">
             <BarChart3 className="w-6 h-6"/>
           </button>
-          <button onClick={()=>{ setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters,1,soPerPage); }}
+          <button onClick={()=>{ setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters,1,soPerPage); window.scrollTo({top:0, behavior:'smooth'}); }}
             className={`p-3 rounded-xl flex justify-center transition-all ${activePage==='all-so'?'bg-white/30 text-white shadow-lg':'text-purple-100 hover:bg-white/20'}`} title="All Sales Orders">
             <FileText className="w-6 h-6"/>
           </button>
