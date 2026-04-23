@@ -611,7 +611,7 @@ const App = () => {
                   <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><Calendar className="w-4 h-4 text-red-500"/> SO Aging (Pie)</h3>
                   <ResponsiveContainer width="100%" height={300}>
                     <PieChart>
-                      <Pie data={agingPieData} cx="50%" cy="40%" innerRadius={44} outerRadius={72} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
+                      <Pie data={agingPieData} cx="50%" cy="40%" innerRadius={52} outerRadius={88} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
                         {agingPieData.map((d,i)=><Cell key={i} fill={d.fill}/>)}
                       </Pie>
                       <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v)+' SO',n]}/>
