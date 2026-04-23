@@ -145,10 +145,10 @@ const App = () => {
   const [agingData, setAgingData] = useState([]);
   const [allSOData, setAllSOData] = useState([]);
   const [soTotal, setSoTotal] = useState(0);
-  const [soFilterOptions, setSoFilterOptions] = useState({ op_units: [], vendors: [] });
+  const [soFilterOptions, setSoFilterOptions] = useState({ op_units: [], vendors: [], statuses: [] });
 
-  // SO filters with aging
-  const [soFilters, setSoFilters] = useState({ op_unit: '', vendor: '', aging: [] });
+  // SO filters — semua multi-select
+  const [soFilters, setSoFilters] = useState({ op_units: [], vendors: [], statuses: [], aging: [] });
   const [soPage, setSoPage] = useState(1);
   const [soPerPage, setSoPerPage] = useState(20);
 
@@ -186,12 +186,15 @@ const App = () => {
   const fetchSOData = useCallback(async (filters, page, perPage) => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ op_unit: filters.op_unit, vendor: filters.vendor, page, per_page: perPage });
+      const params = new URLSearchParams({ page, per_page: perPage });
+      (filters.op_units || []).forEach(v => params.append('op_unit', v));
+      (filters.vendors || []).forEach(v => params.append('vendor', v));
+      (filters.statuses || []).forEach(v => params.append('status', v));
       (filters.aging || []).forEach(a => params.append('aging', a));
       const res = await api.get(`/api/data/all-so?${params}`);
       setAllSOData(Array.isArray(res.data.data) ? res.data.data : []);
       setSoTotal(res.data.total || 0);
-      setSoFilterOptions(res.data.filters || { op_units: [], vendors: [] });
+      setSoFilterOptions(res.data.filters || { op_units: [], vendors: [], statuses: [] });
     } catch (e) {
       addToast(`Gagal memuat SO: ${e.message}`, 'error');
     } finally { setLoading(false); }
@@ -254,7 +257,10 @@ const App = () => {
   };
 
   const downloadSOExcel = () => {
-    const p = new URLSearchParams({ op_unit: soFilters.op_unit, vendor: soFilters.vendor });
+    const p = new URLSearchParams();
+    (soFilters.op_units||[]).forEach(v => p.append('op_unit', v));
+    (soFilters.vendors||[]).forEach(v => p.append('vendor', v));
+    (soFilters.statuses||[]).forEach(v => p.append('status', v));
     downloadBlob(`/api/export/all-so?${p}`, `SO_List_${new Date().toISOString().slice(0,10)}.xlsx`);
   };
   const downloadPOExcel = () => downloadBlob('/api/export/po-without-so', `PO_Without_SO_${new Date().toISOString().slice(0,10)}.xlsx`);
@@ -524,13 +530,13 @@ const App = () => {
             </div>
           </div>
 
-          {/* 2 Pie Charts side by side */}
-          <div className="grid grid-cols-2 gap-4 flex-1">
+          {/* 2 Pie Charts side by side - SO Status wider */}
+          <div className="grid gap-4 flex-1" style={{gridTemplateColumns:'3fr 2fr'}}>
             <div className={`p-5 rounded-2xl shadow ${card}`}>
               <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><BarChart3 className="w-4 h-4 text-orange-600"/> SO Status (Pie)</h3>
-              <ResponsiveContainer width="100%" height={280}>
+              <ResponsiveContainer width="100%" height={300}>
                 <PieChart>
-                  <Pie data={stats?.so_status||[]} cx="50%" cy="40%" innerRadius={48} outerRadius={80} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
+                  <Pie data={stats?.so_status||[]} cx="50%" cy="42%" innerRadius={52} outerRadius={88} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
                     {(stats?.so_status||[]).map((_,i)=><Cell key={i} fill={PIE_COLORS[i%PIE_COLORS.length]}/>)}
                   </Pie>
                   <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v),n]}/>
@@ -548,9 +554,9 @@ const App = () => {
               return (
                 <div className={`p-5 rounded-2xl shadow ${card}`}>
                   <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><Calendar className="w-4 h-4 text-red-500"/> SO Aging (Pie)</h3>
-                  <ResponsiveContainer width="100%" height={280}>
+                  <ResponsiveContainer width="100%" height={300}>
                     <PieChart>
-                      <Pie data={agingPieData} cx="50%" cy="38%" innerRadius={48} outerRadius={80} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
+                      <Pie data={agingPieData} cx="50%" cy="40%" innerRadius={44} outerRadius={72} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
                         {agingPieData.map((d,i)=><Cell key={i} fill={d.fill}/>)}
                       </Pie>
                       <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v)+' SO',n]}/>
@@ -661,43 +667,96 @@ const App = () => {
           )}
         </div>
 
-        {/* Other Filters */}
-        <div className={`p-4 rounded-xl mb-4 ${darkMode?'bg-gray-700':'bg-gray-50'}`}>
-          <div className="flex flex-wrap gap-3 items-end">
-            <div className="flex-1 min-w-[180px]">
-              <label className={`block text-xs font-medium mb-1 ${txt2}`}>Operation Unit</label>
-              <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
-                value={soFilters.op_unit} onChange={e=>setSoFilters(f=>({...f,op_unit:e.target.value}))}>
-                <option value="">All Op Units</option>
-                {soFilterOptions.op_units.map(u=><option key={u} value={u}>{u}</option>)}
-              </select>
+        {/* Multi-select Filters */}
+        {(() => {
+          const MultiSelect = ({ label, options, selected, onChange }) => {
+            const [open, setOpen] = React.useState(false);
+            const ref = React.useRef(null);
+            React.useEffect(() => {
+              const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+              document.addEventListener('mousedown', handler);
+              return () => document.removeEventListener('mousedown', handler);
+            }, []);
+            const toggle = (val) => onChange(selected.includes(val) ? selected.filter(x=>x!==val) : [...selected, val]);
+            return (
+              <div className="relative flex-1 min-w-[180px]" ref={ref}>
+                <label className={`block text-xs font-medium mb-1 ${txt2}`}>{label}</label>
+                <button onClick={()=>setOpen(o=>!o)}
+                  className={`w-full px-3 py-2 rounded-lg text-sm border text-left flex justify-between items-center ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300 text-gray-700'}`}>
+                  <span className="truncate">
+                    {selected.length === 0 ? `All ${label}` : `${selected.length} dipilih`}
+                  </span>
+                  <ChevronDown className="w-4 h-4 flex-shrink-0 ml-1"/>
+                </button>
+                {open && (
+                  <div className={`absolute z-50 mt-1 w-full max-h-56 overflow-auto rounded-lg shadow-xl border ${darkMode?'bg-gray-700 border-gray-600':'bg-white border-gray-200'}`}>
+                    {selected.length > 0 && (
+                      <button onClick={()=>onChange([])}
+                        className={`w-full px-3 py-2 text-xs text-left text-red-500 hover:bg-red-50 border-b ${darkMode?'border-gray-600 hover:bg-gray-600':'border-gray-100'}`}>
+                        ✕ Reset pilihan
+                      </button>
+                    )}
+                    {options.map(opt => (
+                      <label key={opt} className={`flex items-center gap-2 px-3 py-2 text-xs cursor-pointer ${darkMode?'hover:bg-gray-600 text-white':'hover:bg-purple-50 text-gray-700'}`}>
+                        <input type="checkbox" checked={selected.includes(opt)} onChange={()=>toggle(opt)} className="accent-purple-600"/>
+                        <span className="truncate" title={opt}>{opt}</span>
+                      </label>
+                    ))}
+                    {options.length === 0 && <div className={`px-3 py-2 text-xs ${txt2}`}>Tidak ada opsi</div>}
+                  </div>
+                )}
+              </div>
+            );
+          };
+          return (
+            <div className={`p-4 rounded-xl mb-4 ${darkMode?'bg-gray-700':'bg-gray-50'}`}>
+              <div className="flex flex-wrap gap-3 items-end">
+                <MultiSelect label="Operation Unit" options={soFilterOptions.op_units}
+                  selected={soFilters.op_units} onChange={v=>setSoFilters(f=>({...f,op_units:v}))}/>
+                <MultiSelect label="Vendor Name" options={soFilterOptions.vendors}
+                  selected={soFilters.vendors} onChange={v=>setSoFilters(f=>({...f,vendors:v}))}/>
+                <MultiSelect label="SO Status" options={soFilterOptions.statuses}
+                  selected={soFilters.statuses} onChange={v=>setSoFilters(f=>({...f,statuses:v}))}/>
+                <div className="flex-1 min-w-[100px]">
+                  <label className={`block text-xs font-medium mb-1 ${txt2}`}>Baris per Halaman</label>
+                  <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                    value={soPerPage} onChange={e=>setSoPerPage(Number(e.target.value))}>
+                    <option value={20}>20</option>
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                    <option value={200}>200</option>
+                  </select>
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={()=>{ setSoPage(1); fetchSOData(soFilters,1,soPerPage); }}
+                    className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-sm font-medium">Apply</button>
+                  <button onClick={()=>{ const f={op_units:[],vendors:[],statuses:[],aging:[]}; setSoFilters(f); setSoPage(1); fetchSOData(f,1,soPerPage); }}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>Reset</button>
+                </div>
+              </div>
+              {/* Active filter tags */}
+              {(soFilters.op_units.length + soFilters.vendors.length + soFilters.statuses.length) > 0 && (
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {soFilters.op_units.map(v=>(
+                    <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full text-xs">
+                      {v}<button onClick={()=>setSoFilters(f=>({...f,op_units:f.op_units.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                    </span>
+                  ))}
+                  {soFilters.vendors.map(v=>(
+                    <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">
+                      {v}<button onClick={()=>setSoFilters(f=>({...f,vendors:f.vendors.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                    </span>
+                  ))}
+                  {soFilters.statuses.map(v=>(
+                    <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs">
+                      {v}<button onClick={()=>setSoFilters(f=>({...f,statuses:f.statuses.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
-            <div className="flex-1 min-w-[180px]">
-              <label className={`block text-xs font-medium mb-1 ${txt2}`}>Vendor Name</label>
-              <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
-                value={soFilters.vendor} onChange={e=>setSoFilters(f=>({...f,vendor:e.target.value}))}>
-                <option value="">All Vendors</option>
-                {soFilterOptions.vendors.map(v=><option key={v} value={v}>{v}</option>)}
-              </select>
-            </div>
-            <div className="flex-1 min-w-[100px]">
-              <label className={`block text-xs font-medium mb-1 ${txt2}`}>Baris per Halaman</label>
-              <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
-                value={soPerPage} onChange={e=>setSoPerPage(Number(e.target.value))}>
-                <option value={20}>20</option>
-                <option value={50}>50</option>
-                <option value={100}>100</option>
-                <option value={200}>200</option>
-              </select>
-            </div>
-            <div className="flex gap-2">
-              <button onClick={()=>{ setSoPage(1); fetchSOData(soFilters,1,soPerPage); }}
-                className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-sm font-medium">Apply</button>
-              <button onClick={()=>{ const f={op_unit:'',vendor:'',aging:[]}; setSoFilters(f); setSoPage(1); fetchSOData(f,1,soPerPage); }}
-                className={`px-4 py-2 rounded-lg text-sm font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>Reset</button>
-            </div>
-          </div>
-        </div>
+          );
+        })()}
 
         {/* SO Table */}
         <div className="overflow-x-auto rounded-lg border border-gray-200">
