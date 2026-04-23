@@ -42,6 +42,7 @@ class POData(db.Model):
     item_no = db.Column(db.String(50))
     po_item_detail = db.Column(db.Text)
     item_code = db.Column(db.String(50))
+    po_item_type = db.Column(db.String(100))
     supplier = db.Column(db.String(200))
     vendor_name_smro = db.Column(db.String(200))
     qty = db.Column(db.Float)
@@ -318,6 +319,32 @@ def po_is_matched(po_number, matched_set):
     po_clean = re.sub(r'^[A-Za-z]{0,4}[-]?', '', po_number)
     return po_number in matched_set or po_clean in matched_set
 
+def get_operation_unit(po_item_type, item_code):
+    """
+    Determine the Operation Unit based on PO Item Type and whether Item Code exists.
+    Logic (from reference table):
+    item_code ada:
+      MRO      -> HLI GREEN POWER (CONSUMABLE)
+      Equipment-> HLI GREEN POWER(BONDED AREA)
+      ETC      -> HLI GREEN POWER(BONDED AREA)
+    item_code tidak ada:
+      MRO      -> HLI GREEN POWER(BONDED AREA)
+      Equipment-> HLI GREEN POWER
+      ETC      -> HLI GREEN POWER(BONDED AREA)
+    """
+    t = (po_item_type or '').strip().upper()
+    has_code = bool(item_code and item_code.strip())
+    if has_code:
+        if t == 'MRO':
+            return 'HLI GREEN POWER (CONSUMABLE)'
+        else:
+            return 'HLI GREEN POWER(BONDED AREA)'
+    else:
+        if t == 'EQUIPMENT':
+            return 'HLI GREEN POWER'
+        else:
+            return 'HLI GREEN POWER(BONDED AREA)'
+
 @app.route('/api/data/po-without-so', methods=['GET'])
 def get_po_without_so():
     try:
@@ -327,9 +354,12 @@ def get_po_without_so():
         for p in POData.query.all():
             if not po_is_matched(p.po_number, matched_set):
                 days_remaining = (p.request_delivery - today).days if p.request_delivery else None
+                op_unit = get_operation_unit(p.po_item_type, p.item_code)
                 result.append({
                     'id': p.id, 'po_no': p.po_number, 'item_no': p.item_no,
                     'item_code': p.item_code,
+                    'po_item_type': p.po_item_type or '',
+                    'operation_unit': op_unit,
                     'description': p.po_item_detail, 'qty': p.qty, 'unit': p.unit or '',
                     'price': p.price or 0, 'amount': p.amount,
                     'currency': p.currency, 'supplier': p.supplier,
@@ -488,6 +518,7 @@ def upload_po_list():
         col_itemno = find_column(df, ['Item No.','Item No','Item Number','No. Item'])
         col_desc = find_column(df, ['PO Item Detail','Description','Item Description','Deskripsi'])
         col_item = find_column(df, ['Item Code','Material','Item No','Item'])
+        col_itype = find_column(df, ['PO Item Type','Item Type','Type','PO Type'])
         col_supp = find_column(df, ['Supplier','Vendor','Supplier Name'])
         col_vndr = find_column(df, ['Vendor Name SMRO','Vendor Name'])
         col_qty  = find_column(df, ['Qty.','Qty','Quantity'])
@@ -519,6 +550,7 @@ def upload_po_list():
                 'item_no': item_no,
                 'po_item_detail': clean(df_val(row, col_desc)),
                 'item_code': clean(df_val(row, col_item)),
+                'po_item_type': clean(df_val(row, col_itype)),
                 'supplier': clean(df_val(row, col_supp)),
                 'vendor_name_smro': clean(df_val(row, col_vndr)),
                 'qty': safe_float(df_val(row, col_qty)),
@@ -754,13 +786,15 @@ def export_po_without_so():
         pos = [p for p in POData.query.all() if not po_is_matched(p.po_number, matched_set)]
         today = date.today()
         wb = Workbook(); ws = wb.active; ws.title = "PO Without SO"
-        _style_wb(ws, ['PO Number','Item No','Item Code','Description','Supplier',
+        _style_wb(ws, ['PO Number','PO Item Type','Item No','Item Code','Operation Unit','Description','Supplier',
                        'Qty','Unit','Price','Amount','Currency',
                        'PO Date','Purchase Member','Request Delivery','Days Remaining',
-                       'Delivery Plan Date','Remarks'], num_cols=[6,8,9])
+                       'Delivery Plan Date','Remarks'], num_cols=[8,10,11])
         for p in pos:
             days_rem = (p.request_delivery - today).days if p.request_delivery else ''
-            ws.append([p.po_number, p.item_no or '', p.item_code, p.po_item_detail, p.supplier,
+            op_unit = get_operation_unit(p.po_item_type, p.item_code)
+            ws.append([p.po_number, p.po_item_type or '', p.item_no or '', p.item_code or '', op_unit,
+                p.po_item_detail, p.supplier,
                 p.qty or 0, p.unit or '', p.price or 0, p.amount or 0, p.currency or 'IDR',
                 p.po_date.isoformat() if p.po_date else '',
                 p.purchase_member or '',
