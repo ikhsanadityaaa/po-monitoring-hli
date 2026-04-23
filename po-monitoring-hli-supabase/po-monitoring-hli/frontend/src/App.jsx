@@ -374,13 +374,13 @@ const App = () => {
       </div>
 
       {/* Charts Row 1 — Monthly Trend (kiri) | Top 5 Vendor + Top Op Unit (kanan) */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6 items-start">
         {/* Monthly Trend */}
         <div className={`p-6 rounded-2xl shadow ${card}`}>
           <h3 className={`text-base font-bold mb-4 flex items-center gap-2 ${txt}`}>
             <TrendingUp className="w-5 h-5 text-purple-600"/> Monthly Open SO Trend
           </h3>
-          <ResponsiveContainer width="100%" height={280}>
+          <ResponsiveContainer width="100%" height={190}>
             <AreaChart data={stats?.monthly_trend||[]}>
               <defs>
                 <linearGradient id="cSO" x1="0" y1="0" x2="0" y2="1">
@@ -391,11 +391,11 @@ const App = () => {
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={darkMode?'#374151':'#E5E7EB'}/>
-              <XAxis dataKey="month" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={11}/>
-              <YAxis yAxisId="left" stroke="#8B5CF6" fontSize={11}/>
-              <YAxis yAxisId="right" orientation="right" stroke="#F97316" fontSize={11}/>
+              <XAxis dataKey="month" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10}/>
+              <YAxis yAxisId="left" stroke="#8B5CF6" fontSize={10}/>
+              <YAxis yAxisId="right" orientation="right" stroke="#F97316" fontSize={10}/>
               <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}}/>
-              <Legend/>
+              <Legend iconSize={8} wrapperStyle={{fontSize:'11px'}}/>
               <Area yAxisId="left" type="monotone" dataKey="so_count" name="Jumlah SO" stroke="#8B5CF6" strokeWidth={2} fill="url(#cSO)"/>
               <Area yAxisId="right" type="monotone" dataKey="amount" name="Nilai (IDR Juta)" stroke="#F97316" strokeWidth={2} fill="url(#cAmt)"/>
             </AreaChart>
@@ -405,7 +405,7 @@ const App = () => {
         {/* Right column — Top 5 Vendor (atas) + Top Op Unit (bawah) */}
         <div className="flex flex-col gap-4">
           {/* Top 5 Vendors */}
-          <div className={`p-5 rounded-2xl shadow ${card} flex-1`}>
+          <div className={`p-5 rounded-2xl shadow ${card}`}>
             <h3 className={`text-sm font-bold mb-3 flex items-center gap-2 ${txt}`}>
               <BarChart3 className="w-4 h-4 text-blue-600"/> Top 5 Vendors (Open SO)
             </h3>
@@ -414,7 +414,7 @@ const App = () => {
                 <tr>
                   <th className={`p-1.5 text-left font-semibold ${txt2}`}>#</th>
                   <th className={`p-1.5 text-left font-semibold ${txt2}`}>Vendor</th>
-                  <th className={`p-1.5 text-right font-semibold ${txt2}`}>SO</th>
+                  <th className={`p-1.5 text-right font-semibold ${txt2}`}>Open SO</th>
                   <th className={`p-1.5 text-right font-semibold ${txt2}`}>Amount</th>
                 </tr>
               </thead>
@@ -435,16 +435,16 @@ const App = () => {
           </div>
 
           {/* Top Operation Units */}
-          <div className={`p-5 rounded-2xl shadow ${card} flex-1`}>
+          <div className={`p-5 rounded-2xl shadow ${card}`}>
             <h3 className={`text-sm font-bold mb-3 flex items-center gap-2 ${txt}`}>
-              <Building2 className="w-4 h-4 text-green-600"/> Total Open PO per Operation Unit
+              <Building2 className="w-4 h-4 text-green-600"/> Total Open SO per Operation Unit
             </h3>
             <div className="overflow-auto max-h-40">
               <table className="w-full text-xs">
                 <thead className={`sticky top-0 ${tblHd}`}>
                   <tr>
                     <th className={`p-1.5 text-left font-semibold ${txt2}`}>Operation Unit</th>
-                    <th className={`p-1.5 text-right font-semibold ${txt2}`}>Jumlah Open SO</th>
+                    <th className={`p-1.5 text-right font-semibold ${txt2}`}>Open SO</th>
                     <th className={`p-1.5 text-right font-semibold ${txt2}`}>Amount</th>
                   </tr>
                 </thead>
@@ -476,7 +476,7 @@ const App = () => {
             const grandTotal  = rows.reduce((s, r) => s + r.total, 0);
             const grandAmount = rows.reduce((s, r) => s + (r.amount || 0), 0);
             return (
-              <div className="overflow-auto max-h-72">
+              <div className="overflow-auto max-h-96">
                 <table className="w-full text-xs" style={{minWidth: months.length > 4 ? `${160 + months.length * 72 + 200}px` : undefined}}>
                   <thead className={`sticky top-0 ${tblHd}`}>
                     <tr>
