@@ -93,14 +93,13 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
         <div className="overflow-auto flex-1">
           <table className="w-full text-sm">
             <thead className={`sticky top-0 ${darkMode?'bg-gray-700':'bg-purple-50'}`}>
-              <tr>{['Aging','SO Number','SO Item','Status','Op Unit','Vendor','Product','Qty','Sales Amount','Cust PO','Delivery Memo','SO Date','Plan Date','Remarks'].map(h=>(
+              <tr>{['SO Number','SO Item','Status','Op Unit','Vendor','Product','Qty','Sales Amount','Cust PO','Delivery Memo','SO Date','Plan Date','Remarks'].map(h=>(
                 <th key={h} className={`px-3 py-2 text-left font-semibold whitespace-nowrap ${darkMode?'text-gray-200':'text-gray-700'}`}>{h}</th>
               ))}</tr>
             </thead>
             <tbody className={`divide-y ${darkMode?'divide-gray-700':'divide-gray-100'}`}>
               {rows.map((s,i)=>(
                 <tr key={i} className={darkMode?'hover:bg-gray-700':'hover:bg-purple-50'}>
-                  <td className="px-3 py-2 whitespace-nowrap"><span className="px-2 py-0.5 rounded-full text-xs font-bold text-white" style={{backgroundColor: AGING_COLORS[s.aging_label] || '#6B7280'}}>{s.aging_label||'-'}</span></td>
                   <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{s.so_number}</td>
                   <td className="px-3 py-2 whitespace-nowrap">{s.so_item}</td>
                   <td className="px-3 py-2 whitespace-nowrap"><span className={`px-2 py-0.5 rounded-full text-xs font-medium ${s.so_status==='Delivery Completed'?'bg-green-100 text-green-700':s.so_status==='SO Cancel'?'bg-red-100 text-red-700':'bg-blue-100 text-blue-700'}`}>{s.so_status||'-'}</span></td>
@@ -162,6 +161,7 @@ const App = () => {
   const [modal, setModal] = useState(null);
   const [editingCell, setEditingCell] = useState(null);
   const [editValue, setEditValue] = useState('');
+  const poTableRef = React.useRef(null);
 
   const addToast = useCallback((message, type='success') => {
     const id = Date.now(); setToasts(t => [...t, { id, message, type }]);
@@ -334,12 +334,17 @@ const App = () => {
       {/* KPI Row */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         <div className={`p-5 rounded-2xl shadow hover:shadow-lg transition-all cursor-pointer ${card}`}
-          onClick={() => setActivePage('all-so')}>
+          onClick={() => {
+            setActivePage('all-so');
+            setSoPage(1);
+            fetchSOData(soFilters, 1, soPerPage);
+            setTimeout(() => { poTableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 300);
+          }}>
           <div className="flex justify-between items-start">
             <div>
               <p className={`text-sm font-medium ${txt2}`}>PO HLI tanpa SO</p>
               <h3 className="text-3xl font-bold mt-1 text-red-500">{fmtNum(stats?.po_without_so)}</h3>
-              <p className={`text-xs mt-1 ${txt2}`}>Klik untuk detail</p>
+              <p className={`text-xs mt-1 ${txt2}`}>nomor PO unik · klik untuk detail</p>
             </div>
             <div className="p-3 bg-red-100 rounded-xl"><AlertCircle className="w-6 h-6 text-red-500"/></div>
           </div>
@@ -531,44 +536,20 @@ const App = () => {
             </div>
           </div>
 
-          {/* ┌─────────────────────────────────────────────────────────────┐
-               │  2 PIE CHARTS — PANDUAN KUSTOMISASI                         │
-               │                                                              │
-               │  LEBAR CHART  → ubah minHeight di kedua <div style>         │
-               │  DIAMETER     → outerRadius (jari-jari luar donut)          │
-               │  LUBANG TENGAH→ innerRadius (0 = pie penuh, > 0 = donut)   │
-               │  POSISI VERTIKAL → cy="44%" (naik = kecilkan, turun = besar)│
-               │  POSISI HORIZ → cx="50%" (biasanya biarkan 50%)            │
-               │  JARAK ANTAR SLICE → paddingAngle                           │
-               └─────────────────────────────────────────────────────────────┘ */}
-          <div className="grid gap-4 flex-1" style={{gridTemplateColumns: '6fr 4fr'}}>
-
-            {/* ── PIE 1: SO Status ── */}
-            <div className={`p-5 rounded-2xl shadow ${card} flex flex-col`}>
+          {/* 2 Pie Charts side by side - SO Status wider */}
+          <div className="grid gap-4 flex-1" style={{gridTemplateColumns:'3fr 2fr'}}>
+            <div className={`p-5 rounded-2xl shadow ${card}`}>
               <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><BarChart3 className="w-4 h-4 text-orange-600"/> SO Status (Pie)</h3>
-              {/* minHeight = tinggi area chart dalam pixel — naikkan untuk chart lebih besar */}
-              <div className="flex-1" style={{minHeight: 300}}>
-                <ResponsiveContainer width="100%" height="100%">
-                  {/* margin = jarak antara tepi chart dan tepi container, cegah label terpotong */}
-                  <PieChart margin={{top: 10, right: 10, bottom: 10, left: 10}}>
-                    <Pie
-                      data={stats?.so_status||[]}
-                      cx="50%"          /* posisi horizontal center donut */
-                      cy="44%"          /* posisi vertikal center donut — kecilkan % = naik */
-                      innerRadius={50}  /* jari-jari dalam (lubang tengah). 0 = pie penuh */
-                      outerRadius={85}  /* jari-jari luar (ukuran donut). Naikkan = lebih besar */
-                      paddingAngle={0}  /* jarak antar slice dalam derajat */
-                      dataKey="value" labelLine={false} label={renderPctLabel}>
-                      {(stats?.so_status||[]).map((_,i)=><Cell key={i} fill={PIE_COLORS[i%PIE_COLORS.length]}/>)}
-                    </Pie>
-                    <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v),n]}/>
-                    <Legend layout="horizontal" align="center" verticalAlign="bottom" iconSize={8} formatter={(v)=><span className="text-xs">{v}</span>}/>
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
+              <ResponsiveContainer width="100%" height={300}>
+                <PieChart>
+                  <Pie data={stats?.so_status||[]} cx="50%" cy="42%" innerRadius={52} outerRadius={88} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
+                    {(stats?.so_status||[]).map((_,i)=><Cell key={i} fill={PIE_COLORS[i%PIE_COLORS.length]}/>)}
+                  </Pie>
+                  <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v),n]}/>
+                  <Legend layout="horizontal" align="center" verticalAlign="bottom" iconSize={8} formatter={(v)=><span className="text-xs">{v}</span>}/>
+                </PieChart>
+              </ResponsiveContainer>
             </div>
-
-            {/* ── PIE 2: SO Aging ── */}
             {(() => {
               const agingPieData = [
                 { name:'< 30 Hari', value:agingData.reduce((s,v)=>s+(v.less_30||0),0), fill:'#10B981' },
@@ -577,27 +558,17 @@ const App = () => {
                 { name:'> 180 Hari', value:agingData.reduce((s,v)=>s+(v.more_180||0),0), fill:'#EF4444' },
               ].filter(d=>d.value>0);
               return (
-                <div className={`p-5 rounded-2xl shadow ${card} flex flex-col`}>
+                <div className={`p-5 rounded-2xl shadow ${card}`}>
                   <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><Calendar className="w-4 h-4 text-red-500"/> SO Aging (Pie)</h3>
-                  {/* minHeight = tinggi area chart dalam pixel — samakan dengan Pie 1 */}
-                  <div className="flex-1" style={{minHeight: 300}}>
-                    <ResponsiveContainer width="100%" height="100%">
-                      <PieChart margin={{top: 10, right: 10, bottom: 10, left: 10}}>
-                        <Pie
-                          data={agingPieData}
-                          cx="50%"          /* posisi horizontal center donut */
-                          cy="35%"          /* posisi vertikal center donut */
-                          innerRadius={50}  /* jari-jari dalam (lubang tengah) */
-                          outerRadius={85}  /* jari-jari luar — samakan dengan Pie 1 */
-                          paddingAngle={0}
-                          dataKey="value" labelLine={false} label={renderPctLabel}>
-                          {agingPieData.map((d,i)=><Cell key={i} fill={d.fill}/>)}
-                        </Pie>
-                        <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v)+' SO',n]}/>
-                        <Legend layout="horizontal" align="center" verticalAlign="bottom" iconSize={8} formatter={(v)=><span className="text-xs">{v}</span>}/>
-                      </PieChart>
-                    </ResponsiveContainer>
-                  </div>
+                  <ResponsiveContainer width="100%" height={300}>
+                    <PieChart>
+                      <Pie data={agingPieData} cx="50%" cy="40%" innerRadius={44} outerRadius={72} paddingAngle={2} dataKey="value" labelLine={false} label={renderPctLabel}>
+                        {agingPieData.map((d,i)=><Cell key={i} fill={d.fill}/>)}
+                      </Pie>
+                      <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v)+' SO',n]}/>
+                      <Legend layout="horizontal" align="center" verticalAlign="bottom" iconSize={8} formatter={(v)=><span className="text-xs">{v}</span>}/>
+                    </PieChart>
+                  </ResponsiveContainer>
                 </div>
               );
             })()}
@@ -619,18 +590,14 @@ const App = () => {
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
               {agingData.slice(0,15).map((v,i)=>(
-                <tr key={i} className={trHov}>
+                <tr key={i} className={`${trHov} cursor-pointer`}
+                  onClick={()=>openModal(`Aging Detail: ${v.vendor}`, `/api/data/aging-detail/${encodeURIComponent(v.vendor)}`)}>
                   <td className={`p-3 font-medium text-xs ${txt}`}>{v.vendor}</td>
-                  <td className="p-3 text-center font-semibold text-green-600 cursor-pointer hover:underline"
-                    onClick={()=>openModal(`Aging Detail: ${v.vendor} — < 30 Hari`, `/api/data/aging-detail/${encodeURIComponent(v.vendor)}?bucket=0-30`)}>{fmtNum(v.less_30)}</td>
-                  <td className="p-3 text-center font-semibold text-yellow-600 cursor-pointer hover:underline"
-                    onClick={()=>openModal(`Aging Detail: ${v.vendor} — 30-90 Hari`, `/api/data/aging-detail/${encodeURIComponent(v.vendor)}?bucket=30-90`)}>{fmtNum(v.days_30_90)}</td>
-                  <td className="p-3 text-center font-semibold text-orange-600 cursor-pointer hover:underline"
-                    onClick={()=>openModal(`Aging Detail: ${v.vendor} — 90-180 Hari`, `/api/data/aging-detail/${encodeURIComponent(v.vendor)}?bucket=90-180`)}>{fmtNum(v.days_90_180)}</td>
-                  <td className="p-3 text-center font-semibold text-red-600 cursor-pointer hover:underline"
-                    onClick={()=>openModal(`Aging Detail: ${v.vendor} — > 180 Hari`, `/api/data/aging-detail/${encodeURIComponent(v.vendor)}?bucket=180%2B`)}>{fmtNum(v.more_180)}</td>
-                  <td className="p-3 text-center font-bold text-purple-600 cursor-pointer hover:underline"
-                    onClick={()=>openModal(`Aging Detail: ${v.vendor}`, `/api/data/aging-detail/${encodeURIComponent(v.vendor)}`)}>{fmtNum(v.total_open)}</td>
+                  <td className="p-3 text-center font-semibold text-green-600">{fmtNum(v.less_30)}</td>
+                  <td className="p-3 text-center font-semibold text-yellow-600">{fmtNum(v.days_30_90)}</td>
+                  <td className="p-3 text-center font-semibold text-orange-600">{fmtNum(v.days_90_180)}</td>
+                  <td className="p-3 text-center font-semibold text-red-600">{fmtNum(v.more_180)}</td>
+                  <td className="p-3 text-center font-bold text-purple-600">{fmtNum(v.total_open)}</td>
                   <td className="p-3 text-right font-semibold text-orange-600 text-xs">{fmtCurShort(v.sales_amount)}</td>
                 </tr>
               ))}
@@ -645,16 +612,11 @@ const App = () => {
                 return (
                   <tr>
                     <td className={`p-3 font-bold ${txt}`}>TOTAL</td>
-                    <td className="p-3 text-center font-bold text-green-700 cursor-pointer hover:underline"
-                      onClick={()=>openModal('TOTAL — < 30 Hari (Semua Vendor)', '/api/data/aging-detail-all?bucket=0-30')}>{fmtNum(tot.less_30)}</td>
-                    <td className="p-3 text-center font-bold text-yellow-700 cursor-pointer hover:underline"
-                      onClick={()=>openModal('TOTAL — 30-90 Hari (Semua Vendor)', '/api/data/aging-detail-all?bucket=30-90')}>{fmtNum(tot.days_30_90)}</td>
-                    <td className="p-3 text-center font-bold text-orange-700 cursor-pointer hover:underline"
-                      onClick={()=>openModal('TOTAL — 90-180 Hari (Semua Vendor)', '/api/data/aging-detail-all?bucket=90-180')}>{fmtNum(tot.days_90_180)}</td>
-                    <td className="p-3 text-center font-bold text-red-700 cursor-pointer hover:underline"
-                      onClick={()=>openModal('TOTAL — > 180 Hari (Semua Vendor)', '/api/data/aging-detail-all?bucket=180%2B')}>{fmtNum(tot.more_180)}</td>
-                    <td className="p-3 text-center font-bold text-purple-700 cursor-pointer hover:underline"
-                      onClick={()=>openModal('TOTAL — Semua Aging (Semua Vendor)', '/api/data/aging-detail-all')}>{fmtNum(tot.total_open)}</td>
+                    <td className="p-3 text-center font-bold text-green-700">{fmtNum(tot.less_30)}</td>
+                    <td className="p-3 text-center font-bold text-yellow-700">{fmtNum(tot.days_30_90)}</td>
+                    <td className="p-3 text-center font-bold text-orange-700">{fmtNum(tot.days_90_180)}</td>
+                    <td className="p-3 text-center font-bold text-red-700">{fmtNum(tot.more_180)}</td>
+                    <td className="p-3 text-center font-bold text-purple-700">{fmtNum(tot.total_open)}</td>
                     <td className="p-3 text-right font-bold text-orange-700 text-xs">{fmtCurShort(tot.sales_amount)}</td>
                   </tr>
                 );
@@ -807,7 +769,7 @@ const App = () => {
           <table className="w-full text-sm">
             <thead className={tblHd}>
               <tr>
-                {['Aging','SO Item','Item Name','Status','Op Unit','Vendor','Qty',
+                {['Aging','SO Number','SO Item','Item Name','Status','Op Unit','Vendor','Qty',
                   'Sales Price','Sales Amount','PO Price','PO Amount',
                   'Possible Delivery','Plan Date','Remarks'].map(h=>(
                   <th key={h} className={`px-3 py-2.5 text-left font-semibold whitespace-nowrap ${txt2}`}>{h}</th>
@@ -816,7 +778,7 @@ const App = () => {
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
               {allSOData.length === 0 ? (
-                <tr><td colSpan={14} className={`px-4 py-10 text-center ${txt2}`}>
+                <tr><td colSpan={15} className={`px-4 py-10 text-center ${txt2}`}>
                   <FileText className="w-10 h-10 mx-auto mb-2 opacity-40"/>Tidak ada data
                 </td></tr>
               ) : allSOData.map((so)=>(
@@ -827,6 +789,7 @@ const App = () => {
                       {so.aging_label||'-'}
                     </span>
                   </td>
+                  <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{so.so_number}</td>
                   <td className={`px-3 py-2 whitespace-nowrap ${txt2}`}>{so.so_item}</td>
                   <td className={`px-3 py-2 max-w-[160px] truncate ${txt2}`} title={so.product_name}>{so.product_name}</td>
                   <td className="px-3 py-2 whitespace-nowrap">
@@ -905,12 +868,14 @@ const App = () => {
       </div>
 
       {/* PO HLI Without SO Table */}
-      <div className={`rounded-2xl shadow overflow-hidden ${card}`}>
+      <div ref={poTableRef} className={`rounded-2xl shadow overflow-hidden ${card}`}>
         <div className={`p-5 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
           <div className="flex items-center gap-2">
             <AlertCircle className="w-5 h-5 text-yellow-600"/>
             <h3 className={`text-base font-bold ${txt}`}>PO HLI yang Belum Ada SO-nya</h3>
-            <span className={`text-sm ${txt2}`}>({fmtNum(poWithoutSO.length)} items)</span>
+            <span className={`text-sm ${txt2}`}>
+              ({fmtNum(new Set(poWithoutSO.map(p=>p.po_no)).size)} PO · {fmtNum(poWithoutSO.length)} item baris)
+            </span>
           </div>
           <div className="flex gap-2 items-center">
             <select className={`px-3 py-1.5 rounded-lg text-sm ${darkMode?'bg-gray-700 text-white':'bg-gray-100 text-gray-700'}`}
