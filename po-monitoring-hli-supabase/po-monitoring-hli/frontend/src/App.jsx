@@ -93,13 +93,14 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
         <div className="overflow-auto flex-1">
           <table className="w-full text-sm">
             <thead className={`sticky top-0 ${darkMode?'bg-gray-700':'bg-purple-50'}`}>
-              <tr>{['SO Number','SO Item','Status','Op Unit','Vendor','Product','Qty','Sales Amount','Cust PO','Delivery Memo','SO Date','Plan Date','Remarks'].map(h=>(
+              <tr>{['Aging','SO Number','SO Item','Status','Op Unit','Vendor','Product','Qty','Sales Amount','Cust PO','Delivery Memo','SO Date','Plan Date','Remarks'].map(h=>(
                 <th key={h} className={`px-3 py-2 text-left font-semibold whitespace-nowrap ${darkMode?'text-gray-200':'text-gray-700'}`}>{h}</th>
               ))}</tr>
             </thead>
             <tbody className={`divide-y ${darkMode?'divide-gray-700':'divide-gray-100'}`}>
               {rows.map((s,i)=>(
                 <tr key={i} className={darkMode?'hover:bg-gray-700':'hover:bg-purple-50'}>
+                  <td className="px-3 py-2 whitespace-nowrap"><span className="px-2 py-0.5 rounded-full text-xs font-bold text-white" style={{backgroundColor: AGING_COLORS[s.aging_label] || '#6B7280'}}>{s.aging_label||'-'}</span></td>
                   <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{s.so_number}</td>
                   <td className="px-3 py-2 whitespace-nowrap">{s.so_item}</td>
                   <td className="px-3 py-2 whitespace-nowrap"><span className={`px-2 py-0.5 rounded-full text-xs font-medium ${s.so_status==='Delivery Completed'?'bg-green-100 text-green-700':s.so_status==='SO Cancel'?'bg-red-100 text-red-700':'bg-blue-100 text-blue-700'}`}>{s.so_status||'-'}</span></td>
@@ -584,14 +585,18 @@ const App = () => {
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
               {agingData.slice(0,15).map((v,i)=>(
-                <tr key={i} className={`${trHov} cursor-pointer`}
-                  onClick={()=>openModal(`Aging Detail: ${v.vendor}`, `/api/data/aging-detail/${encodeURIComponent(v.vendor)}`)}>
+                <tr key={i} className={trHov}>
                   <td className={`p-3 font-medium text-xs ${txt}`}>{v.vendor}</td>
-                  <td className="p-3 text-center font-semibold text-green-600">{fmtNum(v.less_30)}</td>
-                  <td className="p-3 text-center font-semibold text-yellow-600">{fmtNum(v.days_30_90)}</td>
-                  <td className="p-3 text-center font-semibold text-orange-600">{fmtNum(v.days_90_180)}</td>
-                  <td className="p-3 text-center font-semibold text-red-600">{fmtNum(v.more_180)}</td>
-                  <td className="p-3 text-center font-bold text-purple-600">{fmtNum(v.total_open)}</td>
+                  <td className="p-3 text-center font-semibold text-green-600 cursor-pointer hover:underline"
+                    onClick={()=>openModal(`Aging Detail: ${v.vendor} — < 30 Hari`, `/api/data/aging-detail/${encodeURIComponent(v.vendor)}?bucket=0-30`)}>{fmtNum(v.less_30)}</td>
+                  <td className="p-3 text-center font-semibold text-yellow-600 cursor-pointer hover:underline"
+                    onClick={()=>openModal(`Aging Detail: ${v.vendor} — 30-90 Hari`, `/api/data/aging-detail/${encodeURIComponent(v.vendor)}?bucket=30-90`)}>{fmtNum(v.days_30_90)}</td>
+                  <td className="p-3 text-center font-semibold text-orange-600 cursor-pointer hover:underline"
+                    onClick={()=>openModal(`Aging Detail: ${v.vendor} — 90-180 Hari`, `/api/data/aging-detail/${encodeURIComponent(v.vendor)}?bucket=90-180`)}>{fmtNum(v.days_90_180)}</td>
+                  <td className="p-3 text-center font-semibold text-red-600 cursor-pointer hover:underline"
+                    onClick={()=>openModal(`Aging Detail: ${v.vendor} — > 180 Hari`, `/api/data/aging-detail/${encodeURIComponent(v.vendor)}?bucket=180+`)}>{fmtNum(v.more_180)}</td>
+                  <td className="p-3 text-center font-bold text-purple-600 cursor-pointer hover:underline"
+                    onClick={()=>openModal(`Aging Detail: ${v.vendor}`, `/api/data/aging-detail/${encodeURIComponent(v.vendor)}`)}>{fmtNum(v.total_open)}</td>
                   <td className="p-3 text-right font-semibold text-orange-600 text-xs">{fmtCurShort(v.sales_amount)}</td>
                 </tr>
               ))}
@@ -763,7 +768,7 @@ const App = () => {
           <table className="w-full text-sm">
             <thead className={tblHd}>
               <tr>
-                {['Aging','SO Number','SO Item','Item Name','Status','Op Unit','Vendor','Qty',
+                {['Aging','SO Item','Item Name','Status','Op Unit','Vendor','Qty',
                   'Sales Price','Sales Amount','PO Price','PO Amount',
                   'Possible Delivery','Plan Date','Remarks'].map(h=>(
                   <th key={h} className={`px-3 py-2.5 text-left font-semibold whitespace-nowrap ${txt2}`}>{h}</th>
@@ -772,7 +777,7 @@ const App = () => {
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
               {allSOData.length === 0 ? (
-                <tr><td colSpan={15} className={`px-4 py-10 text-center ${txt2}`}>
+                <tr><td colSpan={14} className={`px-4 py-10 text-center ${txt2}`}>
                   <FileText className="w-10 h-10 mx-auto mb-2 opacity-40"/>Tidak ada data
                 </td></tr>
               ) : allSOData.map((so)=>(
@@ -783,7 +788,6 @@ const App = () => {
                       {so.aging_label||'-'}
                     </span>
                   </td>
-                  <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{so.so_number}</td>
                   <td className={`px-3 py-2 whitespace-nowrap ${txt2}`}>{so.so_item}</td>
                   <td className={`px-3 py-2 max-w-[160px] truncate ${txt2}`} title={so.product_name}>{so.product_name}</td>
                   <td className="px-3 py-2 whitespace-nowrap">
