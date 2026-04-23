@@ -385,6 +385,23 @@ def get_aging_detail(vendor_name):
             open_so_filter(), SOData.vendor_name == vendor_name
         ).order_by(SOData.so_create_date.asc()).all()
         if bucket:
+            bucket = bucket.strip().replace(' ', '+')  # fix URL encoding: + decoded as space
+            sos = [s for s in sos if get_aging_label((today - s.so_create_date).days if s.so_create_date else None) == bucket]
+        return jsonify([so_dict(s) for s in sos])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/data/aging-detail-all', methods=['GET'])
+def get_aging_detail_all():
+    try:
+        bucket = request.args.get('bucket')
+        if bucket:
+            bucket = bucket.strip().replace(' ', '+')
+        today = date.today()
+        sos = db.session.query(SOData).filter(
+            open_so_filter(), SOData.so_create_date.isnot(None)
+        ).order_by(SOData.vendor_name.asc(), SOData.so_create_date.asc()).all()
+        if bucket:
             sos = [s for s in sos if get_aging_label((today - s.so_create_date).days if s.so_create_date else None) == bucket]
         return jsonify([so_dict(s) for s in sos])
     except Exception as e:
