@@ -586,7 +586,7 @@ const App = () => {
                         <Pie
                           data={agingPieData}
                           cx="50%"          /* posisi horizontal center donut */
-                          cy="42%"          /* posisi vertikal center donut */
+                          cy="35%"          /* posisi vertikal center donut */
                           innerRadius={50}  /* jari-jari dalam (lubang tengah) */
                           outerRadius={85}  /* jari-jari luar — samakan dengan Pie 1 */
                           paddingAngle={0}
