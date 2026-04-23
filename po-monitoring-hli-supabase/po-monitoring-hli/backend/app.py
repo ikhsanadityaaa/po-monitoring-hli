@@ -18,24 +18,15 @@ CORS(app, resources={r"/api/*": {
     "allow_headers": ["Content-Type", "Authorization", "Accept"]
 }})
 
-# ── Database config ─────────────────────────────────────────────────────────
-# Supabase provides DATABASE_URL as:
-# postgresql://postgres.[project-ref]:[password]@aws-0-[region].pooler.supabase.com:6543/postgres
 _db_url = os.environ.get('DATABASE_URL', '')
-
 if _db_url:
-    # SQLAlchemy needs "postgresql://" not "postgres://"
     if _db_url.startswith('postgres://'):
         _db_url = _db_url.replace('postgres://', 'postgresql://', 1)
     app.config['SQLALCHEMY_DATABASE_URI'] = _db_url
     app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-        'pool_pre_ping': True,
-        'pool_recycle': 300,
-        'pool_size': 5,
-        'max_overflow': 10,
+        'pool_pre_ping': True, 'pool_recycle': 300, 'pool_size': 5, 'max_overflow': 10,
     }
 else:
-    # Local development fallback — SQLite
     _inst = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance')
     os.makedirs(_inst, exist_ok=True)
     app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{_inst}/po_database.db'
@@ -44,12 +35,11 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 db = SQLAlchemy(app)
 
-# ── Models ───────────────────────────────────────────────────────────────────
-
 class POData(db.Model):
     __tablename__ = 'po_data'
     id = db.Column(db.Integer, primary_key=True)
     po_number = db.Column(db.String(50), index=True)
+    item_no = db.Column(db.String(50))
     po_item_detail = db.Column(db.Text)
     item_code = db.Column(db.String(50))
     supplier = db.Column(db.String(200))
@@ -60,6 +50,7 @@ class POData(db.Model):
     amount = db.Column(db.Float)
     currency = db.Column(db.String(10))
     po_date = db.Column(db.Date)
+    purchase_member = db.Column(db.String(200))
     request_delivery = db.Column(db.Date)
     delivery_plan_date = db.Column(db.Date)
     remarks = db.Column(db.Text)
@@ -102,21 +93,31 @@ with app.app_context():
     db.create_all()
     print('DB schema ready.')
 
-# ── Constants & Helpers ──────────────────────────────────────────────────────
-
 CLOSED_STATUSES = {
     'Delivery Completed', 'SO Cancel',
     'Approval Apply', 'Approval Complete Step', 'Approval Reject'
 }
 
-PO_HLI_RE = re.compile(r'\b\d{7,}(?:-\d+)?\b')
+PO_HLI_RE = re.compile(r'\b(?:[A-Za-z]{0,4}[-]?)?\d{7,}(?:-\d+)?\b')
 
 def extract_po_hli(val):
     if not val: return []
-    return PO_HLI_RE.findall(str(val))
+    matches = PO_HLI_RE.findall(str(val))
+    # Normalize: strip any letter prefix so '4500012345' matches 'PO-4500012345'
+    normalized = []
+    for m in matches:
+        digits_only = re.sub(r'^[A-Za-z]{0,4}[-]?', '', m)
+        normalized.append(digits_only)
+        if digits_only != m:
+            normalized.append(m)  # also keep original form
+    return normalized
 
 def open_so_filter():
-    return db.or_(SOData.so_status.is_(None), ~SOData.so_status.in_(list(CLOSED_STATUSES)))
+    """Return SQLAlchemy filter clause for open (non-closed) SO records."""
+    return db.or_(
+        SOData.so_status.is_(None),
+        SOData.so_status.notin_(list(CLOSED_STATUSES))
+    )
 
 def clean(val):
     if val is None: return None
@@ -150,7 +151,16 @@ def find_column(df, names):
 def df_val(row, col):
     return row.get(col) if col else None
 
+def get_aging_label(days):
+    if days is None: return 'No Date'
+    if days >= 180: return '180+'
+    if days >= 90: return '90-180'
+    if days >= 30: return '30-90'
+    return '0-30'
+
 def so_dict(s):
+    today = date.today()
+    age_days = (today - s.so_create_date).days if s.so_create_date else None
     return {
         'id': s.id, 'so_number': s.so_number, 'so_item': s.so_item,
         'so_status': s.so_status, 'operation_unit_name': s.operation_unit_name,
@@ -161,10 +171,10 @@ def so_dict(s):
         'so_create_date': s.so_create_date.isoformat() if s.so_create_date else '',
         'delivery_possible_date': s.delivery_possible_date.isoformat() if s.delivery_possible_date else '',
         'delivery_plan_date': s.delivery_plan_date.isoformat() if s.delivery_plan_date else '',
-        'remarks': s.remarks or ''
+        'remarks': s.remarks or '',
+        'aging_days': age_days,
+        'aging_label': get_aging_label(age_days)
     }
-
-# ── Dashboard ────────────────────────────────────────────────────────────────
 
 @app.route('/api/dashboard/stats', methods=['GET'])
 def get_dashboard_stats():
@@ -180,7 +190,11 @@ def get_dashboard_stats():
             for n in extract_po_hli(cpn): matched_set.add(n)
             for n in extract_po_hli(memo): matched_set.add(n)
 
-        po_without_so_count = sum(1 for p in po_numbers if p not in matched_set)
+        po_without_so_count = 0
+        for p in po_numbers:
+            p_clean = re.sub(r'^[A-Za-z]{0,4}[-]?', '', p) if p else ''
+            if p not in matched_set and p_clean not in matched_set:
+                po_without_so_count += 1
 
         so_without_po_count = 0
         for cpn, memo in db.session.query(SOData.customer_po_number, SOData.delivery_memo)\
@@ -210,9 +224,18 @@ def get_dashboard_stats():
              .order_by(func.sum(SOData.sales_amount).desc()).limit(5).all()
         ]
 
+        # Top Operation Units
+        top_op_units = [
+            {'op_unit': r[0], 'so_count': r[1], 'total_amount': round(r[2] or 0, 2)}
+            for r in db.session.query(
+                SOData.operation_unit_name, func.count(SOData.id), func.sum(SOData.sales_amount)
+            ).filter(open_so_filter(), SOData.operation_unit_name.isnot(None))
+             .group_by(SOData.operation_unit_name)
+             .order_by(func.sum(SOData.sales_amount).desc()).limit(10).all()
+        ]
+
         total_open_for_pct = total_so_count or 1
-        so_status = [{
-            'name': r[0], 'value': r[1],
+        so_status = [{'name': r[0], 'value': r[1],
             'percentage': round(r[1] / total_open_for_pct * 100, 1),
             'amount': round(r[2] or 0, 2)
         } for r in db.session.query(
@@ -251,7 +274,10 @@ def get_dashboard_stats():
 
         total_open_so_amount = db.session.query(func.sum(SOData.sales_amount))\
                                           .filter(open_so_filter()).scalar() or 0
-        last_log = UploadLog.query.order_by(UploadLog.uploaded_at.desc()).first()
+
+        # Date ranges
+        po_date_range = db.session.query(func.min(POData.po_date), func.max(POData.po_date)).first()
+        so_date_range = db.session.query(func.min(SOData.so_create_date), func.max(SOData.so_create_date)).first()
 
         return jsonify({
             'po_without_so': po_without_so_count,
@@ -262,16 +288,22 @@ def get_dashboard_stats():
             'total_so_count': total_so_count,
             'monthly_trend': monthly_trend,
             'top_vendors': top_vendors,
+            'top_op_units': top_op_units,
             'so_status': so_status,
             'so_status_monthly': so_status_monthly,
             'status_months': sorted_months,
-            'last_upload': last_log.uploaded_at.isoformat() if last_log else None
+            'po_date_range': {
+                'min': po_date_range[0].isoformat() if po_date_range[0] else None,
+                'max': po_date_range[1].isoformat() if po_date_range[1] else None,
+            },
+            'so_date_range': {
+                'min': so_date_range[0].isoformat() if so_date_range[0] else None,
+                'max': so_date_range[1].isoformat() if so_date_range[1] else None,
+            },
         })
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
-
-# ── Data Endpoints ───────────────────────────────────────────────────────────
 
 @app.route('/api/data/po-without-so', methods=['GET'])
 def get_po_without_so():
@@ -280,14 +312,22 @@ def get_po_without_so():
         for cpn, memo in db.session.query(SOData.customer_po_number, SOData.delivery_memo).all():
             for n in extract_po_hli(cpn): matched_set.add(n)
             for n in extract_po_hli(memo): matched_set.add(n)
+        today = date.today()
         result = []
         for p in POData.query.all():
-            if p.po_number not in matched_set:
+            po_num_clean = re.sub(r'^[A-Za-z]{0,4}[-]?', '', p.po_number) if p.po_number else ''
+            if p.po_number not in matched_set and po_num_clean not in matched_set:
+                days_remaining = (p.request_delivery - today).days if p.request_delivery else None
                 result.append({
-                    'id': p.id, 'po_no': p.po_number, 'item_no': p.item_code,
-                    'description': p.po_item_detail, 'qty': p.qty, 'amount': p.amount,
+                    'id': p.id, 'po_no': p.po_number, 'item_no': p.item_no,
+                    'item_code': p.item_code,
+                    'description': p.po_item_detail, 'qty': p.qty, 'unit': p.unit or '',
+                    'price': p.price or 0, 'amount': p.amount,
                     'currency': p.currency, 'supplier': p.supplier,
+                    'po_date': p.po_date.isoformat() if p.po_date else '',
+                    'purchase_member': p.purchase_member or '',
                     'req_delivery': p.request_delivery.isoformat() if p.request_delivery else '',
+                    'days_remaining': days_remaining,
                     'delivery_plan_date': p.delivery_plan_date.isoformat() if p.delivery_plan_date else '',
                     'remarks': p.remarks or ''
                 })
@@ -347,19 +387,36 @@ def get_all_so():
     try:
         op_unit  = request.args.get('op_unit', '').strip()
         vendor   = request.args.get('vendor', '').strip()
+        aging    = request.args.getlist('aging')  # e.g. ['180+','90-180']
         page     = max(1, int(request.args.get('page', 1)))
-        per_page = min(500, int(request.args.get('per_page', 100)))
+        per_page = min(500, int(request.args.get('per_page', 20)))
+
+        today = date.today()
         q = SOData.query
         if op_unit: q = q.filter(SOData.operation_unit_name == op_unit)
         if vendor:  q = q.filter(SOData.vendor_name == vendor)
-        total = q.count()
-        sos   = q.order_by(SOData.so_create_date.desc()).offset((page-1)*per_page).limit(per_page).all()
-        op_units = sorted({r[0] for r in db.session.query(SOData.operation_unit_name).distinct() if r[0]})
-        vendors  = sorted({r[0] for r in db.session.query(SOData.vendor_name).distinct() if r[0]})
+
+        # Apply aging filter in Python after fetching (simpler than SQL CASE)
+        all_sos = q.order_by(SOData.so_create_date.desc()).all()
+
+        if aging:
+            def matches_aging(s):
+                age = (today - s.so_create_date).days if s.so_create_date else None
+                label = get_aging_label(age)
+                return label in aging
+            all_sos = [s for s in all_sos if matches_aging(s)]
+
+        total = len(all_sos)
+        paged = all_sos[(page-1)*per_page : page*per_page]
+
+        # Dynamic filters based on filtered results
+        op_units = sorted({s.operation_unit_name for s in all_sos if s.operation_unit_name})
+        vendors  = sorted({s.vendor_name for s in all_sos if s.vendor_name})
+
         return jsonify({
-            'data': [so_dict(s) for s in sos],
+            'data': [so_dict(s) for s in paged],
             'total': total, 'page': page, 'per_page': per_page,
-            'filters': {'op_units': op_units, 'vendors': vendors}
+            'filters': {'op_units': list(op_units), 'vendors': list(vendors)}
         })
     except Exception as e:
         import traceback; traceback.print_exc()
@@ -382,9 +439,7 @@ def get_top_vendor_detail(vendor_name):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# ── Upload ───────────────────────────────────────────────────────────────────
-
-CHUNK_SIZE = 200  # smaller chunks work better with Postgres connection pooling
+CHUNK_SIZE = 200
 
 @app.route('/api/upload/po-list', methods=['POST'])
 def upload_po_list():
@@ -398,6 +453,7 @@ def upload_po_list():
         if not col_po:
             return jsonify({'error': f'Kolom PO Number tidak ditemukan. Kolom: {df.columns.tolist()}'}), 400
 
+        col_itemno = find_column(df, ['Item No.','Item No','Item Number','No. Item'])
         col_desc = find_column(df, ['PO Item Detail','Description','Item Description','Deskripsi'])
         col_item = find_column(df, ['Item Code','Material','Item No','Item'])
         col_supp = find_column(df, ['Supplier','Vendor','Supplier Name'])
@@ -408,6 +464,7 @@ def upload_po_list():
         col_amt  = find_column(df, ['Amount','Total Amount','Total'])
         col_cur  = find_column(df, ['Currency','Curr'])
         col_pdt  = find_column(df, ['PO Date','Order Date','Tanggal PO'])
+        col_pm   = find_column(df, ['Purchase Member','Purchasing Member','PIC','Buyer'])
         col_rdd  = find_column(df, ['Request Delivery Date','Delivery Date','Req Delivery'])
 
         db.session.execute(text('DELETE FROM po_data'))
@@ -417,12 +474,20 @@ def upload_po_list():
             po_num = clean(df_val(row, col_po))
             if not po_num: continue
             records.append({
-                'po_number': po_num, 'po_item_detail': clean(df_val(row, col_desc)),
-                'item_code': clean(df_val(row, col_item)), 'supplier': clean(df_val(row, col_supp)),
-                'vendor_name_smro': clean(df_val(row, col_vndr)), 'qty': safe_float(df_val(row, col_qty)),
-                'unit': clean(df_val(row, col_unit)), 'price': safe_float(df_val(row, col_price)),
-                'amount': safe_float(df_val(row, col_amt)), 'currency': clean(df_val(row, col_cur)) or 'IDR',
-                'po_date': parse_date(df_val(row, col_pdt)), 'request_delivery': parse_date(df_val(row, col_rdd)),
+                'po_number': po_num,
+                'item_no': clean(df_val(row, col_itemno)),
+                'po_item_detail': clean(df_val(row, col_desc)),
+                'item_code': clean(df_val(row, col_item)),
+                'supplier': clean(df_val(row, col_supp)),
+                'vendor_name_smro': clean(df_val(row, col_vndr)),
+                'qty': safe_float(df_val(row, col_qty)),
+                'unit': clean(df_val(row, col_unit)),
+                'price': safe_float(df_val(row, col_price)),
+                'amount': safe_float(df_val(row, col_amt)),
+                'currency': clean(df_val(row, col_cur)) or 'IDR',
+                'po_date': parse_date(df_val(row, col_pdt)),
+                'purchase_member': clean(df_val(row, col_pm)),
+                'request_delivery': parse_date(df_val(row, col_rdd)),
                 'uploaded_at': datetime.utcnow()
             })
             count += 1
@@ -444,12 +509,12 @@ def upload_smro():
         df = pd.read_excel(file, engine='openpyxl')
         df.columns = [str(c).strip() for c in df.columns]
 
-        col_so      = find_column(df, ['SO Number','SO No','SO No.','SO','SO Item',
-                                       'Sales Order','Sales Order Number','No SO','Nomor SO'])
+        col_so = find_column(df, ['SO Number','SO No','SO No.','SO','SO Item',
+                                   'Sales Order','Sales Order Number','No SO','Nomor SO'])
         if not col_so:
             return jsonify({'error': f'Kolom SO Number tidak ditemukan. Kolom: {df.columns.tolist()}'}), 400
 
-        col_soitem  = find_column(df, ['SO Item No','Item No','Line','SO Line'])
+        col_soitem  = find_column(df, ['SO Item No','Item No','Line','SO Line','SO Item'])
         col_status  = find_column(df, ['SO Status','Status','Order Status'])
         col_opunit  = find_column(df, ['Operation Unit Name','Op Unit','Client Name','Client','Operation Unit'])
         col_vendor  = find_column(df, ['Vendor Name','Vendor','Supplier'])
@@ -475,11 +540,16 @@ def upload_smro():
             if not so_val: continue
             records.append({
                 'so_number': so_val, 'so_item': clean(df_val(row, col_soitem)),
-                'so_status': clean(df_val(row, col_status)), 'operation_unit_name': clean(df_val(row, col_opunit)),
-                'vendor_name': clean(df_val(row, col_vendor)), 'customer_po_number': clean(df_val(row, col_custpo)),
-                'delivery_memo': clean(df_val(row, col_memo)), 'product_name': clean(df_val(row, col_prod)),
-                'so_qty': safe_float(df_val(row, col_qty)), 'sales_unit': clean(df_val(row, col_sunit)),
-                'sales_price': safe_float(df_val(row, col_sprice)), 'sales_amount': safe_float(df_val(row, col_samt)),
+                'so_status': clean(df_val(row, col_status)),
+                'operation_unit_name': clean(df_val(row, col_opunit)),
+                'vendor_name': clean(df_val(row, col_vendor)),
+                'customer_po_number': clean(df_val(row, col_custpo)),
+                'delivery_memo': clean(df_val(row, col_memo)),
+                'product_name': clean(df_val(row, col_prod)),
+                'so_qty': safe_float(df_val(row, col_qty)),
+                'sales_unit': clean(df_val(row, col_sunit)),
+                'sales_price': safe_float(df_val(row, col_sprice)),
+                'sales_amount': safe_float(df_val(row, col_samt)),
                 'currency': clean(df_val(row, col_cur)) or 'IDR',
                 'purchasing_price': safe_float(df_val(row, col_pprice)),
                 'purchasing_amount': safe_float(df_val(row, col_pamt)),
@@ -498,8 +568,6 @@ def upload_smro():
     except Exception as e:
         db.session.rollback(); import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
-
-# ── Update / Batch ───────────────────────────────────────────────────────────
 
 @app.route('/api/data/so/<int:so_id>', methods=['PUT'])
 def update_so(so_id):
@@ -543,8 +611,6 @@ def batch_upload_so():
         db.session.rollback(); import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-# ── Export ───────────────────────────────────────────────────────────────────
-
 def _style_wb(ws, headers, num_cols=None):
     ws.append(headers)
     fill = PatternFill(start_color="8B5CF6", end_color="8B5CF6", fill_type="solid")
@@ -567,14 +633,17 @@ def export_all_so():
         if op: q = q.filter(SOData.operation_unit_name == op)
         if vn: q = q.filter(SOData.vendor_name == vn)
         sos = q.all()
+        today = date.today()
         wb = Workbook(); ws = wb.active; ws.title = "SO List"
-        _style_wb(ws, ['SO Number','SO Item','Status','Op Unit','Vendor','Product',
+        _style_wb(ws, ['Aging','SO Number','SO Item','Status','Op Unit','Vendor','Product',
                        'SO Qty','Sales Price','Sales Amount','PO Price','PO Amount',
                        'SO Date','Delivery Possible','Customer PO','Delivery Memo',
-                       'Delivery Plan Date','Remarks'], num_cols=[7,8,9,10,11])
+                       'Delivery Plan Date','Remarks'], num_cols=[8,9,10,11,12])
         for s in sos:
-            ws.append([s.so_number, s.so_item, s.so_status, s.operation_unit_name, s.vendor_name,
-                s.product_name, s.so_qty or 0, s.sales_price or 0, s.sales_amount or 0,
+            age = (today - s.so_create_date).days if s.so_create_date else None
+            ws.append([get_aging_label(age), s.so_number, s.so_item, s.so_status,
+                s.operation_unit_name, s.vendor_name, s.product_name,
+                s.so_qty or 0, s.sales_price or 0, s.sales_amount or 0,
                 s.purchasing_price or 0, s.purchasing_amount or 0,
                 s.so_create_date.isoformat() if s.so_create_date else '',
                 s.delivery_possible_date.isoformat() if s.delivery_possible_date else '',
@@ -596,14 +665,20 @@ def export_po_without_so():
             for n in extract_po_hli(cpn): matched_set.add(n)
             for n in extract_po_hli(memo): matched_set.add(n)
         pos = [p for p in POData.query.all() if p.po_number not in matched_set]
+        today = date.today()
         wb = Workbook(); ws = wb.active; ws.title = "PO Without SO"
-        _style_wb(ws, ['PO Number','Description','Item Code','Supplier','Qty','Amount','Currency',
-                       'PO Date','Request Delivery','Delivery Plan Date','Remarks'], num_cols=[5,6])
+        _style_wb(ws, ['PO Number','Item No','Item Code','Description','Supplier',
+                       'Qty','Unit','Price','Amount','Currency',
+                       'PO Date','Purchase Member','Request Delivery','Days Remaining',
+                       'Delivery Plan Date','Remarks'], num_cols=[6,8,9])
         for p in pos:
-            ws.append([p.po_number, p.po_item_detail, p.item_code, p.supplier,
-                p.qty or 0, p.amount or 0, p.currency or 'IDR',
+            days_rem = (p.request_delivery - today).days if p.request_delivery else ''
+            ws.append([p.po_number, p.item_no or '', p.item_code, p.po_item_detail, p.supplier,
+                p.qty or 0, p.unit or '', p.price or 0, p.amount or 0, p.currency or 'IDR',
                 p.po_date.isoformat() if p.po_date else '',
+                p.purchase_member or '',
                 p.request_delivery.isoformat() if p.request_delivery else '',
+                days_rem,
                 p.delivery_plan_date.isoformat() if p.delivery_plan_date else '',
                 p.remarks or ''])
         output = io.BytesIO(); wb.save(output); output.seek(0)
