@@ -413,6 +413,7 @@ const App = () => {
   // SO filters
   const [soFilters, setSoFilters] = useState({ op_units: [], vendors: [], statuses: [], aging: [] });
   const [soSearchNums, setSoSearchNums] = useState([]); // search SO Item
+  const [soMarginFilter, setSoMarginFilter] = useState('all'); // 'all' | 'positive' | 'negative'
   const [soPage, setSoPage] = useState(1);
   const [soPerPage, setSoPerPage] = useState(20);
 
@@ -1090,7 +1091,7 @@ const App = () => {
             const active = soFilters.aging.includes(label);
             return (
               <button key={label} onClick={()=>toggleAgingFilter(label)}
-                className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${active?'text-white border-transparent':'border-gray-300 ' + txt2}`}
+                className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${active?'text-white border-transparent':'border-gray-200 text-gray-400 bg-gray-100'}`}
                 style={active ? {backgroundColor: AGING_COLORS[label], borderColor: AGING_COLORS[label]} : {}}>
                 {label} hari
               </button>
@@ -1128,6 +1129,15 @@ const App = () => {
             <MultiSelect label="SO Status" options={soFilterOptions.statuses}
               selected={soFilters.statuses} onChange={v=>setSoFilters(f=>({...f,statuses:v}))}
               darkMode={darkMode} txt2={txt2}/>
+            <div className="flex-1 min-w-[140px]">
+              <label className={`block text-xs font-medium mb-1 ${txt2}`}>Filter Margin</label>
+              <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                value={soMarginFilter} onChange={e=>setSoMarginFilter(e.target.value)}>
+                <option value="all">Semua Data</option>
+                <option value="positive">Ada Margin (≥ 0)</option>
+                <option value="negative">Margin Minus (&lt; 0)</option>
+              </select>
+            </div>
             <div className="flex-1 min-w-[100px]">
               <label className={`block text-xs font-medium mb-1 ${txt2}`}>Baris per Halaman</label>
               <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
@@ -1143,7 +1153,7 @@ const App = () => {
                 className="px-5 py-2 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-semibold shadow-sm">Apply</button>
               <button onClick={()=>{
                 const f={op_units:[],vendors:[],statuses:[],aging:[]};
-                setSoFilters(f); setSoSearchNums([]); setSoPage(1);
+                setSoFilters(f); setSoSearchNums([]); setSoMarginFilter('all'); setSoPage(1);
                 fetchSOData(f,1,soPerPage,[]);
               }}
                 className={`px-4 py-2 rounded-lg text-sm font-medium shadow-sm ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Reset</button>
@@ -1182,19 +1192,31 @@ const App = () => {
             <thead className={tblHd}>
               <tr>
                 {['Aging','SO Item','Item Name','Status','Op Unit','Vendor','Qty',
-                  'Sales Price','Sales Amount','PO Price','PO Amount',
+                  'Sales Price','Sales Amount','PO Price','PO Amount','Margin','%Margin',
                   'Possible Delivery','Plan Date','Remarks'].map(h=>(
                   <th key={h} className={`px-3 py-2.5 text-left font-semibold whitespace-nowrap ${txt2}`}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
-              {allSOData.length === 0 ? (
-                <tr><td colSpan={14} className={`px-4 py-10 text-center ${txt2}`}>
-                  <FileText className="w-10 h-10 mx-auto mb-2 opacity-40"/>Tidak ada data
-                </td></tr>
-              ) : allSOData.map((so)=>{
+              {(() => {
+                // Apply client-side margin filter
+                const marginFiltered = soMarginFilter === 'all' ? allSOData : allSOData.filter(so => {
+                  const poAmt = (so.purchasing_price || 0) * (so.so_qty || 0);
+                  const margin = (so.sales_amount || 0) - poAmt;
+                  return soMarginFilter === 'negative' ? margin < 0 : margin >= 0;
+                });
+                if (marginFiltered.length === 0) return (
+                  <tr><td colSpan={16} className={`px-4 py-10 text-center ${txt2}`}>
+                    <FileText className="w-10 h-10 mx-auto mb-2 opacity-40"/>Tidak ada data
+                  </td></tr>
+                );
+                return marginFiltered.map((so) => {
                 const isDeliveryCompleted = so.so_status === 'Delivery Completed';
+                const poAmount = (so.purchasing_price || 0) * (so.so_qty || 0);
+                const margin = (so.sales_amount || 0) - poAmount;
+                const marginPct = poAmount !== 0 ? (margin / poAmount) * 100 : null;
+                const marginColor = margin < 0 ? 'text-red-600 font-semibold' : margin > 0 ? 'text-green-600 font-semibold' : txt2;
                 return (
                 <tr key={so.id} className={`${trHov} transition-colors`}>
                   <td className="px-3 py-2 whitespace-nowrap">
@@ -1221,7 +1243,11 @@ const App = () => {
                   <td className="px-3 py-2 text-right whitespace-nowrap min-w-[130px]">{fmtCur(so.sales_price)}</td>
                   <td className="px-3 py-2 text-right font-semibold text-orange-600 whitespace-nowrap min-w-[130px]">{fmtCur(so.sales_amount)}</td>
                   <td className="px-3 py-2 text-right whitespace-nowrap min-w-[130px]">{fmtCur(so.purchasing_price)}</td>
-                  <td className="px-3 py-2 text-right font-semibold text-green-600 whitespace-nowrap min-w-[130px]">{fmtCur(so.purchasing_amount)}</td>
+                  <td className="px-3 py-2 text-right font-semibold text-green-600 whitespace-nowrap min-w-[130px]">{fmtCur(poAmount)}</td>
+                  <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${marginColor}`}>{fmtCur(margin)}</td>
+                  <td className={`px-3 py-2 text-right whitespace-nowrap ${marginColor}`}>
+                    {marginPct !== null ? `${marginPct.toFixed(1)}%` : '-'}
+                  </td>
                   <td className={`px-3 py-2 text-center text-xs ${txt2}`}>{so.delivery_possible_date||'-'}</td>
                   <td className="px-3 py-2 text-center">
                     {editingCell?.id===so.id && editingCell.field==='delivery_plan_date' ? (
@@ -1269,7 +1295,8 @@ const App = () => {
                   </td>
                 </tr>
                 );
-              })}
+              })
+              })()}
             </tbody>
           </table>
         </div>
@@ -1300,14 +1327,6 @@ const App = () => {
             </span>
           </div>
           <div className="flex gap-2 items-center">
-            <label className={`text-sm ${txt2}`}>Baris:</label>
-            <select className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-300 text-gray-700'}`}
-              value={poPerPage} onChange={e=>{ setPoPerPage(Number(e.target.value)); setPoPage(1); }}>
-              <option value={20}>20</option>
-              <option value={50}>50</option>
-              <option value={100}>100</option>
-              <option value={500}>500</option>
-            </select>
             <DownloadButton onClick={downloadPOExcel} className="flex items-center gap-1 px-4 py-1.5 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-medium shadow-sm">
               <Download className="w-4 h-4"/>Download Excel
             </DownloadButton>
@@ -1340,12 +1359,22 @@ const App = () => {
             onChange={v => { setPoFilterOpUnit(v); setPoPage(1); }}
             darkMode={darkMode} txt2={txt2}
           />
-          {(poSearchNums.length > 0 || poFilterItemType.length > 0 || poFilterOpUnit.length > 0) && (
+          <div className="flex-1 min-w-[120px]">
+            <label className={`block text-xs font-medium mb-1 ${txt2}`}>Baris per Halaman</label>
+            <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+              value={poPerPage} onChange={e=>setPoPerPage(Number(e.target.value))}>
+              <option value={20}>20</option>
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+              <option value={500}>500</option>
+            </select>
+          </div>
+          <div className="flex gap-2 items-end">
+            <button onClick={()=>setPoPage(1)}
+              className="px-5 py-2 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-semibold shadow-sm">Apply</button>
             <button onClick={()=>{ setPoSearchNums([]); setPoFilterItemType([]); setPoFilterOpUnit([]); setPoPage(1); }}
-              className={`px-4 py-2 rounded-lg text-sm font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>
-              Reset Filter
-            </button>
-          )}
+              className={`px-4 py-2 rounded-lg text-sm font-medium shadow-sm ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Reset</button>
+          </div>
         </div>
 
         {/* Active PO filter tags */}
