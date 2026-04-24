@@ -565,13 +565,14 @@ def get_aging_detail_all():
 @app.route('/api/data/all-so', methods=['GET'])
 def get_all_so():
     try:
-        op_units  = request.args.getlist('op_unit')   # multi-value
-        vendors   = request.args.getlist('vendor')    # multi-value
-        statuses  = request.args.getlist('status')    # multi-value
-        aging     = request.args.getlist('aging')
-        so_items  = request.args.getlist('so_item')   # search by SO item numbers
-        page      = max(1, int(request.args.get('page', 1)))
-        per_page  = min(500, int(request.args.get('per_page', 20)))
+        op_units      = request.args.getlist('op_unit')
+        vendors       = request.args.getlist('vendor')
+        statuses      = request.args.getlist('status')
+        aging         = request.args.getlist('aging')
+        so_items      = request.args.getlist('so_item')
+        margin_filter = request.args.get('margin_filter', 'all')  # 'all' | 'positive' | 'negative'
+        page          = max(1, int(request.args.get('page', 1)))
+        per_page      = min(500, int(request.args.get('per_page', 20)))
 
         today = date.today()
         q = SOData.query.filter(open_so_filter())
@@ -582,11 +583,22 @@ def get_all_so():
 
         all_sos = q.order_by(SOData.so_create_date.desc()).all()
 
+        # Aging filter (client-computed, applied post-query)
         if aging:
             def matches_aging(s):
                 age = (today - s.so_create_date).days if s.so_create_date else None
                 return get_aging_label(age) in aging
             all_sos = [s for s in all_sos if matches_aging(s)]
+
+        # Margin filter — margin = sales_amount - (purchasing_price * so_qty)
+        if margin_filter in ('positive', 'negative'):
+            def calc_margin(s):
+                po_amt = (s.purchasing_price or 0) * (s.so_qty or 0)
+                return (s.sales_amount or 0) - po_amt
+            if margin_filter == 'negative':
+                all_sos = [s for s in all_sos if calc_margin(s) < 0]
+            else:
+                all_sos = [s for s in all_sos if calc_margin(s) >= 0]
 
         total = len(all_sos)
         paged = all_sos[(page-1)*per_page : page*per_page]
