@@ -167,15 +167,14 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
 };
 
 // ─── MultiSelect dropdown — Excel-style (all checked by default) ─────────
+// selected: [] = all pass (default) | '__NONE__' = nothing passes | string[] = only these pass
 const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
-  // "all selected" = selected array is empty (no filter = show all)
-  const noneSelected = selected.length === 0;
-  const allSelected  = selected.length === options.length;
-  const someSelected = !noneSelected && !allSelected;
-  // visually "all checked" when no filter applied
-  const allVisuallyChecked = noneSelected;
+
+  const isNoneMode = selected === '__NONE__';
+  const isAllMode  = !isNoneMode && Array.isArray(selected) && selected.length === 0;
+  const isSomeMode = !isNoneMode && Array.isArray(selected) && selected.length > 0;
 
   useEffect(() => {
     const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
@@ -184,50 +183,35 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
   }, []);
 
   const toggleAll = () => {
-    if (noneSelected) {
-      // Currently all checked → uncheck all (set to explicit empty selection = nothing shown)
-      // We use a sentinel: store all items as "selected" but display as "0 dipilih"
-      // Better UX: uncheck all means filter passes nothing, so we store all as excluded
-      // Actually Excel behavior: uncheck all → nothing shows. We store [] but invert logic.
-      // Simplest: use null/special state — instead use a "noneMode" approach:
-      // When noneSelected (was all-checked), clicking unchecks all → store special marker
-      onChange('__NONE__');
+    if (isAllMode) {
+      onChange('__NONE__'); // all were checked → uncheck all
     } else {
-      // Currently some/all explicitly selected OR none-mode → check all → reset to []
-      onChange([]);
+      onChange([]);          // none or some were checked → check all
     }
   };
 
   const toggle = (val) => {
-    // If currently in all-checked visual state (noneSelected)
-    if (noneSelected) {
-      // Click one item: keep only that one checked (deselect all others)
-      onChange([val]);
-      return;
-    }
-    const currentSelected = selected === '__NONE__' ? [] : selected;
-    if (currentSelected.includes(val)) {
-      const next = currentSelected.filter(x => x !== val);
+    if (isNoneMode) { onChange([val]); return; }
+    if (isAllMode)  { onChange([val]); return; } // deselect all others, keep only this
+    // isSomeMode
+    const arr = selected;
+    if (arr.includes(val)) {
+      const next = arr.filter(x => x !== val);
       onChange(next.length === 0 ? '__NONE__' : next);
     } else {
-      const next = [...currentSelected, val];
+      const next = [...arr, val];
       onChange(next.length === options.length ? [] : next);
     }
   };
 
-  const isChecked = (val) => {
-    if (selected === '__NONE__') return false;
-    if (noneSelected) return true; // all visually checked
+  const isItemChecked = (val) => {
+    if (isNoneMode) return false;
+    if (isAllMode)  return true;
     return selected.includes(val);
   };
 
-  const isAllChecked = selected !== '__NONE__' && noneSelected;
-  const isNoneMode   = selected === '__NONE__';
-
-  const displayLabel = isNoneMode
-    ? `0 dipilih`
-    : noneSelected
-    ? `Semua ${label}`
+  const displayLabel = isNoneMode ? `0 dipilih`
+    : isAllMode ? `Semua ${label}`
     : `${selected.length} dipilih`;
 
   return (
@@ -235,28 +219,27 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
       <label className={`block text-xs font-medium mb-1 ${txt2}`}>{label}</label>
       <button onClick={()=>setOpen(o=>!o)} style={{cursor:'pointer'}}
         className={`w-full px-3 py-2 rounded-lg text-sm border text-left flex justify-between items-center transition-colors
-          ${darkMode
-            ? 'bg-gray-600 border-gray-500 text-white hover:bg-gray-500'
-            : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
+          ${darkMode ? 'bg-gray-600 border-gray-500 text-white hover:bg-gray-500'
+                     : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
         <span className="truncate">{displayLabel}</span>
         <ChevronDown className="w-4 h-4 flex-shrink-0 ml-1"/>
       </button>
       {open && (
-        <div className={`absolute z-50 mt-1 w-full max-h-56 overflow-auto rounded-lg shadow-xl border ${darkMode?'bg-gray-700 border-gray-600':'bg-white border-gray-200'}`}>
-          {/* Select All row — like Excel */}
+        <div className={`absolute z-50 mt-1 w-full max-h-56 overflow-auto rounded-lg shadow-xl border
+          ${darkMode ? 'bg-gray-700 border-gray-600' : 'bg-white border-gray-200'}`}>
           <label style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold border-b
-            ${darkMode?'border-gray-600 hover:bg-gray-600 text-white':'border-gray-100 hover:bg-purple-50 text-gray-700'}`}>
+            ${darkMode ? 'border-gray-600 hover:bg-gray-600 text-white' : 'border-gray-100 hover:bg-purple-50 text-gray-700'}`}>
             <input type="checkbox"
-              checked={isAllChecked}
-              ref={el => { if (el) el.indeterminate = someSelected; }}
+              checked={isAllMode}
+              ref={el => { if (el) el.indeterminate = isSomeMode; }}
               onChange={toggleAll}
               className="accent-purple-600" style={{cursor:'pointer'}}/>
             <span>(Pilih Semua)</span>
           </label>
           {options.map(opt => (
             <label key={opt} style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs
-              ${darkMode?'hover:bg-gray-600 text-white':'hover:bg-purple-50 text-gray-700'}`}>
-              <input type="checkbox" checked={isChecked(opt)} onChange={()=>toggle(opt)}
+              ${darkMode ? 'hover:bg-gray-600 text-white' : 'hover:bg-purple-50 text-gray-700'}`}>
+              <input type="checkbox" checked={isItemChecked(opt)} onChange={()=>toggle(opt)}
                 className="accent-purple-600" style={{cursor:'pointer'}}/>
               <span className="truncate" title={opt}>{opt}</span>
             </label>
@@ -1122,6 +1105,12 @@ const App = () => {
                         <input type="date" defaultValue={so.delivery_plan_date}
                           className={`px-2 py-1 rounded text-xs border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                           onChange={e=>setEditValue(e.target.value)}
+                          onBlur={e=>{
+                            // Only close if not clicking the ✓ or ✗ buttons (they use onMouseDown)
+                            if (!e.relatedTarget || !e.currentTarget.closest('div').contains(e.relatedTarget)) {
+                              setEditingCell(null);
+                            }
+                          }}
                           onKeyDown={e=>{
                             if(e.key==='Enter'){e.preventDefault();updateSOCell(so.id,'delivery_plan_date',editValue);}
                             if(e.key==='Escape'){e.preventDefault();setEditingCell(null);}
