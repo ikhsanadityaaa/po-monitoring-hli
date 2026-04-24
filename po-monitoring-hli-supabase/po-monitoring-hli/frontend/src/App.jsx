@@ -166,85 +166,129 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
   );
 };
 
-// ─── MultiSelect dropdown — Excel-style (all checked by default) ─────────
-// selected: [] = all pass (default) | '__NONE__' = nothing passes | string[] = only these pass
+// ─── MultiSelect dropdown — Excel-style with draft state ─────────────────
+// selected: [] = all pass | '__NONE__' = nothing passes | string[] = only these pass
+// Changes are ONLY committed when user clicks "Terapkan". Clicking outside = cancel.
 const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen]   = useState(false);
+  const [draft, setDraft] = useState(selected); // local draft, not yet committed
   const ref = useRef(null);
 
-  const isNoneMode = selected === '__NONE__';
-  const isAllMode  = !isNoneMode && Array.isArray(selected) && selected.length === 0;
-  const isSomeMode = !isNoneMode && Array.isArray(selected) && selected.length > 0;
+  // Sync draft when dropdown opens (reset to current committed value)
+  const handleOpen = () => {
+    setDraft(selected);
+    setOpen(true);
+  };
 
+  // Close without committing → discard draft
+  const handleCancel = () => {
+    setDraft(selected); // revert
+    setOpen(false);
+  };
+
+  // Commit draft to parent
+  const handleApply = () => {
+    onChange(draft);
+    setOpen(false);
+  };
+
+  // Click outside = cancel
   useEffect(() => {
-    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const handler = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) {
+        setDraft(selected); // revert draft
+        setOpen(false);
+      }
+    };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
-  }, []);
+  }, [selected]); // depend on selected so revert always uses latest committed value
+
+  // Draft state helpers
+  const draftIsNone = draft === '__NONE__';
+  const draftIsAll  = !draftIsNone && Array.isArray(draft) && draft.length === 0;
+  const draftIsSome = !draftIsNone && Array.isArray(draft) && draft.length > 0;
 
   const toggleAll = () => {
-    if (isAllMode) {
-      onChange('__NONE__'); // all were checked → uncheck all
+    if (draftIsAll) {
+      setDraft('__NONE__');
     } else {
-      onChange([]);          // none or some were checked → check all
+      setDraft([]);
     }
   };
 
   const toggle = (val) => {
-    if (isNoneMode) { onChange([val]); return; }
-    if (isAllMode)  { onChange([val]); return; } // deselect all others, keep only this
-    // isSomeMode
-    const arr = selected;
+    if (draftIsNone || draftIsAll) { setDraft([val]); return; }
+    const arr = Array.isArray(draft) ? draft : [];
     if (arr.includes(val)) {
       const next = arr.filter(x => x !== val);
-      onChange(next.length === 0 ? '__NONE__' : next);
+      setDraft(next.length === 0 ? '__NONE__' : next);
     } else {
       const next = [...arr, val];
-      onChange(next.length === options.length ? [] : next);
+      setDraft(next.length === options.length ? [] : next);
     }
   };
 
   const isItemChecked = (val) => {
-    if (isNoneMode) return false;
-    if (isAllMode)  return true;
-    return selected.includes(val);
+    if (draftIsNone) return false;
+    if (draftIsAll)  return true;
+    return Array.isArray(draft) && draft.includes(val);
   };
 
-  const displayLabel = isNoneMode ? `0 dipilih`
-    : isAllMode ? `Semua ${label}`
+  // Display label based on COMMITTED value (selected), not draft
+  const committedIsNone = selected === '__NONE__';
+  const committedIsAll  = !committedIsNone && Array.isArray(selected) && selected.length === 0;
+  const displayLabel = committedIsNone ? `0 dipilih`
+    : committedIsAll ? `Semua ${label}`
     : `${selected.length} dipilih`;
 
   return (
     <div className="relative flex-1 min-w-[180px]" ref={ref}>
       <label className={`block text-xs font-medium mb-1 ${txt2}`}>{label}</label>
-      <button onClick={()=>setOpen(o=>!o)} style={{cursor:'pointer'}}
+      <button onClick={open ? handleCancel : handleOpen} style={{cursor:'pointer'}}
         className={`w-full px-3 py-2 rounded-lg text-sm border text-left flex justify-between items-center transition-colors
           ${darkMode ? 'bg-gray-600 border-gray-500 text-white hover:bg-gray-500'
                      : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
         <span className="truncate">{displayLabel}</span>
-        <ChevronDown className="w-4 h-4 flex-shrink-0 ml-1"/>
+        <ChevronDown className={`w-4 h-4 flex-shrink-0 ml-1 transition-transform ${open ? 'rotate-180' : ''}`}/>
       </button>
       {open && (
-        <div className={`absolute z-50 mt-1 w-full max-h-56 overflow-auto rounded-lg shadow-xl border
+        <div className={`absolute z-50 mt-1 w-full rounded-lg shadow-xl border
           ${darkMode ? 'bg-gray-700 border-gray-600' : 'bg-white border-gray-200'}`}>
-          <label style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold border-b
-            ${darkMode ? 'border-gray-600 hover:bg-gray-600 text-white' : 'border-gray-100 hover:bg-purple-50 text-gray-700'}`}>
-            <input type="checkbox"
-              checked={isAllMode}
-              ref={el => { if (el) el.indeterminate = isSomeMode; }}
-              onChange={toggleAll}
-              className="accent-purple-600" style={{cursor:'pointer'}}/>
-            <span>(Pilih Semua)</span>
-          </label>
-          {options.map(opt => (
-            <label key={opt} style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs
-              ${darkMode ? 'hover:bg-gray-600 text-white' : 'hover:bg-purple-50 text-gray-700'}`}>
-              <input type="checkbox" checked={isItemChecked(opt)} onChange={()=>toggle(opt)}
+          {/* Options list */}
+          <div className="max-h-48 overflow-auto">
+            <label style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold border-b
+              ${darkMode ? 'border-gray-600 hover:bg-gray-600 text-white' : 'border-gray-100 hover:bg-purple-50 text-gray-700'}`}>
+              <input type="checkbox"
+                checked={draftIsAll}
+                ref={el => { if (el) el.indeterminate = draftIsSome; }}
+                onChange={toggleAll}
                 className="accent-purple-600" style={{cursor:'pointer'}}/>
-              <span className="truncate" title={opt}>{opt}</span>
+              <span>(Pilih Semua)</span>
             </label>
-          ))}
-          {options.length === 0 && <div className={`px-3 py-2 text-xs ${txt2}`}>Tidak ada opsi</div>}
+            {options.map(opt => (
+              <label key={opt} style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs
+                ${darkMode ? 'hover:bg-gray-600 text-white' : 'hover:bg-purple-50 text-gray-700'}`}>
+                <input type="checkbox" checked={isItemChecked(opt)} onChange={()=>toggle(opt)}
+                  className="accent-purple-600" style={{cursor:'pointer'}}/>
+                <span className="truncate" title={opt}>{opt}</span>
+              </label>
+            ))}
+            {options.length === 0 && <div className={`px-3 py-2 text-xs ${txt2}`}>Tidak ada opsi</div>}
+          </div>
+          {/* Apply / Cancel footer */}
+          <div className={`flex gap-2 px-3 py-2 border-t ${darkMode ? 'border-gray-600' : 'border-gray-100'}`}>
+            <button onClick={handleApply}
+              className="flex-1 px-3 py-1.5 bg-purple-700 hover:bg-purple-800 text-white rounded text-xs font-semibold"
+              style={{cursor:'pointer'}}>
+              Terapkan
+            </button>
+            <button onClick={handleCancel}
+              className={`px-3 py-1.5 rounded text-xs font-medium ${darkMode ? 'bg-gray-600 text-gray-200 hover:bg-gray-500' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}
+              style={{cursor:'pointer'}}>
+              Batal
+            </button>
+          </div>
         </div>
       )}
     </div>
