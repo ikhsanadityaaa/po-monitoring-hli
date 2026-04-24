@@ -102,19 +102,50 @@ CLOSED_STATUSES = {
 # Operation units yang dikecualikan dari matching PO HLI vs SO
 EXCLUDED_OP_UNITS = {'HLI GREEN POWER (CONSUMABLE)'}
 
-PO_HLI_RE = re.compile(r'\b(?:[A-Za-z]{0,4}[-]?)?\d{7,}(?:-\d+)?\b')
+# Regex: optional short letter prefix, then 7+ digit PO number, optionally followed by -ItemNo
+PO_HLI_RE = re.compile(r'(?:[A-Za-z]{1,4}[-]?)?(\d{7,})(?:-(\d+))?')
+
+def _normalize_item_no(item_no):
+    """
+    Return a set of normalised variants of item_no to maximise matching.
+    e.g. '010' -> {'010', '10'}, '10.0' -> {'10', '010'}, '10' -> {'10', '010'}
+    """
+    if item_no is None:
+        return set()
+    s = str(item_no).strip()
+    variants = {s}
+    # Remove trailing .0 (Excel stores integers as floats sometimes)
+    if s.endswith('.0'):
+        s = s[:-2]
+        variants.add(s)
+    # Integer form
+    try:
+        n = int(float(s))
+        variants.add(str(n))        # plain  e.g. '10'
+        variants.add(f"{n:02d}")    # 2-digit e.g. '10' (or '01' for n=1)
+        variants.add(f"{n:03d}")    # 3-digit e.g. '010'
+    except (ValueError, OverflowError):
+        pass
+    return variants
 
 def extract_po_hli(val):
-    if not val: return []
-    matches = PO_HLI_RE.findall(str(val))
-    # Normalize: strip any letter prefix so '4500012345' matches 'PO-4500012345'
-    normalized = []
-    for m in matches:
-        digits_only = re.sub(r'^[A-Za-z]{0,4}[-]?', '', m)
-        normalized.append(digits_only)
-        if digits_only != m:
-            normalized.append(m)  # also keep original form
-    return normalized
+    """
+    Extract all PO HLI reference keys from a free-text field.
+    For '4570226161-10' emits: '4570226161', '4570226161-10', '4570226161-010'
+    For '4570226161'    emits: '4570226161'
+    """
+    if not val:
+        return []
+    text = str(val).strip()
+    result = set()
+    for m in PO_HLI_RE.finditer(text):
+        po_num  = m.group(1)
+        item_no = m.group(2)
+        result.add(po_num)
+        if item_no:
+            for item_var in _normalize_item_no(item_no):
+                result.add(f"{po_num}-{item_var}")
+    return list(result)
 
 def open_so_filter():
     """Return SQLAlchemy filter clause for open (non-closed) SO records."""
@@ -191,7 +222,13 @@ def get_dashboard_stats():
 
         matched_set = build_matched_set()
 
-        po_without_so_count = sum(1 for p in po_numbers if not po_is_matched(p, matched_set))
+        po_without_so_count = 0
+        for p in POData.query.all():
+            op_unit = get_operation_unit(p.po_item_type, p.item_code)
+            if op_unit in EXCLUDED_OP_UNITS:
+                continue
+            if not po_is_matched(p.po_number, p.item_no, matched_set):
+                po_without_so_count += 1
 
         so_without_po_count = 0
         for cpn, memo in db.session.query(SOData.customer_po_number, SOData.delivery_memo)\
@@ -304,7 +341,12 @@ def get_dashboard_stats():
         return jsonify({'error': str(e)}), 500
 
 def build_matched_set():
-    """Build set of PO numbers that already have a matching SO (excluding consumable op unit)."""
+    """
+    Build set of PO references that already have a matching SO.
+    Excludes SO rows from EXCLUDED_OP_UNITS.
+    The set contains both plain PO numbers AND combined "PO-ItemNo" strings
+    so we can match at either level.
+    """
     matched = set()
     for cpn, memo in db.session.query(SOData.customer_po_number, SOData.delivery_memo)\
             .filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
@@ -312,12 +354,28 @@ def build_matched_set():
         for n in extract_po_hli(memo): matched.add(n)
     return matched
 
-def po_is_matched(po_number, matched_set):
-    """Check if a PO number exists in the matched set (with normalization)."""
+def po_is_matched(po_number, item_no, matched_set):
+    """
+    Check if a PO line (po_number + item_no) is covered by any SO reference.
+    Logic:
+      - If matched_set contains the plain po_number  -> ALL items of that PO are matched
+      - If matched_set contains 'po_number-item_no' (any normalised variant) -> this item matched
+    """
     if not po_number:
         return False
-    po_clean = re.sub(r'^[A-Za-z]{0,4}[-]?', '', po_number)
-    return po_number in matched_set or po_clean in matched_set
+    po_str = str(po_number).strip()
+
+    # 1. Plain PO number match (SO references entire PO, all items covered)
+    if po_str in matched_set:
+        return True
+
+    # 2. Combined PO-ItemNo match (SO references specific item)
+    if item_no:
+        for item_var in _normalize_item_no(item_no):
+            if f"{po_str}-{item_var}" in matched_set:
+                return True
+
+    return False
 
 def get_operation_unit(po_item_type, item_code):
     """
@@ -352,9 +410,12 @@ def get_po_without_so():
         today = date.today()
         result = []
         for p in POData.query.all():
-            if not po_is_matched(p.po_number, matched_set):
+            op_unit = get_operation_unit(p.po_item_type, p.item_code)
+            # Exclude CONSUMABLE items from this list entirely
+            if op_unit in EXCLUDED_OP_UNITS:
+                continue
+            if not po_is_matched(p.po_number, p.item_no, matched_set):
                 days_remaining = (p.request_delivery - today).days if p.request_delivery else None
-                op_unit = get_operation_unit(p.po_item_type, p.item_code)
                 result.append({
                     'id': p.id, 'po_no': p.po_number, 'item_no': p.item_no,
                     'item_code': p.item_code,
@@ -785,16 +846,21 @@ def export_all_so():
 def export_po_without_so():
     try:
         matched_set = build_matched_set()
-        pos = [p for p in POData.query.all() if not po_is_matched(p.po_number, matched_set)]
         today = date.today()
+        pos = []
+        for p in POData.query.all():
+            op_unit = get_operation_unit(p.po_item_type, p.item_code)
+            if op_unit in EXCLUDED_OP_UNITS:
+                continue
+            if not po_is_matched(p.po_number, p.item_no, matched_set):
+                pos.append((p, op_unit))
         wb = Workbook(); ws = wb.active; ws.title = "PO Without SO"
         _style_wb(ws, ['PO Number','PO Item Type','Item No','Item Code','Operation Unit','Description','Supplier',
                        'Qty','Unit','Price','Amount','Currency',
                        'PO Date','Purchase Member','Request Delivery','Days Remaining',
                        'Delivery Plan Date','Remarks'], num_cols=[8,10,11])
-        for p in pos:
+        for p, op_unit in pos:
             days_rem = (p.request_delivery - today).days if p.request_delivery else ''
-            op_unit = get_operation_unit(p.po_item_type, p.item_code)
             ws.append([p.po_number, p.po_item_type or '', p.item_no or '', p.item_code or '', op_unit,
                 p.po_item_detail, p.supplier,
                 p.qty or 0, p.unit or '', p.price or 0, p.amount or 0, p.currency or 'IDR',
