@@ -164,21 +164,30 @@ def is_return_so_item(so_item):
         return False
     return str(so_item).strip().startswith('9')
 
-def is_excluded_so_number(so_number):
+def has_internal_po_ref(customer_po_number, delivery_memo):
     """
-    Return True if this SO Number should be excluded from PO HLI matching/counting.
-    Rules:
-      - SO Number that starts with '2' (internal/other type), e.g. 2024154899-20
+    Return True if the Customer PO Number or Delivery Memo contains a reference
+    that starts with '2' (internal/non-HLI order), e.g. 2024154899-20 or 2024390384-10.
+    These should NOT be counted as 'SO without PO HLI'.
     """
-    if not so_number:
-        return False
-    return str(so_number).strip().startswith('2')
+    for field in [customer_po_number, delivery_memo]:
+        if not field:
+            continue
+        text = str(field).strip()
+        # Check each token (space or comma separated)
+        for token in re.split(r'[\s,;]+', text):
+            token = token.strip()
+            if token and token[0] == '2' and re.match(r'^2\d{6,}', token):
+                return True
+    return False
 
-def so_is_countable(so_item, so_number):
+def so_is_countable(so_item, so_number=None, customer_po_number=None, delivery_memo=None):
     """Return True if this SO record should be counted in PO HLI without SO logic."""
+    # Exclude return items (SO Item starts with 9)
     if is_return_so_item(so_item):
         return False
-    if is_excluded_so_number(so_number):
+    # Exclude SO where Cust PO or Delivery Memo references start with '2'
+    if has_internal_po_ref(customer_po_number, delivery_memo):
         return False
     return True
 
@@ -262,8 +271,8 @@ def get_dashboard_stats():
         for s in db.session.query(SOData).filter(
                 open_so_filter(),
                 ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
-            # Exclude return items and internal SO numbers
-            if not so_is_countable(s.so_item, s.so_number):
+            # Exclude return items (SO Item starts with 9) and internal refs (Cust PO/Memo starts with 2)
+            if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
                 continue
             candidates = extract_po_hli(s.customer_po_number) + extract_po_hli(s.delivery_memo)
             if not candidates or not any(c in po_numbers for c in candidates):
@@ -386,7 +395,7 @@ def build_matched_set():
             SOData.so_item, SOData.so_number,
             SOData.customer_po_number, SOData.delivery_memo)\
             .filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
-        if not so_is_countable(so_item, so_number):
+        if not so_is_countable(so_item, customer_po_number=cpn, delivery_memo=memo):
             continue
         for n in extract_po_hli(cpn): matched.add(n)
         for n in extract_po_hli(memo): matched.add(n)
@@ -482,8 +491,8 @@ def get_so_without_po():
         for s in db.session.query(SOData).filter(
                 open_so_filter(),
                 ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
-            # Exclude return items (SO item starts with 9) and internal SO numbers (starts with 2)
-            if not so_is_countable(s.so_item, s.so_number):
+            # Exclude return items (SO item starts with 9) and internal refs in Cust PO/Memo
+            if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
                 continue
             candidates = extract_po_hli(s.customer_po_number) + extract_po_hli(s.delivery_memo)
             if not candidates or not any(c in po_numbers for c in candidates):
@@ -499,8 +508,8 @@ def get_aging_data():
         today = date.today()
         vendors = {}
         for s in db.session.query(SOData).filter(open_so_filter(), SOData.so_create_date.isnot(None)).all():
-            # Exclude return items and internal SO numbers
-            if not so_is_countable(s.so_item, s.so_number):
+            # Exclude return items (SO item starts with 9) and internal refs in Cust PO/Memo
+            if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
                 continue
             v = s.vendor_name or 'Unknown'
             if v not in vendors:
@@ -526,8 +535,8 @@ def get_aging_detail(vendor_name):
         sos = db.session.query(SOData).filter(
             open_so_filter(), SOData.vendor_name == vendor_name
         ).order_by(SOData.so_create_date.asc()).all()
-        # Exclude return items (SO item starts with 9) and internal SO numbers (starts with 2)
-        sos = [s for s in sos if so_is_countable(s.so_item, s.so_number)]
+        # Exclude return items and internal refs in Cust PO/Memo
+        sos = [s for s in sos if so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
         if bucket:
             bucket = bucket.strip().replace(' ', '+')  # fix URL encoding: + decoded as space
             sos = [s for s in sos if get_aging_label((today - s.so_create_date).days if s.so_create_date else None) == bucket]
@@ -545,8 +554,8 @@ def get_aging_detail_all():
         sos = db.session.query(SOData).filter(
             open_so_filter(), SOData.so_create_date.isnot(None)
         ).order_by(SOData.vendor_name.asc(), SOData.so_create_date.asc()).all()
-        # Exclude return items and internal SO numbers
-        sos = [s for s in sos if so_is_countable(s.so_item, s.so_number)]
+        # Exclude return items and internal refs in Cust PO/Memo
+        sos = [s for s in sos if so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
         if bucket:
             sos = [s for s in sos if get_aging_label((today - s.so_create_date).days if s.so_create_date else None) == bucket]
         return jsonify([so_dict(s) for s in sos])
