@@ -170,8 +170,12 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
 const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
-  // "all selected" means selected is empty (no filter applied = show all)
-  const allSelected = selected.length === 0 || selected.length === options.length;
+  // "all selected" = selected array is empty (no filter = show all)
+  const noneSelected = selected.length === 0;
+  const allSelected  = selected.length === options.length;
+  const someSelected = !noneSelected && !allSelected;
+  // visually "all checked" when no filter applied
+  const allVisuallyChecked = noneSelected;
 
   useEffect(() => {
     const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
@@ -179,41 +183,81 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  const toggle = (val) => {
-    if (allSelected) {
-      // When all are selected and user clicks one, deselect all others (keep only this one)
-      onChange(options.filter(o => o !== val));
+  const toggleAll = () => {
+    if (noneSelected) {
+      // Currently all checked → uncheck all (set to explicit empty selection = nothing shown)
+      // We use a sentinel: store all items as "selected" but display as "0 dipilih"
+      // Better UX: uncheck all means filter passes nothing, so we store all as excluded
+      // Actually Excel behavior: uncheck all → nothing shows. We store [] but invert logic.
+      // Simplest: use null/special state — instead use a "noneMode" approach:
+      // When noneSelected (was all-checked), clicking unchecks all → store special marker
+      onChange('__NONE__');
     } else {
-      const next = selected.includes(val) ? selected.filter(x=>x!==val) : [...selected, val];
-      // If all options are selected, reset to empty (= all)
+      // Currently some/all explicitly selected OR none-mode → check all → reset to []
+      onChange([]);
+    }
+  };
+
+  const toggle = (val) => {
+    // If currently in all-checked visual state (noneSelected)
+    if (noneSelected) {
+      // Click one item: keep only that one checked (deselect all others)
+      onChange([val]);
+      return;
+    }
+    const currentSelected = selected === '__NONE__' ? [] : selected;
+    if (currentSelected.includes(val)) {
+      const next = currentSelected.filter(x => x !== val);
+      onChange(next.length === 0 ? '__NONE__' : next);
+    } else {
+      const next = [...currentSelected, val];
       onChange(next.length === options.length ? [] : next);
     }
   };
 
-  const toggleAll = () => {
-    onChange([]); // empty = all selected
+  const isChecked = (val) => {
+    if (selected === '__NONE__') return false;
+    if (noneSelected) return true; // all visually checked
+    return selected.includes(val);
   };
 
-  const isChecked = (val) => allSelected || selected.includes(val);
+  const isAllChecked = selected !== '__NONE__' && noneSelected;
+  const isNoneMode   = selected === '__NONE__';
+
+  const displayLabel = isNoneMode
+    ? `0 dipilih`
+    : noneSelected
+    ? `Semua ${label}`
+    : `${selected.length} dipilih`;
 
   return (
     <div className="relative flex-1 min-w-[180px]" ref={ref}>
       <label className={`block text-xs font-medium mb-1 ${txt2}`}>{label}</label>
-      <button onClick={()=>setOpen(o=>!o)}
-        className={`w-full px-3 py-2 rounded-lg text-sm border text-left flex justify-between items-center ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300 text-gray-700'}`}>
-        <span className="truncate">{allSelected ? `Semua ${label}` : `${selected.length} dipilih`}</span>
+      <button onClick={()=>setOpen(o=>!o)} style={{cursor:'pointer'}}
+        className={`w-full px-3 py-2 rounded-lg text-sm border text-left flex justify-between items-center transition-colors
+          ${darkMode
+            ? 'bg-gray-600 border-gray-500 text-white hover:bg-gray-500'
+            : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
+        <span className="truncate">{displayLabel}</span>
         <ChevronDown className="w-4 h-4 flex-shrink-0 ml-1"/>
       </button>
       {open && (
         <div className={`absolute z-50 mt-1 w-full max-h-56 overflow-auto rounded-lg shadow-xl border ${darkMode?'bg-gray-700 border-gray-600':'bg-white border-gray-200'}`}>
           {/* Select All row — like Excel */}
-          <label className={`flex items-center gap-2 px-3 py-2 text-xs cursor-pointer font-semibold border-b ${darkMode?'border-gray-600 hover:bg-gray-600 text-white':'border-gray-100 hover:bg-purple-50 text-gray-700'}`}>
-            <input type="checkbox" checked={allSelected} onChange={toggleAll} className="accent-purple-600"/>
+          <label style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold border-b
+            ${darkMode?'border-gray-600 hover:bg-gray-600 text-white':'border-gray-100 hover:bg-purple-50 text-gray-700'}`}>
+            <input type="checkbox"
+              checked={isAllChecked}
+              ref={el => { if (el) el.indeterminate = someSelected; }}
+              onChange={toggleAll}
+              className="accent-purple-600" style={{cursor:'pointer'}}/>
             <span>(Pilih Semua)</span>
           </label>
           {options.map(opt => (
-            <label key={opt} className={`flex items-center gap-2 px-3 py-2 text-xs cursor-pointer ${darkMode?'hover:bg-gray-600 text-white':'hover:bg-purple-50 text-gray-700'}`}>
-              <input type="checkbox" checked={isChecked(opt)} onChange={()=>toggle(opt)} className="accent-purple-600"/>
+            <label key={opt} style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs
+              ${darkMode?'hover:bg-gray-600 text-white':'hover:bg-purple-50 text-gray-700'}`}>
+              <input type="checkbox" checked={isChecked(opt)} onChange={()=>toggle(opt)}
+                className="accent-purple-600" style={{cursor:'pointer'}}/>
               <span className="truncate" title={opt}>{opt}</span>
             </label>
           ))}
@@ -414,15 +458,21 @@ const App = () => {
     } finally { setLoading(false); }
   }, [addToast]);
 
+  // Helper: resolve filter array — __NONE__ means "nothing selected" (filter passes nothing)
+  const resolveFilter = (val) => {
+    if (val === '__NONE__') return ['__NONE_PLACEHOLDER__']; // backend will return 0 rows
+    if (!Array.isArray(val) || val.length === 0) return []; // empty = no filter = all
+    return val;
+  };
+
   const fetchSOData = useCallback(async (filters, page, perPage, searchNums) => {
     setLoading(true);
     try {
       const params = new URLSearchParams({ page, per_page: perPage });
-      (filters.op_units || []).forEach(v => params.append('op_unit', v));
-      (filters.vendors || []).forEach(v => params.append('vendor', v));
-      (filters.statuses || []).forEach(v => params.append('status', v));
+      resolveFilter(filters.op_units).forEach(v => params.append('op_unit', v));
+      resolveFilter(filters.vendors).forEach(v => params.append('vendor', v));
+      resolveFilter(filters.statuses).forEach(v => params.append('status', v));
       (filters.aging || []).forEach(a => params.append('aging', a));
-      // Search by SO item
       (searchNums || []).forEach(n => params.append('so_item', n));
       const res = await api.get(`/api/data/all-so?${params}`);
       setAllSOData(Array.isArray(res.data.data) ? res.data.data : []);
@@ -440,10 +490,15 @@ const App = () => {
       const nums = poSearchNums.map(n=>n.toLowerCase());
       filtered = filtered.filter(p => nums.some(n => (p.po_no||'').toLowerCase().includes(n)));
     }
-    if (poFilterItemType.length > 0) {
+    // __NONE__ = nothing passes; [] = all pass; array = filter by those values
+    if (poFilterItemType === '__NONE__') {
+      filtered = [];
+    } else if (Array.isArray(poFilterItemType) && poFilterItemType.length > 0) {
       filtered = filtered.filter(p => poFilterItemType.includes(p.po_item_type));
     }
-    if (poFilterOpUnit.length > 0) {
+    if (poFilterOpUnit === '__NONE__') {
+      filtered = [];
+    } else if (Array.isArray(poFilterOpUnit) && poFilterOpUnit.length > 0) {
       filtered = filtered.filter(p => poFilterOpUnit.includes(p.operation_unit));
     }
     setPoFiltered(filtered);
@@ -908,14 +963,14 @@ const App = () => {
             <p className={`text-sm ${txt2}`}>{fmtNum(soTotal)} total records — halaman {soPage} dari {soTotalPages}</p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <label className="flex items-center gap-1 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm cursor-pointer">
+            <label className="flex items-center gap-1 px-3 py-1.5 bg-green-700 hover:bg-green-800 text-white rounded-lg text-sm font-medium shadow-sm">
               <Upload className="w-4 h-4"/>Batch Upload
               <input type="file" accept=".xlsx,.xls" onChange={handleBatchUpload} className="hidden"/>
             </label>
-            <DownloadButton onClick={downloadSOTemplate} className="flex items-center gap-1 px-3 py-1.5 bg-yellow-500 hover:bg-yellow-600 text-white rounded-lg text-sm">
+            <DownloadButton onClick={downloadSOTemplate} className="flex items-center gap-1 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm font-medium shadow-sm">
               <FileSpreadsheet className="w-4 h-4"/>Template
             </DownloadButton>
-            <DownloadButton onClick={downloadSOExcel} className="flex items-center gap-1 px-3 py-1.5 bg-gradient-to-r from-purple-600 to-purple-500 text-white rounded-lg text-sm shadow">
+            <DownloadButton onClick={downloadSOExcel} className="flex items-center gap-1 px-3 py-1.5 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-medium shadow-sm">
               <Download className="w-4 h-4"/>Download Excel
             </DownloadButton>
           </div>
@@ -978,13 +1033,13 @@ const App = () => {
             </div>
             <div className="flex gap-2">
               <button onClick={()=>{ setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums); }}
-                className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-sm font-medium">Apply</button>
+                className="px-5 py-2 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-semibold shadow-sm">Apply</button>
               <button onClick={()=>{
                 const f={op_units:[],vendors:[],statuses:[],aging:[]};
                 setSoFilters(f); setSoSearchNums([]); setSoPage(1);
                 fetchSOData(f,1,soPerPage,[]);
               }}
-                className={`px-4 py-2 rounded-lg text-sm font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>Reset</button>
+                className={`px-4 py-2 rounded-lg text-sm font-medium shadow-sm ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Reset</button>
             </div>
           </div>
           {/* Active filter tags */}
@@ -1031,13 +1086,17 @@ const App = () => {
                 <tr><td colSpan={14} className={`px-4 py-10 text-center ${txt2}`}>
                   <FileText className="w-10 h-10 mx-auto mb-2 opacity-40"/>Tidak ada data
                 </td></tr>
-              ) : allSOData.map((so)=>(
+              ) : allSOData.map((so)=>{
+                const isDeliveryCompleted = so.so_status === 'Delivery Completed';
+                return (
                 <tr key={so.id} className={`${trHov} transition-colors`}>
                   <td className="px-3 py-2 whitespace-nowrap">
-                    <span className={`px-2 py-0.5 rounded-full text-xs font-bold text-white`}
-                      style={{backgroundColor: AGING_COLORS[so.aging_label] || '#6B7280'}}>
-                      {so.aging_label||'-'}
-                    </span>
+                    {!isDeliveryCompleted && so.aging_label && so.aging_label !== 'No Date' ? (
+                      <span className="px-2 py-0.5 rounded-full text-xs font-bold text-white"
+                        style={{backgroundColor: AGING_COLORS[so.aging_label] || '#6B7280'}}>
+                        {so.aging_label}
+                      </span>
+                    ) : null}
                   </td>
                   {/* SO Item first, no SO Number column */}
                   <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{so.so_item}</td>
@@ -1102,7 +1161,8 @@ const App = () => {
                     )}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -1140,7 +1200,7 @@ const App = () => {
               <option value={100}>100 Baris</option>
               <option value={500}>500 Baris</option>
             </select>
-            <DownloadButton onClick={downloadPOExcel} className="flex items-center gap-1 px-4 py-1.5 bg-gradient-to-r from-purple-600 to-purple-500 text-white rounded-lg text-sm shadow">
+            <DownloadButton onClick={downloadPOExcel} className="flex items-center gap-1 px-4 py-1.5 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-medium shadow-sm">
               <Download className="w-4 h-4"/>Download Excel
             </DownloadButton>
           </div>
@@ -1267,12 +1327,18 @@ const App = () => {
   // ══════════════════════════════════════════════════════════════
   return (
     <div className={`min-h-screen font-sans ${darkMode?'bg-gray-900':'bg-gray-50'}`}>
-      <style>{`
+    <style>{`
         @keyframes slide-in {
           from { transform: translateX(100%); opacity: 0; }
           to   { transform: translateX(0);    opacity: 1; }
         }
         .animate-slide-in { animation: slide-in 0.25s ease-out forwards; }
+        /* Global: all buttons, links, selects, labels with checkboxes → pointer cursor */
+        button, [role="button"], select, label[for], a,
+        input[type="checkbox"], input[type="radio"] {
+          cursor: pointer !important;
+        }
+        button:disabled { cursor: not-allowed !important; opacity: 0.5; }
       `}</style>
 
       <div className="fixed top-5 right-5 z-[100] flex flex-col gap-2">
@@ -1311,11 +1377,11 @@ const App = () => {
             </p>
           </div>
           <div className="flex gap-3">
-            <label className={`flex items-center gap-2 px-4 py-2 rounded-xl cursor-pointer shadow hover:shadow-md transition-all ${darkMode?'bg-purple-600 text-white':'bg-gradient-to-r from-purple-600 to-purple-500 text-white'}`}>
+            <label className={`flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all ${darkMode?'bg-purple-700 hover:bg-purple-800 text-white':'bg-purple-700 hover:bg-purple-800 text-white'}`}>
               <Upload className="w-4 h-4"/><span className="text-sm font-medium">Upload PO List</span>
               <input type="file" accept=".xlsx,.xls" onChange={e=>handleUpload(e,'po')} className="hidden"/>
             </label>
-            <label className={`flex items-center gap-2 px-4 py-2 rounded-xl cursor-pointer shadow hover:shadow-md transition-all ${darkMode?'bg-blue-600 text-white':'bg-gradient-to-r from-blue-500 to-blue-600 text-white'}`}>
+            <label className={`flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all ${darkMode?'bg-blue-700 hover:bg-blue-800 text-white':'bg-blue-700 hover:bg-blue-800 text-white'}`}>
               <Upload className="w-4 h-4"/><span className="text-sm font-medium">Upload SMRO</span>
               <input type="file" accept=".xlsx,.xls" onChange={e=>handleUpload(e,'smro')} className="hidden"/>
             </label>
