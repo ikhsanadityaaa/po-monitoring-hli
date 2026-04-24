@@ -552,9 +552,9 @@ const App = () => {
 
   const downloadSOExcel = () => {
     const p = new URLSearchParams();
-    (soFilters.op_units||[]).forEach(v => p.append('op_unit', v));
-    (soFilters.vendors||[]).forEach(v => p.append('vendor', v));
-    (soFilters.statuses||[]).forEach(v => p.append('status', v));
+    resolveFilter(soFilters.op_units).forEach(v => p.append('op_unit', v));
+    resolveFilter(soFilters.vendors).forEach(v => p.append('vendor', v));
+    resolveFilter(soFilters.statuses).forEach(v => p.append('status', v));
     downloadBlob(`/api/export/all-so?${p}`, `SO_List_${new Date().toISOString().slice(0,10)}.xlsx`, 'SO List');
   };
   const downloadPOExcel = () => downloadBlob('/api/export/po-without-so', `PO_Without_SO_${new Date().toISOString().slice(0,10)}.xlsx`, 'PO Without SO');
@@ -1026,30 +1026,50 @@ const App = () => {
             </div>
           </div>
           {/* Active filter tags */}
-          {(soSearchNums.length + soFilters.op_units.length + soFilters.vendors.length + soFilters.statuses.length) > 0 && (
+          {(() => {
+            const activeOpUnits = Array.isArray(soFilters.op_units) ? soFilters.op_units : [];
+            const activeVendors = Array.isArray(soFilters.vendors) ? soFilters.vendors : [];
+            const activeStatuses = Array.isArray(soFilters.statuses) ? soFilters.statuses : [];
+            const hasActive = soSearchNums.length + activeOpUnits.length + activeVendors.length + activeStatuses.length > 0
+              || soFilters.op_units === '__NONE__' || soFilters.vendors === '__NONE__' || soFilters.statuses === '__NONE__';
+            if (!hasActive) return null;
+            return (
             <div className="mt-3 flex flex-wrap gap-1.5">
               {soSearchNums.map(v=>(
                 <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-xs">
                   SO: {v}<button onClick={()=>{ const next=soSearchNums.filter(x=>x!==v); setSoSearchNums(next); setSoPage(1); fetchSOData(soFilters,1,soPerPage,next); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                 </span>
               ))}
-              {soFilters.op_units.map(v=>(
+              {soFilters.op_units === '__NONE__' ? (
+                <span className="flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full text-xs">
+                  Op Unit: (kosong)<button onClick={()=>setSoFilters(f=>({...f,op_units:[]}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                </span>
+              ) : activeOpUnits.map(v=>(
                 <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full text-xs">
-                  {v}<button onClick={()=>setSoFilters(f=>({...f,op_units:f.op_units.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                  {v}<button onClick={()=>setSoFilters(f=>({...f,op_units:activeOpUnits.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                 </span>
               ))}
-              {soFilters.vendors.map(v=>(
+              {soFilters.vendors === '__NONE__' ? (
+                <span className="flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">
+                  Vendor: (kosong)<button onClick={()=>setSoFilters(f=>({...f,vendors:[]}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                </span>
+              ) : activeVendors.map(v=>(
                 <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">
-                  {v}<button onClick={()=>setSoFilters(f=>({...f,vendors:f.vendors.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                  {v}<button onClick={()=>setSoFilters(f=>({...f,vendors:activeVendors.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                 </span>
               ))}
-              {soFilters.statuses.map(v=>(
+              {soFilters.statuses === '__NONE__' ? (
+                <span className="flex items-center gap-1 px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs">
+                  Status: (kosong)<button onClick={()=>setSoFilters(f=>({...f,statuses:[]}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                </span>
+              ) : activeStatuses.map(v=>(
                 <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs">
-                  {v}<button onClick={()=>setSoFilters(f=>({...f,statuses:f.statuses.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                  {v}<button onClick={()=>setSoFilters(f=>({...f,statuses:activeStatuses.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                 </span>
               ))}
             </div>
-          )}
+            );
+          })()}
         </div>
 
         {/* SO Table — removed SO Number column, SO Item is leftmost */}
