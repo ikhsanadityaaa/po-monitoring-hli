@@ -154,6 +154,34 @@ def open_so_filter():
         SOData.so_status.notin_(list(CLOSED_STATUSES))
     )
 
+def is_return_so_item(so_item):
+    """
+    Return True if this SO item should be excluded from PO HLI matching/counting.
+    Rules:
+      - SO Item that starts with '9' (return item), e.g. 9008988017-10
+    """
+    if not so_item:
+        return False
+    return str(so_item).strip().startswith('9')
+
+def is_excluded_so_number(so_number):
+    """
+    Return True if this SO Number should be excluded from PO HLI matching/counting.
+    Rules:
+      - SO Number that starts with '2' (internal/other type), e.g. 2024154899-20
+    """
+    if not so_number:
+        return False
+    return str(so_number).strip().startswith('2')
+
+def so_is_countable(so_item, so_number):
+    """Return True if this SO record should be counted in PO HLI without SO logic."""
+    if is_return_so_item(so_item):
+        return False
+    if is_excluded_so_number(so_number):
+        return False
+    return True
+
 def clean(val):
     if val is None: return None
     try:
@@ -231,10 +259,13 @@ def get_dashboard_stats():
                 po_without_so_count += 1
 
         so_without_po_count = 0
-        for cpn, memo in db.session.query(SOData.customer_po_number, SOData.delivery_memo)\
-                                   .filter(open_so_filter(),
-                                           ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
-            candidates = extract_po_hli(cpn) + extract_po_hli(memo)
+        for s in db.session.query(SOData).filter(
+                open_so_filter(),
+                ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
+            # Exclude return items and internal SO numbers
+            if not so_is_countable(s.so_item, s.so_number):
+                continue
+            candidates = extract_po_hli(s.customer_po_number) + extract_po_hli(s.delivery_memo)
             if not candidates or not any(c in po_numbers for c in candidates):
                 so_without_po_count += 1
 
@@ -343,13 +374,20 @@ def get_dashboard_stats():
 def build_matched_set():
     """
     Build set of PO references that already have a matching SO.
-    Excludes SO rows from EXCLUDED_OP_UNITS.
+    Excludes:
+      - SO rows from EXCLUDED_OP_UNITS
+      - SO items starting with '9' (return items)
+      - SO numbers starting with '2' (internal order type)
     The set contains both plain PO numbers AND combined "PO-ItemNo" strings
     so we can match at either level.
     """
     matched = set()
-    for cpn, memo in db.session.query(SOData.customer_po_number, SOData.delivery_memo)\
+    for so_item, so_number, cpn, memo in db.session.query(
+            SOData.so_item, SOData.so_number,
+            SOData.customer_po_number, SOData.delivery_memo)\
             .filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
+        if not so_is_countable(so_item, so_number):
+            continue
         for n in extract_po_hli(cpn): matched.add(n)
         for n in extract_po_hli(memo): matched.add(n)
     return matched
@@ -444,6 +482,9 @@ def get_so_without_po():
         for s in db.session.query(SOData).filter(
                 open_so_filter(),
                 ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
+            # Exclude return items (SO item starts with 9) and internal SO numbers (starts with 2)
+            if not so_is_countable(s.so_item, s.so_number):
+                continue
             candidates = extract_po_hli(s.customer_po_number) + extract_po_hli(s.delivery_memo)
             if not candidates or not any(c in po_numbers for c in candidates):
                 result.append(so_dict(s))
@@ -458,6 +499,9 @@ def get_aging_data():
         today = date.today()
         vendors = {}
         for s in db.session.query(SOData).filter(open_so_filter(), SOData.so_create_date.isnot(None)).all():
+            # Exclude return items and internal SO numbers
+            if not so_is_countable(s.so_item, s.so_number):
+                continue
             v = s.vendor_name or 'Unknown'
             if v not in vendors:
                 vendors[v] = {'vendor': v, 'less_30': 0, 'days_30_90': 0,
@@ -482,6 +526,8 @@ def get_aging_detail(vendor_name):
         sos = db.session.query(SOData).filter(
             open_so_filter(), SOData.vendor_name == vendor_name
         ).order_by(SOData.so_create_date.asc()).all()
+        # Exclude return items (SO item starts with 9) and internal SO numbers (starts with 2)
+        sos = [s for s in sos if so_is_countable(s.so_item, s.so_number)]
         if bucket:
             bucket = bucket.strip().replace(' ', '+')  # fix URL encoding: + decoded as space
             sos = [s for s in sos if get_aging_label((today - s.so_create_date).days if s.so_create_date else None) == bucket]
@@ -499,6 +545,8 @@ def get_aging_detail_all():
         sos = db.session.query(SOData).filter(
             open_so_filter(), SOData.so_create_date.isnot(None)
         ).order_by(SOData.vendor_name.asc(), SOData.so_create_date.asc()).all()
+        # Exclude return items and internal SO numbers
+        sos = [s for s in sos if so_is_countable(s.so_item, s.so_number)]
         if bucket:
             sos = [s for s in sos if get_aging_label((today - s.so_create_date).days if s.so_create_date else None) == bucket]
         return jsonify([so_dict(s) for s in sos])
@@ -550,7 +598,28 @@ def get_all_so():
 @app.route('/api/data/so-status-detail/<path:status>', methods=['GET'])
 def get_so_status_detail(status):
     try:
+        month = request.args.get('month')  # e.g. 'Jan 2024', optional
         sos = SOData.query.filter_by(so_status=status).all()
+        if month:
+            filtered = []
+            for s in sos:
+                if s.so_create_date and s.so_create_date.strftime('%b %Y') == month:
+                    filtered.append(s)
+            sos = filtered
+        return jsonify([so_dict(s) for s in sos])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/data/so-status-detail-all', methods=['GET'])
+def get_so_status_detail_all():
+    """All SO records filtered by optional month — for TOTAL row clicks in Status Distribution."""
+    try:
+        month = request.args.get('month')
+        q = SOData.query
+        if month:
+            sos = [s for s in q.all() if s.so_create_date and s.so_create_date.strftime('%b %Y') == month]
+        else:
+            sos = q.all()
         return jsonify([so_dict(s) for s in sos])
     except Exception as e:
         return jsonify({'error': str(e)}), 500
