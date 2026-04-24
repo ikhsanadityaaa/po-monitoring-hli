@@ -472,7 +472,7 @@ const App = () => {
     return val;
   };
 
-  const fetchSOData = useCallback(async (filters, page, perPage, searchNums) => {
+  const fetchSOData = useCallback(async (filters, page, perPage, searchNums, marginFilter) => {
     setLoading(true);
     try {
       const params = new URLSearchParams({ page, per_page: perPage });
@@ -481,6 +481,7 @@ const App = () => {
       resolveFilter(filters.statuses).forEach(v => params.append('status', v));
       (filters.aging || []).forEach(a => params.append('aging', a));
       (searchNums || []).forEach(n => params.append('so_item', n));
+      if (marginFilter && marginFilter !== 'all') params.append('margin_filter', marginFilter);
       const res = await api.get(`/api/data/all-so?${params}`);
       setAllSOData(Array.isArray(res.data.data) ? res.data.data : []);
       setSoTotal(res.data.total || 0);
@@ -513,7 +514,7 @@ const App = () => {
   }, [poWithoutSO, poSearchNums, poFilterItemType, poFilterOpUnit]);
 
   useEffect(() => { fetchDashboard(); }, []);
-  useEffect(() => { if (activePage === 'all-so') fetchSOData(soFilters, soPage, soPerPage, soSearchNums); }, [activePage]);
+  useEffect(() => { if (activePage === 'all-so') fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter); }, [activePage]);
 
   const handleUpload = async (e, type) => {
     const file = e.target.files[0]; if (!file) return;
@@ -581,7 +582,7 @@ const App = () => {
       setUploadProgress(null);
       addToast(`✅ ${res.data.message}`, 'success');
       fetchDashboard();
-      if (activePage === 'all-so') fetchSOData(soFilters, 1, soPerPage, soSearchNums);
+      if (activePage === 'all-so') fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter);
       setSoPage(1);
     } catch (e) {
       setUploadProgress(null);
@@ -601,7 +602,7 @@ const App = () => {
       });
       setUploadProgress(null);
       addToast(`✅ Batch update: ${res.data.updated} records diperbarui`, 'success');
-      fetchSOData(soFilters, soPage, soPerPage, soSearchNums);
+      fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter);
     } catch (e) {
       setUploadProgress(null);
       addToast(`❌ Gagal batch upload: ${e.response?.data?.error || e.message}`, 'error');
@@ -711,7 +712,7 @@ const App = () => {
           onClick={() => {
             setActivePage('all-so');
             setSoPage(1);
-            fetchSOData(soFilters, 1, soPerPage, soSearchNums);
+            fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter);
             setTimeout(() => { poTableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 300);
           }}>
           <div className="flex justify-between items-start">
@@ -752,7 +753,7 @@ const App = () => {
           onClick={() => {
             setActivePage('all-so');
             setSoPage(1);
-            fetchSOData(soFilters, 1, soPerPage, soSearchNums);
+            fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter);
             window.scrollTo({ top: 0, behavior: 'smooth' });
           }}>
           <div className="flex justify-between items-start">
@@ -1115,7 +1116,7 @@ const App = () => {
                 onSearch={(nums) => {
                   setSoSearchNums(nums);
                   setSoPage(1);
-                  fetchSOData(soFilters, 1, soPerPage, nums);
+                  fetchSOData(soFilters, 1, soPerPage, nums, soMarginFilter);
                 }}
                 darkMode={darkMode} txt2={txt2}
               />
@@ -1149,12 +1150,12 @@ const App = () => {
               </select>
             </div>
             <div className="flex gap-2">
-              <button onClick={()=>{ setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums); }}
+              <button onClick={()=>{ setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums,soMarginFilter); }}
                 className="px-5 py-2 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-semibold shadow-sm">Apply</button>
               <button onClick={()=>{
                 const f={op_units:[],vendors:[],statuses:[],aging:[]};
                 setSoFilters(f); setSoSearchNums([]); setSoMarginFilter('all'); setSoPage(1);
-                fetchSOData(f,1,soPerPage,[]);
+                fetchSOData(f,1,soPerPage,[],'all');
               }}
                 className={`px-4 py-2 rounded-lg text-sm font-medium shadow-sm ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Reset</button>
             </div>
@@ -1164,7 +1165,7 @@ const App = () => {
             <div className="mt-3 flex flex-wrap gap-1.5">
               {soSearchNums.map(v=>(
                 <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-xs">
-                  SO: {v}<button onClick={()=>{ const next=soSearchNums.filter(x=>x!==v); setSoSearchNums(next); setSoPage(1); fetchSOData(soFilters,1,soPerPage,next); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                  SO: {v}<button onClick={()=>{ const next=soSearchNums.filter(x=>x!==v); setSoSearchNums(next); setSoPage(1); fetchSOData(soFilters,1,soPerPage,next,soMarginFilter); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                 </span>
               ))}
               {soFilters.op_units.map(v=>(
@@ -1200,18 +1201,12 @@ const App = () => {
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
               {(() => {
-                // Apply client-side margin filter
-                const marginFiltered = soMarginFilter === 'all' ? allSOData : allSOData.filter(so => {
-                  const poAmt = (so.purchasing_price || 0) * (so.so_qty || 0);
-                  const margin = (so.sales_amount || 0) - poAmt;
-                  return soMarginFilter === 'negative' ? margin < 0 : margin >= 0;
-                });
-                if (marginFiltered.length === 0) return (
+                if (allSOData.length === 0) return (
                   <tr><td colSpan={16} className={`px-4 py-10 text-center ${txt2}`}>
                     <FileText className="w-10 h-10 mx-auto mb-2 opacity-40"/>Tidak ada data
                   </td></tr>
                 );
-                return marginFiltered.map((so) => {
+                return allSOData.map((so) => {
                 const isDeliveryCompleted = so.so_status === 'Delivery Completed';
                 const poAmount = (so.purchasing_price || 0) * (so.so_qty || 0);
                 const margin = (so.sales_amount || 0) - poAmount;
@@ -1307,10 +1302,10 @@ const App = () => {
             Menampilkan {((soPage-1)*soPerPage)+1}–{Math.min(soPage*soPerPage,soTotal)} dari {fmtNum(soTotal)}
           </span>
           <div className="flex gap-1 items-center">
-            <button disabled={soPage===1} onClick={()=>{ const p=soPage-1; setSoPage(p); fetchSOData(soFilters,p,soPerPage,soSearchNums); }}
+            <button disabled={soPage===1} onClick={()=>{ const p=soPage-1; setSoPage(p); fetchSOData(soFilters,p,soPerPage,soSearchNums,soMarginFilter); }}
               className={`p-1.5 rounded ${soPage===1?'opacity-40':'hover:bg-purple-100'}`}><ChevronLeft className="w-4 h-4"/></button>
             <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-purple-100 text-purple-700'}`}>{soPage}/{soTotalPages}</span>
-            <button disabled={soPage===soTotalPages} onClick={()=>{ const p=soPage+1; setSoPage(p); fetchSOData(soFilters,p,soPerPage,soSearchNums); }}
+            <button disabled={soPage===soTotalPages} onClick={()=>{ const p=soPage+1; setSoPage(p); fetchSOData(soFilters,p,soPerPage,soSearchNums,soMarginFilter); }}
               className={`p-1.5 rounded ${soPage===soTotalPages?'opacity-40':'hover:bg-purple-100'}`}><ChevronRight className="w-4 h-4"/></button>
           </div>
         </div>
@@ -1492,7 +1487,7 @@ const App = () => {
             className={`p-3 rounded-xl flex justify-center transition-all ${activePage==='dashboard'?'bg-white/30 text-white shadow-lg':'text-purple-100 hover:bg-white/20'}`} title="Dashboard">
             <BarChart3 className="w-6 h-6"/>
           </button>
-          <button onClick={()=>{ setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums); window.scrollTo({top:0, behavior:'smooth'}); }}
+          <button onClick={()=>{ setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums,soMarginFilter); window.scrollTo({top:0, behavior:'smooth'}); }}
             className={`p-3 rounded-xl flex justify-center transition-all ${activePage==='all-so'?'bg-white/30 text-white shadow-lg':'text-purple-100 hover:bg-white/20'}`} title="All Sales Orders">
             <FileText className="w-6 h-6"/>
           </button>
