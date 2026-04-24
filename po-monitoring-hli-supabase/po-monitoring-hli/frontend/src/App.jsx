@@ -99,9 +99,15 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
   const PER = 50;
   const pages = Math.ceil((data?.length || 0) / PER);
   const rows = (data || []).slice((dlPage-1)*PER, dlPage*PER);
+
+  // Determine if SO Item column exists in data (show SO Number only when SO Item is absent)
+  const hasSoItem = (data || []).some(s => s.so_item);
+
   const downloadExcel = () => {
     const ws = XLSX.utils.json_to_sheet(data.map(s => ({
-      'SO Item': s.so_item, 'SO Number': s.so_number, 'Status': s.so_status,
+      'SO Item': s.so_item,
+      ...(!hasSoItem ? { 'SO Number': s.so_number } : {}),
+      'Status': s.so_status,
       'Op Unit': s.operation_unit_name, 'Vendor': s.vendor_name, 'Product': s.product_name,
       'SO Qty': s.so_qty, 'Sales Price': s.sales_price, 'Sales Amount': s.sales_amount,
       'Customer PO': s.customer_po_number, 'Delivery Memo': s.delivery_memo,
@@ -126,26 +132,26 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
         <div className="overflow-auto flex-1">
           <table className="w-full text-sm">
             <thead className={`sticky top-0 ${darkMode?'bg-gray-700':'bg-purple-50'}`}>
-              <tr>{['SO Item','SO Number','Status','Op Unit','Vendor','Product','Qty','Sales Amount','Cust PO','Delivery Memo','SO Date','Plan Date','Remarks'].map(h=>(
+              <tr>{['SO Item', ...(!hasSoItem ? ['SO Number'] : []), 'Status','Op Unit','Vendor','Product','Qty','Sales Amount','Cust PO','Delivery Memo','SO Date','Plan Date','Remarks'].map(h=>(
                 <th key={h} className={`px-3 py-2 text-left font-semibold whitespace-nowrap ${darkMode?'text-gray-200':'text-gray-700'}`}>{h}</th>
               ))}</tr>
             </thead>
             <tbody className={`divide-y ${darkMode?'divide-gray-700':'divide-gray-100'}`}>
               {rows.map((s,i)=>(
                 <tr key={i} className={darkMode?'hover:bg-gray-700':'hover:bg-purple-50'}>
-                  <td className="px-3 py-2 text-purple-500 font-medium whitespace-nowrap">{s.so_item}</td>
-                  <td className={`px-3 py-2 whitespace-nowrap ${darkMode?'text-gray-300':'text-gray-700'}`}>{s.so_number}</td>
+                  <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{s.so_item||'-'}</td>
+                  {!hasSoItem && <td className="px-3 py-2 whitespace-nowrap">{s.so_number}</td>}
                   <td className="px-3 py-2 whitespace-nowrap"><span className={`px-2 py-0.5 rounded-full text-xs font-medium ${s.so_status==='Delivery Completed'?'bg-green-100 text-green-700':s.so_status==='SO Cancel'?'bg-red-100 text-red-700':'bg-blue-100 text-blue-700'}`}>{s.so_status||'-'}</span></td>
-                  <td className={`px-3 py-2 whitespace-nowrap min-w-[180px] ${darkMode?'text-gray-300':'text-gray-700'}`}>{s.operation_unit_name}</td>
-                  <td className={`px-3 py-2 whitespace-nowrap max-w-[140px] truncate ${darkMode?'text-gray-300':'text-gray-700'}`}>{s.vendor_name}</td>
-                  <td className={`px-3 py-2 max-w-[160px] truncate ${darkMode?'text-gray-300':'text-gray-700'}`}>{s.product_name}</td>
-                  <td className={`px-3 py-2 text-right ${darkMode?'text-gray-300':'text-gray-700'}`}>{fmtNum(s.so_qty)}</td>
-                  <td className="px-3 py-2 text-right font-semibold text-orange-500 whitespace-nowrap">{fmtCur(s.sales_amount)}</td>
-                  <td className={`px-3 py-2 whitespace-nowrap ${darkMode?'text-gray-300':'text-gray-700'}`}>{s.customer_po_number||'-'}</td>
-                  <td className={`px-3 py-2 max-w-[160px] truncate ${darkMode?'text-gray-300':'text-gray-700'}`}>{s.delivery_memo||'-'}</td>
-                  <td className={`px-3 py-2 whitespace-nowrap ${darkMode?'text-gray-300':'text-gray-700'}`}>{s.so_create_date||'-'}</td>
-                  <td className="px-3 py-2 whitespace-nowrap text-purple-500">{s.delivery_plan_date||'-'}</td>
-                  <td className={`px-3 py-2 max-w-[140px] truncate ${darkMode?'text-gray-300':'text-gray-700'}`}>{s.remarks||'-'}</td>
+                  <td className="px-3 py-2 whitespace-nowrap min-w-[180px]">{s.operation_unit_name}</td>
+                  <td className="px-3 py-2 whitespace-nowrap max-w-[140px] truncate">{s.vendor_name}</td>
+                  <td className="px-3 py-2 max-w-[160px] truncate">{s.product_name}</td>
+                  <td className="px-3 py-2 text-right">{fmtNum(s.so_qty)}</td>
+                  <td className="px-3 py-2 text-right font-semibold text-orange-600 whitespace-nowrap">{fmtCur(s.sales_amount)}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">{s.customer_po_number||'-'}</td>
+                  <td className="px-3 py-2 max-w-[160px] truncate">{s.delivery_memo||'-'}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">{s.so_create_date||'-'}</td>
+                  <td className="px-3 py-2 whitespace-nowrap text-purple-600">{s.delivery_plan_date||'-'}</td>
+                  <td className="px-3 py-2 max-w-[140px] truncate">{s.remarks||'-'}</td>
                 </tr>
               ))}
             </tbody>
@@ -166,129 +172,102 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
   );
 };
 
-// ─── MultiSelect dropdown — Excel-style with draft state ─────────────────
-// selected: [] = all pass | '__NONE__' = nothing passes | string[] = only these pass
-// Changes are ONLY committed when user clicks "Terapkan". Clicking outside = cancel.
+// ─── MultiSelect dropdown — Excel-style (all checked by default) ─────────
 const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => {
-  const [open, setOpen]   = useState(false);
-  const [draft, setDraft] = useState(selected); // local draft, not yet committed
+  const [open, setOpen] = useState(false);
   const ref = useRef(null);
+  // "all selected" = selected array is empty (no filter = show all)
+  const noneSelected = selected.length === 0;
+  const allSelected  = selected.length === options.length;
+  const someSelected = !noneSelected && !allSelected;
+  // visually "all checked" when no filter applied
+  const allVisuallyChecked = noneSelected;
 
-  // Sync draft when dropdown opens (reset to current committed value)
-  const handleOpen = () => {
-    setDraft(selected);
-    setOpen(true);
-  };
-
-  // Close without committing → discard draft
-  const handleCancel = () => {
-    setDraft(selected); // revert
-    setOpen(false);
-  };
-
-  // Commit draft to parent
-  const handleApply = () => {
-    onChange(draft);
-    setOpen(false);
-  };
-
-  // Click outside = cancel
   useEffect(() => {
-    const handler = (e) => {
-      if (ref.current && !ref.current.contains(e.target)) {
-        setDraft(selected); // revert draft
-        setOpen(false);
-      }
-    };
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
-  }, [selected]); // depend on selected so revert always uses latest committed value
-
-  // Draft state helpers
-  const draftIsNone = draft === '__NONE__';
-  const draftIsAll  = !draftIsNone && Array.isArray(draft) && draft.length === 0;
-  const draftIsSome = !draftIsNone && Array.isArray(draft) && draft.length > 0;
+  }, []);
 
   const toggleAll = () => {
-    if (draftIsAll) {
-      setDraft('__NONE__');
+    if (noneSelected) {
+      // Currently all checked → uncheck all (set to explicit empty selection = nothing shown)
+      // We use a sentinel: store all items as "selected" but display as "0 dipilih"
+      // Better UX: uncheck all means filter passes nothing, so we store all as excluded
+      // Actually Excel behavior: uncheck all → nothing shows. We store [] but invert logic.
+      // Simplest: use null/special state — instead use a "noneMode" approach:
+      // When noneSelected (was all-checked), clicking unchecks all → store special marker
+      onChange('__NONE__');
     } else {
-      setDraft([]);
+      // Currently some/all explicitly selected OR none-mode → check all → reset to []
+      onChange([]);
     }
   };
 
   const toggle = (val) => {
-    if (draftIsNone || draftIsAll) { setDraft([val]); return; }
-    const arr = Array.isArray(draft) ? draft : [];
-    if (arr.includes(val)) {
-      const next = arr.filter(x => x !== val);
-      setDraft(next.length === 0 ? '__NONE__' : next);
+    // If currently in all-checked visual state (noneSelected)
+    if (noneSelected) {
+      // Click one item: keep only that one checked (deselect all others)
+      onChange([val]);
+      return;
+    }
+    const currentSelected = selected === '__NONE__' ? [] : selected;
+    if (currentSelected.includes(val)) {
+      const next = currentSelected.filter(x => x !== val);
+      onChange(next.length === 0 ? '__NONE__' : next);
     } else {
-      const next = [...arr, val];
-      setDraft(next.length === options.length ? [] : next);
+      const next = [...currentSelected, val];
+      onChange(next.length === options.length ? [] : next);
     }
   };
 
-  const isItemChecked = (val) => {
-    if (draftIsNone) return false;
-    if (draftIsAll)  return true;
-    return Array.isArray(draft) && draft.includes(val);
+  const isChecked = (val) => {
+    if (selected === '__NONE__') return false;
+    if (noneSelected) return true; // all visually checked
+    return selected.includes(val);
   };
 
-  // Display label based on COMMITTED value (selected), not draft
-  const committedIsNone = selected === '__NONE__';
-  const committedIsAll  = !committedIsNone && Array.isArray(selected) && selected.length === 0;
-  const displayLabel = committedIsNone ? `0 dipilih`
-    : committedIsAll ? `Semua ${label}`
+  const isAllChecked = selected !== '__NONE__' && noneSelected;
+  const isNoneMode   = selected === '__NONE__';
+
+  const displayLabel = isNoneMode
+    ? `0 dipilih`
+    : noneSelected
+    ? `Semua ${label}`
     : `${selected.length} dipilih`;
 
   return (
     <div className="relative flex-1 min-w-[180px]" ref={ref}>
       <label className={`block text-xs font-medium mb-1 ${txt2}`}>{label}</label>
-      <button onClick={open ? handleCancel : handleOpen} style={{cursor:'pointer'}}
+      <button onClick={()=>setOpen(o=>!o)} style={{cursor:'pointer'}}
         className={`w-full px-3 py-2 rounded-lg text-sm border text-left flex justify-between items-center transition-colors
-          ${darkMode ? 'bg-gray-600 border-gray-500 text-white hover:bg-gray-500'
-                     : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
+          ${darkMode
+            ? 'bg-gray-600 border-gray-500 text-white hover:bg-gray-500'
+            : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
         <span className="truncate">{displayLabel}</span>
-        <ChevronDown className={`w-4 h-4 flex-shrink-0 ml-1 transition-transform ${open ? 'rotate-180' : ''}`}/>
+        <ChevronDown className="w-4 h-4 flex-shrink-0 ml-1"/>
       </button>
       {open && (
-        <div className={`absolute z-50 mt-1 w-full rounded-lg shadow-xl border
-          ${darkMode ? 'bg-gray-700 border-gray-600' : 'bg-white border-gray-200'}`}>
-          {/* Options list */}
-          <div className="max-h-48 overflow-auto">
-            <label style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold border-b
-              ${darkMode ? 'border-gray-600 hover:bg-gray-600 text-white' : 'border-gray-100 hover:bg-purple-50 text-gray-700'}`}>
-              <input type="checkbox"
-                checked={draftIsAll}
-                ref={el => { if (el) el.indeterminate = draftIsSome; }}
-                onChange={toggleAll}
+        <div className={`absolute z-50 mt-1 w-full max-h-56 overflow-auto rounded-lg shadow-xl border ${darkMode?'bg-gray-700 border-gray-600':'bg-white border-gray-200'}`}>
+          {/* Select All row — like Excel */}
+          <label style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold border-b
+            ${darkMode?'border-gray-600 hover:bg-gray-600 text-white':'border-gray-100 hover:bg-purple-50 text-gray-700'}`}>
+            <input type="checkbox"
+              checked={isAllChecked}
+              ref={el => { if (el) el.indeterminate = someSelected; }}
+              onChange={toggleAll}
+              className="accent-purple-600" style={{cursor:'pointer'}}/>
+            <span>(Pilih Semua)</span>
+          </label>
+          {options.map(opt => (
+            <label key={opt} style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs
+              ${darkMode?'hover:bg-gray-600 text-white':'hover:bg-purple-50 text-gray-700'}`}>
+              <input type="checkbox" checked={isChecked(opt)} onChange={()=>toggle(opt)}
                 className="accent-purple-600" style={{cursor:'pointer'}}/>
-              <span>(Pilih Semua)</span>
+              <span className="truncate" title={opt}>{opt}</span>
             </label>
-            {options.map(opt => (
-              <label key={opt} style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs
-                ${darkMode ? 'hover:bg-gray-600 text-white' : 'hover:bg-purple-50 text-gray-700'}`}>
-                <input type="checkbox" checked={isItemChecked(opt)} onChange={()=>toggle(opt)}
-                  className="accent-purple-600" style={{cursor:'pointer'}}/>
-                <span className="truncate" title={opt}>{opt}</span>
-              </label>
-            ))}
-            {options.length === 0 && <div className={`px-3 py-2 text-xs ${txt2}`}>Tidak ada opsi</div>}
-          </div>
-          {/* Apply / Cancel footer */}
-          <div className={`flex gap-2 px-3 py-2 border-t ${darkMode ? 'border-gray-600' : 'border-gray-100'}`}>
-            <button onClick={handleApply}
-              className="flex-1 px-3 py-1.5 bg-purple-700 hover:bg-purple-800 text-white rounded text-xs font-semibold"
-              style={{cursor:'pointer'}}>
-              Terapkan
-            </button>
-            <button onClick={handleCancel}
-              className={`px-3 py-1.5 rounded text-xs font-medium ${darkMode ? 'bg-gray-600 text-gray-200 hover:bg-gray-500' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}
-              style={{cursor:'pointer'}}>
-              Batal
-            </button>
-          </div>
+          ))}
+          {options.length === 0 && <div className={`px-3 py-2 text-xs ${txt2}`}>Tidak ada opsi</div>}
         </div>
       )}
     </div>
@@ -596,9 +575,9 @@ const App = () => {
 
   const downloadSOExcel = () => {
     const p = new URLSearchParams();
-    resolveFilter(soFilters.op_units).forEach(v => p.append('op_unit', v));
-    resolveFilter(soFilters.vendors).forEach(v => p.append('vendor', v));
-    resolveFilter(soFilters.statuses).forEach(v => p.append('status', v));
+    (soFilters.op_units||[]).forEach(v => p.append('op_unit', v));
+    (soFilters.vendors||[]).forEach(v => p.append('vendor', v));
+    (soFilters.statuses||[]).forEach(v => p.append('status', v));
     downloadBlob(`/api/export/all-so?${p}`, `SO_List_${new Date().toISOString().slice(0,10)}.xlsx`, 'SO List');
   };
   const downloadPOExcel = () => downloadBlob('/api/export/po-without-so', `PO_Without_SO_${new Date().toISOString().slice(0,10)}.xlsx`, 'PO Without SO');
@@ -821,12 +800,27 @@ const App = () => {
                         {months.map(m => {
                           const val = s.monthly?.[m];
                           return val ? (
-                            <td key={m} className="px-2 py-2 text-center font-semibold text-white" style={{backgroundColor:'#7C3AED'}}>{fmtNum(val)}</td>
+                            <td key={m} className="px-2 py-2 text-center font-semibold text-white" style={{backgroundColor:'#7C3AED'}}>
+                              <button
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  openModal(`SO Status: ${s.name} — ${m}`, `/api/data/so-status-detail/${encodeURIComponent(s.name)}?month=${encodeURIComponent(m)}`);
+                                }}
+                                className="font-semibold underline-offset-2 hover:underline cursor-pointer text-white">
+                                {fmtNum(val)}
+                              </button>
+                            </td>
                           ) : (
                             <td key={m} className="px-2 py-2 text-center" style={{backgroundColor: darkMode?'rgba(59,130,246,0.08)':'rgba(219,234,254,0.45)'}}></td>
                           );
                         })}
-                        <td className="px-3 py-2 text-right font-bold text-purple-600">{fmtNum(s.total)}</td>
+                        <td className="px-3 py-2 text-right font-bold text-purple-600">
+                          <button
+                            onClick={e => { e.stopPropagation(); openModal(`SO Status: ${s.name}`, `/api/data/so-status-detail/${encodeURIComponent(s.name)}`); }}
+                            className="font-bold text-purple-600 hover:underline cursor-pointer">
+                            {fmtNum(s.total)}
+                          </button>
+                        </td>
                         <td className="px-3 py-2 text-right text-green-600">{s.percentage}%</td>
                         <td className="px-3 py-2 text-right text-orange-600 whitespace-nowrap">{fmtCurShort(s.amount)}</td>
                       </tr>
@@ -835,7 +829,17 @@ const App = () => {
                   <tfoot className={`${tblHd} font-bold`}>
                     <tr>
                       <td className={`px-3 py-2 sticky left-0 ${darkMode?'bg-gray-700':'bg-purple-50'} ${txt}`}>TOTAL</td>
-                      {months.map(m => <td key={m} className="px-2 py-2 text-center text-purple-600">{totByMonth[m]?fmtNum(totByMonth[m]):''}</td>)}
+                      {months.map(m => (
+                        <td key={m} className="px-2 py-2 text-center">
+                          {totByMonth[m] ? (
+                            <button
+                              onClick={() => openModal(`Semua Status — ${m}`, `/api/data/so-status-detail-all?month=${encodeURIComponent(m)}`)}
+                              className="font-bold text-purple-600 hover:underline cursor-pointer">
+                              {fmtNum(totByMonth[m])}
+                            </button>
+                          ) : ''}
+                        </td>
+                      ))}
                       <td className="px-3 py-2 text-right text-purple-600">{fmtNum(grandTotal)}</td>
                       <td className="px-3 py-2 text-right text-green-600">100%</td>
                       <td className="px-3 py-2 text-right text-orange-600 whitespace-nowrap">{fmtCurShort(grandAmount)}</td>
@@ -921,7 +925,7 @@ const App = () => {
               {agingData.slice(0,15).map((v,i)=>{
                 const openDetail = (bucket) => {
                   const url = bucket
-                    ? `/api/data/aging-detail/${encodeURIComponent(v.vendor)}?aging_bucket=${encodeURIComponent(bucket)}`
+                    ? `/api/data/aging-detail/${encodeURIComponent(v.vendor)}?bucket=${encodeURIComponent(bucket)}`
                     : `/api/data/aging-detail/${encodeURIComponent(v.vendor)}`;
                   const label = bucket ? `${v.vendor} — ${bucket} hari` : `Aging Detail: ${v.vendor}`;
                   openModal(label, url);
@@ -958,14 +962,27 @@ const App = () => {
                   days_90_180:acc.days_90_180+(v.days_90_180||0), more_180:acc.more_180+(v.more_180||0),
                   total_open:acc.total_open+(v.total_open||0), sales_amount:acc.sales_amount+(v.sales_amount||0),
                 }), {less_30:0,days_30_90:0,days_90_180:0,more_180:0,total_open:0,sales_amount:0});
+                const totCellBtn = (val, bucket, colorClass) => val > 0 ? (
+                  <button
+                    onClick={() => openModal(`All Vendors — ${bucket} hari`, `/api/data/aging-detail-all?bucket=${encodeURIComponent(bucket)}`)}
+                    className={`font-bold underline-offset-2 hover:underline cursor-pointer ${colorClass}`}>
+                    {fmtNum(val)}
+                  </button>
+                ) : <span className={colorClass}>{fmtNum(val)}</span>;
                 return (
                   <tr>
                     <td className={`p-3 font-bold ${txt}`}>TOTAL</td>
-                    <td className="p-3 text-center font-bold text-green-700">{fmtNum(tot.less_30)}</td>
-                    <td className="p-3 text-center font-bold text-yellow-700">{fmtNum(tot.days_30_90)}</td>
-                    <td className="p-3 text-center font-bold text-orange-700">{fmtNum(tot.days_90_180)}</td>
-                    <td className="p-3 text-center font-bold text-red-700">{fmtNum(tot.more_180)}</td>
-                    <td className="p-3 text-center font-bold text-purple-700">{fmtNum(tot.total_open)}</td>
+                    <td className="p-3 text-center">{totCellBtn(tot.less_30,'0-30','text-green-700')}</td>
+                    <td className="p-3 text-center">{totCellBtn(tot.days_30_90,'30-90','text-yellow-700')}</td>
+                    <td className="p-3 text-center">{totCellBtn(tot.days_90_180,'90-180','text-orange-700')}</td>
+                    <td className="p-3 text-center">{totCellBtn(tot.more_180,'180+','text-red-700')}</td>
+                    <td className="p-3 text-center">
+                      <button
+                        onClick={() => openModal('All Vendors — Semua Aging', '/api/data/aging-detail-all')}
+                        className="font-bold text-purple-700 hover:underline cursor-pointer">
+                        {fmtNum(tot.total_open)}
+                      </button>
+                    </td>
                     <td className="p-3 text-right font-bold text-orange-700 text-xs">{fmtCurShort(tot.sales_amount)}</td>
                   </tr>
                 );
@@ -1070,50 +1087,30 @@ const App = () => {
             </div>
           </div>
           {/* Active filter tags */}
-          {(() => {
-            const activeOpUnits = Array.isArray(soFilters.op_units) ? soFilters.op_units : [];
-            const activeVendors = Array.isArray(soFilters.vendors) ? soFilters.vendors : [];
-            const activeStatuses = Array.isArray(soFilters.statuses) ? soFilters.statuses : [];
-            const hasActive = soSearchNums.length + activeOpUnits.length + activeVendors.length + activeStatuses.length > 0
-              || soFilters.op_units === '__NONE__' || soFilters.vendors === '__NONE__' || soFilters.statuses === '__NONE__';
-            if (!hasActive) return null;
-            return (
+          {(soSearchNums.length + soFilters.op_units.length + soFilters.vendors.length + soFilters.statuses.length) > 0 && (
             <div className="mt-3 flex flex-wrap gap-1.5">
               {soSearchNums.map(v=>(
                 <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-xs">
                   SO: {v}<button onClick={()=>{ const next=soSearchNums.filter(x=>x!==v); setSoSearchNums(next); setSoPage(1); fetchSOData(soFilters,1,soPerPage,next); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                 </span>
               ))}
-              {soFilters.op_units === '__NONE__' ? (
-                <span className="flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full text-xs">
-                  Op Unit: (kosong)<button onClick={()=>setSoFilters(f=>({...f,op_units:[]}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
-                </span>
-              ) : activeOpUnits.map(v=>(
+              {soFilters.op_units.map(v=>(
                 <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full text-xs">
-                  {v}<button onClick={()=>setSoFilters(f=>({...f,op_units:activeOpUnits.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                  {v}<button onClick={()=>setSoFilters(f=>({...f,op_units:f.op_units.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                 </span>
               ))}
-              {soFilters.vendors === '__NONE__' ? (
-                <span className="flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">
-                  Vendor: (kosong)<button onClick={()=>setSoFilters(f=>({...f,vendors:[]}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
-                </span>
-              ) : activeVendors.map(v=>(
+              {soFilters.vendors.map(v=>(
                 <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">
-                  {v}<button onClick={()=>setSoFilters(f=>({...f,vendors:activeVendors.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                  {v}<button onClick={()=>setSoFilters(f=>({...f,vendors:f.vendors.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                 </span>
               ))}
-              {soFilters.statuses === '__NONE__' ? (
-                <span className="flex items-center gap-1 px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs">
-                  Status: (kosong)<button onClick={()=>setSoFilters(f=>({...f,statuses:[]}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
-                </span>
-              ) : activeStatuses.map(v=>(
+              {soFilters.statuses.map(v=>(
                 <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs">
-                  {v}<button onClick={()=>setSoFilters(f=>({...f,statuses:activeStatuses.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                  {v}<button onClick={()=>setSoFilters(f=>({...f,statuses:f.statuses.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                 </span>
               ))}
             </div>
-            );
-          })()}
+          )}
         </div>
 
         {/* SO Table — removed SO Number column, SO Item is leftmost */}
@@ -1158,23 +1155,17 @@ const App = () => {
                   <td className={`px-3 py-2 min-w-[180px] truncate ${txt2}`} title={so.operation_unit_name}>{so.operation_unit_name}</td>
                   <td className={`px-3 py-2 max-w-[120px] truncate ${txt2}`} title={so.vendor_name}>{so.vendor_name}</td>
                   <td className={`px-3 py-2 text-right ${txt2}`}>{fmtNum(so.so_qty)}</td>
-                  <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${txt2}`}>{fmtCur(so.sales_price)}</td>
-                  <td className="px-3 py-2 text-right font-semibold text-orange-500 whitespace-nowrap min-w-[130px]">{fmtCur(so.sales_amount)}</td>
-                  <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${txt2}`}>{fmtCur(so.purchasing_price)}</td>
-                  <td className="px-3 py-2 text-right font-semibold text-green-500 whitespace-nowrap min-w-[130px]">{fmtCur(so.purchasing_amount)}</td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap min-w-[130px]">{fmtCur(so.sales_price)}</td>
+                  <td className="px-3 py-2 text-right font-semibold text-orange-600 whitespace-nowrap min-w-[130px]">{fmtCur(so.sales_amount)}</td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap min-w-[130px]">{fmtCur(so.purchasing_price)}</td>
+                  <td className="px-3 py-2 text-right font-semibold text-green-600 whitespace-nowrap min-w-[130px]">{fmtCur(so.purchasing_amount)}</td>
                   <td className={`px-3 py-2 text-center text-xs ${txt2}`}>{so.delivery_possible_date||'-'}</td>
-                  <td className={`px-3 py-2 text-center ${txt2}`}>
+                  <td className="px-3 py-2 text-center">
                     {editingCell?.id===so.id && editingCell.field==='delivery_plan_date' ? (
                       <div className="flex items-center gap-1">
                         <input type="date" defaultValue={so.delivery_plan_date}
                           className={`px-2 py-1 rounded text-xs border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                           onChange={e=>setEditValue(e.target.value)}
-                          onBlur={e=>{
-                            // Only close if not clicking the ✓ or ✗ buttons (they use onMouseDown)
-                            if (!e.relatedTarget || !e.currentTarget.closest('div').contains(e.relatedTarget)) {
-                              setEditingCell(null);
-                            }
-                          }}
                           onKeyDown={e=>{
                             if(e.key==='Enter'){e.preventDefault();updateSOCell(so.id,'delivery_plan_date',editValue);}
                             if(e.key==='Escape'){e.preventDefault();setEditingCell(null);}
@@ -1198,7 +1189,7 @@ const App = () => {
                       </div>
                     )}
                   </td>
-                  <td className={`px-3 py-2 ${txt2}`}>
+                  <td className="px-3 py-2">
                     {editingCell?.id===so.id && editingCell.field==='remarks' ? (
                       <input type="text" defaultValue={so.remarks}
                         className={`w-full px-2 py-1 rounded text-xs border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
@@ -1348,8 +1339,8 @@ const App = () => {
                     <td className={`px-4 py-3 ${txt2} max-w-xs truncate`} title={row.description}>{row.description}</td>
                     <td className={`px-4 py-3 text-right ${txt2}`}>{fmtNum(row.qty)}</td>
                     <td className={`px-4 py-3 ${txt2}`}>{row.unit||'-'}</td>
-                    <td className={`px-4 py-3 text-right whitespace-nowrap min-w-[140px] ${txt2}`}>{fmtCur(row.price)}</td>
-                    <td className="px-4 py-3 text-right font-semibold text-orange-500 whitespace-nowrap min-w-[140px]">{fmtCur(row.amount)}</td>
+                    <td className="px-4 py-3 text-right whitespace-nowrap min-w-[140px]">{fmtCur(row.price)}</td>
+                    <td className="px-4 py-3 text-right font-semibold text-orange-600 whitespace-nowrap min-w-[140px]">{fmtCur(row.amount)}</td>
                     <td className={`px-4 py-3 ${txt2}`}>{row.currency||'IDR'}</td>
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.po_date||'-'}</td>
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.purchase_member||'-'}</td>
