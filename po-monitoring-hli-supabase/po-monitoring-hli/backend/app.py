@@ -574,7 +574,7 @@ def get_all_so():
         per_page  = min(500, int(request.args.get('per_page', 20)))
 
         today = date.today()
-        q = SOData.query
+        q = SOData.query.filter(open_so_filter())
         if op_units:  q = q.filter(SOData.operation_unit_name.in_(op_units))
         if vendors:   q = q.filter(SOData.vendor_name.in_(vendors))
         if statuses:  q = q.filter(SOData.so_status.in_(statuses))
@@ -625,10 +625,10 @@ def get_so_status_detail_all():
     try:
         month = request.args.get('month')
         if month:
-            sos = [s for s in SOData.query.all()
+            sos = [s for s in SOData.query.filter(open_so_filter()).all()
                    if s.so_create_date and s.so_create_date.strftime('%b %Y') == month]
         else:
-            sos = SOData.query.order_by(SOData.so_create_date.desc()).all()
+            sos = SOData.query.filter(open_so_filter()).order_by(SOData.so_create_date.desc()).all()
         return jsonify([so_dict(s) for s in sos])
     except Exception as e:
         return jsonify({'error': str(e)}), 500
