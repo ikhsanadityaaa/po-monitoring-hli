@@ -794,19 +794,19 @@ const App = () => {
                   </thead>
                   <tbody className={`divide-y ${tblDv}`}>
                     {rows.map((s, i) => (
-                      <tr key={i} className={`${trHov} cursor-pointer`}
-                        onClick={() => openModal(`SO Status: ${s.name}`, `/api/data/so-status-detail/${encodeURIComponent(s.name)}`)}>
-                        <td className={`px-3 py-2 font-medium whitespace-nowrap sticky left-0 ${darkMode?'bg-gray-800':'bg-white'} ${txt}`}>{s.name}</td>
+                      <tr key={i} className={trHov}>
+                        <td
+                          className={`px-3 py-2 font-medium whitespace-nowrap sticky left-0 ${darkMode?'bg-gray-800':'bg-white'} ${txt} cursor-pointer hover:text-purple-600 hover:underline`}
+                          onClick={() => openModal(`SO Status: ${s.name}`, `/api/data/so-status-detail/${encodeURIComponent(s.name)}`)}>
+                          {s.name}
+                        </td>
                         {months.map(m => {
                           const val = s.monthly?.[m];
                           return val ? (
                             <td key={m} className="px-2 py-2 text-center font-semibold text-white" style={{backgroundColor:'#7C3AED'}}>
                               <button
-                                onClick={e => {
-                                  e.stopPropagation();
-                                  openModal(`SO Status: ${s.name} — ${m}`, `/api/data/so-status-detail/${encodeURIComponent(s.name)}?month=${encodeURIComponent(m)}`);
-                                }}
-                                className="font-semibold underline-offset-2 hover:underline cursor-pointer text-white">
+                                onClick={() => openModal(`SO Status: ${s.name} — ${m}`, `/api/data/so-status-detail/${encodeURIComponent(s.name)}?month=${encodeURIComponent(m)}`)}
+                                className="font-semibold underline-offset-2 hover:underline cursor-pointer text-white w-full">
                                 {fmtNum(val)}
                               </button>
                             </td>
@@ -816,7 +816,7 @@ const App = () => {
                         })}
                         <td className="px-3 py-2 text-right font-bold text-purple-600">
                           <button
-                            onClick={e => { e.stopPropagation(); openModal(`SO Status: ${s.name}`, `/api/data/so-status-detail/${encodeURIComponent(s.name)}`); }}
+                            onClick={() => openModal(`SO Status: ${s.name}`, `/api/data/so-status-detail/${encodeURIComponent(s.name)}`)}
                             className="font-bold text-purple-600 hover:underline cursor-pointer">
                             {fmtNum(s.total)}
                           </button>
