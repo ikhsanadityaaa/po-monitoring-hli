@@ -133,19 +133,19 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
             <tbody className={`divide-y ${darkMode?'divide-gray-700':'divide-gray-100'}`}>
               {rows.map((s,i)=>(
                 <tr key={i} className={darkMode?'hover:bg-gray-700':'hover:bg-purple-50'}>
-                  <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{s.so_item}</td>
-                  <td className="px-3 py-2 whitespace-nowrap">{s.so_number}</td>
+                  <td className="px-3 py-2 text-purple-500 font-medium whitespace-nowrap">{s.so_item}</td>
+                  <td className={`px-3 py-2 whitespace-nowrap ${darkMode?'text-gray-300':'text-gray-700'}`}>{s.so_number}</td>
                   <td className="px-3 py-2 whitespace-nowrap"><span className={`px-2 py-0.5 rounded-full text-xs font-medium ${s.so_status==='Delivery Completed'?'bg-green-100 text-green-700':s.so_status==='SO Cancel'?'bg-red-100 text-red-700':'bg-blue-100 text-blue-700'}`}>{s.so_status||'-'}</span></td>
-                  <td className="px-3 py-2 whitespace-nowrap min-w-[180px]">{s.operation_unit_name}</td>
-                  <td className="px-3 py-2 whitespace-nowrap max-w-[140px] truncate">{s.vendor_name}</td>
-                  <td className="px-3 py-2 max-w-[160px] truncate">{s.product_name}</td>
-                  <td className="px-3 py-2 text-right">{fmtNum(s.so_qty)}</td>
-                  <td className="px-3 py-2 text-right font-semibold text-orange-600 whitespace-nowrap">{fmtCur(s.sales_amount)}</td>
-                  <td className="px-3 py-2 whitespace-nowrap">{s.customer_po_number||'-'}</td>
-                  <td className="px-3 py-2 max-w-[160px] truncate">{s.delivery_memo||'-'}</td>
-                  <td className="px-3 py-2 whitespace-nowrap">{s.so_create_date||'-'}</td>
-                  <td className="px-3 py-2 whitespace-nowrap text-purple-600">{s.delivery_plan_date||'-'}</td>
-                  <td className="px-3 py-2 max-w-[140px] truncate">{s.remarks||'-'}</td>
+                  <td className={`px-3 py-2 whitespace-nowrap min-w-[180px] ${darkMode?'text-gray-300':'text-gray-700'}`}>{s.operation_unit_name}</td>
+                  <td className={`px-3 py-2 whitespace-nowrap max-w-[140px] truncate ${darkMode?'text-gray-300':'text-gray-700'}`}>{s.vendor_name}</td>
+                  <td className={`px-3 py-2 max-w-[160px] truncate ${darkMode?'text-gray-300':'text-gray-700'}`}>{s.product_name}</td>
+                  <td className={`px-3 py-2 text-right ${darkMode?'text-gray-300':'text-gray-700'}`}>{fmtNum(s.so_qty)}</td>
+                  <td className="px-3 py-2 text-right font-semibold text-orange-500 whitespace-nowrap">{fmtCur(s.sales_amount)}</td>
+                  <td className={`px-3 py-2 whitespace-nowrap ${darkMode?'text-gray-300':'text-gray-700'}`}>{s.customer_po_number||'-'}</td>
+                  <td className={`px-3 py-2 max-w-[160px] truncate ${darkMode?'text-gray-300':'text-gray-700'}`}>{s.delivery_memo||'-'}</td>
+                  <td className={`px-3 py-2 whitespace-nowrap ${darkMode?'text-gray-300':'text-gray-700'}`}>{s.so_create_date||'-'}</td>
+                  <td className="px-3 py-2 whitespace-nowrap text-purple-500">{s.delivery_plan_date||'-'}</td>
+                  <td className={`px-3 py-2 max-w-[140px] truncate ${darkMode?'text-gray-300':'text-gray-700'}`}>{s.remarks||'-'}</td>
                 </tr>
               ))}
             </tbody>
@@ -1158,12 +1158,12 @@ const App = () => {
                   <td className={`px-3 py-2 min-w-[180px] truncate ${txt2}`} title={so.operation_unit_name}>{so.operation_unit_name}</td>
                   <td className={`px-3 py-2 max-w-[120px] truncate ${txt2}`} title={so.vendor_name}>{so.vendor_name}</td>
                   <td className={`px-3 py-2 text-right ${txt2}`}>{fmtNum(so.so_qty)}</td>
-                  <td className="px-3 py-2 text-right whitespace-nowrap min-w-[130px]">{fmtCur(so.sales_price)}</td>
-                  <td className="px-3 py-2 text-right font-semibold text-orange-600 whitespace-nowrap min-w-[130px]">{fmtCur(so.sales_amount)}</td>
-                  <td className="px-3 py-2 text-right whitespace-nowrap min-w-[130px]">{fmtCur(so.purchasing_price)}</td>
-                  <td className="px-3 py-2 text-right font-semibold text-green-600 whitespace-nowrap min-w-[130px]">{fmtCur(so.purchasing_amount)}</td>
+                  <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${txt2}`}>{fmtCur(so.sales_price)}</td>
+                  <td className="px-3 py-2 text-right font-semibold text-orange-500 whitespace-nowrap min-w-[130px]">{fmtCur(so.sales_amount)}</td>
+                  <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${txt2}`}>{fmtCur(so.purchasing_price)}</td>
+                  <td className="px-3 py-2 text-right font-semibold text-green-500 whitespace-nowrap min-w-[130px]">{fmtCur(so.purchasing_amount)}</td>
                   <td className={`px-3 py-2 text-center text-xs ${txt2}`}>{so.delivery_possible_date||'-'}</td>
-                  <td className="px-3 py-2 text-center">
+                  <td className={`px-3 py-2 text-center ${txt2}`}>
                     {editingCell?.id===so.id && editingCell.field==='delivery_plan_date' ? (
                       <div className="flex items-center gap-1">
                         <input type="date" defaultValue={so.delivery_plan_date}
@@ -1198,7 +1198,7 @@ const App = () => {
                       </div>
                     )}
                   </td>
-                  <td className="px-3 py-2">
+                  <td className={`px-3 py-2 ${txt2}`}>
                     {editingCell?.id===so.id && editingCell.field==='remarks' ? (
                       <input type="text" defaultValue={so.remarks}
                         className={`w-full px-2 py-1 rounded text-xs border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
@@ -1348,8 +1348,8 @@ const App = () => {
                     <td className={`px-4 py-3 ${txt2} max-w-xs truncate`} title={row.description}>{row.description}</td>
                     <td className={`px-4 py-3 text-right ${txt2}`}>{fmtNum(row.qty)}</td>
                     <td className={`px-4 py-3 ${txt2}`}>{row.unit||'-'}</td>
-                    <td className="px-4 py-3 text-right whitespace-nowrap min-w-[140px]">{fmtCur(row.price)}</td>
-                    <td className="px-4 py-3 text-right font-semibold text-orange-600 whitespace-nowrap min-w-[140px]">{fmtCur(row.amount)}</td>
+                    <td className={`px-4 py-3 text-right whitespace-nowrap min-w-[140px] ${txt2}`}>{fmtCur(row.price)}</td>
+                    <td className="px-4 py-3 text-right font-semibold text-orange-500 whitespace-nowrap min-w-[140px]">{fmtCur(row.amount)}</td>
                     <td className={`px-4 py-3 ${txt2}`}>{row.currency||'IDR'}</td>
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.po_date||'-'}</td>
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.purchase_member||'-'}</td>
