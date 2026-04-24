@@ -621,14 +621,14 @@ def get_so_status_detail(status):
 
 @app.route('/api/data/so-status-detail-all', methods=['GET'])
 def get_so_status_detail_all():
-    """All SO records filtered by optional month — for TOTAL row clicks in Status Distribution."""
+    """SO records filtered by optional month — for TOTAL row clicks in Status Distribution."""
     try:
         month = request.args.get('month')
-        q = SOData.query
         if month:
-            sos = [s for s in q.all() if s.so_create_date and s.so_create_date.strftime('%b %Y') == month]
+            sos = [s for s in SOData.query.all()
+                   if s.so_create_date and s.so_create_date.strftime('%b %Y') == month]
         else:
-            sos = q.all()
+            sos = SOData.query.order_by(SOData.so_create_date.desc()).all()
         return jsonify([so_dict(s) for s in sos])
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -651,6 +651,32 @@ def upload_po_list():
         file = request.files['file']
         df = pd.read_excel(file, engine='openpyxl')
         df.columns = [str(c).strip() for c in df.columns]
+
+        # ── Header validation ──────────────────────────────────────────────
+        # These are the key columns that MUST exist (using any of their aliases)
+        REQUIRED_PO_COLS = {
+            'PO Number':        ['PO No.','PO No','PO Number','PO'],
+            'Item No':          ['Item No.','Item No','Item Number','No. Item'],
+            'PO Item Type':     ['PO Item Type','Item Type','Type','PO Type'],
+            'Supplier':         ['Supplier','Vendor','Supplier Name'],
+            'Qty':              ['Qty.','Qty','Quantity'],
+            'Amount':           ['Amount','Total Amount','Total'],
+            'PO Date':          ['PO Date','Order Date','Tanggal PO'],
+            'Request Delivery': ['Request Delivery Date','Delivery Date','Req Delivery'],
+        }
+        missing_required = []
+        for friendly_name, aliases in REQUIRED_PO_COLS.items():
+            if not find_column(df, aliases):
+                missing_required.append(friendly_name)
+        if len(missing_required) >= 3:
+            return jsonify({
+                'error': (
+                    f'❌ File tidak valid — {len(missing_required)} kolom penting tidak ditemukan: '
+                    f'{", ".join(missing_required)}. '
+                    f'Pastikan Anda mengupload file HLI PO List yang benar, lalu cek kembali.'
+                )
+            }), 400
+        # ── End header validation ──────────────────────────────────────────
 
         col_po   = find_column(df, ['PO No.','PO No','PO Number','PO'])
         if not col_po:
@@ -739,6 +765,31 @@ def upload_smro():
         file = request.files['file']
         df = pd.read_excel(file, engine='openpyxl')
         df.columns = [str(c).strip() for c in df.columns]
+
+        # ── Header validation ──────────────────────────────────────────────
+        REQUIRED_SMRO_COLS = {
+            'SO Number':       ['SO Number','SO No','SO No.','SO','Sales Order','Sales Order Number','No SO','Nomor SO'],
+            'SO Item':         ['SO Item No','Item No','Line','SO Line','SO Item'],
+            'SO Status':       ['SO Status','Status','Order Status'],
+            'Operation Unit':  ['Operation Unit Name','Op Unit','Client Name','Client','Operation Unit'],
+            'Vendor Name':     ['Vendor Name','Vendor','Supplier'],
+            'Customer PO':     ['Customer PO Number','Customer PO','PO Ref','PO Reference'],
+            'Sales Amount':    ['Sales Amount(Exclude Tax)','Sales Amount','Amount','Total'],
+            'SO Create Date':  ['SO Create Date','Order Date','SO Date','Create Date'],
+        }
+        missing_required = []
+        for friendly_name, aliases in REQUIRED_SMRO_COLS.items():
+            if not find_column(df, aliases):
+                missing_required.append(friendly_name)
+        if len(missing_required) >= 3:
+            return jsonify({
+                'error': (
+                    f'❌ File tidak valid — {len(missing_required)} kolom penting tidak ditemukan: '
+                    f'{", ".join(missing_required)}. '
+                    f'Pastikan Anda mengupload file SMRO yang benar, lalu cek kembali.'
+                )
+            }), 400
+        # ── End header validation ──────────────────────────────────────────
 
         col_so = find_column(df, ['SO Number','SO No','SO No.','SO','SO Item',
                                    'Sales Order','Sales Order Number','No SO','Nomor SO'])
