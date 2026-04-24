@@ -581,7 +581,7 @@ def get_all_so():
         if statuses:  q = q.filter(SOData.so_status.in_(statuses))
         if so_items:  q = q.filter(SOData.so_item.in_(so_items))
 
-        all_sos = q.order_by(SOData.so_create_date.desc()).all()
+        all_sos = q.order_by(SOData.so_create_date.asc()).all()
 
         # Aging filter (client-computed, applied post-query)
         if aging:
