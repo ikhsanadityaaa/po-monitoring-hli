@@ -517,8 +517,59 @@ const App = () => {
   const handleUpload = async (e, type) => {
     const file = e.target.files[0]; if (!file) return;
     e.target.value = '';
-    const label = type === 'po' ? 'PO List' : 'SMRO';
+    const label = type === 'po' ? 'HLI PO List (Item)' : 'SMRO - Search Client Odr';
     const endpoint = type === 'po' ? '/api/upload/po-list' : '/api/upload/smro';
+
+    // ── Client-side header validation ──────────────────────────────────
+    const REQUIRED_HEADERS = {
+      po: {
+        'PO Number':        ['po no.','po no','po number','po'],
+        'Item No':          ['item no.','item no','item number','no. item'],
+        'PO Item Type':     ['po item type','item type','type','po type'],
+        'Supplier':         ['supplier','vendor','supplier name'],
+        'Qty':              ['qty.','qty','quantity'],
+        'Amount':           ['amount','total amount','total'],
+        'PO Date':          ['po date','order date','tanggal po'],
+        'Request Delivery': ['request delivery date','delivery date','req delivery'],
+      },
+      smro: {
+        'SO Number':      ['so number','so no','so no.','so','sales order','sales order number','no so','nomor so'],
+        'SO Item':        ['so item no','item no','line','so line','so item'],
+        'SO Status':      ['so status','status','order status'],
+        'Operation Unit': ['operation unit name','op unit','client name','client','operation unit'],
+        'Vendor Name':    ['vendor name','vendor','supplier'],
+        'Customer PO':    ['customer po number','customer po','po ref','po reference'],
+        'Sales Amount':   ['sales amount(exclude tax)','sales amount','amount','total'],
+        'SO Create Date': ['so create date','order date','so date','create date'],
+      }
+    };
+
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const wb = XLSX.read(arrayBuffer, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const jsonData = XLSX.utils.sheet_to_json(ws, { header: 1 });
+      const headerRow = (jsonData[0] || []).map(h => String(h || '').trim().toLowerCase());
+
+      const reqHeaders = REQUIRED_HEADERS[type];
+      const missing = [];
+      for (const [friendlyName, aliases] of Object.entries(reqHeaders)) {
+        const found = aliases.some(alias => headerRow.includes(alias.toLowerCase()));
+        if (!found) missing.push(friendlyName);
+      }
+      if (missing.length >= 3) {
+        addToast(
+          `❌ File tidak valid — ${missing.length} kolom penting tidak ditemukan: ${missing.join(', ')}. Pastikan file ${label} yang benar, lalu cek kembali.`,
+          'error'
+        );
+        return;
+      }
+    } catch (readErr) {
+      addToast(`❌ Gagal membaca file: ${readErr.message}`, 'error');
+      return;
+    }
+    // ── End client-side header validation ──────────────────────────────
+
     const fd = new FormData(); fd.append('file', file);
     setUploadProgress({ label, pct: 0 });
     try {
@@ -840,7 +891,13 @@ const App = () => {
                           ) : ''}
                         </td>
                       ))}
-                      <td className="px-3 py-2 text-right text-purple-600">{fmtNum(grandTotal)}</td>
+                      <td className="px-3 py-2 text-right">
+                        <button
+                          onClick={() => openModal('Semua SO', '/api/data/so-status-detail-all')}
+                          className="font-bold text-purple-600 hover:underline cursor-pointer">
+                          {fmtNum(grandTotal)}
+                        </button>
+                      </td>
                       <td className="px-3 py-2 text-right text-green-600">100%</td>
                       <td className="px-3 py-2 text-right text-orange-600 whitespace-nowrap">{fmtCurShort(grandAmount)}</td>
                     </tr>
@@ -1414,7 +1471,7 @@ const App = () => {
         <header className="mb-6 flex flex-wrap justify-between items-center gap-4">
           <div>
             <h1 className={`text-2xl font-bold tracking-tight ${txt}`}>
-              PO HLI Monitoring <span className="text-purple-600">Dashboard</span>
+              HLI PO Monitoring <span className="text-purple-600">Dashboard</span>
             </h1>
             <p className={`mt-0.5 text-sm ${txt2}`}>
               {activePage==='dashboard'?'Purchase Orders & Sales Orders Overview':'Manage All Sales Orders & PO Without SO'}
@@ -1422,11 +1479,11 @@ const App = () => {
           </div>
           <div className="flex gap-3">
             <label className={`flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all ${darkMode?'bg-purple-700 hover:bg-purple-800 text-white':'bg-purple-700 hover:bg-purple-800 text-white'}`}>
-              <Upload className="w-4 h-4"/><span className="text-sm font-medium">Upload PO List</span>
+              <Upload className="w-4 h-4"/><span className="text-sm font-medium">Upload HLI PO List (Item)</span>
               <input type="file" accept=".xlsx,.xls" onChange={e=>handleUpload(e,'po')} className="hidden"/>
             </label>
             <label className={`flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all ${darkMode?'bg-blue-700 hover:bg-blue-800 text-white':'bg-blue-700 hover:bg-blue-800 text-white'}`}>
-              <Upload className="w-4 h-4"/><span className="text-sm font-medium">Upload SMRO</span>
+              <Upload className="w-4 h-4"/><span className="text-sm font-medium">Upload SMRO - Search Client Odr</span>
               <input type="file" accept=".xlsx,.xls" onChange={e=>handleUpload(e,'smro')} className="hidden"/>
             </label>
           </div>
