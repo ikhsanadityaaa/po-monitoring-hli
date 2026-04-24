@@ -747,12 +747,18 @@ const App = () => {
           </div>
         </div>
 
-        <div className={`p-5 rounded-2xl shadow hover:shadow-lg transition-all ${card}`}>
+        <div className={`p-5 rounded-2xl shadow hover:shadow-lg transition-all cursor-pointer ${card}`}
+          onClick={() => {
+            setActivePage('all-so');
+            setSoPage(1);
+            fetchSOData(soFilters, 1, soPerPage, soSearchNums);
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }}>
           <div className="flex justify-between items-start">
             <div>
               <p className={`text-sm font-medium ${txt2}`}>Total SO (Open)</p>
               <h3 className="text-3xl font-bold mt-1 text-green-600">{fmtNum(stats?.total_so_count)}</h3>
-              <p className={`text-xs mt-1 ${txt2}`}>{stats?.so_date_range?.max ? fmtDate(stats.so_date_range.max) : 'Belum ada upload'}</p>
+              <p className={`text-xs mt-1 ${txt2}`}>{stats?.so_date_range?.max ? fmtDate(stats.so_date_range.max) : 'Belum ada upload'} · klik untuk detail</p>
             </div>
             <div className="p-3 bg-green-100 rounded-xl"><CheckCircle className="w-6 h-6 text-green-600"/></div>
           </div>
@@ -1294,12 +1300,13 @@ const App = () => {
             </span>
           </div>
           <div className="flex gap-2 items-center">
-            <select className={`px-3 py-1.5 rounded-lg text-sm ${darkMode?'bg-gray-700 text-white':'bg-gray-100 text-gray-700'}`}
+            <label className={`text-sm ${txt2}`}>Baris:</label>
+            <select className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-300 text-gray-700'}`}
               value={poPerPage} onChange={e=>{ setPoPerPage(Number(e.target.value)); setPoPage(1); }}>
-              <option value={20}>20 Baris</option>
-              <option value={50}>50 Baris</option>
-              <option value={100}>100 Baris</option>
-              <option value={500}>500 Baris</option>
+              <option value={20}>20</option>
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+              <option value={500}>500</option>
             </select>
             <DownloadButton onClick={downloadPOExcel} className="flex items-center gap-1 px-4 py-1.5 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-medium shadow-sm">
               <Download className="w-4 h-4"/>Download Excel
@@ -1412,7 +1419,7 @@ const App = () => {
           </table>
         </div>
         <div className={`p-4 border-t ${darkMode?'border-gray-700':'border-gray-100'} flex justify-between items-center`}>
-          <span className={`text-sm ${txt2}`}>{(poPage-1)*poPerPage+1}–{Math.min(poPage*poPerPage,poFiltered.length)} dari {fmtNum(poFiltered.length)}</span>
+          <span className={`text-sm ${txt2}`}>Menampilkan {(poPage-1)*poPerPage+1}–{Math.min(poPage*poPerPage,poFiltered.length)} dari {fmtNum(poFiltered.length)}</span>
           <div className="flex gap-1 items-center">
             <button disabled={poPage===1} onClick={()=>setPoPage(p=>p-1)} className={`p-1.5 rounded ${poPage===1?'opacity-40':'hover:bg-purple-100'}`}><ChevronLeft className="w-4 h-4"/></button>
             <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-purple-100 text-purple-700'}`}>{poPage}/{poTotalPages}</span>
