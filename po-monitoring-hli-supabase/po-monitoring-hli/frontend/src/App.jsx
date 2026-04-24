@@ -1068,7 +1068,7 @@ const App = () => {
       <div className={`p-6 rounded-2xl shadow mb-6 ${card}`}>
         <div className="flex flex-wrap justify-between items-center gap-3 mb-5">
           <div>
-            <h2 className={`text-xl font-bold ${txt}`}>All Sales Orders (SO)</h2>
+            <h2 className={`text-xl font-bold ${txt}`}>Open SO (Sales Order)</h2>
             <p className={`text-sm ${txt2}`}>{fmtNum(soTotal)} total records — halaman {soPage} dari {soTotalPages}</p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -1397,7 +1397,7 @@ const App = () => {
           <table className="w-full text-sm">
             <thead className={tblHd}>
               <tr>
-                {['PO HLI NUMBER','PO ITEM TYPE','ITEM NO','ITEM CODE','OPERATION UNIT','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','HARI TERSISA'].map(h=>(
+                {['PO HLI NUMBER','ITEM NO','PO ITEM TYPE','ITEM CODE','OPERATION UNIT','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','HARI TERSISA'].map(h=>(
                   <th key={h} className={`px-4 py-3 text-left font-semibold whitespace-nowrap ${txt2} ${h==='PRICE'||h==='AMOUNT'?'min-w-[140px]':''}`}>{h}</th>
                 ))}
               </tr>
@@ -1413,6 +1413,7 @@ const App = () => {
                 return (
                   <tr key={i} className={`${trHov} transition-colors`}>
                     <td className="px-4 py-3 text-purple-600 font-medium whitespace-nowrap">{row.po_no}</td>
+                    <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.item_no||'-'}</td>
                     <td className={`px-4 py-3 whitespace-nowrap`}>
                       {row.po_item_type ? (
                         <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
@@ -1421,7 +1422,6 @@ const App = () => {
                           'bg-gray-100 text-gray-700'}`}>{row.po_item_type}</span>
                       ) : <span className={`${txt2} text-xs`}>-</span>}
                     </td>
-                    <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.item_no||'-'}</td>
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.item_code||'-'}</td>
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap text-xs`} title={row.operation_unit}>{row.operation_unit||'-'}</td>
                     <td className={`px-4 py-3 ${txt2} max-w-xs truncate`} title={row.description}>{row.description}</td>
@@ -1488,7 +1488,7 @@ const App = () => {
             <BarChart3 className="w-6 h-6"/>
           </button>
           <button onClick={()=>{ setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums,soMarginFilter); window.scrollTo({top:0, behavior:'smooth'}); }}
-            className={`p-3 rounded-xl flex justify-center transition-all ${activePage==='all-so'?'bg-white/30 text-white shadow-lg':'text-purple-100 hover:bg-white/20'}`} title="All Sales Orders">
+            className={`p-3 rounded-xl flex justify-center transition-all ${activePage==='all-so'?'bg-white/30 text-white shadow-lg':'text-purple-100 hover:bg-white/20'}`} title="Open SO (Sales Order)">
             <FileText className="w-6 h-6"/>
           </button>
         </nav>
@@ -1505,7 +1505,7 @@ const App = () => {
               HLI PO Monitoring <span className="text-purple-600">Dashboard</span>
             </h1>
             <p className={`mt-0.5 text-sm ${txt2}`}>
-              {activePage==='dashboard'?'Purchase Orders & Sales Orders Overview':'Manage All Sales Orders & PO Without SO'}
+              {activePage==='dashboard'?'Purchase Orders & Sales Orders Overview':'Manage Open SO (Sales Order) & PO Without SO'}
             </p>
           </div>
           <div className="flex gap-3">
