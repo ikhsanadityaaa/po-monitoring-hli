@@ -231,8 +231,8 @@ def so_dict(s):
     }
 
 # ─── Build hidden set from delete requests ────────────────────────────────
-def get_hidden_po_numbers():
-    """Return set of PO numbers that are hidden from dashboard."""
+def get_hidden_po_hli_keys():
+    """Return set of hidden PO HLI keys. Format stored: 'po_number-item_no' or just 'po_number'."""
     reqs = DeleteRequest.query.filter_by(ref_type='PO', is_hidden=True).all()
     return {r.ref_number for r in reqs}
 
@@ -241,7 +241,39 @@ def get_hidden_so_items():
     reqs = DeleteRequest.query.filter_by(ref_type='SO', is_hidden=True).all()
     return {r.ref_number for r in reqs}
 
-@app.route('/api/dashboard/stats', methods=['GET'])
+# Keep alias for backward compat in export
+def get_hidden_po_numbers():
+    return get_hidden_po_hli_keys()
+
+def po_hli_key(po_number, item_no):
+    """Generate PO HLI key: po_number-item_no (normalized item_no)."""
+    if not po_number:
+        return None
+    if item_no:
+        try:
+            n = int(float(str(item_no).strip()))
+            norm = str(n)
+        except (ValueError, OverflowError):
+            norm = str(item_no).strip()
+        return f"{po_number}-{norm}"
+    return po_number
+
+def is_po_hidden(po_number, item_no, hidden_keys):
+    """Check if this PO item is hidden. Matches by combined key or by po_number alone."""
+    key = po_hli_key(po_number, item_no)
+    if key and key in hidden_keys:
+        return True
+    # Also check all normalized variants of item_no
+    if item_no:
+        for var in _normalize_item_no(item_no):
+            if f"{po_number}-{var}" in hidden_keys:
+                return True
+    # Check if po_number alone is hidden (legacy)
+    if po_number in hidden_keys:
+        return True
+    return False
+
+
 def get_dashboard_stats():
     try:
         hidden_po = get_hidden_po_numbers()
@@ -251,13 +283,13 @@ def get_dashboard_stats():
         total_po_amount = db.session.query(func.sum(POData.amount)).scalar() or 0
         total_so_count = db.session.query(func.count(SOData.id)).filter(open_so_filter()).scalar() or 0
 
-        po_numbers = {r[0] for r in db.session.query(POData.po_number).all() if r[0]}
+        po_numbers = get_po_hli_key_set()
 
         matched_set = build_matched_set()
 
         po_without_so_count = 0
         for p in POData.query.all():
-            if p.po_number in hidden_po:
+            if is_po_hidden(p.po_number, p.item_no, hidden_po):
                 continue
             op_unit = get_operation_unit(p.po_item_type, p.item_code)
             if op_unit in EXCLUDED_OP_UNITS:
@@ -424,7 +456,18 @@ def po_is_matched(po_number, item_no, matched_set):
     return False
 
 
-@app.route('/api/data/po-without-so', methods=['GET'])
+def get_po_hli_key_set():
+    """Build set of all PO HLI keys from PO table: both 'po_number' and 'po_number-item_no'."""
+    keys = set()
+    for p in POData.query.with_entities(POData.po_number, POData.item_no).all():
+        if p.po_number:
+            keys.add(p.po_number)
+            if p.item_no:
+                for var in _normalize_item_no(p.item_no):
+                    keys.add(f"{p.po_number}-{var}")
+    return keys
+
+
 def get_po_without_so():
     try:
         matched_set = build_matched_set()
@@ -440,8 +483,8 @@ def get_po_without_so():
                 continue
             seen_keys.add(key)
 
-            # Skip hidden
-            if p.po_number in hidden_po:
+            # Skip hidden — check by combined PO HLI key (po_number-item_no)
+            if is_po_hidden(p.po_number, p.item_no, hidden_po):
                 continue
             op_unit = get_operation_unit(p.po_item_type, p.item_code)
             if op_unit in EXCLUDED_OP_UNITS:
@@ -472,7 +515,7 @@ def get_po_without_so():
 @app.route('/api/data/so-without-po', methods=['GET'])
 def get_so_without_po():
     try:
-        po_numbers = {r[0] for r in db.session.query(POData.po_number).all() if r[0]}
+        po_hli_keys = get_po_hli_key_set()
         hidden_so = get_hidden_so_items()
         result = []
         for s in db.session.query(SOData).filter(
@@ -483,7 +526,7 @@ def get_so_without_po():
             if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
                 continue
             candidates = extract_po_hli(s.customer_po_number) + extract_po_hli(s.delivery_memo)
-            if not candidates or not any(c in po_numbers for c in candidates):
+            if not candidates or not any(c in po_hli_keys for c in candidates):
                 result.append(so_dict(s))
         return jsonify(result)
     except Exception as e:
@@ -1088,7 +1131,7 @@ def export_po_without_so():
             if key in seen_keys:
                 continue
             seen_keys.add(key)
-            if p.po_number in hidden_po:
+            if is_po_hidden(p.po_number, p.item_no, hidden_po):
                 continue
             op_unit = get_operation_unit(p.po_item_type, p.item_code)
             if op_unit in EXCLUDED_OP_UNITS:
@@ -1120,6 +1163,135 @@ def export_po_without_so():
         return jsonify({'error': str(e)}), 500
 
 
-if __name__ == '__main__':
+@app.route('/api/template/hide', methods=['GET'])
+def download_hide_template():
+    """Download Excel template for batch hide requests."""
+    hide_type = request.args.get('type', 'PO').upper()  # 'PO' or 'SO'
+    wb = Workbook()
+    ws = wb.active
+
+    if hide_type == 'SO':
+        ws.title = "Hide SO Template"
+        headers = ['SO Number', 'Alasan']
+        ws.append(headers)
+        # Style header
+        fill = PatternFill(start_color="1D4ED8", end_color="1D4ED8", fill_type="solid")
+        for i, cell in enumerate(ws[1], 1):
+            cell.fill = fill
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.alignment = Alignment(horizontal='center')
+            ws.column_dimensions[get_column_letter(i)].width = 30 if i == 1 else 50
+        # Example row
+        ws.append(['9008988017-10', 'Alasan kenapa SO ini disembunyikan'])
+        note_row = ws.append(['PETUNJUK: Isi SO Number (format: SO_NUMBER-ITEM_NO atau SO_NUMBER), dan Alasan (wajib diisi)'])
+    else:
+        ws.title = "Hide PO HLI Template"
+        headers = ['NO PO HLI (PO Number-Item No)', 'Alasan']
+        ws.append(headers)
+        # Style header
+        fill = PatternFill(start_color="7C3AED", end_color="7C3AED", fill_type="solid")
+        for i, cell in enumerate(ws[1], 1):
+            cell.fill = fill
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.alignment = Alignment(horizontal='center')
+            ws.column_dimensions[get_column_letter(i)].width = 35 if i == 1 else 50
+        # Example row
+        ws.append(['4502358819-10', 'Alasan kenapa PO HLI ini disembunyikan'])
+        ws.append(['PETUNJUK: Isi NO PO HLI dengan format PO_NUMBER-ITEM_NO (contoh: 4502358819-10), dan Alasan (wajib diisi)'])
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    fname = f"Template_Hide_{'SO' if hide_type == 'SO' else 'PO_HLI'}.xlsx"
+    return send_file(output,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        as_attachment=True, download_name=fname)
+
+
+@app.route('/api/upload/hide-batch', methods=['POST'])
+def upload_hide_batch():
+    """Process batch hide Excel file. Supports both PO HLI and SO hide templates."""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
+        file = request.files['file']
+        hide_type = request.form.get('type', 'PO').upper()
+
+        df = pd.read_excel(file, engine='openpyxl')
+        df.columns = [str(c).strip() for c in df.columns]
+
+        # Detect column names
+        if hide_type == 'SO':
+            col_ref = find_column(df, ['SO Number', 'SO No', 'SO Item', 'SO Number-Item No'])
+        else:
+            col_ref = find_column(df, [
+                'NO PO HLI (PO Number-Item No)', 'NO PO HLI', 'PO HLI',
+                'PO Number-Item No', 'PO HLI Number', 'PO Number'
+            ])
+
+        col_reason = find_column(df, ['Alasan', 'Reason', 'Keterangan'])
+
+        if not col_ref:
+            return jsonify({'error': f'Kolom nomor referensi tidak ditemukan. Kolom tersedia: {df.columns.tolist()}'}), 400
+        if not col_reason:
+            return jsonify({'error': f'Kolom Alasan tidak ditemukan. Kolom tersedia: {df.columns.tolist()}'}), 400
+
+        success_count = 0
+        skipped = []
+        errors = []
+
+        for idx, row in df.iterrows():
+            ref_number = clean(df_val(row, col_ref))
+            reason = clean(df_val(row, col_reason))
+
+            # Skip header-like rows (instructions)
+            if not ref_number or ref_number.upper().startswith('PETUNJUK'):
+                continue
+            # Skip example rows
+            if reason and reason.lower().startswith('alasan kenapa'):
+                continue
+
+            if not reason:
+                errors.append(f"Baris {idx+2}: Alasan kosong untuk {ref_number}")
+                continue
+
+            # Check if already hidden
+            existing = DeleteRequest.query.filter_by(
+                ref_type=hide_type, ref_number=ref_number, is_hidden=True
+            ).first()
+            if existing:
+                skipped.append(ref_number)
+                continue
+
+            req = DeleteRequest(
+                ref_type=hide_type,
+                ref_number=ref_number,
+                reason=reason,
+                is_hidden=True
+            )
+            db.session.add(req)
+            success_count += 1
+
+        db.session.commit()
+
+        msg = f'{success_count} data berhasil disembunyikan'
+        if skipped:
+            msg += f'. {len(skipped)} sudah disembunyikan sebelumnya: {", ".join(skipped[:5])}'
+        if errors:
+            msg += f'. {len(errors)} error: {"; ".join(errors[:3])}'
+
+        return jsonify({
+            'message': msg,
+            'hidden': success_count,
+            'skipped': len(skipped),
+            'errors': errors
+        })
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+
     print("Backend: http://127.0.0.1:5000")
     app.run(debug=True, host='0.0.0.0', port=5000)
