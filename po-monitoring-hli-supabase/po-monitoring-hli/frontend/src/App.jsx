@@ -7,7 +7,8 @@ import {
   Upload, Download, AlertCircle, CheckCircle, XCircle,
   Package, DollarSign, TrendingUp, Calendar, ChevronLeft,
   ChevronRight, Moon, Sun, FileText, BarChart3, FileSpreadsheet,
-  Filter, X, ChevronDown, ChevronUp, Building2, Search, Loader2
+  Filter, X, ChevronDown, ChevronUp, Building2, Search, Loader2,
+  EyeOff, Eye, Trash2, RotateCcw, Plus
 } from 'lucide-react';
 import axios from 'axios';
 import { format, parseISO } from 'date-fns';
@@ -395,6 +396,122 @@ const StatusPie = ({ data, darkMode }) => {
   );
 };
 
+
+// ─── Delete Request Modal ──────────────────────────────────────────────────
+const DeleteRequestModal = ({ darkMode, onClose, deleteForm, setDeleteForm, deleteFormError, onSubmit }) => {
+  const bg = darkMode ? 'bg-gray-800 text-white' : 'bg-white text-gray-900';
+  const inp = darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-gray-50 border-gray-300 text-gray-800';
+  return (
+    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
+      <div className={`rounded-2xl shadow-2xl w-full max-w-md ${bg}`} onClick={e=>e.stopPropagation()}>
+        <div className={`flex justify-between items-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-200'}`}>
+          <div className="flex items-center gap-2">
+            <EyeOff className="w-5 h-5 text-orange-500"/>
+            <h3 className="font-bold text-base">Request Sembunyikan dari Dashboard</h3>
+          </div>
+          <button onClick={onClose} className={`p-1.5 rounded-lg ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`}><X className="w-5 h-5"/></button>
+        </div>
+        <div className="px-6 py-5 space-y-4">
+          <div>
+            <label className={`block text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>Tipe Data</label>
+            <div className="flex gap-3">
+              {['PO','SO'].map(t=>(
+                <label key={t} className="flex items-center gap-2 cursor-pointer">
+                  <input type="radio" name="ref_type" value={t} checked={deleteForm.ref_type===t}
+                    onChange={()=>setDeleteForm(f=>({...f,ref_type:t}))} className="accent-purple-600"/>
+                  <span className="text-sm font-medium">{t === 'PO' ? 'PO HLI' : 'SO (Sales Order)'}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className={`block text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>
+              {deleteForm.ref_type === 'PO' ? 'Nomor PO HLI' : 'Nomor SO / SO Item'}
+            </label>
+            <input
+              type="text"
+              value={deleteForm.ref_number}
+              onChange={e=>setDeleteForm(f=>({...f,ref_number:e.target.value}))}
+              placeholder={deleteForm.ref_type==='PO' ? 'e.g. 4570226161' : 'e.g. 9008988017-10'}
+              className={`w-full px-3 py-2 rounded-lg text-sm border ${inp}`}
+            />
+          </div>
+          <div>
+            <label className={`block text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>Alasan</label>
+            <textarea
+              value={deleteForm.reason}
+              onChange={e=>setDeleteForm(f=>({...f,reason:e.target.value}))}
+              placeholder="Masukkan alasan kenapa data ini disembunyikan dari dashboard..."
+              rows={3}
+              className={`w-full px-3 py-2 rounded-lg text-sm border resize-none ${inp}`}
+            />
+          </div>
+          {deleteFormError && (
+            <div className="flex items-center gap-2 text-red-500 text-sm bg-red-50 rounded-lg px-3 py-2">
+              <AlertCircle className="w-4 h-4 flex-shrink-0"/>{deleteFormError}
+            </div>
+          )}
+        </div>
+        <div className={`px-6 py-4 border-t flex justify-end gap-3 ${darkMode?'border-gray-700':'border-gray-200'}`}>
+          <button onClick={onClose} className={`px-4 py-2 rounded-lg text-sm font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>Batal</button>
+          <button onClick={onSubmit} className="px-5 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-sm font-semibold flex items-center gap-2">
+            <EyeOff className="w-4 h-4"/>Sembunyikan
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ─── Hidden Items Panel ────────────────────────────────────────────────────
+const HiddenItemsPanel = ({ darkMode, requests, onRestore, onClose }) => {
+  const bg = darkMode ? 'bg-gray-800 text-white' : 'bg-white text-gray-900';
+  const txt2 = darkMode ? 'text-gray-400' : 'text-gray-500';
+  const hidden = requests.filter(r=>r.is_hidden);
+  const fmtDt = (iso) => { try { return new Date(iso).toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); } catch { return iso; } };
+  return (
+    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
+      <div className={`rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col ${bg}`} onClick={e=>e.stopPropagation()}>
+        <div className={`flex justify-between items-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-200'}`}>
+          <div className="flex items-center gap-2">
+            <Eye className="w-5 h-5 text-purple-500"/>
+            <h3 className="font-bold text-base">Data yang Disembunyikan dari Dashboard</h3>
+            <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${darkMode?'bg-gray-700 text-gray-300':'bg-gray-100 text-gray-600'}`}>{hidden.length} item</span>
+          </div>
+          <button onClick={onClose} className={`p-1.5 rounded-lg ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`}><X className="w-5 h-5"/></button>
+        </div>
+        <div className="overflow-auto flex-1 p-4">
+          {hidden.length === 0 ? (
+            <div className={`text-center py-12 ${txt2}`}>
+              <Eye className="w-10 h-10 mx-auto mb-2 opacity-40"/>
+              <p className="text-sm">Tidak ada data yang disembunyikan</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {hidden.map(r=>(
+                <div key={r.id} className={`flex items-start justify-between gap-4 p-4 rounded-xl border ${darkMode?'bg-gray-700 border-gray-600':'bg-gray-50 border-gray-200'}`}>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className={`px-2 py-0.5 rounded text-xs font-bold ${r.ref_type==='PO'?'bg-red-100 text-red-700':'bg-orange-100 text-orange-700'}`}>{r.ref_type}</span>
+                      <span className="font-semibold text-sm">{r.ref_number}</span>
+                    </div>
+                    <p className={`text-xs ${txt2} mb-1`}><span className="font-medium">Alasan:</span> {r.reason}</p>
+                    <p className={`text-xs ${txt2}`}>📅 {fmtDt(r.requested_at)}</p>
+                  </div>
+                  <button onClick={()=>onRestore(r)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-xs font-semibold flex-shrink-0">
+                    <RotateCcw className="w-3.5 h-3.5"/>Tampilkan Lagi
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ═══════════════════════════════════════════════════════════════════
 // MAIN APP
 // ═══════════════════════════════════════════════════════════════════
@@ -434,6 +551,13 @@ const App = () => {
   const [editValue, setEditValue] = useState('');
   const [downloadToast, setDownloadToast] = useState(null);
   const poTableRef = useRef(null);
+
+  // Delete request / hide feature
+  const [deleteRequests, setDeleteRequests] = useState([]);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [showHiddenPanel, setShowHiddenPanel] = useState(false);
+  const [deleteForm, setDeleteForm] = useState({ ref_type: 'PO', ref_number: '', reason: '' });
+  const [deleteFormError, setDeleteFormError] = useState('');
 
   const addToast = useCallback((message, type='success') => {
     const id = Date.now(); setToasts(t => [...t, { id, message, type }]);
@@ -491,6 +615,43 @@ const App = () => {
     } finally { setLoading(false); }
   }, [addToast]);
 
+  // ─── Delete Request API functions ────────────────────────────────────────
+  const fetchDeleteRequests = useCallback(async () => {
+    try {
+      const res = await api.get('/api/delete-requests');
+      setDeleteRequests(Array.isArray(res.data) ? res.data : []);
+    } catch (e) { /* silent */ }
+  }, []);
+
+  const submitDeleteRequest = async () => {
+    setDeleteFormError('');
+    if (!deleteForm.ref_number.trim()) { setDeleteFormError('Nomor referensi wajib diisi'); return; }
+    if (!deleteForm.reason.trim()) { setDeleteFormError('Alasan wajib diisi'); return; }
+    try {
+      await api.post('/api/delete-requests', deleteForm);
+      addToast(`✅ ${deleteForm.ref_type} ${deleteForm.ref_number} berhasil disembunyikan dari dashboard`, 'success');
+      setDeleteForm({ ref_type: 'PO', ref_number: '', reason: '' });
+      setShowDeleteModal(false);
+      fetchDeleteRequests();
+      fetchDashboard();
+    } catch (e) {
+      setDeleteFormError(e.response?.data?.error || e.message);
+    }
+  };
+
+  const restoreDeleteRequest = async (req) => {
+    try {
+      await api.put(`/api/delete-requests/${req.id}/restore`);
+      addToast(`✅ ${req.ref_type} ${req.ref_number} berhasil ditampilkan kembali`, 'success');
+      fetchDeleteRequests();
+      fetchDashboard();
+    } catch (e) {
+      addToast(`❌ Gagal restore: ${e.response?.data?.error || e.message}`, 'error');
+    }
+  };
+
+  // Apply PO local filters whenever dependencies change
+
   // Apply PO local filters whenever dependencies change
   useEffect(() => {
     let filtered = [...poWithoutSO];
@@ -513,7 +674,7 @@ const App = () => {
     setPoPage(1);
   }, [poWithoutSO, poSearchNums, poFilterItemType, poFilterOpUnit]);
 
-  useEffect(() => { fetchDashboard(); }, []);
+  useEffect(() => { fetchDashboard(); fetchDeleteRequests(); }, []);
   useEffect(() => { if (activePage === 'all-so') fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter); }, [activePage]);
 
   const handleUpload = async (e, type) => {
@@ -1194,7 +1355,7 @@ const App = () => {
               <tr>
                 {['Aging','SO Item','Item Name','Status','Op Unit','Vendor','Qty',
                   'Sales Price','Sales Amount','PO Price','PO Amount','Margin','%Margin',
-                  'Possible Delivery','Plan Date','Remarks'].map(h=>(
+                  'Possible Delivery','Plan Date','Remarks','Aksi'].map(h=>(
                   <th key={h} className={`px-3 py-2.5 text-left font-semibold whitespace-nowrap ${txt2}`}>{h}</th>
                 ))}
               </tr>
@@ -1287,6 +1448,14 @@ const App = () => {
                         {so.remarks||'✏️ Add'}
                       </span>
                     )}
+                  </td>
+                  <td className="px-3 py-2 text-center">
+                    <button
+                      onClick={()=>{ setDeleteForm({ref_type:'SO', ref_number:so.so_item||so.so_number, reason:''}); setShowDeleteModal(true); }}
+                      title="Sembunyikan dari Dashboard"
+                      className="flex items-center gap-1 px-2 py-1 text-xs text-orange-600 hover:bg-orange-50 rounded-lg border border-orange-200 hover:border-orange-400 transition-all">
+                      <EyeOff className="w-3.5 h-3.5"/>
+                    </button>
                   </td>
                 </tr>
                 );
@@ -1397,14 +1566,14 @@ const App = () => {
           <table className="w-full text-sm">
             <thead className={tblHd}>
               <tr>
-                {['PO HLI NUMBER','ITEM NO','PO ITEM TYPE','ITEM CODE','OPERATION UNIT','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','HARI TERSISA'].map(h=>(
+                {['PO HLI NUMBER','ITEM NO','PO ITEM TYPE','ITEM CODE','OPERATION UNIT','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','HARI TERSISA','AKSI'].map(h=>(
                   <th key={h} className={`px-4 py-3 text-left font-semibold whitespace-nowrap ${txt2} ${h==='PRICE'||h==='AMOUNT'?'min-w-[140px]':''}`}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
               {poRows.length === 0 ? (
-                <tr><td colSpan={15} className={`px-4 py-10 text-center ${txt2}`}>
+                <tr><td colSpan={16} className={`px-4 py-10 text-center ${txt2}`}>
                   <Package className="w-10 h-10 mx-auto mb-2 opacity-40"/>Tidak ada data
                 </td></tr>
               ) : poRows.map((row,i)=>{
@@ -1435,6 +1604,14 @@ const App = () => {
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.req_delivery||'-'}</td>
                     <td className={`px-4 py-3 text-center whitespace-nowrap ${daysColor}`}>
                       {daysLeft === null ? '-' : daysLeft < 0 ? `${Math.abs(daysLeft)} hari lewat` : `${daysLeft} hari`}
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <button
+                        onClick={()=>{ setDeleteForm({ref_type:'PO', ref_number:row.po_no, reason:''}); setShowDeleteModal(true); }}
+                        title="Sembunyikan dari Dashboard"
+                        className="flex items-center gap-1 px-2 py-1 text-xs text-orange-600 hover:bg-orange-50 rounded-lg border border-orange-200 hover:border-orange-400 transition-all">
+                        <EyeOff className="w-3.5 h-3.5"/>Sembunyikan
+                      </button>
                     </td>
                   </tr>
                 );
@@ -1508,7 +1685,7 @@ const App = () => {
               {activePage==='dashboard'?'Purchase Orders & Sales Orders Overview':'Manage Open SO (Sales Order) & PO Without SO'}
             </p>
           </div>
-          <div className="flex gap-3">
+          <div className="flex flex-wrap gap-2">
             <label className={`flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all ${darkMode?'bg-purple-700 hover:bg-purple-800 text-white':'bg-purple-700 hover:bg-purple-800 text-white'}`}>
               <Upload className="w-4 h-4"/><span className="text-sm font-medium">Upload HLI PO List (Item)</span>
               <input type="file" accept=".xlsx,.xls" onChange={e=>handleUpload(e,'po')} className="hidden"/>
@@ -1517,6 +1694,20 @@ const App = () => {
               <Upload className="w-4 h-4"/><span className="text-sm font-medium">Upload SMRO - Search Client Odr</span>
               <input type="file" accept=".xlsx,.xls" onChange={e=>handleUpload(e,'smro')} className="hidden"/>
             </label>
+            <button onClick={()=>setShowDeleteModal(true)}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all bg-orange-600 hover:bg-orange-700 text-white">
+              <EyeOff className="w-4 h-4"/><span className="text-sm font-medium">Request Sembunyikan</span>
+            </button>
+            <button onClick={()=>{ fetchDeleteRequests(); setShowHiddenPanel(true); }}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all ${darkMode?'bg-gray-600 hover:bg-gray-500 text-white':'bg-gray-200 hover:bg-gray-300 text-gray-700'}`}>
+              <Eye className="w-4 h-4"/>
+              <span className="text-sm font-medium">Data Disembunyikan</span>
+              {deleteRequests.filter(r=>r.is_hidden).length > 0 && (
+                <span className="px-1.5 py-0.5 bg-orange-500 text-white rounded-full text-xs font-bold">
+                  {deleteRequests.filter(r=>r.is_hidden).length}
+                </span>
+              )}
+            </button>
           </div>
         </header>
 
@@ -1524,6 +1715,26 @@ const App = () => {
       </main>
 
       {modal && <SOModal title={modal.title} data={modal.data} darkMode={darkMode} onClose={()=>setModal(null)}/>}
+
+      {showDeleteModal && (
+        <DeleteRequestModal
+          darkMode={darkMode}
+          onClose={()=>{ setShowDeleteModal(false); setDeleteFormError(''); }}
+          deleteForm={deleteForm}
+          setDeleteForm={setDeleteForm}
+          deleteFormError={deleteFormError}
+          onSubmit={submitDeleteRequest}
+        />
+      )}
+
+      {showHiddenPanel && (
+        <HiddenItemsPanel
+          darkMode={darkMode}
+          requests={deleteRequests}
+          onRestore={restoreDeleteRequest}
+          onClose={()=>setShowHiddenPanel(false)}
+        />
+      )}
 
       {uploadProgress && (
         <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center backdrop-blur-sm">
