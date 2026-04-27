@@ -558,6 +558,14 @@ const App = () => {
   const [showHiddenPanel, setShowHiddenPanel] = useState(false);
   const [deleteForm, setDeleteForm] = useState({ ref_type: 'PO', ref_number: '', reason: '' });
   const [deleteFormError, setDeleteFormError] = useState('');
+  // Hide batch upload
+  const [showHideMenu, setShowHideMenu] = useState(false);
+  const hideMenuRef = useRef(null);
+  useEffect(() => {
+    const handler = (e) => { if (hideMenuRef.current && !hideMenuRef.current.contains(e.target)) setShowHideMenu(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
 
   const addToast = useCallback((message, type='success') => {
     const id = Date.now(); setToasts(t => [...t, { id, message, type }]);
@@ -657,7 +665,13 @@ const App = () => {
     let filtered = [...poWithoutSO];
     if (poSearchNums.length > 0) {
       const nums = poSearchNums.map(n=>n.toLowerCase());
-      filtered = filtered.filter(p => nums.some(n => (p.po_no||'').toLowerCase().includes(n)));
+      filtered = filtered.filter(p => {
+        const poHliKey = p.item_no ? `${p.po_no}-${p.item_no}`.toLowerCase() : (p.po_no||'').toLowerCase();
+        return nums.some(n =>
+          poHliKey.includes(n) ||
+          (p.po_no||'').toLowerCase().includes(n)
+        );
+      });
     }
     // __NONE__ = nothing passes; [] = all pass; array = filter by those values
     if (poFilterItemType === '__NONE__') {
@@ -770,7 +784,35 @@ const App = () => {
     }
   };
 
-  const downloadBlob = async (url, filename, label) => {
+  const downloadHideTemplate = (type) => {
+    setShowHideMenu(false);
+    downloadBlob(`/api/template/hide?type=${type}`, `Template_Hide_${type === 'SO' ? 'SO' : 'PO_HLI'}.xlsx`, `Template Hide ${type}`);
+  };
+
+  const handleHideBatchUpload = async (e, type) => {
+    const file = e.target.files[0]; if (!file) return;
+    e.target.value = '';
+    setShowHideMenu(false);
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('type', type);
+    setUploadProgress({ label: `Hide ${type} Batch`, pct: 0 });
+    try {
+      const res = await api.post('/api/upload/hide-batch', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (ev) => setUploadProgress({ label: `Hide ${type} Batch`, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
+      });
+      setUploadProgress(null);
+      addToast(`✅ ${res.data.message}`, 'success');
+      fetchDeleteRequests();
+      fetchDashboard();
+    } catch (e) {
+      setUploadProgress(null);
+      addToast(`❌ Gagal upload hide batch: ${e.response?.data?.error || e.message}`, 'error');
+    }
+  };
+
+
     const toastId = Date.now();
     setDownloadToast({ id: toastId, message: `Mengunduh ${label || filename}...` });
     try {
@@ -1355,7 +1397,7 @@ const App = () => {
               <tr>
                 {['Aging','SO Item','Item Name','Status','Op Unit','Vendor','Qty',
                   'Sales Price','Sales Amount','PO Price','PO Amount','Margin','%Margin',
-                  'Possible Delivery','Plan Date','Remarks','Aksi'].map(h=>(
+                  'Possible Delivery','Plan Date','Remarks'].map(h=>(
                   <th key={h} className={`px-3 py-2.5 text-left font-semibold whitespace-nowrap ${txt2}`}>{h}</th>
                 ))}
               </tr>
@@ -1449,14 +1491,6 @@ const App = () => {
                       </span>
                     )}
                   </td>
-                  <td className="px-3 py-2 text-center">
-                    <button
-                      onClick={()=>{ setDeleteForm({ref_type:'SO', ref_number:so.so_item||so.so_number, reason:''}); setShowDeleteModal(true); }}
-                      title="Sembunyikan dari Dashboard"
-                      className="flex items-center gap-1 px-2 py-1 text-xs text-orange-600 hover:bg-orange-50 rounded-lg border border-orange-200 hover:border-orange-400 transition-all">
-                      <EyeOff className="w-3.5 h-3.5"/>
-                    </button>
-                  </td>
                 </tr>
                 );
               })
@@ -1504,7 +1538,7 @@ const App = () => {
             <label className={`block text-xs font-medium mb-1 ${txt2}`}>Search PO Number</label>
             <SearchInput
               label="PO HLI Number"
-              placeholder={"e.g.\n4570226161\n4570226162"}
+              placeholder={"e.g.\n4502358819\n4502358819-10"}
               onSearch={(nums) => { setPoSearchNums(nums); setPoPage(1); }}
               darkMode={darkMode} txt2={txt2}
             />
@@ -1566,7 +1600,7 @@ const App = () => {
           <table className="w-full text-sm">
             <thead className={tblHd}>
               <tr>
-                {['PO HLI NUMBER','ITEM NO','PO ITEM TYPE','ITEM CODE','OPERATION UNIT','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','HARI TERSISA','AKSI'].map(h=>(
+                {['PO HLI NUMBER','ITEM NO','PO ITEM TYPE','ITEM CODE','OPERATION UNIT','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','HARI TERSISA'].map(h=>(
                   <th key={h} className={`px-4 py-3 text-left font-semibold whitespace-nowrap ${txt2} ${h==='PRICE'||h==='AMOUNT'?'min-w-[140px]':''}`}>{h}</th>
                 ))}
               </tr>
@@ -1581,7 +1615,9 @@ const App = () => {
                 const daysColor = daysLeft === null ? txt2 : daysLeft < 0 ? 'text-red-600 font-bold' : daysLeft <= 7 ? 'text-orange-600 font-semibold' : daysLeft <= 30 ? 'text-yellow-600' : 'text-green-600';
                 return (
                   <tr key={i} className={`${trHov} transition-colors`}>
-                    <td className="px-4 py-3 text-purple-600 font-medium whitespace-nowrap">{row.po_no}</td>
+                    <td className="px-4 py-3 text-purple-600 font-medium whitespace-nowrap">
+                      {row.item_no ? `${row.po_no}-${row.item_no}` : row.po_no}
+                    </td>
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.item_no||'-'}</td>
                     <td className={`px-4 py-3 whitespace-nowrap`}>
                       {row.po_item_type ? (
@@ -1604,14 +1640,6 @@ const App = () => {
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.req_delivery||'-'}</td>
                     <td className={`px-4 py-3 text-center whitespace-nowrap ${daysColor}`}>
                       {daysLeft === null ? '-' : daysLeft < 0 ? `${Math.abs(daysLeft)} hari lewat` : `${daysLeft} hari`}
-                    </td>
-                    <td className="px-4 py-3 text-center">
-                      <button
-                        onClick={()=>{ setDeleteForm({ref_type:'PO', ref_number:row.po_no, reason:''}); setShowDeleteModal(true); }}
-                        title="Sembunyikan dari Dashboard"
-                        className="flex items-center gap-1 px-2 py-1 text-xs text-orange-600 hover:bg-orange-50 rounded-lg border border-orange-200 hover:border-orange-400 transition-all">
-                        <EyeOff className="w-3.5 h-3.5"/>Sembunyikan
-                      </button>
                     </td>
                   </tr>
                 );
@@ -1694,14 +1722,55 @@ const App = () => {
               <Upload className="w-4 h-4"/><span className="text-sm font-medium">Upload SMRO - Search Client Odr</span>
               <input type="file" accept=".xlsx,.xls" onChange={e=>handleUpload(e,'smro')} className="hidden"/>
             </label>
-            <button onClick={()=>setShowDeleteModal(true)}
-              className="flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all bg-orange-600 hover:bg-orange-700 text-white">
-              <EyeOff className="w-4 h-4"/><span className="text-sm font-medium">Request Sembunyikan</span>
-            </button>
+            <div className="relative" ref={hideMenuRef}>
+              <button onClick={()=>setShowHideMenu(o=>!o)}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all bg-orange-600 hover:bg-orange-700 text-white">
+                <EyeOff className="w-4 h-4"/><span className="text-sm font-medium">Hide</span>
+                <ChevronDown className="w-3.5 h-3.5"/>
+              </button>
+              {showHideMenu && (
+                <div className={`absolute right-0 mt-2 z-50 rounded-xl shadow-2xl border w-72 p-3 ${darkMode?'bg-gray-800 border-gray-700 text-white':'bg-white border-gray-200'}`}>
+                  <p className={`text-xs font-semibold mb-3 px-1 ${darkMode?'text-gray-300':'text-gray-600'}`}>
+                    Sembunyikan data dari dashboard via template Excel
+                  </p>
+                  {/* PO HLI */}
+                  <div className={`mb-2 p-3 rounded-lg ${darkMode?'bg-gray-700':'bg-orange-50'}`}>
+                    <p className="text-xs font-bold mb-1 text-orange-700">🔵 PO HLI (dari PO List)</p>
+                    <p className={`text-xs mb-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>Format: PO Number-Item No (mis: 4502358819-10)</p>
+                    <div className="flex gap-2">
+                      <button onClick={()=>downloadHideTemplate('PO')}
+                        className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-xs font-semibold">
+                        <Download className="w-3 h-3"/>Download Template
+                      </button>
+                      <label className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-semibold cursor-pointer">
+                        <Upload className="w-3 h-3"/>Upload Filled
+                        <input type="file" accept=".xlsx,.xls" onChange={e=>handleHideBatchUpload(e,'PO')} className="hidden"/>
+                      </label>
+                    </div>
+                  </div>
+                  {/* SO */}
+                  <div className={`p-3 rounded-lg ${darkMode?'bg-gray-700':'bg-blue-50'}`}>
+                    <p className="text-xs font-bold mb-1 text-blue-700">🟠 SO (dari SMRO)</p>
+                    <p className={`text-xs mb-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>Format: SO Number atau SO Number-Item No</p>
+                    <div className="flex gap-2">
+                      <button onClick={()=>downloadHideTemplate('SO')}
+                        className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold">
+                        <Download className="w-3 h-3"/>Download Template
+                      </button>
+                      <label className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-semibold cursor-pointer">
+                        <Upload className="w-3 h-3"/>Upload Filled
+                        <input type="file" accept=".xlsx,.xls" onChange={e=>handleHideBatchUpload(e,'SO')} className="hidden"/>
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
             <button onClick={()=>{ fetchDeleteRequests(); setShowHiddenPanel(true); }}
               className={`flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all ${darkMode?'bg-gray-600 hover:bg-gray-500 text-white':'bg-gray-200 hover:bg-gray-300 text-gray-700'}`}>
               <Eye className="w-4 h-4"/>
-              <span className="text-sm font-medium">Data Disembunyikan</span>
+              <span className="text-sm font-medium">Hide History</span>
               {deleteRequests.filter(r=>r.is_hidden).length > 0 && (
                 <span className="px-1.5 py-0.5 bg-orange-500 text-white rounded-full text-xs font-bold">
                   {deleteRequests.filter(r=>r.is_hidden).length}
@@ -1715,17 +1784,6 @@ const App = () => {
       </main>
 
       {modal && <SOModal title={modal.title} data={modal.data} darkMode={darkMode} onClose={()=>setModal(null)}/>}
-
-      {showDeleteModal && (
-        <DeleteRequestModal
-          darkMode={darkMode}
-          onClose={()=>{ setShowDeleteModal(false); setDeleteFormError(''); }}
-          deleteForm={deleteForm}
-          setDeleteForm={setDeleteForm}
-          deleteFormError={deleteFormError}
-          onSubmit={submitDeleteRequest}
-        />
-      )}
 
       {showHiddenPanel && (
         <HiddenItemsPanel
