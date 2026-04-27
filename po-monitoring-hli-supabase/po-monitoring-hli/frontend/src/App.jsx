@@ -1600,7 +1600,7 @@ const App = () => {
           <table className="w-full text-sm">
             <thead className={tblHd}>
               <tr>
-                {['PO HLI NUMBER','ITEM NO','PO ITEM TYPE','ITEM CODE','OPERATION UNIT','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','HARI TERSISA'].map(h=>(
+                {['PO HLI NUMBER','PO ITEM TYPE','ITEM CODE','OPERATION UNIT','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','HARI TERSISA'].map(h=>(
                   <th key={h} className={`px-4 py-3 text-left font-semibold whitespace-nowrap ${txt2} ${h==='PRICE'||h==='AMOUNT'?'min-w-[140px]':''}`}>{h}</th>
                 ))}
               </tr>
@@ -1618,7 +1618,6 @@ const App = () => {
                     <td className="px-4 py-3 text-purple-600 font-medium whitespace-nowrap">
                       {row.item_no ? `${row.po_no}-${row.item_no}` : row.po_no}
                     </td>
-                    <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.item_no||'-'}</td>
                     <td className={`px-4 py-3 whitespace-nowrap`}>
                       {row.po_item_type ? (
                         <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
