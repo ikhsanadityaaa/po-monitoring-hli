@@ -56,7 +56,7 @@ const fmtDate = (d) => { try { return d ? format(parseISO(d),'dd MMM yyyy') : '-
 // ─── Download Toast ────────────────────────────────────────────────────────
 const DownloadToast = ({ message, onClose }) => {
   return (
-    <div className="fixed top-5 right-5 z-[200] flex itemss-center gap-3 px-5 py-3 rounded-xl shadow-2xl text-white bg-purple-700 max-w-sm animate-slide-in">
+    <div className="fixed top-5 right-5 z-[200] flex items-center gap-3 px-5 py-3 rounded-xl shadow-2xl text-white bg-purple-700 max-w-sm animate-slide-in">
       <Loader2 className="w-5 h-5 flex-shrink-0 animate-spin"/>
       <span className="text-sm font-medium">{message}</span>
     </div>
@@ -67,7 +67,7 @@ const Toast = ({ message, type, onClose }) => {
   useEffect(() => { const t = setTimeout(onClose, 3000); return () => clearTimeout(t); }, [onClose]);
   const bg = type === 'success' ? 'bg-green-600' : type === 'error' ? 'bg-red-600' : 'bg-blue-600';
   return (
-    <div className={`fixed top-5 right-5 z-[100] flex itemss-center gap-3 px-5 py-3 rounded-xl shadow-2xl text-white ${bg} max-w-sm`}>
+    <div className={`fixed top-5 right-5 z-[100] flex items-center gap-3 px-5 py-3 rounded-xl shadow-2xl text-white ${bg} max-w-sm`}>
       {type === 'success' ? <CheckCircle className="w-5 h-5 flex-shrink-0" /> : <AlertCircle className="w-5 h-5 flex-shrink-0" />}
       <span className="text-sm font-medium">{message}</span>
       <button onClick={onClose} className="ml-2 hover:opacity-70"><X className="w-4 h-4" /></button>
@@ -102,11 +102,11 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
   const rows = (data || []).slice((dlPage-1)*PER, dlPage*PER);
 
   // Determine if SO Item column exists in data (show SO Number only when SO Item is absent)
-  const hasSoItem = (data || []).some(s => s.so_items);
+  const hasSoItem = (data || []).some(s => s.so_item);
 
   const downloadExcel = () => {
     const ws = XLSX.utils.json_to_sheet(data.map(s => ({
-      'SO Item': s.so_items,
+      'SO Item': s.so_item,
       ...(!hasSoItem ? { 'SO Number': s.so_number } : {}),
       'Status': s.so_status,
       'Op Unit': s.operation_unit_name, 'Vendor': s.vendor_name, 'Product': s.product_name,
@@ -121,12 +121,12 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
       `${title.replace(/\s+/g,'_')}.xlsx`);
   };
   return (
-    <div className="fixed inset-0 bg-black/60 z-50 flex itemss-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
       <div role="dialog" aria-modal="true" aria-label={title} className={`rounded-2xl shadow-2xl w-full max-w-6xl max-h-[85vh] flex flex-col ${darkMode?'bg-gray-800 text-white':'bg-white'}`} onClick={e=>e.stopPropagation()}>
-        <div className={`flex justify-between itemss-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
+        <div className={`flex justify-between items-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
           <h3 className="font-bold text-lg">{title} <span className={`text-sm font-normal ml-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>({fmtNum(data?.length)} records)</span></h3>
           <div className="flex gap-2">
-            <button onClick={downloadExcel} className="flex itemss-center gap-1 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm"><FileSpreadsheet className="w-4 h-4"/>Excel</button>
+            <button onClick={downloadExcel} className="flex items-center gap-1 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm"><FileSpreadsheet className="w-4 h-4"/>Excel</button>
             <button onClick={onClose} className={`p-1.5 rounded-lg ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`}><X className="w-5 h-5"/></button>
           </div>
         </div>
@@ -140,7 +140,7 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
             <tbody className={`divide-y ${darkMode?'divide-gray-700':'divide-gray-100'}`}>
               {rows.map((s,i)=>(
                 <tr key={i} className={darkMode?'hover:bg-gray-700':'hover:bg-purple-50'}>
-                  <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{s.so_items||'-'}</td>
+                  <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{s.so_item||'-'}</td>
                   {!hasSoItem && <td className="px-3 py-2 whitespace-nowrap">{s.so_number}</td>}
                   <td className="px-3 py-2 whitespace-nowrap"><span className={`px-2 py-0.5 rounded-full text-xs font-medium ${s.so_status==='Delivery Completed'?'bg-green-100 text-green-700':s.so_status==='SO Cancel'?'bg-red-100 text-red-700':'bg-blue-100 text-blue-700'}`}>{s.so_status||'-'}</span></td>
                   <td className="px-3 py-2 whitespace-nowrap min-w-[180px]">{s.operation_unit_name}</td>
@@ -159,7 +159,7 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
           </table>
         </div>
         {pages > 1 && (
-          <div className={`flex justify-between itemss-center px-6 py-3 border-t ${darkMode?'border-gray-700':'border-gray-100'}`}>
+          <div className={`flex justify-between items-center px-6 py-3 border-t ${darkMode?'border-gray-700':'border-gray-100'}`}>
             <span className={`text-sm ${darkMode?'text-gray-400':'text-gray-600'}`}>{(dlPage-1)*PER+1}–{Math.min(dlPage*PER,data.length)} / {fmtNum(data.length)}</span>
             <div className="flex gap-2">
               <button disabled={dlPage===1} onClick={()=>setDlPage(p=>p-1)} className={`p-1.5 rounded ${dlPage===1?'opacity-40':'hover:bg-gray-200'}`}><ChevronLeft className="w-4 h-4"/></button>
@@ -193,7 +193,7 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
   const toggleAll = () => {
     if (noneSelected) {
       // Currently all checked → uncheck all (set to explicit empty selection = nothing shown)
-      // We use a sentinel: store all itemss as "selected" but display as "0 selected"
+      // We use a sentinel: store all items as "selected" but display as "0 dipilih"
       // Better UX: uncheck all means filter passes nothing, so we store all as excluded
       // Actually Excel behavior: uncheck all → nothing shows. We store [] but invert logic.
       // Simplest: use null/special state — instead use a "noneMode" approach:
@@ -208,7 +208,7 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
   const toggle = (val) => {
     // If currently in all-checked visual state (noneSelected)
     if (noneSelected) {
-      // Click one items: keep only that one checked (deselect all others)
+      // Click one item: keep only that one checked (deselect all others)
       onChange([val]);
       return;
     }
@@ -232,16 +232,16 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
   const isNoneMode   = selected === '__NONE__';
 
   const displayLabel = isNoneMode
-    ? `0 selected`
+    ? `0 dipilih`
     : noneSelected
-    ? `All ${label}`
-    : `${selected.length} selected`;
+    ? `Semua ${label}`
+    : `${selected.length} dipilih`;
 
   return (
     <div className="relative flex-1 min-w-[180px]" ref={ref}>
       <label className={`block text-xs font-medium mb-1 ${txt2}`}>{label}</label>
       <button onClick={()=>setOpen(o=>!o)} style={{cursor:'pointer'}}
-        className={`w-full px-3 py-2 rounded-lg text-sm border text-left flex justify-between itemss-center transition-colors
+        className={`w-full px-3 py-2 rounded-lg text-sm border text-left flex justify-between items-center transition-colors
           ${darkMode
             ? 'bg-gray-600 border-gray-500 text-white hover:bg-gray-500'
             : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
@@ -251,24 +251,24 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
       {open && (
         <div className={`absolute z-50 mt-1 w-full max-h-56 overflow-auto rounded-lg shadow-xl border ${darkMode?'bg-gray-700 border-gray-600':'bg-white border-gray-200'}`}>
           {/* Select All row — like Excel */}
-          <label style={{cursor:'pointer'}} className={`flex itemss-center gap-2 px-3 py-2 text-xs font-semibold border-b
+          <label style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold border-b
             ${darkMode?'border-gray-600 hover:bg-gray-600 text-white':'border-gray-100 hover:bg-purple-50 text-gray-700'}`}>
             <input type="checkbox"
               checked={isAllChecked}
               ref={el => { if (el) el.indeterminate = someSelected; }}
               onChange={toggleAll}
               className="accent-purple-600" style={{cursor:'pointer'}}/>
-            <span>(Select All)</span>
+            <span>(Pilih Semua)</span>
           </label>
           {options.map(opt => (
-            <label key={opt} style={{cursor:'pointer'}} className={`flex itemss-center gap-2 px-3 py-2 text-xs
+            <label key={opt} style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs
               ${darkMode?'hover:bg-gray-600 text-white':'hover:bg-purple-50 text-gray-700'}`}>
               <input type="checkbox" checked={isChecked(opt)} onChange={()=>toggle(opt)}
                 className="accent-purple-600" style={{cursor:'pointer'}}/>
               <span className="truncate" title={opt}>{opt}</span>
             </label>
           ))}
-          {options.length === 0 && <div className={`px-3 py-2 text-xs ${txt2}`}>No options available</div>}
+          {options.length === 0 && <div className={`px-3 py-2 text-xs ${txt2}`}>Tidak ada opsi</div>}
         </div>
       )}
     </div>
@@ -304,7 +304,7 @@ const SearchInput = ({ placeholder, onSearch, darkMode, txt2, label }) => {
       <button
         onClick={() => setOpen(o => !o)}
         title={`Search ${label}`}
-        className={`flex itemss-center gap-1.5 px-3 py-2 rounded-lg text-sm border font-medium transition-all
+        className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm border font-medium transition-all
           ${darkMode ? 'bg-gray-600 border-gray-500 text-white hover:bg-gray-500' : 'bg-white border-gray-300 text-gray-700 hover:bg-purple-50 hover:border-purple-400'}`}
       >
         <Search className="w-4 h-4"/>
@@ -314,7 +314,7 @@ const SearchInput = ({ placeholder, onSearch, darkMode, txt2, label }) => {
       {open && (
         <div className={`absolute left-0 top-full mt-1 z-50 rounded-xl shadow-2xl border p-3 w-64 ${darkMode?'bg-gray-800 border-gray-700':'bg-white border-gray-200'}`}>
           <p className={`text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>
-            Enter {label} (one per line):
+            Masukkan {label} (satu per baris):
           </p>
           <textarea
             value={value}
@@ -328,7 +328,7 @@ const SearchInput = ({ placeholder, onSearch, darkMode, txt2, label }) => {
           <div className="flex gap-2 mt-2">
             <button onClick={handleSearch}
               className="flex-1 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-semibold">
-              Search
+              Cari
             </button>
             <button onClick={handleClear}
               className={`px-3 py-1.5 rounded-lg text-xs font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>
@@ -350,7 +350,7 @@ const StatusPie = ({ data, darkMode }) => {
   const rest = sorted.slice(5);
   const etcValue = rest.reduce((s, d) => s + d.value, 0);
   const pieData = etcValue > 0
-    ? [...top5, { name: `Etc (${rest.length} others)`, value: etcValue, isEtc: true, etcItems: rest }]
+    ? [...top5, { name: `Etc (${rest.length} lainnya)`, value: etcValue, isEtc: true, etcItems: rest }]
     : top5;
   return (
     <div style={{position:'relative'}}>
@@ -402,21 +402,21 @@ const DeleteRequestModal = ({ darkMode, onClose, deleteForm, setDeleteForm, dele
   const bg = darkMode ? 'bg-gray-800 text-white' : 'bg-white text-gray-900';
   const inp = darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-gray-50 border-gray-300 text-gray-800';
   return (
-    <div className="fixed inset-0 bg-black/60 z-50 flex itemss-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
       <div className={`rounded-2xl shadow-2xl w-full max-w-md ${bg}`} onClick={e=>e.stopPropagation()}>
-        <div className={`flex justify-between itemss-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-200'}`}>
-          <div className="flex itemss-center gap-2">
+        <div className={`flex justify-between items-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-200'}`}>
+          <div className="flex items-center gap-2">
             <EyeOff className="w-5 h-5 text-orange-500"/>
-            <h3 className="font-bold text-base">Hide from Dashboard</h3>
+            <h3 className="font-bold text-base">Request Sembunyikan dari Dashboard</h3>
           </div>
           <button onClick={onClose} className={`p-1.5 rounded-lg ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`}><X className="w-5 h-5"/></button>
         </div>
         <div className="px-6 py-5 space-y-4">
           <div>
-            <label className={`block text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>Data Type</label>
+            <label className={`block text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>Tipe Data</label>
             <div className="flex gap-3">
               {['PO','SO'].map(t=>(
-                <label key={t} className="flex itemss-center gap-2 cursor-pointer">
+                <label key={t} className="flex items-center gap-2 cursor-pointer">
                   <input type="radio" name="ref_type" value={t} checked={deleteForm.ref_type===t}
                     onChange={()=>setDeleteForm(f=>({...f,ref_type:t}))} className="accent-purple-600"/>
                   <span className="text-sm font-medium">{t === 'PO' ? 'PO HLI' : 'SO (Sales Order)'}</span>
@@ -426,7 +426,7 @@ const DeleteRequestModal = ({ darkMode, onClose, deleteForm, setDeleteForm, dele
           </div>
           <div>
             <label className={`block text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>
-              {deleteForm.ref_type === 'PO' ? 'PO HLI Number' : 'SO Number / SO Item'}
+              {deleteForm.ref_type === 'PO' ? 'Nomor PO HLI' : 'Nomor SO / SO Item'}
             </label>
             <input
               type="text"
@@ -437,25 +437,25 @@ const DeleteRequestModal = ({ darkMode, onClose, deleteForm, setDeleteForm, dele
             />
           </div>
           <div>
-            <label className={`block text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>Reason</label>
+            <label className={`block text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>Alasan</label>
             <textarea
               value={deleteForm.reason}
               onChange={e=>setDeleteForm(f=>({...f,reason:e.target.value}))}
-              placeholder="Enter reason for hiding this items from the dashboard..."
+              placeholder="Masukkan alasan kenapa data ini disembunyikan dari dashboard..."
               rows={3}
               className={`w-full px-3 py-2 rounded-lg text-sm border resize-none ${inp}`}
             />
           </div>
           {deleteFormError && (
-            <div className="flex itemss-center gap-2 text-red-500 text-sm bg-red-50 rounded-lg px-3 py-2">
+            <div className="flex items-center gap-2 text-red-500 text-sm bg-red-50 rounded-lg px-3 py-2">
               <AlertCircle className="w-4 h-4 flex-shrink-0"/>{deleteFormError}
             </div>
           )}
         </div>
         <div className={`px-6 py-4 border-t flex justify-end gap-3 ${darkMode?'border-gray-700':'border-gray-200'}`}>
-          <button onClick={onClose} className={`px-4 py-2 rounded-lg text-sm font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>Cancel</button>
-          <button onClick={onSubmit} className="px-5 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-sm font-semibold flex itemss-center gap-2">
-            <EyeOff className="w-4 h-4"/>Hide
+          <button onClick={onClose} className={`px-4 py-2 rounded-lg text-sm font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>Batal</button>
+          <button onClick={onSubmit} className="px-5 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-sm font-semibold flex items-center gap-2">
+            <EyeOff className="w-4 h-4"/>Sembunyikan
           </button>
         </div>
       </div>
@@ -470,13 +470,13 @@ const HiddenItemsPanel = ({ darkMode, requests, onRestore, onClose }) => {
   const hidden = requests.filter(r=>r.is_hidden);
   const fmtDt = (iso) => { try { return new Date(iso).toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); } catch { return iso; } };
   return (
-    <div className="fixed inset-0 bg-black/60 z-50 flex itemss-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
       <div className={`rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col ${bg}`} onClick={e=>e.stopPropagation()}>
-        <div className={`flex justify-between itemss-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-200'}`}>
-          <div className="flex itemss-center gap-2">
+        <div className={`flex justify-between items-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-200'}`}>
+          <div className="flex items-center gap-2">
             <Eye className="w-5 h-5 text-purple-500"/>
-            <h3 className="font-bold text-base">Items Hidden from Dashboard</h3>
-            <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${darkMode?'bg-gray-700 text-gray-300':'bg-gray-100 text-gray-600'}`}>{hidden.length} items</span>
+            <h3 className="font-bold text-base">Data yang Disembunyikan dari Dashboard</h3>
+            <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${darkMode?'bg-gray-700 text-gray-300':'bg-gray-100 text-gray-600'}`}>{hidden.length} item</span>
           </div>
           <button onClick={onClose} className={`p-1.5 rounded-lg ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`}><X className="w-5 h-5"/></button>
         </div>
@@ -484,23 +484,23 @@ const HiddenItemsPanel = ({ darkMode, requests, onRestore, onClose }) => {
           {hidden.length === 0 ? (
             <div className={`text-center py-12 ${txt2}`}>
               <Eye className="w-10 h-10 mx-auto mb-2 opacity-40"/>
-              <p className="text-sm">No hidden items</p>
+              <p className="text-sm">Tidak ada data yang disembunyikan</p>
             </div>
           ) : (
             <div className="space-y-3">
               {hidden.map(r=>(
-                <div key={r.id} className={`flex itemss-start justify-between gap-4 p-4 rounded-xl border ${darkMode?'bg-gray-700 border-gray-600':'bg-gray-50 border-gray-200'}`}>
+                <div key={r.id} className={`flex items-start justify-between gap-4 p-4 rounded-xl border ${darkMode?'bg-gray-700 border-gray-600':'bg-gray-50 border-gray-200'}`}>
                   <div className="flex-1 min-w-0">
-                    <div className="flex itemss-center gap-2 mb-1">
+                    <div className="flex items-center gap-2 mb-1">
                       <span className={`px-2 py-0.5 rounded text-xs font-bold ${r.ref_type==='PO'?'bg-red-100 text-red-700':'bg-orange-100 text-orange-700'}`}>{r.ref_type}</span>
                       <span className="font-semibold text-sm">{r.ref_number}</span>
                     </div>
-                    <p className={`text-xs ${txt2} mb-1`}><span className="font-medium">Reason:</span> {r.reason}</p>
+                    <p className={`text-xs ${txt2} mb-1`}><span className="font-medium">Alasan:</span> {r.reason}</p>
                     <p className={`text-xs ${txt2}`}>📅 {fmtDt(r.requested_at)}</p>
                   </div>
                   <button onClick={()=>onRestore(r)}
-                    className="flex itemss-center gap-1.5 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-xs font-semibold flex-shrink-0">
-                    <RotateCcw className="w-3.5 h-3.5"/>Restore
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-xs font-semibold flex-shrink-0">
+                    <RotateCcw className="w-3.5 h-3.5"/>Tampilkan Lagi
                   </button>
                 </div>
               ))}
@@ -587,9 +587,9 @@ const App = () => {
       setPoWithoutSO(poFiltered);
       setPoFiltered(poFiltered);
       // Build filter options from PO data
-      const itemsTypes = [...new Set(poFiltered.map(p=>p.po_items_type).filter(Boolean))].sort();
+      const itemTypes = [...new Set(poFiltered.map(p=>p.po_item_type).filter(Boolean))].sort();
       const opUnits   = [...new Set(poFiltered.map(p=>p.operation_unit).filter(Boolean))].sort();
-      setPoItemTypeOptions(itemsTypes);
+      setPoItemTypeOptions(itemTypes);
       setPoOpUnitOptions(opUnits);
       setAgingData(Array.isArray(aRes.data) ? aRes.data : []);
     } catch (e) {
@@ -612,14 +612,14 @@ const App = () => {
       resolveFilter(filters.vendors).forEach(v => params.append('vendor', v));
       resolveFilter(filters.statuses).forEach(v => params.append('status', v));
       (filters.aging || []).forEach(a => params.append('aging', a));
-      (searchNums || []).forEach(n => params.append('so_items', n));
+      (searchNums || []).forEach(n => params.append('so_item', n));
       if (marginFilter && marginFilter !== 'all') params.append('margin_filter', marginFilter);
       const res = await api.get(`/api/data/all-so?${params}`);
       setAllSOData(Array.isArray(res.data.data) ? res.data.data : []);
       setSoTotal(res.data.total || 0);
       setSoFilterOptions(res.data.filters || { op_units: [], vendors: [], statuses: [] });
     } catch (e) {
-      addToast(`Failed to load SO data: ${e.message}`, 'error');
+      addToast(`Gagal memuat SO: ${e.message}`, 'error');
     } finally { setLoading(false); }
   }, [addToast]);
 
@@ -633,11 +633,11 @@ const App = () => {
 
   const submitDeleteRequest = async () => {
     setDeleteFormError('');
-    if (!deleteForm.ref_number.trim()) { setDeleteFormError('Reference number is required'); return; }
-    if (!deleteForm.reason.trim()) { setDeleteFormError('Reason wajib diisi'); return; }
+    if (!deleteForm.ref_number.trim()) { setDeleteFormError('Nomor referensi wajib diisi'); return; }
+    if (!deleteForm.reason.trim()) { setDeleteFormError('Alasan wajib diisi'); return; }
     try {
       await api.post('/api/delete-requests', deleteForm);
-      addToast(`✅ ${deleteForm.ref_type} ${deleteForm.ref_number} successfully hidden from dashboard`, 'success');
+      addToast(`✅ ${deleteForm.ref_type} ${deleteForm.ref_number} berhasil disembunyikan dari dashboard`, 'success');
       setDeleteForm({ ref_type: 'PO', ref_number: '', reason: '' });
       setShowDeleteModal(false);
       fetchDeleteRequests();
@@ -650,11 +650,11 @@ const App = () => {
   const restoreDeleteRequest = async (req) => {
     try {
       await api.put(`/api/delete-requests/${req.id}/restore`);
-      addToast(`✅ ${req.ref_type} ${req.ref_number} successfully restored to dashboard`, 'success');
+      addToast(`✅ ${req.ref_type} ${req.ref_number} berhasil ditampilkan kembali`, 'success');
       fetchDeleteRequests();
       fetchDashboard();
     } catch (e) {
-      addToast(`❌ Restore failed: ${e.response?.data?.error || e.message}`, 'error');
+      addToast(`❌ Gagal restore: ${e.response?.data?.error || e.message}`, 'error');
     }
   };
 
@@ -666,7 +666,7 @@ const App = () => {
     if (poSearchNums.length > 0) {
       const nums = poSearchNums.map(n=>n.toLowerCase());
       filtered = filtered.filter(p => {
-        const poHliKey = p.items_no ? `${p.po_no}-${p.items_no}`.toLowerCase() : (p.po_no||'').toLowerCase();
+        const poHliKey = p.item_no ? `${p.po_no}-${p.item_no}`.toLowerCase() : (p.po_no||'').toLowerCase();
         return nums.some(n =>
           poHliKey.includes(n) ||
           (p.po_no||'').toLowerCase().includes(n)
@@ -677,7 +677,7 @@ const App = () => {
     if (poFilterItemType === '__NONE__') {
       filtered = [];
     } else if (Array.isArray(poFilterItemType) && poFilterItemType.length > 0) {
-      filtered = filtered.filter(p => poFilterItemType.includes(p.po_items_type));
+      filtered = filtered.filter(p => poFilterItemType.includes(p.po_item_type));
     }
     if (poFilterOpUnit === '__NONE__') {
       filtered = [];
@@ -701,8 +701,8 @@ const App = () => {
     const REQUIRED_HEADERS = {
       po: {
         'PO Number':        ['po no.','po no','po number','po'],
-        'Item No':          ['items no.','items no','items number','no. items'],
-        'PO Item Type':     ['po items type','items type','type','po type'],
+        'Item No':          ['item no.','item no','item number','no. item'],
+        'PO Item Type':     ['po item type','item type','type','po type'],
         'Supplier':         ['supplier','vendor','supplier name'],
         'Qty':              ['qty.','qty','quantity'],
         'Amount':           ['amount','total amount','total'],
@@ -711,7 +711,7 @@ const App = () => {
       },
       smro: {
         'SO Number':      ['so number','so no','so no.','so','sales order','sales order number','no so','nomor so'],
-        'SO Item':        ['so items no','items no','line','so line','so items'],
+        'SO Item':        ['so item no','item no','line','so line','so item'],
         'SO Status':      ['so status','status','order status'],
         'Operation Unit': ['operation unit name','op unit','client name','client','operation unit'],
         'Vendor Name':    ['vendor name','vendor','supplier'],
@@ -736,13 +736,13 @@ const App = () => {
       }
       if (missing.length >= 3) {
         addToast(
-          `❌ File tidak valid — ${missing.length} kolom penting tidak ditemsukan: ${missing.join(', ')}. Pastikan file ${label} yang benar, lalu cek kembali.`,
+          `❌ File tidak valid — ${missing.length} kolom penting tidak ditemukan: ${missing.join(', ')}. Pastikan file ${label} yang benar, lalu cek kembali.`,
           'error'
         );
         return;
       }
     } catch (readErr) {
-      addToast(`❌ Failed to read file: ${readErr.message}`, 'error');
+      addToast(`❌ Gagal membaca file: ${readErr.message}`, 'error');
       return;
     }
     // ── End client-side header validation ──────────────────────────────
@@ -761,7 +761,7 @@ const App = () => {
       setSoPage(1);
     } catch (e) {
       setUploadProgress(null);
-      addToast(`❌ Upload failed ${label}: ${e.response?.data?.error || e.message}`, 'error');
+      addToast(`❌ Gagal upload ${label}: ${e.response?.data?.error || e.message}`, 'error');
     }
   };
 
@@ -776,17 +776,17 @@ const App = () => {
         onUploadProgress: (ev) => setUploadProgress({ label: 'Batch Update', pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
       });
       setUploadProgress(null);
-      addToast(`✅ Batch update: ${res.data.updated} records updated`, 'success');
+      addToast(`✅ Batch update: ${res.data.updated} records diperbarui`, 'success');
       fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter);
     } catch (e) {
       setUploadProgress(null);
-      addToast(`❌ Batch upload failed: ${e.response?.data?.error || e.message}`, 'error');
+      addToast(`❌ Gagal batch upload: ${e.response?.data?.error || e.message}`, 'error');
     }
   };
 
   const downloadBlob = async (url, filename, label) => {
     const toastId = Date.now();
-    setDownloadToast({ id: toastId, message: `Downloading ${label || filename}...` });
+    setDownloadToast({ id: toastId, message: `Mengunduh ${label || filename}...` });
     try {
       const res = await api.get(url, { responseType: 'blob' });
       const link = document.createElement('a');
@@ -794,10 +794,10 @@ const App = () => {
       link.setAttribute('download', filename);
       document.body.appendChild(link); link.click(); link.remove();
       setDownloadToast(null);
-      addToast(`✅ File "${filename}" downloaded successfully`, 'success');
+      addToast(`✅ File "${filename}" berhasil didownload`, 'success');
     } catch (e) {
       setDownloadToast(null);
-      addToast('❌ File download failed', 'error');
+      addToast('❌ Gagal download file', 'error');
     }
   };
 
@@ -825,7 +825,7 @@ const App = () => {
       fetchDashboard();
     } catch (e) {
       setUploadProgress(null);
-      addToast(`❌ Upload failed hide batch: ${e.response?.data?.error || e.message}`, 'error');
+      addToast(`❌ Gagal upload hide batch: ${e.response?.data?.error || e.message}`, 'error');
     }
   };
 
@@ -838,13 +838,13 @@ const App = () => {
   };
   const downloadPOExcel = () => downloadBlob('/api/export/po-without-so', `PO_Without_SO_${new Date().toISOString().slice(0,10)}.xlsx`, 'PO Without SO');
   const downloadSOTemplate = () => {
-    setDownloadToast({ message: 'Preparing template...' });
+    setDownloadToast({ message: 'Menyiapkan template...' });
     setTimeout(() => {
       const ws = XLSX.utils.json_to_sheet(allSOData.map(s=>({'SO Number':s.so_number,'Delivery Plan Date':s.delivery_plan_date||'','Remarks':s.remarks||''})));
       const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Template');
       saveAs(new Blob([XLSX.write(wb,{bookType:'xlsx',type:'array'})],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),`SO_Template_${new Date().toISOString().slice(0,10)}.xlsx`);
       setDownloadToast(null);
-      addToast('✅ Template downloaded successfully', 'success');
+      addToast('✅ Template berhasil didownload', 'success');
     }, 300);
   };
 
@@ -853,7 +853,7 @@ const App = () => {
     try {
       await api.put(`/api/data/so/${soId}`, { [field]: value });
       setAllSOData(prev => prev.map(s => s.id === soId ? { ...s, [field]: value } : s));
-    } catch (e) { addToast(`❌ Update failed: ${e.message}`, 'error'); }
+    } catch (e) { addToast(`❌ Gagal update: ${e.message}`, 'error'); }
   };
 
   const openModal = async (title, endpointOrData) => {
@@ -861,7 +861,7 @@ const App = () => {
     try {
       const res = await api.get(endpointOrData);
       setModal({ title, data: Array.isArray(res.data) ? res.data : [] });
-    } catch (e) { addToast(`❌ Failed to load details: ${e.message}`, 'error'); }
+    } catch (e) { addToast(`❌ Gagal memuat detail: ${e.message}`, 'error'); }
   };
 
   const toggleAgingFilter = (label) => {
@@ -879,14 +879,14 @@ const App = () => {
   const uniquePOCount = new Set(poFiltered.map(p=>p.po_no)).size;
 
   const card  = darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-100';
-  const txt   = darkMode ? 'text-white' : txt;
+  const txt   = darkMode ? 'text-white' : 'text-gray-900';
   const txt2  = darkMode ? 'text-gray-400' : 'text-gray-600';
   const tblHd = darkMode ? 'bg-gray-700' : 'bg-purple-50';
   const tblDv = darkMode ? 'divide-gray-700' : 'divide-gray-100';
   const trHov = darkMode ? 'hover:bg-gray-700' : 'hover:bg-purple-50';
 
   const fmtDateRange = (range) => {
-    if (!range?.min) return 'No data yet';
+    if (!range?.min) return 'Belum ada data';
     return `${fmtDate(range.min)} — ${fmtDate(range.max)}`;
   };
 
@@ -897,12 +897,12 @@ const App = () => {
     <>
       {/* Date Range Info Bar */}
       <div className={`mb-4 px-5 py-3 rounded-xl flex flex-wrap gap-6 text-xs ${darkMode?'bg-gray-800 border border-gray-700':'bg-white border border-gray-100'} shadow`}>
-        <div className="flex itemss-center gap-2">
+        <div className="flex items-center gap-2">
           <Calendar className="w-4 h-4 text-purple-500"/>
           <span className={txt2}>PO Date Range:</span>
           <span className={`font-semibold ${txt}`}>{fmtDateRange(stats?.po_date_range)}</span>
         </div>
-        <div className="flex itemss-center gap-2">
+        <div className="flex items-center gap-2">
           <Calendar className="w-4 h-4 text-blue-500"/>
           <span className={txt2}>SO Create Date Range:</span>
           <span className={`font-semibold ${txt}`}>{fmtDateRange(stats?.so_date_range)}</span>
@@ -918,31 +918,31 @@ const App = () => {
             fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter);
             setTimeout(() => { poTableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 300);
           }}>
-          <div className="flex justify-between itemss-start">
+          <div className="flex justify-between items-start">
             <div>
-              <p className={`text-sm font-medium ${txt2}`}>PO HLI without SO</p>
+              <p className={`text-sm font-medium ${txt2}`}>PO HLI tanpa SO</p>
               {/* Use client-side filtered count which excludes CONSUMABLE */}
               <h3 className="text-3xl font-bold mt-1 text-red-500">{fmtNum(uniquePOCount)}</h3>
-              <p className={`text-xs mt-1 ${txt2}`}>unique PO numbers · click for details</p>
+              <p className={`text-xs mt-1 ${txt2}`}>nomor PO unik · klik untuk detail</p>
             </div>
             <div className="p-3 bg-red-100 rounded-xl"><AlertCircle className="w-6 h-6 text-red-500"/></div>
           </div>
         </div>
 
         <div className={`p-5 rounded-2xl shadow hover:shadow-lg transition-all cursor-pointer ${card}`}
-          onClick={() => openModal('SO Without PO HLI', '/api/data/so-without-po')}>
-          <div className="flex justify-between itemss-start">
+          onClick={() => openModal('SO Tanpa PO HLI', '/api/data/so-without-po')}>
+          <div className="flex justify-between items-start">
             <div>
-              <p className={`text-sm font-medium ${txt2}`}>SO without PO HLI</p>
+              <p className={`text-sm font-medium ${txt2}`}>SO tanpa PO HLI</p>
               <h3 className="text-3xl font-bold mt-1 text-orange-500">{fmtNum(stats?.so_without_po)}</h3>
-              <p className={`text-xs mt-1 ${txt2}`}>Click for details</p>
+              <p className={`text-xs mt-1 ${txt2}`}>Klik untuk detail</p>
             </div>
             <div className="p-3 bg-orange-100 rounded-xl"><XCircle className="w-6 h-6 text-orange-500"/></div>
           </div>
         </div>
 
         <div className={`p-5 rounded-2xl shadow hover:shadow-lg transition-all ${card}`}>
-          <div className="flex justify-between itemss-start">
+          <div className="flex justify-between items-start">
             <div>
               <p className={`text-sm font-medium ${txt2}`}>Total PO HLI Amount</p>
               <h3 className={`text-xl font-bold mt-1 text-purple-600`}>{fmtCurShort(stats?.total_po_amount)}</h3>
@@ -959,11 +959,11 @@ const App = () => {
             fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter);
             window.scrollTo({ top: 0, behavior: 'smooth' });
           }}>
-          <div className="flex justify-between itemss-start">
+          <div className="flex justify-between items-start">
             <div>
               <p className={`text-sm font-medium ${txt2}`}>Total SO (Open)</p>
               <h3 className="text-3xl font-bold mt-1 text-green-600">{fmtNum(stats?.total_so_count)}</h3>
-              <p className={`text-xs mt-1 ${txt2}`}>{stats?.so_date_range?.max ? fmtDate(stats.so_date_range.max) : 'No upload yet'} · click for details</p>
+              <p className={`text-xs mt-1 ${txt2}`}>{stats?.so_date_range?.max ? fmtDate(stats.so_date_range.max) : 'Belum ada upload'} · klik untuk detail</p>
             </div>
             <div className="p-3 bg-green-100 rounded-xl"><CheckCircle className="w-6 h-6 text-green-600"/></div>
           </div>
@@ -971,9 +971,9 @@ const App = () => {
       </div>
 
       {/* Charts Row 1 */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6 itemss-start">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6 items-start">
         <div className={`p-6 rounded-2xl shadow ${card}`}>
-          <h3 className={`text-base font-bold mb-4 flex itemss-center gap-2 ${txt}`}>
+          <h3 className={`text-base font-bold mb-4 flex items-center gap-2 ${txt}`}>
             <TrendingUp className="w-5 h-5 text-purple-600"/> Monthly Open SO Trend
           </h3>
           <ResponsiveContainer width="100%" height={190}>
@@ -992,15 +992,15 @@ const App = () => {
               <YAxis yAxisId="right" orientation="right" stroke="#F97316" fontSize={10}/>
               <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}}/>
               <Legend iconSize={8} wrapperStyle={{fontSize:'11px'}}/>
-              <Area yAxisId="left" type="monotone" dataKey="so_count" name="SO Count" stroke="#8B5CF6" strokeWidth={2} fill="url(#cSO)"/>
-              <Area yAxisId="right" type="monotone" dataKey="amount" name="Value (IDR Million)" stroke="#F97316" strokeWidth={2} fill="url(#cAmt)"/>
+              <Area yAxisId="left" type="monotone" dataKey="so_count" name="Jumlah SO" stroke="#8B5CF6" strokeWidth={2} fill="url(#cSO)"/>
+              <Area yAxisId="right" type="monotone" dataKey="amount" name="Nilai (IDR Juta)" stroke="#F97316" strokeWidth={2} fill="url(#cAmt)"/>
             </AreaChart>
           </ResponsiveContainer>
         </div>
 
         <div className="flex flex-col gap-4">
           <div className={`p-5 rounded-2xl shadow ${card}`}>
-            <h3 className={`text-sm font-bold mb-3 flex itemss-center gap-2 ${txt}`}>
+            <h3 className={`text-sm font-bold mb-3 flex items-center gap-2 ${txt}`}>
               <BarChart3 className="w-4 h-4 text-blue-600"/> Top 5 Vendors (Open SO)
             </h3>
             <table className="w-full text-xs">
@@ -1017,7 +1017,7 @@ const App = () => {
                   <tr key={i} className={`${trHov} cursor-pointer`}
                     onClick={()=>openModal(`Vendor: ${v.vendor}`, `/api/data/top-vendor-detail/${encodeURIComponent(v.vendor)}`)}>
                     <td className="p-1.5">
-                      <span className={`inline-flex itemss-center justify-center w-6 h-6 rounded text-xs font-bold ${i===0?'bg-yellow-100 text-yellow-700':i===1?'bg-gray-200 text-gray-700':i===2?'bg-orange-100 text-orange-700':'bg-purple-100 text-purple-700'}`}>#{i+1}</span>
+                      <span className={`inline-flex items-center justify-center w-6 h-6 rounded text-xs font-bold ${i===0?'bg-yellow-100 text-yellow-700':i===1?'bg-gray-200 text-gray-700':i===2?'bg-orange-100 text-orange-700':'bg-purple-100 text-purple-700'}`}>#{i+1}</span>
                     </td>
                     <td className={`p-1.5 font-medium ${txt} max-w-[120px] truncate`} title={v.vendor}>{v.vendor}</td>
                     <td className="p-1.5 text-right font-semibold text-purple-600">{fmtNum(v.so_count)}</td>
@@ -1031,9 +1031,9 @@ const App = () => {
       </div>
 
       {/* Charts Row 2 */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6 itemss-stretch">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6 items-stretch">
         <div className={`p-6 rounded-2xl shadow flex flex-col ${card}`}>
-          <h3 className={`text-base font-bold mb-4 flex itemss-center gap-2 ${txt}`}>
+          <h3 className={`text-base font-bold mb-4 flex items-center gap-2 ${txt}`}>
             <FileText className="w-5 h-5 text-green-600"/> SO Status Distribution
           </h3>
           {(() => {
@@ -1095,7 +1095,7 @@ const App = () => {
                         <td key={m} className="px-2 py-2 text-center">
                           {totByMonth[m] ? (
                             <button
-                              onClick={() => openModal(`All Statuses — ${m}`, `/api/data/so-status-detail-all?month=${encodeURIComponent(m)}`)}
+                              onClick={() => openModal(`Semua Status — ${m}`, `/api/data/so-status-detail-all?month=${encodeURIComponent(m)}`)}
                               className="font-bold text-purple-600 hover:underline cursor-pointer">
                               {fmtNum(totByMonth[m])}
                             </button>
@@ -1104,7 +1104,7 @@ const App = () => {
                       ))}
                       <td className="px-3 py-2 text-right">
                         <button
-                          onClick={() => openModal('All SO', '/api/data/so-status-detail-all')}
+                          onClick={() => openModal('Semua SO', '/api/data/so-status-detail-all')}
                           className="font-bold text-purple-600 hover:underline cursor-pointer">
                           {fmtNum(grandTotal)}
                         </button>
@@ -1121,7 +1121,7 @@ const App = () => {
 
         <div className="flex flex-col gap-4">
           <div className={`p-5 rounded-2xl shadow ${card}`}>
-            <h3 className={`text-sm font-bold mb-3 flex itemss-center gap-2 ${txt}`}>
+            <h3 className={`text-sm font-bold mb-3 flex items-center gap-2 ${txt}`}>
               <Building2 className="w-4 h-4 text-green-600"/> Total Open SO per Operation Unit
             </h3>
             <div className="overflow-auto max-h-40">
@@ -1148,19 +1148,19 @@ const App = () => {
 
           <div className="grid gap-4 flex-1" style={{gridTemplateColumns:'3fr 2fr'}}>
             <div className={`p-5 rounded-2xl shadow ${card}`}>
-              <h3 className={`text-sm font-bold mb-2 flex itemss-center gap-2 ${txt}`}><BarChart3 className="w-4 h-4 text-orange-600"/> SO Status (Pie)</h3>
+              <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><BarChart3 className="w-4 h-4 text-orange-600"/> SO Status (Pie)</h3>
               <StatusPie data={stats?.so_status} darkMode={darkMode}/>
             </div>
             {(() => {
               const agingPieData = [
-                { name:'< 30 Days', value:agingData.reduce((s,v)=>s+(v.less_30||0),0), fill:'#10B981' },
-                { name:'30–90 Days', value:agingData.reduce((s,v)=>s+(v.days_30_90||0),0), fill:'#F59E0B' },
-                { name:'90–180 Days', value:agingData.reduce((s,v)=>s+(v.days_90_180||0),0), fill:'#F97316' },
-                { name:'> 180 Days', value:agingData.reduce((s,v)=>s+(v.more_180||0),0), fill:'#EF4444' },
+                { name:'< 30 Hari', value:agingData.reduce((s,v)=>s+(v.less_30||0),0), fill:'#10B981' },
+                { name:'30–90 Hari', value:agingData.reduce((s,v)=>s+(v.days_30_90||0),0), fill:'#F59E0B' },
+                { name:'90–180 Hari', value:agingData.reduce((s,v)=>s+(v.days_90_180||0),0), fill:'#F97316' },
+                { name:'> 180 Hari', value:agingData.reduce((s,v)=>s+(v.more_180||0),0), fill:'#EF4444' },
               ].filter(d=>d.value>0);
               return (
                 <div className={`p-5 rounded-2xl shadow ${card}`}>
-                  <h3 className={`text-sm font-bold mb-2 flex itemss-center gap-2 ${txt}`}><Calendar className="w-4 h-4 text-red-500"/> SO Aging (Pie)</h3>
+                  <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><Calendar className="w-4 h-4 text-red-500"/> SO Aging (Pie)</h3>
                   <ResponsiveContainer width="100%" height={300}>
                     <PieChart>
                       <Pie data={agingPieData} cx="50%" cy="40%" innerRadius={52} outerRadius={88} paddingAngle={0} dataKey="value" labelLine={false} label={renderPctLabel}>
@@ -1179,13 +1179,13 @@ const App = () => {
 
       {/* SO Aging Table */}
       <div className={`p-6 rounded-2xl shadow mb-6 ${card}`}>
-        <h3 className={`text-base font-bold mb-4 flex itemss-center gap-2 ${txt}`}>
+        <h3 className={`text-base font-bold mb-4 flex items-center gap-2 ${txt}`}>
           <Calendar className="w-5 h-5 text-red-600"/> SO Aging — Open SO by Vendor
         </h3>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className={tblHd}>
-              <tr>{['Vendor (SMRO)','< 30 Days','30–90 Days','90–180 Days','> 180 Days','Total Open','Sales Amount'].map(h=>(
+              <tr>{['Vendor (SMRO)','< 30 Hari','30–90 Hari','90–180 Hari','> 180 Hari','Total Open','Sales Amount'].map(h=>(
                 <th key={h} className={`p-3 text-center font-semibold ${txt2} first:text-left`}>{h}</th>
               ))}</tr>
             </thead>
@@ -1195,7 +1195,7 @@ const App = () => {
                   const url = bucket
                     ? `/api/data/aging-detail/${encodeURIComponent(v.vendor)}?bucket=${encodeURIComponent(bucket)}`
                     : `/api/data/aging-detail/${encodeURIComponent(v.vendor)}`;
-                  const label = bucket ? `${v.vendor} — ${bucket} days` : `Aging Detail: ${v.vendor}`;
+                  const label = bucket ? `${v.vendor} — ${bucket} hari` : `Aging Detail: ${v.vendor}`;
                   openModal(label, url);
                 };
                 const cellBtn = (val, bucket, colorClass) => val > 0 ? (
@@ -1232,7 +1232,7 @@ const App = () => {
                 }), {less_30:0,days_30_90:0,days_90_180:0,more_180:0,total_open:0,sales_amount:0});
                 const totCellBtn = (val, bucket, colorClass) => val > 0 ? (
                   <button
-                    onClick={() => openModal(`All Vendors — ${bucket} days`, `/api/data/aging-detail-all?bucket=${encodeURIComponent(bucket)}`)}
+                    onClick={() => openModal(`All Vendors — ${bucket} hari`, `/api/data/aging-detail-all?bucket=${encodeURIComponent(bucket)}`)}
                     className={`font-bold underline-offset-2 hover:underline cursor-pointer ${colorClass}`}>
                     {fmtNum(val)}
                   </button>
@@ -1246,7 +1246,7 @@ const App = () => {
                     <td className="p-3 text-center">{totCellBtn(tot.more_180,'180+','text-red-700')}</td>
                     <td className="p-3 text-center">
                       <button
-                        onClick={() => openModal('All Vendors — All Aging Buckets', '/api/data/aging-detail-all')}
+                        onClick={() => openModal('All Vendors — Semua Aging', '/api/data/aging-detail-all')}
                         className="font-bold text-purple-700 hover:underline cursor-pointer">
                         {fmtNum(tot.total_open)}
                       </button>
@@ -1269,35 +1269,35 @@ const App = () => {
     <div>
       {/* All SO Table */}
       <div className={`p-6 rounded-2xl shadow mb-6 ${card}`}>
-        <div className="flex flex-wrap justify-between itemss-center gap-3 mb-5">
+        <div className="flex flex-wrap justify-between items-center gap-3 mb-5">
           <div>
             <h2 className={`text-xl font-bold ${txt}`}>Open SO (Sales Order)</h2>
-            <p className={`text-sm ${txt2}`}>{fmtNum(soTotal)} total records — page {soPage} of {soTotalPages}</p>
+            <p className={`text-sm ${txt2}`}>{fmtNum(soTotal)} total records — halaman {soPage} dari {soTotalPages}</p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <label className="flex itemss-center gap-1 px-3 py-1.5 bg-green-700 hover:bg-green-800 text-white rounded-lg text-sm font-medium shadow-sm">
+            <label className="flex items-center gap-1 px-3 py-1.5 bg-green-700 hover:bg-green-800 text-white rounded-lg text-sm font-medium shadow-sm">
               <Upload className="w-4 h-4"/>Batch Upload
               <input type="file" accept=".xlsx,.xls" onChange={handleBatchUpload} className="hidden"/>
             </label>
-            <DownloadButton onClick={downloadSOTemplate} className="flex itemss-center gap-1 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm font-medium shadow-sm">
+            <DownloadButton onClick={downloadSOTemplate} className="flex items-center gap-1 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm font-medium shadow-sm">
               <FileSpreadsheet className="w-4 h-4"/>Template
             </DownloadButton>
-            <DownloadButton onClick={downloadSOExcel} className="flex itemss-center gap-1 px-3 py-1.5 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-medium shadow-sm">
+            <DownloadButton onClick={downloadSOExcel} className="flex items-center gap-1 px-3 py-1.5 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-medium shadow-sm">
               <Download className="w-4 h-4"/>Download Excel
             </DownloadButton>
           </div>
         </div>
 
         {/* Aging Filter Chips */}
-        <div className="mb-3 flex flex-wrap gap-2 itemss-center">
-          <span className={`text-xs font-medium ${txt2}`}>Aging Filter:</span>
+        <div className="mb-3 flex flex-wrap gap-2 items-center">
+          <span className={`text-xs font-medium ${txt2}`}>Filter Aging:</span>
           {AGING_LABELS.map(label => {
             const active = soFilters.aging.includes(label);
             return (
               <button key={label} onClick={()=>toggleAgingFilter(label)}
                 className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${active?'text-white border-transparent':'border-gray-200 text-gray-400 bg-gray-100'}`}
                 style={active ? {backgroundColor: AGING_COLORS[label], borderColor: AGING_COLORS[label]} : {}}>
-                {label} days
+                {label} hari
               </button>
             );
           })}
@@ -1309,7 +1309,7 @@ const App = () => {
 
         {/* Multi-select Filters row — Search SO leftmost */}
         <div className={`p-4 rounded-xl mb-4 ${darkMode?'bg-gray-700':'bg-gray-50'}`}>
-          <div className="flex flex-wrap gap-3 itemss-end">
+          <div className="flex flex-wrap gap-3 items-end">
             {/* Search SO Item — paling kiri */}
             <div>
               <label className={`block text-xs font-medium mb-1 ${txt2}`}>Search SO Item</label>
@@ -1334,16 +1334,16 @@ const App = () => {
               selected={soFilters.statuses} onChange={v=>setSoFilters(f=>({...f,statuses:v}))}
               darkMode={darkMode} txt2={txt2}/>
             <div className="flex-1 min-w-[140px]">
-              <label className={`block text-xs font-medium mb-1 ${txt2}`}>Margin Filter</label>
+              <label className={`block text-xs font-medium mb-1 ${txt2}`}>Filter Margin</label>
               <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                 value={soMarginFilter} onChange={e=>setSoMarginFilter(e.target.value)}>
-                <option value="all">All Data</option>
-                <option value="positive">With Margin (≥ 0)</option>
-                <option value="negative">Negative Margin (&lt; 0)</option>
+                <option value="all">Semua Data</option>
+                <option value="positive">Ada Margin (≥ 0)</option>
+                <option value="negative">Margin Minus (&lt; 0)</option>
               </select>
             </div>
             <div className="flex-1 min-w-[100px]">
-              <label className={`block text-xs font-medium mb-1 ${txt2}`}>Rows per Page</label>
+              <label className={`block text-xs font-medium mb-1 ${txt2}`}>Baris per Halaman</label>
               <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                 value={soPerPage} onChange={e=>setSoPerPage(Number(e.target.value))}>
                 <option value={20}>20</option>
@@ -1367,22 +1367,22 @@ const App = () => {
           {(soSearchNums.length + soFilters.op_units.length + soFilters.vendors.length + soFilters.statuses.length) > 0 && (
             <div className="mt-3 flex flex-wrap gap-1.5">
               {soSearchNums.map(v=>(
-                <span key={v} className="flex itemss-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-xs">
+                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-xs">
                   SO: {v}<button onClick={()=>{ const next=soSearchNums.filter(x=>x!==v); setSoSearchNums(next); setSoPage(1); fetchSOData(soFilters,1,soPerPage,next,soMarginFilter); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                 </span>
               ))}
               {soFilters.op_units.map(v=>(
-                <span key={v} className="flex itemss-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full text-xs">
+                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full text-xs">
                   {v}<button onClick={()=>setSoFilters(f=>({...f,op_units:f.op_units.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                 </span>
               ))}
               {soFilters.vendors.map(v=>(
-                <span key={v} className="flex itemss-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">
+                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">
                   {v}<button onClick={()=>setSoFilters(f=>({...f,vendors:f.vendors.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                 </span>
               ))}
               {soFilters.statuses.map(v=>(
-                <span key={v} className="flex itemss-center gap-1 px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs">
+                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs">
                   {v}<button onClick={()=>setSoFilters(f=>({...f,statuses:f.statuses.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                 </span>
               ))}
@@ -1406,7 +1406,7 @@ const App = () => {
               {(() => {
                 if (allSOData.length === 0) return (
                   <tr><td colSpan={16} className={`px-4 py-10 text-center ${txt2}`}>
-                    <FileText className="w-10 h-10 mx-auto mb-2 opacity-40"/>No data available
+                    <FileText className="w-10 h-10 mx-auto mb-2 opacity-40"/>Tidak ada data
                   </td></tr>
                 );
                 return allSOData.map((so) => {
@@ -1426,7 +1426,7 @@ const App = () => {
                     ) : null}
                   </td>
                   {/* SO Item first, no SO Number column */}
-                  <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{so.so_items}</td>
+                  <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{so.so_item}</td>
                   <td className={`px-3 py-2 max-w-[160px] truncate ${txt2}`} title={so.product_name}>{so.product_name}</td>
                   <td className="px-3 py-2 whitespace-nowrap">
                     <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
@@ -1449,7 +1449,7 @@ const App = () => {
                   <td className={`px-3 py-2 text-center text-xs ${txt2}`}>{so.delivery_possible_date||'-'}</td>
                   <td className="px-3 py-2 text-center">
                     {editingCell?.id===so.id && editingCell.field==='delivery_plan_date' ? (
-                      <div className="flex itemss-center gap-1">
+                      <div className="flex items-center gap-1">
                         <input type="date" defaultValue={so.delivery_plan_date}
                           className={`px-2 py-1 rounded text-xs border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                           onChange={e=>setEditValue(e.target.value)}
@@ -1464,7 +1464,7 @@ const App = () => {
                           className="text-red-400 hover:text-red-600 p-0.5"><X className="w-3.5 h-3.5"/></button>
                       </div>
                     ) : (
-                      <div className="flex itemss-center justify-center gap-1 group">
+                      <div className="flex items-center justify-center gap-1 group">
                         <span className="cursor-pointer text-purple-600 hover:underline text-xs whitespace-nowrap"
                           onClick={()=>{setEditingCell({id:so.id,field:'delivery_plan_date'});setEditValue(so.delivery_plan_date||'');}}>
                           {so.delivery_plan_date||'✏️ Set'}
@@ -1500,11 +1500,11 @@ const App = () => {
         </div>
 
         {/* Pagination */}
-        <div className={`mt-4 pt-3 border-t ${darkMode?'border-gray-700':'border-gray-200'} flex justify-between itemss-center`}>
+        <div className={`mt-4 pt-3 border-t ${darkMode?'border-gray-700':'border-gray-200'} flex justify-between items-center`}>
           <span className={`text-sm ${txt2}`}>
-            Showing {((soPage-1)*soPerPage)+1}–{Math.min(soPage*soPerPage,soTotal)} of {fmtNum(soTotal)}
+            Menampilkan {((soPage-1)*soPerPage)+1}–{Math.min(soPage*soPerPage,soTotal)} dari {fmtNum(soTotal)}
           </span>
-          <div className="flex gap-1 itemss-center">
+          <div className="flex gap-1 items-center">
             <button disabled={soPage===1} onClick={()=>{ const p=soPage-1; setSoPage(p); fetchSOData(soFilters,p,soPerPage,soSearchNums,soMarginFilter); }}
               className={`p-1.5 rounded ${soPage===1?'opacity-40':'hover:bg-purple-100'}`}><ChevronLeft className="w-4 h-4"/></button>
             <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-purple-100 text-purple-700'}`}>{soPage}/{soTotalPages}</span>
@@ -1516,23 +1516,23 @@ const App = () => {
 
       {/* PO HLI Without SO Table */}
       <div ref={poTableRef} className={`rounded-2xl shadow overflow-hidden ${card}`}>
-        <div className={`p-5 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between itemss-center gap-3`}>
-          <div className="flex itemss-center gap-2">
+        <div className={`p-5 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+          <div className="flex items-center gap-2">
             <AlertCircle className="w-5 h-5 text-yellow-600"/>
-            <h3 className={`text-base font-bold ${txt}`}>PO HLI Without Matching SO</h3>
+            <h3 className={`text-base font-bold ${txt}`}>PO HLI yang Belum Ada SO-nya</h3>
             <span className={`text-sm ${txt2}`}>
-              ({fmtNum(new Set(poFiltered.map(p=>p.po_no)).size)} POs · {fmtNum(poFiltered.length)} line itemss)
+              ({fmtNum(new Set(poFiltered.map(p=>p.po_no)).size)} PO · {fmtNum(poFiltered.length)} item baris)
             </span>
           </div>
-          <div className="flex gap-2 itemss-center">
-            <DownloadButton onClick={downloadPOExcel} className="flex itemss-center gap-1 px-4 py-1.5 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-medium shadow-sm">
+          <div className="flex gap-2 items-center">
+            <DownloadButton onClick={downloadPOExcel} className="flex items-center gap-1 px-4 py-1.5 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-medium shadow-sm">
               <Download className="w-4 h-4"/>Download Excel
             </DownloadButton>
           </div>
         </div>
 
         {/* PO Filters row */}
-        <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700 bg-gray-750':'border-gray-100 bg-gray-50'} flex flex-wrap gap-3 itemss-end`}>
+        <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700 bg-gray-750':'border-gray-100 bg-gray-50'} flex flex-wrap gap-3 items-end`}>
           {/* Search PO HLI Number — paling kiri */}
           <div>
             <label className={`block text-xs font-medium mb-1 ${txt2}`}>Search PO Number</label>
@@ -1558,7 +1558,7 @@ const App = () => {
             darkMode={darkMode} txt2={txt2}
           />
           <div className="flex-1 min-w-[120px]">
-            <label className={`block text-xs font-medium mb-1 ${txt2}`}>Rows per Page</label>
+            <label className={`block text-xs font-medium mb-1 ${txt2}`}>Baris per Halaman</label>
             <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
               value={poPerPage} onChange={e=>setPoPerPage(Number(e.target.value))}>
               <option value={20}>20</option>
@@ -1567,7 +1567,7 @@ const App = () => {
               <option value={500}>500</option>
             </select>
           </div>
-          <div className="flex gap-2 itemss-end">
+          <div className="flex gap-2 items-end">
             <button onClick={()=>setPoPage(1)}
               className="px-5 py-2 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-semibold shadow-sm">Apply</button>
             <button onClick={()=>{ setPoSearchNums([]); setPoFilterItemType([]); setPoFilterOpUnit([]); setPoPage(1); }}
@@ -1579,17 +1579,17 @@ const App = () => {
         {(poSearchNums.length > 0 || poFilterItemType.length > 0 || poFilterOpUnit.length > 0) && (
           <div className={`px-5 py-2 flex flex-wrap gap-1.5 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
             {poSearchNums.map(v=>(
-              <span key={v} className="flex itemss-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-xs">
+              <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-xs">
                 PO: {v}<button onClick={()=>setPoSearchNums(prev=>prev.filter(x=>x!==v))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
               </span>
             ))}
             {poFilterItemType.map(v=>(
-              <span key={v} className="flex itemss-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">
+              <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">
                 {v}<button onClick={()=>setPoFilterItemType(prev=>prev.filter(x=>x!==v))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
               </span>
             ))}
             {poFilterOpUnit.map(v=>(
-              <span key={v} className="flex itemss-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full text-xs">
+              <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full text-xs">
                 {v}<button onClick={()=>setPoFilterOpUnit(prev=>prev.filter(x=>x!==v))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
               </span>
             ))}
@@ -1600,7 +1600,7 @@ const App = () => {
           <table className="w-full text-sm">
             <thead className={tblHd}>
               <tr>
-                {['PO HLI NUMBER','PO ITEM TYPE','ITEM CODE','OPERATION UNIT','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','BDAYS REMAINING'].map(h=>(
+                {['PO HLI NUMBER','PO ITEM TYPE','ITEM CODE','OPERATION UNIT','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','HARI TERSISA'].map(h=>(
                   <th key={h} className={`px-4 py-3 text-left font-semibold whitespace-nowrap ${txt2} ${h==='PRICE'||h==='AMOUNT'?'min-w-[140px]':''}`}>{h}</th>
                 ))}
               </tr>
@@ -1608,7 +1608,7 @@ const App = () => {
             <tbody className={`divide-y ${tblDv}`}>
               {poRows.length === 0 ? (
                 <tr><td colSpan={16} className={`px-4 py-10 text-center ${txt2}`}>
-                  <Package className="w-10 h-10 mx-auto mb-2 opacity-40"/>No data available
+                  <Package className="w-10 h-10 mx-auto mb-2 opacity-40"/>Tidak ada data
                 </td></tr>
               ) : poRows.map((row,i)=>{
                 const daysLeft = row.days_remaining;
@@ -1616,17 +1616,17 @@ const App = () => {
                 return (
                   <tr key={i} className={`${trHov} transition-colors`}>
                     <td className="px-4 py-3 text-purple-600 font-medium whitespace-nowrap">
-                      {row.items_no ? `${row.po_no}-${row.items_no}` : row.po_no}
+                      {row.item_no ? `${row.po_no}-${row.item_no}` : row.po_no}
                     </td>
                     <td className={`px-4 py-3 whitespace-nowrap`}>
-                      {row.po_items_type ? (
+                      {row.po_item_type ? (
                         <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                          row.po_items_type.toUpperCase()==='MRO' ? 'bg-blue-100 text-blue-700' :
-                          row.po_items_type.toUpperCase()==='EQUIPMENT' ? 'bg-green-100 text-green-700' :
-                          'bg-gray-100 text-gray-700'}`}>{row.po_items_type}</span>
+                          row.po_item_type.toUpperCase()==='MRO' ? 'bg-blue-100 text-blue-700' :
+                          row.po_item_type.toUpperCase()==='EQUIPMENT' ? 'bg-green-100 text-green-700' :
+                          'bg-gray-100 text-gray-700'}`}>{row.po_item_type}</span>
                       ) : <span className={`${txt2} text-xs`}>-</span>}
                     </td>
-                    <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.items_code||'-'}</td>
+                    <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.item_code||'-'}</td>
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap text-xs`} title={row.operation_unit}>{row.operation_unit||'-'}</td>
                     <td className={`px-4 py-3 ${txt2} max-w-xs truncate`} title={row.description}>{row.description}</td>
                     <td className={`px-4 py-3 text-right ${txt2}`}>{fmtNum(row.qty)}</td>
@@ -1638,7 +1638,7 @@ const App = () => {
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.purchase_member||'-'}</td>
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.req_delivery||'-'}</td>
                     <td className={`px-4 py-3 text-center whitespace-nowrap ${daysColor}`}>
-                      {daysLeft === null ? '-' : daysLeft < 0 ? `${Math.abs(daysLeft)} biz days overdue` : `${daysLeft} biz days`}
+                      {daysLeft === null ? '-' : daysLeft < 0 ? `${Math.abs(daysLeft)} hari lewat` : `${daysLeft} hari`}
                     </td>
                   </tr>
                 );
@@ -1646,9 +1646,9 @@ const App = () => {
             </tbody>
           </table>
         </div>
-        <div className={`p-4 border-t ${darkMode?'border-gray-700':'border-gray-100'} flex justify-between itemss-center`}>
-          <span className={`text-sm ${txt2}`}>Showing {(poPage-1)*poPerPage+1}–{Math.min(poPage*poPerPage,poFiltered.length)} of {fmtNum(poFiltered.length)}</span>
-          <div className="flex gap-1 itemss-center">
+        <div className={`p-4 border-t ${darkMode?'border-gray-700':'border-gray-100'} flex justify-between items-center`}>
+          <span className={`text-sm ${txt2}`}>Menampilkan {(poPage-1)*poPerPage+1}–{Math.min(poPage*poPerPage,poFiltered.length)} dari {fmtNum(poFiltered.length)}</span>
+          <div className="flex gap-1 items-center">
             <button disabled={poPage===1} onClick={()=>setPoPage(p=>p-1)} className={`p-1.5 rounded ${poPage===1?'opacity-40':'hover:bg-purple-100'}`}><ChevronLeft className="w-4 h-4"/></button>
             <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-purple-100 text-purple-700'}`}>{poPage}/{poTotalPages}</span>
             <button disabled={poPage===poTotalPages} onClick={()=>setPoPage(p=>p+1)} className={`p-1.5 rounded ${poPage===poTotalPages?'opacity-40':'hover:bg-purple-100'}`}><ChevronRight className="w-4 h-4"/></button>
@@ -1662,7 +1662,7 @@ const App = () => {
   // MAIN RENDER
   // ══════════════════════════════════════════════════════════════
   return (
-    <div className={`min-h-screen font-sans ${darkMode?'bg-gray-900 dark-root':'bg-gray-50'}`}>
+    <div className={`min-h-screen font-sans ${darkMode?'bg-gray-900':'bg-gray-50'}`}>
     <style>{`
         @keyframes slide-in {
           from { transform: translateX(100%); opacity: 0; }
@@ -1675,9 +1675,6 @@ const App = () => {
           cursor: pointer !important;
         }
         button:disabled { cursor: not-allowed !important; opacity: 0.5; }
-        /* Dark mode guard: ensure no black text */
-        .dark-root input, .dark-root select, .dark-root textarea,
-        .dark-root option { color: #e5e7eb !important; background-color: #374151 !important; }
       `}</style>
 
       <div className="fixed top-5 right-5 z-[100] flex flex-col gap-2">
@@ -1688,7 +1685,7 @@ const App = () => {
       {downloadToast && <DownloadToast message={downloadToast.message} />}
 
       {/* Sidebar */}
-      <aside className={`fixed left-0 top-0 h-full w-20 flex flex-col itemss-center py-8 shadow-2xl z-40 ${darkMode?'bg-gray-800 border-r border-gray-700':'bg-gradient-to-b from-purple-600 to-purple-700'}`}>
+      <aside className={`fixed left-0 top-0 h-full w-20 flex flex-col items-center py-8 shadow-2xl z-40 ${darkMode?'bg-gray-800 border-r border-gray-700':'bg-gradient-to-b from-purple-600 to-purple-700'}`}>
         <nav className="flex-1 flex flex-col gap-4 w-full px-2 pt-0">
           <button onClick={()=>setActivePage('dashboard')}
             className={`p-3 rounded-xl flex justify-center transition-all ${activePage==='dashboard'?'bg-white/30 text-white shadow-lg':'text-purple-100 hover:bg-white/20'}`} title="Dashboard">
@@ -1706,7 +1703,7 @@ const App = () => {
 
       {/* Main */}
       <main className="ml-20 p-6">
-        <header className="mb-6 flex flex-wrap justify-between itemss-center gap-4">
+        <header className="mb-6 flex flex-wrap justify-between items-center gap-4">
           <div>
             <h1 className={`text-2xl font-bold tracking-tight ${txt}`}>
               HLI PO Monitoring <span className="text-purple-600">Dashboard</span>
@@ -1716,35 +1713,35 @@ const App = () => {
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <label className={`flex itemss-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all ${darkMode?'bg-purple-700 hover:bg-purple-800 text-white':'bg-purple-700 hover:bg-purple-800 text-white'}`}>
+            <label className={`flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all ${darkMode?'bg-purple-700 hover:bg-purple-800 text-white':'bg-purple-700 hover:bg-purple-800 text-white'}`}>
               <Upload className="w-4 h-4"/><span className="text-sm font-medium">Upload HLI PO List (Item)</span>
               <input type="file" accept=".xlsx,.xls" onChange={e=>handleUpload(e,'po')} className="hidden"/>
             </label>
-            <label className={`flex itemss-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all ${darkMode?'bg-blue-700 hover:bg-blue-800 text-white':'bg-blue-700 hover:bg-blue-800 text-white'}`}>
+            <label className={`flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all ${darkMode?'bg-blue-700 hover:bg-blue-800 text-white':'bg-blue-700 hover:bg-blue-800 text-white'}`}>
               <Upload className="w-4 h-4"/><span className="text-sm font-medium">Upload SMRO - Search Client Odr</span>
               <input type="file" accept=".xlsx,.xls" onChange={e=>handleUpload(e,'smro')} className="hidden"/>
             </label>
             <div className="relative" ref={hideMenuRef}>
               <button onClick={()=>setShowHideMenu(o=>!o)}
-                className="flex itemss-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all bg-orange-600 hover:bg-orange-700 text-white">
+                className="flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all bg-orange-600 hover:bg-orange-700 text-white">
                 <EyeOff className="w-4 h-4"/><span className="text-sm font-medium">Hide</span>
                 <ChevronDown className="w-3.5 h-3.5"/>
               </button>
               {showHideMenu && (
                 <div className={`absolute right-0 mt-2 z-50 rounded-xl shadow-2xl border w-72 p-3 ${darkMode?'bg-gray-800 border-gray-700 text-white':'bg-white border-gray-200'}`}>
                   <p className={`text-xs font-semibold mb-3 px-1 ${darkMode?'text-gray-300':'text-gray-600'}`}>
-                    Hide items from dashboard using Excel template
+                    Sembunyikan data dari dashboard via template Excel
                   </p>
                   {/* PO HLI */}
                   <div className={`mb-2 p-3 rounded-lg ${darkMode?'bg-gray-700':'bg-orange-50'}`}>
-                    <p className="text-xs font-bold mb-1 text-orange-700">🔵 PO HLI (from PO List)</p>
-                    <p className={`text-xs mb-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>Format: PO Number-Item No (e.g. 4502358819-10)</p>
+                    <p className="text-xs font-bold mb-1 text-orange-700">🔵 PO HLI (dari PO List)</p>
+                    <p className={`text-xs mb-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>Format: PO Number-Item No (mis: 4502358819-10)</p>
                     <div className="flex gap-2">
                       <button onClick={()=>downloadHideTemplate('PO')}
-                        className="flex-1 flex itemss-center justify-center gap-1 px-2 py-1.5 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-xs font-semibold">
+                        className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-xs font-semibold">
                         <Download className="w-3 h-3"/>Download Template
                       </button>
-                      <label className="flex-1 flex itemss-center justify-center gap-1 px-2 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-semibold cursor-pointer">
+                      <label className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-semibold cursor-pointer">
                         <Upload className="w-3 h-3"/>Upload Filled
                         <input type="file" accept=".xlsx,.xls" onChange={e=>handleHideBatchUpload(e,'PO')} className="hidden"/>
                       </label>
@@ -1752,14 +1749,14 @@ const App = () => {
                   </div>
                   {/* SO */}
                   <div className={`p-3 rounded-lg ${darkMode?'bg-gray-700':'bg-blue-50'}`}>
-                    <p className="text-xs font-bold mb-1 text-blue-700">🟠 SO (from SMRO)</p>
-                    <p className={`text-xs mb-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>Format: SO Number or SO Number-Item No</p>
+                    <p className="text-xs font-bold mb-1 text-blue-700">🟠 SO (dari SMRO)</p>
+                    <p className={`text-xs mb-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>Format: SO Number atau SO Number-Item No</p>
                     <div className="flex gap-2">
                       <button onClick={()=>downloadHideTemplate('SO')}
-                        className="flex-1 flex itemss-center justify-center gap-1 px-2 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold">
+                        className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold">
                         <Download className="w-3 h-3"/>Download Template
                       </button>
-                      <label className="flex-1 flex itemss-center justify-center gap-1 px-2 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-semibold cursor-pointer">
+                      <label className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-semibold cursor-pointer">
                         <Upload className="w-3 h-3"/>Upload Filled
                         <input type="file" accept=".xlsx,.xls" onChange={e=>handleHideBatchUpload(e,'SO')} className="hidden"/>
                       </label>
@@ -1770,7 +1767,7 @@ const App = () => {
             </div>
 
             <button onClick={()=>{ fetchDeleteRequests(); setShowHiddenPanel(true); }}
-              className={`flex itemss-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all ${darkMode?'bg-gray-600 hover:bg-gray-500 text-white':'bg-gray-200 hover:bg-gray-300 text-gray-700'}`}>
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all ${darkMode?'bg-gray-600 hover:bg-gray-500 text-white':'bg-gray-200 hover:bg-gray-300 text-gray-700'}`}>
               <Eye className="w-4 h-4"/>
               <span className="text-sm font-medium">Hide History</span>
               {deleteRequests.filter(r=>r.is_hidden).length > 0 && (
@@ -1797,12 +1794,12 @@ const App = () => {
       )}
 
       {uploadProgress && (
-        <div className="fixed inset-0 bg-black/60 z-[60] flex itemss-center justify-center backdrop-blur-sm">
-          <div className={`${darkMode?'bg-gray-800':'bg-white'} p-8 rounded-2xl shadow-2xl flex flex-col itemss-center gap-4 w-80`}>
+        <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center backdrop-blur-sm">
+          <div className={`${darkMode?'bg-gray-800':'bg-white'} p-8 rounded-2xl shadow-2xl flex flex-col items-center gap-4 w-80`}>
             <div className="w-14 h-14 border-4 border-purple-600 border-t-transparent rounded-full animate-spin"/>
             <div className="w-full text-center">
-              <p className={`font-bold text-lg mb-1 ${txt}`}>Uploading {uploadProgress.label}...</p>
-              <p className={`text-xs mb-3 ${txt2}`}>Please wait, do not close the browser</p>
+              <p className={`font-bold text-lg mb-1 ${txt}`}>Mengupload {uploadProgress.label}...</p>
+              <p className={`text-xs mb-3 ${txt2}`}>Mohon tunggu, jangan tutup browser</p>
               <div className={`w-full rounded-full h-3 ${darkMode?'bg-gray-700':'bg-gray-200'}`}>
                 <div className="bg-gradient-to-r from-purple-600 to-purple-400 h-3 rounded-full transition-all duration-300" style={{width:`${uploadProgress.pct}%`}}/>
               </div>
@@ -1813,10 +1810,10 @@ const App = () => {
       )}
 
       {loading && !uploadProgress && (
-        <div className="fixed inset-0 bg-black/30 z-[55] flex itemss-center justify-center">
-          <div className={`${darkMode?'bg-gray-800':'bg-white'} px-6 py-4 rounded-xl shadow-xl flex itemss-center gap-3`}>
+        <div className="fixed inset-0 bg-black/30 z-[55] flex items-center justify-center">
+          <div className={`${darkMode?'bg-gray-800':'bg-white'} px-6 py-4 rounded-xl shadow-xl flex items-center gap-3`}>
             <div className="w-6 h-6 border-3 border-purple-600 border-t-transparent rounded-full animate-spin"/>
-            <p className={`text-sm font-semibold ${txt}`}>Loading data...</p>
+            <p className={`text-sm font-semibold ${txt}`}>Memuat data...</p>
           </div>
         </div>
       )}
