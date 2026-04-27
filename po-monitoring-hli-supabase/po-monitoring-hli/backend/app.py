@@ -426,15 +426,15 @@ def get_operation_unit(po_item_type, item_code):
 
 
 def build_matched_set():
-    """Build set of PO references that appear in open SO records (Customer PO / Delivery Memo)."""
+    """Build set of PO references that appear in ANY SO record (open or closed).
+    We use ALL statuses here because a PO that has ever been linked to an SO
+    (even if Delivery Completed or SO Cancel) should NOT appear as 'PO without SO'.
+    """
     matched = set()
     for s in db.session.query(
             SOData.customer_po_number, SOData.delivery_memo, SOData.so_item,
-            SOData.so_status, SOData.operation_unit_name).all():
-        cust_po, memo, so_item, so_status, op_unit = s[0], s[1], s[2], s[3], s[4]
-        # Skip closed statuses
-        if so_status in CLOSED_STATUSES:
-            continue
+            SOData.operation_unit_name).all():
+        cust_po, memo, so_item, op_unit = s[0], s[1], s[2], s[3]
         # Skip excluded op units
         if op_unit in EXCLUDED_OP_UNITS:
             continue
@@ -442,8 +442,7 @@ def build_matched_set():
         if is_return_so_item(so_item):
             continue
         # Extract ALL PO references from Customer PO Number and Delivery Memo
-        refs = extract_po_hli(cust_po) + extract_po_hli(memo)
-        for ref in refs:
+        for ref in extract_po_hli(cust_po) + extract_po_hli(memo):
             matched.add(ref)
     return matched
 
