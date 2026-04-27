@@ -426,24 +426,68 @@ def get_operation_unit(po_item_type, item_code):
 
 
 def build_matched_set():
-    """Build set of PO references (po_number and po_number-item combos) that appear in open SO records."""
+    """Build set of PO references that appear in open SO records (Customer PO / Delivery Memo)."""
     matched = set()
     for s in db.session.query(
             SOData.customer_po_number, SOData.delivery_memo, SOData.so_item,
             SOData.so_status, SOData.operation_unit_name).all():
-        so_item, so_status, op_unit, cust_po, memo = s[2], s[3], s[4], s[0], s[1]
+        cust_po, memo, so_item, so_status, op_unit = s[0], s[1], s[2], s[3], s[4]
         # Skip closed statuses
         if so_status in CLOSED_STATUSES:
             continue
         # Skip excluded op units
         if op_unit in EXCLUDED_OP_UNITS:
             continue
-        # Skip return items
+        # Skip return items (SO Item starting with 9)
         if is_return_so_item(so_item):
             continue
-        for ref in extract_po_hli(cust_po) + extract_po_hli(memo):
+        # Extract ALL PO references from Customer PO Number and Delivery Memo
+        refs = extract_po_hli(cust_po) + extract_po_hli(memo)
+        for ref in refs:
             matched.add(ref)
     return matched
+
+
+@app.route('/api/debug/matching', methods=['GET'])
+def debug_matching():
+    """Debug endpoint — check why a specific PO HLI is not matched."""
+    po_number = request.args.get('po_number', '').strip()
+    item_no   = request.args.get('item_no', '').strip() or None
+    if not po_number:
+        return jsonify({'error': 'Provide ?po_number=xxxx'}), 400
+
+    matched_set = build_matched_set()
+    item_variants = list(_normalize_item_no(item_no)) if item_no else []
+    keys_checked = [po_number] + [f"{po_number}-{v}" for v in item_variants]
+    hits = [k for k in keys_checked if k in matched_set]
+
+    # Find which SOs mention this PO
+    matching_so_rows = []
+    for s in db.session.query(SOData).all():
+        refs = extract_po_hli(s.customer_po_number) + extract_po_hli(s.delivery_memo)
+        if any(r.startswith(po_number) for r in refs):
+            matching_so_rows.append({
+                'so_number': s.so_number,
+                'so_item': s.so_item,
+                'so_status': s.so_status,
+                'customer_po_number': s.customer_po_number,
+                'delivery_memo': s.delivery_memo,
+                'extracted_refs': refs,
+            })
+
+    # Sample of matched_set entries starting with this po_number
+    sample_in_matched = [m for m in matched_set if po_number in m][:20]
+
+    return jsonify({
+        'po_number': po_number,
+        'item_no': item_no,
+        'item_variants': item_variants,
+        'keys_checked': keys_checked,
+        'is_matched': bool(hits),
+        'matched_by': hits,
+        'sample_matched_set_entries': sorted(sample_in_matched),
+        'so_rows_referencing_this_po': matching_so_rows,
+    })
 
 
 def po_is_matched(po_number, item_no, matched_set):
