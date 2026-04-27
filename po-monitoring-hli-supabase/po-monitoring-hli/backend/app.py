@@ -90,6 +90,16 @@ class UploadLog(db.Model):
     records_count = db.Column(db.Integer)
     uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
 
+# ─── NEW: Delete Request model ─────────────────────────────────────────────
+class DeleteRequest(db.Model):
+    __tablename__ = 'delete_request'
+    id = db.Column(db.Integer, primary_key=True)
+    ref_type = db.Column(db.String(10))       # 'PO' or 'SO'
+    ref_number = db.Column(db.String(100))    # PO HLI number or SO number/item
+    reason = db.Column(db.Text)
+    requested_at = db.Column(db.DateTime, default=datetime.utcnow)
+    is_hidden = db.Column(db.Boolean, default=True)  # True = hidden from dashboard
+
 with app.app_context():
     db.create_all()
     print('DB schema ready.')
@@ -99,41 +109,28 @@ CLOSED_STATUSES = {
     'Approval Apply', 'Approval Complete Step', 'Approval Reject'
 }
 
-# Operation units yang dikecualikan dari matching PO HLI vs SO
 EXCLUDED_OP_UNITS = {'HLI GREEN POWER (CONSUMABLE)'}
 
-# Regex: optional short letter prefix, then 7+ digit PO number, optionally followed by -ItemNo
 PO_HLI_RE = re.compile(r'(?:[A-Za-z]{1,4}[-]?)?(\d{7,})(?:-(\d+))?')
 
 def _normalize_item_no(item_no):
-    """
-    Return a set of normalised variants of item_no to maximise matching.
-    e.g. '010' -> {'010', '10'}, '10.0' -> {'10', '010'}, '10' -> {'10', '010'}
-    """
     if item_no is None:
         return set()
     s = str(item_no).strip()
     variants = {s}
-    # Remove trailing .0 (Excel stores integers as floats sometimes)
     if s.endswith('.0'):
         s = s[:-2]
         variants.add(s)
-    # Integer form
     try:
         n = int(float(s))
-        variants.add(str(n))        # plain  e.g. '10'
-        variants.add(f"{n:02d}")    # 2-digit e.g. '10' (or '01' for n=1)
-        variants.add(f"{n:03d}")    # 3-digit e.g. '010'
+        variants.add(str(n))
+        variants.add(f"{n:02d}")
+        variants.add(f"{n:03d}")
     except (ValueError, OverflowError):
         pass
     return variants
 
 def extract_po_hli(val):
-    """
-    Extract all PO HLI reference keys from a free-text field.
-    For '4570226161-10' emits: '4570226161', '4570226161-10', '4570226161-010'
-    For '4570226161'    emits: '4570226161'
-    """
     if not val:
         return []
     text = str(val).strip()
@@ -148,33 +145,21 @@ def extract_po_hli(val):
     return list(result)
 
 def open_so_filter():
-    """Return SQLAlchemy filter clause for open (non-closed) SO records."""
     return db.or_(
         SOData.so_status.is_(None),
         SOData.so_status.notin_(list(CLOSED_STATUSES))
     )
 
 def is_return_so_item(so_item):
-    """
-    Return True if this SO item should be excluded from PO HLI matching/counting.
-    Rules:
-      - SO Item that starts with '9' (return item), e.g. 9008988017-10
-    """
     if not so_item:
         return False
     return str(so_item).strip().startswith('9')
 
 def has_internal_po_ref(customer_po_number, delivery_memo):
-    """
-    Return True if the Customer PO Number or Delivery Memo contains a reference
-    that starts with '2' (internal/non-HLI order), e.g. 2024154899-20 or 2024390384-10.
-    These should NOT be counted as 'SO without PO HLI'.
-    """
     for field in [customer_po_number, delivery_memo]:
         if not field:
             continue
         text = str(field).strip()
-        # Check each token (space or comma separated)
         for token in re.split(r'[\s,;]+', text):
             token = token.strip()
             if token and token[0] == '2' and re.match(r'^2\d{6,}', token):
@@ -182,11 +167,8 @@ def has_internal_po_ref(customer_po_number, delivery_memo):
     return False
 
 def so_is_countable(so_item, so_number=None, customer_po_number=None, delivery_memo=None):
-    """Return True if this SO record should be counted in PO HLI without SO logic."""
-    # Exclude return items (SO Item starts with 9)
     if is_return_so_item(so_item):
         return False
-    # Exclude SO where Cust PO or Delivery Memo references start with '2'
     if has_internal_po_ref(customer_po_number, delivery_memo):
         return False
     return True
@@ -248,9 +230,23 @@ def so_dict(s):
         'aging_label': get_aging_label(age_days)
     }
 
+# ─── Build hidden set from delete requests ────────────────────────────────
+def get_hidden_po_numbers():
+    """Return set of PO numbers that are hidden from dashboard."""
+    reqs = DeleteRequest.query.filter_by(ref_type='PO', is_hidden=True).all()
+    return {r.ref_number for r in reqs}
+
+def get_hidden_so_items():
+    """Return set of SO items/numbers that are hidden from dashboard."""
+    reqs = DeleteRequest.query.filter_by(ref_type='SO', is_hidden=True).all()
+    return {r.ref_number for r in reqs}
+
 @app.route('/api/dashboard/stats', methods=['GET'])
 def get_dashboard_stats():
     try:
+        hidden_po = get_hidden_po_numbers()
+        hidden_so = get_hidden_so_items()
+
         po_count = db.session.query(func.count(POData.id)).scalar() or 0
         total_po_amount = db.session.query(func.sum(POData.amount)).scalar() or 0
         total_so_count = db.session.query(func.count(SOData.id)).filter(open_so_filter()).scalar() or 0
@@ -261,6 +257,8 @@ def get_dashboard_stats():
 
         po_without_so_count = 0
         for p in POData.query.all():
+            if p.po_number in hidden_po:
+                continue
             op_unit = get_operation_unit(p.po_item_type, p.item_code)
             if op_unit in EXCLUDED_OP_UNITS:
                 continue
@@ -271,7 +269,8 @@ def get_dashboard_stats():
         for s in db.session.query(SOData).filter(
                 open_so_filter(),
                 ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
-            # Exclude return items (SO Item starts with 9) and internal refs (Cust PO/Memo starts with 2)
+            if s.so_item in hidden_so or s.so_number in hidden_so:
+                continue
             if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
                 continue
             candidates = extract_po_hli(s.customer_po_number) + extract_po_hli(s.delivery_memo)
@@ -299,7 +298,6 @@ def get_dashboard_stats():
              .order_by(func.sum(SOData.sales_amount).desc()).limit(5).all()
         ]
 
-        # Top Operation Units
         top_op_units = [
             {'op_unit': r[0], 'so_count': r[1], 'total_amount': round(r[2] or 0, 2)}
             for r in db.session.query(
@@ -350,17 +348,15 @@ def get_dashboard_stats():
         total_open_so_amount = db.session.query(func.sum(SOData.sales_amount))\
                                           .filter(open_so_filter()).scalar() or 0
 
-        # Date ranges
         po_date_range = db.session.query(func.min(POData.po_date), func.max(POData.po_date)).first()
         so_date_range = db.session.query(func.min(SOData.so_create_date), func.max(SOData.so_create_date)).first()
 
         return jsonify({
             'po_without_so': po_without_so_count,
             'so_without_po': so_without_po_count,
-            'total_po_amount': total_po_amount,
-            'total_open_so_amount': total_open_so_amount,
-            'total_po_count': po_count,
+            'total_po_amount': float(total_po_amount),
             'total_so_count': total_so_count,
+            'total_open_so_amount': float(total_open_so_amount),
             'monthly_trend': monthly_trend,
             'top_vendors': top_vendors,
             'top_op_units': top_op_units,
@@ -368,75 +364,20 @@ def get_dashboard_stats():
             'so_status_monthly': so_status_monthly,
             'status_months': sorted_months,
             'po_date_range': {
-                'min': po_date_range[0].isoformat() if po_date_range[0] else None,
-                'max': po_date_range[1].isoformat() if po_date_range[1] else None,
+                'min': po_date_range[0].isoformat() if po_date_range and po_date_range[0] else None,
+                'max': po_date_range[1].isoformat() if po_date_range and po_date_range[1] else None,
             },
             'so_date_range': {
-                'min': so_date_range[0].isoformat() if so_date_range[0] else None,
-                'max': so_date_range[1].isoformat() if so_date_range[1] else None,
+                'min': so_date_range[0].isoformat() if so_date_range and so_date_range[0] else None,
+                'max': so_date_range[1].isoformat() if so_date_range and so_date_range[1] else None,
             },
         })
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-def build_matched_set():
-    """
-    Build set of PO references that already have a matching SO.
-    Excludes:
-      - SO rows from EXCLUDED_OP_UNITS
-      - SO items starting with '9' (return items)
-      - SO numbers starting with '2' (internal order type)
-    The set contains both plain PO numbers AND combined "PO-ItemNo" strings
-    so we can match at either level.
-    """
-    matched = set()
-    for so_item, so_number, cpn, memo in db.session.query(
-            SOData.so_item, SOData.so_number,
-            SOData.customer_po_number, SOData.delivery_memo)\
-            .filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
-        if not so_is_countable(so_item, customer_po_number=cpn, delivery_memo=memo):
-            continue
-        for n in extract_po_hli(cpn): matched.add(n)
-        for n in extract_po_hli(memo): matched.add(n)
-    return matched
-
-def po_is_matched(po_number, item_no, matched_set):
-    """
-    Check if a PO line (po_number + item_no) is covered by any SO reference.
-    Logic:
-      - If matched_set contains the plain po_number  -> ALL items of that PO are matched
-      - If matched_set contains 'po_number-item_no' (any normalised variant) -> this item matched
-    """
-    if not po_number:
-        return False
-    po_str = str(po_number).strip()
-
-    # 1. Plain PO number match (SO references entire PO, all items covered)
-    if po_str in matched_set:
-        return True
-
-    # 2. Combined PO-ItemNo match (SO references specific item)
-    if item_no:
-        for item_var in _normalize_item_no(item_no):
-            if f"{po_str}-{item_var}" in matched_set:
-                return True
-
-    return False
 
 def get_operation_unit(po_item_type, item_code):
-    """
-    Determine the Operation Unit based on PO Item Type and whether Item Code exists.
-    Logic (from reference table):
-    item_code ada:
-      MRO      -> HLI GREEN POWER (CONSUMABLE)
-      Equipment-> HLI GREEN POWER(BONDED AREA)
-      ETC      -> HLI GREEN POWER(BONDED AREA)
-    item_code tidak ada:
-      MRO      -> HLI GREEN POWER(BONDED AREA)
-      Equipment-> HLI GREEN POWER
-      ETC      -> HLI GREEN POWER(BONDED AREA)
-    """
     t = (po_item_type or '').strip().upper()
     has_code = bool(item_code and item_code.strip())
     if has_code:
@@ -450,15 +391,59 @@ def get_operation_unit(po_item_type, item_code):
         else:
             return 'HLI GREEN POWER(BONDED AREA)'
 
+
+def build_matched_set():
+    """Build set of PO references (po_number and po_number-item combos) that appear in open SO records."""
+    matched = set()
+    for s in db.session.query(
+            SOData.customer_po_number, SOData.delivery_memo, SOData.so_item,
+            SOData.so_status, SOData.operation_unit_name).all():
+        so_item, so_status, op_unit, cust_po, memo = s[2], s[3], s[4], s[0], s[1]
+        # Skip closed statuses
+        if so_status in CLOSED_STATUSES:
+            continue
+        # Skip excluded op units
+        if op_unit in EXCLUDED_OP_UNITS:
+            continue
+        # Skip return items
+        if is_return_so_item(so_item):
+            continue
+        for ref in extract_po_hli(cust_po) + extract_po_hli(memo):
+            matched.add(ref)
+    return matched
+
+
+def po_is_matched(po_number, item_no, matched_set):
+    """Return True if this PO item has a matching SO."""
+    if po_number in matched_set:
+        return True
+    if item_no:
+        for item_var in _normalize_item_no(item_no):
+            if f"{po_number}-{item_var}" in matched_set:
+                return True
+    return False
+
+
 @app.route('/api/data/po-without-so', methods=['GET'])
 def get_po_without_so():
     try:
         matched_set = build_matched_set()
+        hidden_po = get_hidden_po_numbers()
         today = date.today()
+
+        # ── FIX: Deduplicate by (po_number, item_no) — unique rows only ──
+        seen_keys = set()
         result = []
         for p in POData.query.all():
+            key = (p.po_number, p.item_no)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+
+            # Skip hidden
+            if p.po_number in hidden_po:
+                continue
             op_unit = get_operation_unit(p.po_item_type, p.item_code)
-            # Exclude CONSUMABLE items from this list entirely
             if op_unit in EXCLUDED_OP_UNITS:
                 continue
             if not po_is_matched(p.po_number, p.item_no, matched_set):
@@ -483,15 +468,18 @@ def get_po_without_so():
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/api/data/so-without-po', methods=['GET'])
 def get_so_without_po():
     try:
         po_numbers = {r[0] for r in db.session.query(POData.po_number).all() if r[0]}
+        hidden_so = get_hidden_so_items()
         result = []
         for s in db.session.query(SOData).filter(
                 open_so_filter(),
                 ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
-            # Exclude return items (SO item starts with 9) and internal refs in Cust PO/Memo
+            if s.so_item in hidden_so or s.so_number in hidden_so:
+                continue
             if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
                 continue
             candidates = extract_po_hli(s.customer_po_number) + extract_po_hli(s.delivery_memo)
@@ -502,13 +490,13 @@ def get_so_without_po():
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/api/data/aging', methods=['GET'])
 def get_aging_data():
     try:
         today = date.today()
         vendors = {}
         for s in db.session.query(SOData).filter(open_so_filter(), SOData.so_create_date.isnot(None)).all():
-            # Exclude return items (SO item starts with 9) and internal refs in Cust PO/Memo
             if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
                 continue
             v = s.vendor_name or 'Unknown'
@@ -527,22 +515,23 @@ def get_aging_data():
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/api/data/aging-detail/<path:vendor_name>', methods=['GET'])
 def get_aging_detail(vendor_name):
     try:
-        bucket = request.args.get('bucket')  # '0-30', '30-90', '90-180', '180+', or None for all
+        bucket = request.args.get('bucket')
         today = date.today()
         sos = db.session.query(SOData).filter(
             open_so_filter(), SOData.vendor_name == vendor_name
         ).order_by(SOData.so_create_date.asc()).all()
-        # Exclude return items and internal refs in Cust PO/Memo
         sos = [s for s in sos if so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
         if bucket:
-            bucket = bucket.strip().replace(' ', '+')  # fix URL encoding: + decoded as space
+            bucket = bucket.strip().replace(' ', '+')
             sos = [s for s in sos if get_aging_label((today - s.so_create_date).days if s.so_create_date else None) == bucket]
         return jsonify([so_dict(s) for s in sos])
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/data/aging-detail-all', methods=['GET'])
 def get_aging_detail_all():
@@ -554,13 +543,13 @@ def get_aging_detail_all():
         sos = db.session.query(SOData).filter(
             open_so_filter(), SOData.so_create_date.isnot(None)
         ).order_by(SOData.vendor_name.asc(), SOData.so_create_date.asc()).all()
-        # Exclude return items and internal refs in Cust PO/Memo
         sos = [s for s in sos if so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
         if bucket:
             sos = [s for s in sos if get_aging_label((today - s.so_create_date).days if s.so_create_date else None) == bucket]
         return jsonify([so_dict(s) for s in sos])
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/data/all-so', methods=['GET'])
 def get_all_so():
@@ -570,7 +559,7 @@ def get_all_so():
         statuses      = request.args.getlist('status')
         aging         = request.args.getlist('aging')
         so_items      = request.args.getlist('so_item')
-        margin_filter = request.args.get('margin_filter', 'all')  # 'all' | 'positive' | 'negative'
+        margin_filter = request.args.get('margin_filter', 'all')
         page          = max(1, int(request.args.get('page', 1)))
         per_page      = min(500, int(request.args.get('per_page', 20)))
 
@@ -583,14 +572,12 @@ def get_all_so():
 
         all_sos = q.order_by(SOData.so_create_date.asc()).all()
 
-        # Aging filter (client-computed, applied post-query)
         if aging:
             def matches_aging(s):
                 age = (today - s.so_create_date).days if s.so_create_date else None
                 return get_aging_label(age) in aging
             all_sos = [s for s in all_sos if matches_aging(s)]
 
-        # Margin filter — margin = sales_amount - (purchasing_price * so_qty)
         if margin_filter in ('positive', 'negative'):
             def calc_margin(s):
                 po_amt = (s.purchasing_price or 0) * (s.so_qty or 0)
@@ -616,10 +603,11 @@ def get_all_so():
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/api/data/so-status-detail/<path:status>', methods=['GET'])
 def get_so_status_detail(status):
     try:
-        month = request.args.get('month')  # e.g. 'Jan 2024', optional
+        month = request.args.get('month')
         sos = SOData.query.filter_by(so_status=status).all()
         if month:
             filtered = []
@@ -631,9 +619,9 @@ def get_so_status_detail(status):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/api/data/so-status-detail-all', methods=['GET'])
 def get_so_status_detail_all():
-    """SO records filtered by optional month — for TOTAL row clicks in Status Distribution."""
     try:
         month = request.args.get('month')
         if month:
@@ -645,6 +633,7 @@ def get_so_status_detail_all():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/api/data/top-vendor-detail/<path:vendor_name>', methods=['GET'])
 def get_top_vendor_detail(vendor_name):
     try:
@@ -653,6 +642,97 @@ def get_top_vendor_detail(vendor_name):
         return jsonify([so_dict(s) for s in sos])
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════
+# DELETE REQUEST ENDPOINTS (soft-hide from dashboard)
+# ═══════════════════════════════════════════════════════════════════
+
+@app.route('/api/delete-requests', methods=['GET'])
+def get_delete_requests():
+    """Return all delete requests (both hidden and visible)."""
+    try:
+        reqs = DeleteRequest.query.order_by(DeleteRequest.requested_at.desc()).all()
+        return jsonify([{
+            'id': r.id,
+            'ref_type': r.ref_type,
+            'ref_number': r.ref_number,
+            'reason': r.reason,
+            'requested_at': r.requested_at.isoformat(),
+            'is_hidden': r.is_hidden,
+        } for r in reqs])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/delete-requests', methods=['POST'])
+def create_delete_request():
+    """Request to hide a PO or SO from dashboard."""
+    try:
+        data = request.json
+        ref_type = data.get('ref_type', '').upper()
+        ref_number = (data.get('ref_number') or '').strip()
+        reason = (data.get('reason') or '').strip()
+
+        if ref_type not in ('PO', 'SO'):
+            return jsonify({'error': 'ref_type harus PO atau SO'}), 400
+        if not ref_number:
+            return jsonify({'error': 'Nomor referensi wajib diisi'}), 400
+        if not reason:
+            return jsonify({'error': 'Alasan wajib diisi'}), 400
+
+        # Check if already requested
+        existing = DeleteRequest.query.filter_by(ref_type=ref_type, ref_number=ref_number, is_hidden=True).first()
+        if existing:
+            return jsonify({'error': f'{ref_type} {ref_number} sudah disembunyikan sebelumnya'}), 400
+
+        req = DeleteRequest(
+            ref_type=ref_type,
+            ref_number=ref_number,
+            reason=reason,
+            is_hidden=True
+        )
+        db.session.add(req)
+        db.session.commit()
+        return jsonify({'success': True, 'id': req.id, 'message': f'{ref_type} {ref_number} berhasil disembunyikan dari dashboard'})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/delete-requests/<int:req_id>/restore', methods=['PUT'])
+def restore_delete_request(req_id):
+    """Restore a hidden item back to dashboard."""
+    try:
+        req = db.session.get(DeleteRequest, req_id)
+        if not req:
+            return jsonify({'error': 'Request tidak ditemukan'}), 404
+        req.is_hidden = False
+        db.session.commit()
+        return jsonify({'success': True, 'message': f'{req.ref_type} {req.ref_number} berhasil ditampilkan kembali'})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/delete-requests/<int:req_id>', methods=['DELETE'])
+def delete_request_permanently(req_id):
+    """Permanently remove a delete request record."""
+    try:
+        req = db.session.get(DeleteRequest, req_id)
+        if not req:
+            return jsonify({'error': 'Request tidak ditemukan'}), 404
+        db.session.delete(req)
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════
+# UPLOAD ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════
 
 CHUNK_SIZE = 200
 
@@ -664,8 +744,6 @@ def upload_po_list():
         df = pd.read_excel(file, engine='openpyxl')
         df.columns = [str(c).strip() for c in df.columns]
 
-        # ── Header validation ──────────────────────────────────────────────
-        # These are the key columns that MUST exist (using any of their aliases)
         REQUIRED_PO_COLS = {
             'PO Number':        ['PO No.','PO No','PO Number','PO'],
             'Item No':          ['Item No.','Item No','Item Number','No. Item'],
@@ -688,7 +766,6 @@ def upload_po_list():
                     f'Pastikan Anda mengupload file HLI PO List yang benar, lalu cek kembali.'
                 )
             }), 400
-        # ── End header validation ──────────────────────────────────────────
 
         col_po   = find_column(df, ['PO No.','PO No','PO Number','PO'])
         if not col_po:
@@ -709,7 +786,6 @@ def upload_po_list():
         col_pm   = find_column(df, ['Purchase Member','Purchasing Member','PIC','Buyer'])
         col_rdd  = find_column(df, ['Request Delivery Date','Delivery Date','Req Delivery'])
 
-        # Build lookup of existing PO records (po_number + item_no) -> existing record
         existing_po = {}
         for p in POData.query.all():
             key = (p.po_number, p.item_no)
@@ -744,11 +820,13 @@ def upload_po_list():
             }
 
             if key in existing_po:
-                # Update existing, preserve remarks & delivery_plan_date
                 existing = existing_po[key]
+                preserved_plan_date = existing.delivery_plan_date
+                preserved_remarks = existing.remarks
                 for field, val in new_data.items():
                     setattr(existing, field, val)
-                # remarks & delivery_plan_date already preserved (not in new_data update)
+                existing.delivery_plan_date = preserved_plan_date
+                existing.remarks = preserved_remarks
             else:
                 new_rec = POData(**new_data)
                 db.session.add(new_rec)
@@ -757,7 +835,6 @@ def upload_po_list():
             if count % CHUNK_SIZE == 0:
                 db.session.flush()
 
-        # Delete records not in the new file
         keys_to_delete = set(existing_po.keys()) - new_keys_in_file
         if keys_to_delete:
             for key in keys_to_delete:
@@ -770,15 +847,21 @@ def upload_po_list():
         db.session.rollback(); import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/api/upload/smro', methods=['POST'])
 def upload_smro():
+    """
+    SMRO upload — upsert only.
+    - Records with SO Item matching new file → updated (remarks & delivery_plan_date preserved)
+    - Records with SO Item NOT in new file → KEPT as-is (not deleted)
+    - New SO Items in file not in DB → inserted
+    """
     try:
         if 'file' not in request.files: return jsonify({'error': 'No file'}), 400
         file = request.files['file']
         df = pd.read_excel(file, engine='openpyxl')
         df.columns = [str(c).strip() for c in df.columns]
 
-        # ── Header validation ──────────────────────────────────────────────
         REQUIRED_SMRO_COLS = {
             'SO Number':       ['SO Number','SO No','SO No.','SO','Sales Order','Sales Order Number','No SO','Nomor SO'],
             'SO Item':         ['SO Item No','Item No','Line','SO Line','SO Item'],
@@ -801,7 +884,6 @@ def upload_smro():
                     f'Pastikan Anda mengupload file SMRO yang benar, lalu cek kembali.'
                 )
             }), 400
-        # ── End header validation ──────────────────────────────────────────
 
         col_so = find_column(df, ['SO Number','SO No','SO No.','SO','SO Item',
                                    'Sales Order','Sales Order Number','No SO','Nomor SO'])
@@ -826,19 +908,20 @@ def upload_smro():
         col_delposs = find_column(df, ['Delivery Possible Date','Possible Delivery Date','Est Delivery'])
         col_matchpo = find_column(df, ['Matched PO Number','Matched PO','PO HLI','PO HLI Number'])
 
-        # Build lookup of existing SO records by so_item (unique key)
+        # Build lookup of existing SO records by so_item
         existing_so = {}
         for s in SOData.query.all():
             if s.so_item:
                 existing_so[s.so_item] = s
 
-        new_soitems_in_file = set()
         count = 0
+        updated = 0
+        inserted = 0
+
         for _, row in df.iterrows():
             so_val = clean(df_val(row, col_so))
             if not so_val: continue
             so_item_val = clean(df_val(row, col_soitem))
-            new_soitems_in_file.add(so_item_val)
 
             new_data = {
                 'so_number': so_val,
@@ -863,35 +946,39 @@ def upload_smro():
             }
 
             if so_item_val and so_item_val in existing_so:
-                # Update existing record, preserve remarks & delivery_plan_date
+                # Update existing record — preserve remarks & delivery_plan_date
                 existing = existing_so[so_item_val]
                 preserved_remarks = existing.remarks
                 preserved_plan_date = existing.delivery_plan_date
                 for field, val in new_data.items():
                     setattr(existing, field, val)
-                # Restore preserved fields
                 existing.remarks = preserved_remarks
                 existing.delivery_plan_date = preserved_plan_date
+                updated += 1
             else:
                 new_rec = SOData(**new_data)
                 db.session.add(new_rec)
+                inserted += 1
 
             count += 1
             if count % CHUNK_SIZE == 0:
                 db.session.flush()
 
-        # Delete records not in the new file (by so_item)
-        keys_to_delete = set(existing_so.keys()) - new_soitems_in_file
-        if keys_to_delete:
-            for key in keys_to_delete:
-                db.session.delete(existing_so[key])
+        # ── KEY CHANGE: Do NOT delete records not in this file ──
+        # Old records with different SO Items are preserved as-is.
 
         db.session.add(UploadLog(file_type='SO', filename=file.filename, records_count=count))
         db.session.commit()
-        return jsonify({'message': f'Berhasil upload {count} SO items', 'uploaded': count})
+        return jsonify({
+            'message': f'Berhasil: {inserted} SO baru ditambahkan, {updated} SO diperbarui. Data lama yang tidak ada di file ini tetap dipertahankan.',
+            'uploaded': count,
+            'inserted': inserted,
+            'updated': updated
+        })
     except Exception as e:
         db.session.rollback(); import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/data/so/<int:so_id>', methods=['PUT'])
 def update_so(so_id):
@@ -905,6 +992,7 @@ def update_so(so_id):
         return jsonify({'success': True})
     except Exception as e:
         db.session.rollback(); return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/data/so/batch-upload', methods=['POST'])
 def batch_upload_so():
@@ -935,6 +1023,7 @@ def batch_upload_so():
         db.session.rollback(); import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+
 def _style_wb(ws, headers, num_cols=None):
     ws.append(headers)
     fill = PatternFill(start_color="8B5CF6", end_color="8B5CF6", fill_type="solid")
@@ -947,6 +1036,7 @@ def _style_wb(ws, headers, num_cols=None):
         for row in ws.iter_rows(min_row=2):
             for ci in num_cols:
                 row[ci-1].number_format = '#,##0.00'
+
 
 @app.route('/api/export/all-so', methods=['GET'])
 def export_all_so():
@@ -983,18 +1073,29 @@ def export_all_so():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/api/export/po-without-so', methods=['GET'])
 def export_po_without_so():
     try:
         matched_set = build_matched_set()
+        hidden_po = get_hidden_po_numbers()
         today = date.today()
+
+        seen_keys = set()
         pos = []
         for p in POData.query.all():
+            key = (p.po_number, p.item_no)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            if p.po_number in hidden_po:
+                continue
             op_unit = get_operation_unit(p.po_item_type, p.item_code)
             if op_unit in EXCLUDED_OP_UNITS:
                 continue
             if not po_is_matched(p.po_number, p.item_no, matched_set):
                 pos.append((p, op_unit))
+
         wb = Workbook(); ws = wb.active; ws.title = "PO Without SO"
         _style_wb(ws, ['PO Number','PO Item Type','Item No','Item Code','Operation Unit','Description','Supplier',
                        'Qty','Unit','Price','Amount','Currency',
@@ -1017,6 +1118,7 @@ def export_po_without_so():
             as_attachment=True, download_name=f"PO_Without_SO_{datetime.now().strftime('%Y%m%d')}.xlsx")
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
 
 if __name__ == '__main__':
     print("Backend: http://127.0.0.1:5000")
