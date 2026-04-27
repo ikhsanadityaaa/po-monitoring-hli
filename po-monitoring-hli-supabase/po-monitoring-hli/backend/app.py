@@ -274,6 +274,7 @@ def is_po_hidden(po_number, item_no, hidden_keys):
     return False
 
 
+@app.route('/api/dashboard/stats', methods=['GET'])
 def get_dashboard_stats():
     try:
         hidden_po = get_hidden_po_numbers()
@@ -468,6 +469,7 @@ def get_po_hli_key_set():
     return keys
 
 
+@app.route('/api/data/po-without-so', methods=['GET'])
 def get_po_without_so():
     try:
         matched_set = build_matched_set()
