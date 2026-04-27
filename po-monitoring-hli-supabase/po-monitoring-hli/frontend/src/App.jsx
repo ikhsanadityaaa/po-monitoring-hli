@@ -784,6 +784,23 @@ const App = () => {
     }
   };
 
+  const downloadBlob = async (url, filename, label) => {
+    const toastId = Date.now();
+    setDownloadToast({ id: toastId, message: `Mengunduh ${label || filename}...` });
+    try {
+      const res = await api.get(url, { responseType: 'blob' });
+      const link = document.createElement('a');
+      link.href = window.URL.createObjectURL(new Blob([res.data]));
+      link.setAttribute('download', filename);
+      document.body.appendChild(link); link.click(); link.remove();
+      setDownloadToast(null);
+      addToast(`✅ File "${filename}" berhasil didownload`, 'success');
+    } catch (e) {
+      setDownloadToast(null);
+      addToast('❌ Gagal download file', 'error');
+    }
+  };
+
   const downloadHideTemplate = (type) => {
     setShowHideMenu(false);
     downloadBlob(`/api/template/hide?type=${type}`, `Template_Hide_${type === 'SO' ? 'SO' : 'PO_HLI'}.xlsx`, `Template Hide ${type}`);
@@ -809,23 +826,6 @@ const App = () => {
     } catch (e) {
       setUploadProgress(null);
       addToast(`❌ Gagal upload hide batch: ${e.response?.data?.error || e.message}`, 'error');
-    }
-  };
-
-
-    const toastId = Date.now();
-    setDownloadToast({ id: toastId, message: `Mengunduh ${label || filename}...` });
-    try {
-      const res = await api.get(url, { responseType: 'blob' });
-      const link = document.createElement('a');
-      link.href = window.URL.createObjectURL(new Blob([res.data]));
-      link.setAttribute('download', filename);
-      document.body.appendChild(link); link.click(); link.remove();
-      setDownloadToast(null);
-      addToast(`✅ File "${filename}" berhasil didownload`, 'success');
-    } catch (e) {
-      setDownloadToast(null);
-      addToast('❌ Gagal download file', 'error');
     }
   };
 
