@@ -203,28 +203,44 @@ class DeleteRequest(db.Model):
     is_hidden = db.Column(db.Boolean, default=True)  # True = hidden from dashboard
 
 def _ensure_so_extra_columns():
-    """Best-effort online migration: add `specification` and `product_id`
-    columns to so_data if they don't exist yet.  `db.create_all()` only
-    creates tables that don't exist; it never adds columns to an existing
-    table.  Both SQLite and PostgreSQL support `ALTER TABLE ... ADD COLUMN
-    IF NOT EXISTS` (SQLite >= 3.35), so a single statement works on both."""
-    statements = [
-        "ALTER TABLE so_data ADD COLUMN IF NOT EXISTS specification TEXT",
-        "ALTER TABLE so_data ADD COLUMN IF NOT EXISTS product_id VARCHAR(100)",
+    """Online migration: add `specification` and `product_id` columns to
+    so_data if they don't exist yet.
+
+    Strategy (works on all SQLite versions and PostgreSQL):
+    1. Query the actual column list from the DB (PRAGMA for SQLite,
+       information_schema for Postgres).
+    2. Only issue ALTER TABLE when the column is genuinely absent.
+    This avoids the `IF NOT EXISTS` clause that many SQLite builds reject.
+    """
+    is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
+    needed = [
+        ('specification', 'TEXT'),
+        ('product_id',    'VARCHAR(100)'),
     ]
-    for sql in statements:
-        try:
-            db.session.execute(text(sql))
-            db.session.commit()
-        except Exception:
-            db.session.rollback()
-            # Older SQLite (<3.35) lacks IF NOT EXISTS — fall back and ignore
-            # the duplicate-column error from a plain ADD COLUMN.
+    try:
+        if is_sqlite:
+            result = db.session.execute(text("PRAGMA table_info(so_data)"))
+            existing_cols = {row[1].lower() for row in result}
+        else:
+            result = db.session.execute(text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'so_data'"
+            ))
+            existing_cols = {row[0].lower() for row in result}
+    except Exception:
+        existing_cols = set()
+
+    for col_name, col_type in needed:
+        if col_name.lower() not in existing_cols:
             try:
-                db.session.execute(text(sql.replace(' IF NOT EXISTS', '')))
+                db.session.execute(
+                    text(f"ALTER TABLE so_data ADD COLUMN {col_name} {col_type}")
+                )
                 db.session.commit()
-            except Exception:
+                print(f'DB migration: added column so_data.{col_name}')
+            except Exception as exc:
                 db.session.rollback()
+                print(f'DB migration warning (so_data.{col_name}): {exc}')
 
 
 with app.app_context():
@@ -1470,9 +1486,16 @@ def upload_smro():
 @app.route('/api/upload/smro-backfill-spec', methods=['POST'])
 def upload_smro_backfill_spec():
     """Backfill-only upload: reads Specification and Product ID from an SMRO
-    Excel file and updates those two fields on existing SO records matched by
-    SO Item.  All other fields are left untouched.  Safe to run multiple times.
-    Returns counts of matched/unmatched rows so the user can verify."""
+    Excel file and updates those two fields on existing SO records.
+
+    Matching strategy (in order):
+    1. Exact SO Item match  (e.g. '9008123456-10' in file == '9008123456-10' in DB)
+    2. SO Number + item-line suffix match  (file SO Item '9008123456-10' →
+       SO Number '9008123456', item line '10')
+    3. SO Number only match (last resort — updates all lines of that SO)
+
+    Safe to run multiple times.  Only writes when spec or pid is non-null in file.
+    """
     try:
         if 'file' not in request.files:
             return jsonify({'error': 'No file'}), 400
@@ -1480,60 +1503,105 @@ def upload_smro_backfill_spec():
         df = pd.read_excel(file, engine='openpyxl')
         df.columns = [str(c).strip() for c in df.columns]
 
+        col_sonum  = find_column(df, ['SO Number', 'SO No', 'SO No.', 'SO'])
         col_soitem = find_column(df, ['SO Item', 'SO Item No', 'SO Line', 'Item No', 'Line'])
         col_spec   = find_column(df, ['Specification', 'Spec', 'Specifications', 'Product Specification'])
         col_pid    = find_column(df, ['Product ID', 'Product Id', 'Product Code',
                                       'Material', 'Material No', 'Material Number', 'Material Code', 'SKU'])
 
-        if not col_soitem:
-            return jsonify({'error': f'SO Item column not found. Columns: {df.columns.tolist()}'}), 400
+        if not col_soitem and not col_sonum:
+            return jsonify({'error': f'SO Item / SO Number column not found. Columns: {df.columns.tolist()}'}), 400
         if not col_spec and not col_pid:
             return jsonify({'error': 'Neither Specification nor Product ID column found.'}), 400
 
         # Ensure columns exist in DB before writing
         _ensure_so_extra_columns()
 
-        # Build lookup: so_item → SOData row
-        existing_so = {s.so_item: s for s in SOData.query.all() if s.so_item}
+        # Build lookups from all SO records in DB
+        all_so = SOData.query.all()
+        # Primary: exact so_item match
+        by_soitem = {}
+        # Secondary: so_number → list of records (for fallback)
+        by_sonum  = {}
+        for s in all_so:
+            if s.so_item:
+                by_soitem[s.so_item] = s
+                # Also index by so_number+item_suffix e.g. '9008123456' + '-10'
+                parts = s.so_item.rsplit('-', 1)
+                if len(parts) == 2:
+                    by_soitem[s.so_item] = s  # already done
+            if s.so_number:
+                by_sonum.setdefault(s.so_number, []).append(s)
 
         updated = 0
         skipped_no_match = 0
-        skipped_no_data = 0
+        skipped_no_data  = 0
+        flush_counter    = 0
 
         for _, row in df.iterrows():
-            so_item_val = clean(df_val(row, col_soitem))
-            if not so_item_val:
-                continue
-            spec_val = clean(df_val(row, col_spec)) if col_spec else None
-            pid_val  = clean(df_val(row, col_pid))  if col_pid  else None
+            so_item_val = clean(df_val(row, col_soitem)) if col_soitem else None
+            so_num_val  = clean(df_val(row, col_sonum))  if col_sonum  else None
+            spec_val    = clean(df_val(row, col_spec))   if col_spec   else None
+            pid_val     = clean(df_val(row, col_pid))    if col_pid    else None
 
             if spec_val is None and pid_val is None:
                 skipped_no_data += 1
                 continue
 
-            rec = existing_so.get(so_item_val)
-            if rec is None:
+            # Resolve matching DB records
+            matched_recs = []
+
+            if so_item_val:
+                # Try exact so_item match first
+                rec = by_soitem.get(so_item_val)
+                if rec:
+                    matched_recs = [rec]
+                else:
+                    # Try: maybe DB stores so_number only as so_item (older uploads)
+                    # Extract so_number from so_item (strip '-NN' suffix)
+                    parts = so_item_val.rsplit('-', 1)
+                    so_num_from_item = parts[0] if len(parts) == 2 else so_item_val
+                    candidates = by_sonum.get(so_num_from_item, [])
+                    if len(parts) == 2:
+                        # Try to match by item line number suffix
+                        item_line = parts[1]
+                        line_matched = [
+                            c for c in candidates
+                            if c.so_item and c.so_item.endswith(f'-{item_line}')
+                        ]
+                        matched_recs = line_matched or candidates
+                    else:
+                        matched_recs = candidates
+
+            if not matched_recs and so_num_val:
+                matched_recs = by_sonum.get(so_num_val, [])
+
+            if not matched_recs:
                 skipped_no_match += 1
                 continue
 
-            changed = False
-            if spec_val is not None and rec.specification != spec_val:
-                rec.specification = spec_val
-                changed = True
-            if pid_val is not None and rec.product_id != pid_val:
-                rec.product_id = pid_val
-                changed = True
-            if changed:
-                updated += 1
-
-            if updated % 200 == 0 and updated > 0:
-                db.session.flush()
+            for rec in matched_recs:
+                changed = False
+                if spec_val is not None and rec.specification != spec_val:
+                    rec.specification = spec_val
+                    changed = True
+                if pid_val is not None and rec.product_id != pid_val:
+                    rec.product_id = pid_val
+                    changed = True
+                if changed:
+                    updated += 1
+                    flush_counter += 1
+                    if flush_counter % 300 == 0:
+                        db.session.flush()
 
         db.session.commit()
         return jsonify({
-            'message': f'Backfill selesai: {updated} SO diperbarui, '
-                       f'{skipped_no_match} SO Item tidak ditemukan di DB, '
-                       f'{skipped_no_data} baris tidak punya data Spec/PID.',
+            'message': (
+                f'Backfill selesai: {updated} SO record diperbarui'
+                + (f', {skipped_no_match} baris tidak cocok di DB' if skipped_no_match else '')
+                + (f', {skipped_no_data} baris tidak ada data Spec/PID' if skipped_no_data else '')
+                + '.'
+            ),
             'updated': updated,
             'skipped_no_match': skipped_no_match,
             'skipped_no_data': skipped_no_data,
