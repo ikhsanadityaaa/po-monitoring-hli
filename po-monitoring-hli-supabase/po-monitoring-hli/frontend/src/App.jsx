@@ -561,6 +561,7 @@ const App = () => {
   const [completedData, setCompletedData] = useState(null);
   const [completedYear, setCompletedYear] = useState('all');
   const [completedLoading, setCompletedLoading] = useState(false);
+  const [showHideMenu, setShowHideMenu] = useState(false);
   const hideMenuRef = useRef(null);
   useEffect(() => {
     const handler = (e) => { if (hideMenuRef.current && !hideMenuRef.current.contains(e.target)) setShowHideMenu(false); };
@@ -898,9 +899,10 @@ const App = () => {
   // ══════════════════════════════════════════════════════════════
   const renderCompleted = () => {
     const d = completedData;
-    const COLORS_PIE = ['#10B981','#EF4444','#9CA3AF'];
+    const CPIE = ['#10B981','#EF4444','#9CA3AF'];
     const fmtM = (v) => v >= 1e9 ? `${(v/1e9).toFixed(1)}B` : v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `${(v/1e3).toFixed(0)}K` : String(Math.round(v));
-    const marginColor = (m) => m > 0 ? 'text-green-600' : m < 0 ? 'text-red-600 font-bold' : 'text-gray-500';
+    const mc = (m) => m > 0 ? 'text-green-600' : m < 0 ? 'text-red-600' : 'text-gray-400';
+    const mcBg = (m) => m < 0 ? (darkMode?'bg-red-900/20':'bg-red-50') : (darkMode?'bg-gray-700':'bg-gray-50');
 
     if (completedLoading) return (
       <div className="flex items-center justify-center h-64">
@@ -914,38 +916,47 @@ const App = () => {
     if (!d) return (
       <div className={`flex flex-col items-center justify-center h-64 rounded-2xl ${card}`}>
         <Award className="w-16 h-16 text-gray-300 mb-4"/>
-        <p className={`text-lg font-semibold ${txt}`}>No data yet</p>
+        <p className={`text-lg font-semibold ${txt}`}>No completed data yet</p>
         <p className={`text-sm ${txt2} mt-1`}>Upload SMRO data to see completed transactions</p>
       </div>
     );
 
+    const totalCompleted = d.margin_distribution.positive + d.margin_distribution.negative + d.margin_distribution.zero;
     const marginPieData = [
-      { name: 'Positive Margin', value: d.margin_distribution.positive },
-      { name: 'Negative Margin', value: d.margin_distribution.negative },
-      { name: 'Zero', value: d.margin_distribution.zero },
+      { name: 'Positive', value: d.margin_distribution.positive },
+      { name: 'Negative', value: d.margin_distribution.negative },
+      { name: 'Zero / No Data', value: d.margin_distribution.zero },
     ].filter(x => x.value > 0);
 
     return (
       <div className="space-y-6">
-        {/* Year filter */}
+
+        {/* ── Year Filter ─────────────────────────────────────── */}
         <div className={`flex flex-wrap items-center gap-3 px-5 py-3 rounded-xl ${card} shadow`}>
+          <Calendar className="w-4 h-4 text-purple-500"/>
           <span className={`text-sm font-semibold ${txt}`}>Filter Year:</span>
           {['all', ...(d.available_years||[]).map(String)].map(y => (
             <button key={y} onClick={()=>{ setCompletedYear(y); fetchCompletedData(y); }}
-              className={`px-4 py-1.5 rounded-full text-sm font-semibold transition-all ${completedYear===y?'bg-purple-600 text-white shadow':'bg-gray-100 text-gray-700 hover:bg-purple-100'}`}>
+              className={`px-4 py-1.5 rounded-full text-sm font-semibold transition-all
+                ${completedYear===y?'bg-purple-600 text-white shadow':'bg-gray-100 text-gray-700 hover:bg-purple-100'}`}>
               {y==='all'?'All Years':y}
             </button>
           ))}
         </div>
 
-        {/* KPI Cards */}
+        {/* ── KPI Cards ───────────────────────────────────────── */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           {[
-            { label:'Total Transactions', value: fmtNum(d.total_count), icon:<CheckCircle className="w-6 h-6 text-green-500"/>, bg:'bg-green-100', color:'text-green-600' },
-            { label:'Total Sales Amount', value: fmtCurShort(d.total_sales), sub: fmtCur(d.total_sales), icon:<DollarSign className="w-6 h-6 text-blue-500"/>, bg:'bg-blue-100', color:'text-blue-600' },
-            { label:'Total Purchase Amount', value: fmtCurShort(d.total_purchase), sub: fmtCur(d.total_purchase), icon:<Package className="w-6 h-6 text-purple-500"/>, bg:'bg-purple-100', color:'text-purple-600' },
-            { label:'Total Margin', value: fmtCurShort(d.total_margin), sub: fmtCur(d.total_margin), icon: d.total_margin>=0?<TrendingUp className="w-6 h-6 text-emerald-500"/>:<TrendingDown className="w-6 h-6 text-red-500"/>, bg: d.total_margin>=0?'bg-emerald-100':'bg-red-100', color: d.total_margin>=0?'text-emerald-600':'text-red-600' },
-          ].map((k,i) => (
+            { label:'Completed Transactions', value: fmtNum(d.total_count),
+              icon:<CheckCircle className="w-6 h-6 text-green-500"/>, bg:'bg-green-100', color:'text-green-600' },
+            { label:'Total Sales Amount', value: fmtCurShort(d.total_sales), sub: fmtCur(d.total_sales),
+              icon:<DollarSign className="w-6 h-6 text-blue-500"/>, bg:'bg-blue-100', color:'text-blue-600' },
+            { label:'Total Purchase Amount', value: fmtCurShort(d.total_purchase), sub: fmtCur(d.total_purchase),
+              icon:<Package className="w-6 h-6 text-purple-500"/>, bg:'bg-purple-100', color:'text-purple-600' },
+            { label:'Total Margin', value: fmtCurShort(d.total_margin), sub: fmtCur(d.total_margin),
+              icon: d.total_margin>=0?<TrendingUp className="w-6 h-6 text-emerald-500"/>:<TrendingDown className="w-6 h-6 text-red-500"/>,
+              bg: d.total_margin>=0?'bg-emerald-100':'bg-red-100', color: d.total_margin>=0?'text-emerald-600':'text-red-600' },
+          ].map((k,i)=>(
             <div key={i} className={`p-5 rounded-2xl shadow ${card}`}>
               <div className="flex justify-between items-start">
                 <div>
@@ -959,16 +970,16 @@ const App = () => {
           ))}
         </div>
 
-        {/* Monthly Trend Chart */}
+        {/* ── Monthly Trend: Amount ────────────────────────────── */}
         <div className={`p-5 rounded-2xl shadow ${card}`}>
-          <h3 className={`text-base font-bold mb-4 ${txt}`}>Monthly Transactions — Sales & Purchase Amount</h3>
+          <h3 className={`text-base font-bold mb-4 ${txt}`}>Monthly Sales & Purchase Amount — Completed</h3>
           <ResponsiveContainer width="100%" height={280}>
             <BarChart data={d.monthly_trend} barGap={2}>
               <defs>
-                <linearGradient id="cSales" x1="0" y1="0" x2="0" y2="1">
+                <linearGradient id="cgSales" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor="#8B5CF6" stopOpacity={0.9}/><stop offset="95%" stopColor="#8B5CF6" stopOpacity={0.5}/>
                 </linearGradient>
-                <linearGradient id="cPurchase" x1="0" y1="0" x2="0" y2="1">
+                <linearGradient id="cgPurchase" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor="#F97316" stopOpacity={0.9}/><stop offset="95%" stopColor="#F97316" stopOpacity={0.5}/>
                 </linearGradient>
               </defs>
@@ -977,52 +988,59 @@ const App = () => {
               <YAxis stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10} tickFormatter={fmtM}/>
               <Tooltip formatter={(v,n)=>[fmtCur(v),n]} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
               <Legend wrapperStyle={{fontSize:12}}/>
-              <Bar dataKey="sales_amount" name="Sales Amount" fill="url(#cSales)" radius={[4,4,0,0]}/>
-              <Bar dataKey="purchase_amount" name="Purchase Amount" fill="url(#cPurchase)" radius={[4,4,0,0]}/>
+              <Bar dataKey="sales_amount" name="Sales Amount" fill="url(#cgSales)" radius={[4,4,0,0]}/>
+              <Bar dataKey="purchase_amount" name="Purchase Amount" fill="url(#cgPurchase)" radius={[4,4,0,0]}/>
             </BarChart>
           </ResponsiveContainer>
         </div>
 
-        {/* Transaction Count per Month */}
+        {/* ── Monthly Trend: Transaction Count ────────────────── */}
         <div className={`p-5 rounded-2xl shadow ${card}`}>
-          <h3 className={`text-base font-bold mb-4 ${txt}`}>Transaction Count per Month</h3>
+          <h3 className={`text-base font-bold mb-4 ${txt}`}>Monthly Transaction Count — Completed</h3>
           <ResponsiveContainer width="100%" height={200}>
             <AreaChart data={d.monthly_trend}>
               <defs>
-                <linearGradient id="cCount" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#10B981" stopOpacity={0.3}/><stop offset="95%" stopColor="#10B981" stopOpacity={0}/>
+                <linearGradient id="cgCount" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#10B981" stopOpacity={0.35}/><stop offset="95%" stopColor="#10B981" stopOpacity={0}/>
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke={darkMode?'#374151':'#F3F4F6'}/>
               <XAxis dataKey="month" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10}/>
               <YAxis stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10}/>
               <Tooltip contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
-              <Area type="monotone" dataKey="count" name="Transactions" stroke="#10B981" strokeWidth={2} fill="url(#cCount)"/>
+              <Area type="monotone" dataKey="count" name="Transactions" stroke="#10B981" strokeWidth={2} fill="url(#cgCount)"/>
             </AreaChart>
           </ResponsiveContainer>
         </div>
 
-        {/* Top 5 Vendors + Margin Pie */}
+        {/* ── Top 5 Vendors  +  Margin Pie ────────────────────── */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
           {/* Top 5 Vendors */}
           <div className={`p-5 rounded-2xl shadow ${card}`}>
-            <h3 className={`text-base font-bold mb-4 ${txt}`}>Top 5 Vendors by Sales Amount</h3>
-            <div className="space-y-3">
-              {d.top_vendors.map((v,i) => {
-                const maxVal = d.top_vendors[0]?.sales_amount || 1;
-                const pct = Math.round(v.sales_amount / maxVal * 100);
+            <h3 className={`text-base font-bold mb-4 ${txt} flex items-center gap-2`}>
+              <Award className="w-5 h-5 text-purple-500"/> Top 5 Vendors — Completed Transactions
+            </h3>
+            <div className="space-y-4">
+              {(d.top_vendors||[]).map((v,i)=>{
+                const maxAmt = d.top_vendors[0]?.sales_amount || 1;
+                const pct = Math.round(v.sales_amount / maxAmt * 100);
+                const rankColors = ['bg-yellow-400','bg-gray-300','bg-orange-400','bg-purple-200','bg-purple-100'];
                 return (
                   <div key={i}>
-                    <div className="flex justify-between items-center mb-1">
-                      <span className={`text-sm font-semibold truncate max-w-[55%] ${txt}`}>#{i+1} {v.vendor}</span>
-                      <span className={`text-xs font-bold text-purple-600`}>{fmtCurShort(v.sales_amount)}</span>
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold text-gray-700 flex-shrink-0 ${rankColors[i]||'bg-gray-100'}`}>{i+1}</span>
+                        <span className={`text-sm font-semibold truncate ${txt}`} title={v.vendor}>{v.vendor}</span>
+                      </div>
+                      <span className="text-xs font-bold text-purple-600 ml-2 flex-shrink-0">{fmtCurShort(v.sales_amount)}</span>
                     </div>
                     <div className={`w-full h-2 rounded-full ${darkMode?'bg-gray-700':'bg-gray-100'}`}>
-                      <div className="h-2 rounded-full bg-gradient-to-r from-purple-600 to-purple-400 transition-all" style={{width:`${pct}%`}}/>
+                      <div className="h-2 rounded-full bg-gradient-to-r from-purple-600 to-purple-400" style={{width:`${pct}%`}}/>
                     </div>
                     <div className="flex justify-between text-xs mt-0.5">
-                      <span className={txt2}>{fmtNum(v.count)} transactions</span>
-                      <span className={marginColor(v.margin)}>Margin: {fmtCurShort(v.margin)}</span>
+                      <span className={txt2}>{fmtNum(v.count)} transactions · Purchase {fmtCurShort(v.purchase_amount)}</span>
+                      <span className={mc(v.margin)}>Margin: {fmtCurShort(v.margin)}</span>
                     </div>
                   </div>
                 );
@@ -1030,48 +1048,59 @@ const App = () => {
             </div>
           </div>
 
-          {/* Margin Distribution Pie */}
+          {/* Margin Pie */}
           <div className={`p-5 rounded-2xl shadow ${card}`}>
-            <h3 className={`text-base font-bold mb-2 ${txt}`}>Margin Distribution</h3>
+            <h3 className={`text-base font-bold mb-3 ${txt} flex items-center gap-2`}>
+              <BarChart3 className="w-5 h-5 text-green-500"/> Margin Distribution — PO Count
+            </h3>
+            {/* Summary badges */}
             <div className="flex gap-2 mb-3">
-              <div className="flex-1 text-center p-3 bg-green-50 rounded-xl">
+              <div className="flex-1 text-center p-3 bg-green-50 dark:bg-green-900/20 rounded-xl">
                 <p className="text-xl font-bold text-green-600">{fmtNum(d.margin_distribution.positive)}</p>
-                <p className="text-xs text-green-700 font-semibold">Positive</p>
+                <p className="text-xs text-green-700 font-semibold mt-0.5">Positive</p>
+                <p className="text-xs text-green-600">{totalCompleted ? Math.round(d.margin_distribution.positive/totalCompleted*100) : 0}%</p>
               </div>
-              <div className="flex-1 text-center p-3 bg-red-50 rounded-xl">
+              <div className="flex-1 text-center p-3 bg-red-50 dark:bg-red-900/20 rounded-xl">
                 <p className="text-xl font-bold text-red-600">{fmtNum(d.margin_distribution.negative)}</p>
-                <p className="text-xs text-red-700 font-semibold">Negative</p>
+                <p className="text-xs text-red-700 font-semibold mt-0.5">Negative</p>
+                <p className="text-xs text-red-600">{totalCompleted ? Math.round(d.margin_distribution.negative/totalCompleted*100) : 0}%</p>
               </div>
-              <div className="flex-1 text-center p-3 bg-gray-50 rounded-xl">
+              <div className="flex-1 text-center p-3 bg-gray-50 dark:bg-gray-700 rounded-xl">
                 <p className="text-xl font-bold text-gray-500">{fmtNum(d.margin_distribution.zero)}</p>
-                <p className="text-xs text-gray-600 font-semibold">Zero</p>
+                <p className="text-xs text-gray-600 font-semibold mt-0.5">Zero</p>
+                <p className="text-xs text-gray-500">{totalCompleted ? Math.round(d.margin_distribution.zero/totalCompleted*100) : 0}%</p>
               </div>
             </div>
-            <ResponsiveContainer width="100%" height={200}>
+            <ResponsiveContainer width="100%" height={180}>
               <PieChart>
-                <Pie data={marginPieData} cx="50%" cy="50%" outerRadius={80} dataKey="value" label={({name,percent})=>`${name} ${(percent*100).toFixed(0)}%`} labelLine={false} fontSize={11}>
-                  {marginPieData.map((_,i)=><Cell key={i} fill={COLORS_PIE[i]}/>)}
+                <Pie data={marginPieData} cx="50%" cy="50%" innerRadius={45} outerRadius={75}
+                  dataKey="value" labelLine={false} label={renderPctLabel}>
+                  {marginPieData.map((_,i)=><Cell key={i} fill={CPIE[i]}/>)}
                 </Pie>
-                <Tooltip formatter={(v)=>[fmtNum(v),'Transactions']} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
+                <Tooltip formatter={(v,n)=>[fmtNum(v)+' PO', n]}
+                  contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
+                <Legend iconSize={8} wrapperStyle={{fontSize:11}}/>
               </PieChart>
             </ResponsiveContainer>
           </div>
         </div>
 
-        {/* Top 20 Items */}
+        {/* ── Top 20 Items ────────────────────────────────────── */}
         <div className={`p-5 rounded-2xl shadow ${card}`}>
-          <h3 className={`text-base font-bold mb-4 ${txt}`}>Top 20 Items by Sales Amount</h3>
+          <h3 className={`text-base font-bold mb-4 ${txt} flex items-center gap-2`}>
+            <Package className="w-5 h-5 text-orange-500"/> Top 20 Items by Sales Amount — Completed
+          </h3>
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
                 <tr className={tblHd}>
-                  {['#','Item / Product','Transactions','Sales Amount','Purchase Amount','Margin','Margin %'].map(h=>(
-                    <th key={h} className="px-3 py-2 text-left font-semibold text-purple-700">{h}</th>
+                  {['#','Item / Product','Qty Transactions','Sales Amount','Purchase Amount','Margin','Margin %'].map(h=>(
+                    <th key={h} className={`px-3 py-2 text-left font-semibold ${darkMode?'text-purple-300':'text-purple-700'}`}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody className={`divide-y ${tblDv}`}>
-                {d.top_items.map((item,i)=>{
+                {(d.top_items||[]).map((item,i)=>{
                   const mPct = item.sales_amount ? (item.margin/item.sales_amount*100).toFixed(1) : '—';
                   return (
                     <tr key={i} className={trHov}>
@@ -1080,8 +1109,8 @@ const App = () => {
                       <td className={`px-3 py-2 ${txt2}`}>{fmtNum(item.count)}</td>
                       <td className="px-3 py-2 text-purple-600 font-semibold">{fmtCurShort(item.sales_amount)}</td>
                       <td className="px-3 py-2 text-orange-600">{fmtCurShort(item.purchase_amount)}</td>
-                      <td className={`px-3 py-2 font-bold ${marginColor(item.margin)}`}>{fmtCurShort(item.margin)}</td>
-                      <td className={`px-3 py-2 font-semibold ${marginColor(item.margin)}`}>{mPct}%</td>
+                      <td className={`px-3 py-2 font-bold ${mc(item.margin)}`}>{fmtCurShort(item.margin)}</td>
+                      <td className={`px-3 py-2 font-semibold ${mc(item.margin)}`}>{mPct !== '—' ? `${mPct}%` : '—'}</td>
                     </tr>
                   );
                 })}
@@ -1090,26 +1119,39 @@ const App = () => {
           </div>
         </div>
 
-        {/* Worst Margin Vendors + Worst Transactions */}
+        {/* ── Worst Margin Vendors  +  Worst 10 Transactions ── */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Worst vendors by margin */}
+
+          {/* Vendors ranked by most negative margin */}
           <div className={`p-5 rounded-2xl shadow ${card}`}>
             <h3 className={`text-base font-bold mb-4 ${txt} flex items-center gap-2`}>
-              <TrendingDown className="w-5 h-5 text-red-500"/> Vendors with Largest Negative Margin
+              <TrendingDown className="w-5 h-5 text-red-500"/> Vendors — Largest Negative Margin
             </h3>
-            {d.worst_margin_vendors.length === 0
-              ? <p className={`text-sm ${txt2}`}>No vendors with negative margin 🎉</p>
-              : <div className="space-y-2">
-                  {d.worst_margin_vendors.map((v,i)=>(
-                    <div key={i} className="flex items-center justify-between px-3 py-2 rounded-lg bg-red-50">
-                      <div>
-                        <span className="text-xs font-bold text-red-700">#{i+1}</span>
-                        <span className={`text-sm font-semibold ml-2 ${txt}`}>{v.vendor}</span>
-                        <span className={`text-xs ml-2 ${txt2}`}>({fmtNum(v.count)} tx)</span>
+            {(d.worst_margin_vendors||[]).length === 0
+              ? <div className="flex flex-col items-center justify-center py-10">
+                  <CheckCircle className="w-10 h-10 text-green-400 mb-2"/>
+                  <p className={`text-sm font-semibold ${txt2}`}>No vendors with negative margin 🎉</p>
+                </div>
+              : <div className="space-y-2 overflow-y-auto max-h-80">
+                  {d.worst_margin_vendors.map((v,i)=>{
+                    const maxAbs = Math.abs(d.worst_margin_vendors[0]?.margin || 1);
+                    const barPct = Math.round(Math.abs(v.margin) / maxAbs * 100);
+                    return (
+                      <div key={i} className={`p-3 rounded-xl ${mcBg(v.margin)}`}>
+                        <div className="flex items-center justify-between mb-1">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="text-xs font-bold text-red-600 flex-shrink-0">#{i+1}</span>
+                            <span className={`text-sm font-semibold truncate ${txt}`} title={v.vendor}>{v.vendor}</span>
+                          </div>
+                          <span className="text-sm font-bold text-red-600 ml-2 flex-shrink-0">{fmtCurShort(v.margin)}</span>
+                        </div>
+                        <div className={`w-full h-1.5 rounded-full ${darkMode?'bg-gray-600':'bg-red-100'} mb-1`}>
+                          <div className="h-1.5 rounded-full bg-red-500" style={{width:`${barPct}%`}}/>
+                        </div>
+                        <p className={`text-xs ${txt2}`}>{fmtNum(v.count)} transactions</p>
                       </div>
-                      <span className="text-sm font-bold text-red-600">{fmtCurShort(v.margin)}</span>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
             }
           </div>
@@ -1119,28 +1161,34 @@ const App = () => {
             <h3 className={`text-base font-bold mb-4 ${txt} flex items-center gap-2`}>
               <TrendingDown className="w-5 h-5 text-red-500"/> Top 10 Transactions — Largest Negative Margin
             </h3>
-            {d.worst_margin_transactions.length === 0
-              ? <p className={`text-sm ${txt2}`}>No negative margin transactions 🎉</p>
+            {(d.worst_margin_transactions||[]).length === 0
+              ? <div className="flex flex-col items-center justify-center py-10">
+                  <CheckCircle className="w-10 h-10 text-green-400 mb-2"/>
+                  <p className={`text-sm font-semibold ${txt2}`}>No negative margin transactions 🎉</p>
+                </div>
               : <div className="overflow-x-auto">
                   <table className="w-full text-xs">
                     <thead>
                       <tr className={tblHd}>
-                        {['SO Item','Vendor','Margin','Margin %','Date'].map(h=>(
-                          <th key={h} className="px-2 py-2 text-left font-semibold text-purple-700">{h}</th>
+                        {['#','SO Item','Vendor','Sales','Purchase','Margin','%','Date'].map(h=>(
+                          <th key={h} className={`px-2 py-2 text-left font-semibold ${darkMode?'text-purple-300':'text-purple-700'}`}>{h}</th>
                         ))}
                       </tr>
                     </thead>
                     <tbody className={`divide-y ${tblDv}`}>
                       {d.worst_margin_transactions.map((t,i)=>(
-                        <tr key={i} className={trHov}>
+                        <tr key={i} className={`${trHov} ${i===0?darkMode?'bg-red-900/20':'bg-red-50':''}`}>
+                          <td className={`px-2 py-2 font-bold text-red-600`}>{i+1}</td>
                           <td className="px-2 py-2">
                             <p className="font-semibold text-purple-600">{t.so_item}</p>
-                            <p className={`truncate max-w-[120px] ${txt2}`} title={t.product}>{t.product}</p>
+                            <p className={`truncate max-w-[100px] ${txt2}`} title={t.product}>{t.product}</p>
                           </td>
-                          <td className={`px-2 py-2 ${txt} truncate max-w-[100px]`} title={t.vendor}>{t.vendor}</td>
-                          <td className="px-2 py-2 font-bold text-red-600">{fmtCurShort(t.margin)}</td>
-                          <td className="px-2 py-2 font-semibold text-red-500">{t.margin_pct ?? '—'}%</td>
-                          <td className={`px-2 py-2 ${txt2}`}>{t.date ? fmtDate(t.date) : '-'}</td>
+                          <td className={`px-2 py-2 ${txt} truncate max-w-[90px]`} title={t.vendor}>{t.vendor}</td>
+                          <td className="px-2 py-2 text-blue-600 whitespace-nowrap">{fmtCurShort(t.sales_amount)}</td>
+                          <td className="px-2 py-2 text-orange-600 whitespace-nowrap">{fmtCurShort(t.purchase_amount)}</td>
+                          <td className="px-2 py-2 font-bold text-red-600 whitespace-nowrap">{fmtCurShort(t.margin)}</td>
+                          <td className="px-2 py-2 font-semibold text-red-500 whitespace-nowrap">{t.margin_pct != null ? `${t.margin_pct}%` : '—'}</td>
+                          <td className={`px-2 py-2 ${txt2} whitespace-nowrap`}>{t.date ? fmtDate(t.date) : '-'}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -1149,6 +1197,7 @@ const App = () => {
             }
           </div>
         </div>
+
       </div>
     );
   };
