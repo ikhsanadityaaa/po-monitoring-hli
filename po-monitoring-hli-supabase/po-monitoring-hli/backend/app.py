@@ -1484,7 +1484,9 @@ def completed_summary():
             if date_to:
                 q = q.filter(SOData.so_create_date <= date_to)
 
-        rows = q.all()
+        # Exclude consumable / non-revenue op units, matching every other
+        # SOData query in the codebase (see /api/completed/margin-detail, etc.).
+        rows = q.filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all()
 
         def po_amt_of(s):
             v = float(s.purchasing_amount or 0)
@@ -1492,34 +1494,37 @@ def completed_summary():
                 v = float(s.purchasing_price) * float(s.so_qty or 0)
             return v
 
+        # Pre-compute per-row sales/purchase/margin once, then reuse.
+        enriched = []
+        for s in rows:
+            po_amt = po_amt_of(s)
+            sales = float(s.sales_amount or 0)
+            enriched.append((s, po_amt, sales, sales - po_amt))
+
         # Monthly trend
         monthly = {}
-        for s in rows:
+        for s, po_amt, sales, _m in enriched:
             if not s.so_create_date:
                 continue
             key = s.so_create_date.strftime('%Y-%m')
             if key not in monthly:
                 monthly[key] = {'month': key, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0}
-
-            po_amt = po_amt_of(s)
             monthly[key]['count'] += 1
-            monthly[key]['sales_amount'] += float(s.sales_amount or 0)
+            monthly[key]['sales_amount'] += sales
             monthly[key]['purchase_amount'] += po_amt
 
         monthly_trend = sorted(monthly.values(), key=lambda x: x['month'])
 
-        # Vendor summary
+        # Vendor summary (top 5 by sales)
         vendor_map = {}
-        for s in rows:
+        for s, po_amt, sales, m in enriched:
             v = s.vendor_name or 'Unknown'
             if v not in vendor_map:
                 vendor_map[v] = {'vendor': v, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0, 'margin': 0.0}
-
-            po_amt = po_amt_of(s)
             vendor_map[v]['count'] += 1
-            vendor_map[v]['sales_amount'] += float(s.sales_amount or 0)
+            vendor_map[v]['sales_amount'] += sales
             vendor_map[v]['purchase_amount'] += po_amt
-            vendor_map[v]['margin'] += float(s.sales_amount or 0) - po_amt
+            vendor_map[v]['margin'] += m
 
         top_vendors = sorted(vendor_map.values(), key=lambda x: x['sales_amount'], reverse=True)[:5]
 
@@ -1527,19 +1532,67 @@ def completed_summary():
         pos = neg = zero = 0
         total_sales = 0.0
         total_purchase = 0.0
-        for s in rows:
-            po_amt = po_amt_of(s)
-            sales = float(s.sales_amount or 0)
+        for _s, po_amt, sales, m in enriched:
             total_sales += sales
             total_purchase += po_amt
-
-            m = sales - po_amt
             if m > 0:
                 pos += 1
             elif m < 0:
                 neg += 1
             else:
                 zero += 1
+
+        # Top 20 items by sales amount (grouped by product / item label)
+        item_map = {}
+        for s, po_amt, sales, m in enriched:
+            key = s.product_name or s.so_item or 'Unknown'
+            if key not in item_map:
+                item_map[key] = {'item': key, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0, 'margin': 0.0}
+            item_map[key]['count'] += 1
+            item_map[key]['sales_amount'] += sales
+            item_map[key]['purchase_amount'] += po_amt
+            item_map[key]['margin'] += m
+
+        top_items = sorted(item_map.values(), key=lambda x: x['sales_amount'], reverse=True)[:20]
+
+        # Worst-margin vendors: vendors with one or more negative-margin txns,
+        # ranked by total negative margin (most negative first).
+        neg_vendor_map = {}
+        for s, po_amt, sales, m in enriched:
+            if m >= 0:
+                continue
+            v = s.vendor_name or 'Unknown'
+            if v not in neg_vendor_map:
+                neg_vendor_map[v] = {
+                    'vendor': v, 'margin': 0.0, 'count': 0,
+                    'total_sales': 0.0, 'total_purchase': 0.0,
+                }
+            neg_vendor_map[v]['margin'] += m
+            neg_vendor_map[v]['count'] += 1
+            neg_vendor_map[v]['total_sales'] += sales
+            neg_vendor_map[v]['total_purchase'] += po_amt
+
+        worst_margin_vendors = sorted(neg_vendor_map.values(), key=lambda x: x['margin'])[:50]
+
+        # Top 10 worst-margin transactions
+        neg_txns = [(s, po_amt, sales, m) for s, po_amt, sales, m in enriched if m < 0]
+        neg_txns.sort(key=lambda x: x[3])  # most negative first
+        worst_margin_transactions = []
+        for s, po_amt, sales, m in neg_txns[:10]:
+            pct = round(m / sales * 100, 1) if sales else None
+            worst_margin_transactions.append({
+                'so_item': s.so_item,
+                'so_number': s.so_number,
+                'item_code': (s.item_code if hasattr(s, 'item_code') and s.item_code else (s.so_item or '-')),
+                'product': s.product_name or '-',
+                'vendor': s.vendor_name or '-',
+                'sales_amount': sales,
+                'purchase_amount': po_amt,
+                'margin': m,
+                'margin_pct': pct,
+                'count': 1,
+                'date': s.so_create_date.isoformat() if s.so_create_date else None,
+            })
 
         return jsonify({
             'total_count': len(rows),
@@ -1548,6 +1601,9 @@ def completed_summary():
             'total_margin': total_sales - total_purchase,
             'monthly_trend': monthly_trend,
             'top_vendors': top_vendors,
+            'top_items': top_items,
+            'worst_margin_vendors': worst_margin_vendors,
+            'worst_margin_transactions': worst_margin_transactions,
             'margin_distribution': {
                 'positive': pos,
                 'negative': neg,

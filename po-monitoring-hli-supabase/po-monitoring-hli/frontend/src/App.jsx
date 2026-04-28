@@ -1153,22 +1153,9 @@ const App = () => {
             <h3 className={`text-base font-bold mb-3 ${txt} flex items-center gap-2`}>
               <BarChart3 className="w-5 h-5 text-green-500"/> Margin Distribution — PO Count
             </h3>
-            <div className="flex gap-4">
-              {/* Pie chart */}
-              <div className="flex-1 min-w-0">
-                <ResponsiveContainer width="100%" height={220}>
-                  <PieChart>
-                    <Pie data={marginPieData} cx="50%" cy="45%" innerRadius={55} outerRadius={88}
-                      dataKey="value" labelLine={false} label={renderPctLabel}>
-                      {marginPieData.map((_,i)=><Cell key={i} fill={CPIE[i]}/>)}
-                    </Pie>
-                    <Tooltip formatter={(v,n)=>[`${fmtNum(v)} PO (${totalCompleted ? Math.round(v/totalCompleted*100) : 0}%)`, n]}
-                      contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
-              {/* Side boxes */}
-              <div className="flex flex-col gap-2 justify-center min-w-[160px]">
+            <div className="flex flex-col gap-4">
+              {/* Top boxes (Positive / Negative / Zero) */}
+              <div className="grid grid-cols-3 gap-2">
                 {[
                   { cat:'positive', label:'Positive', color:'text-green-600', bg: darkMode?'bg-green-900/30 border-green-700':'bg-green-50 border-green-200', count: d.margin_distribution.positive },
                   { cat:'negative', label:'Negative', color:'text-red-600', bg: darkMode?'bg-red-900/30 border-red-700':'bg-red-50 border-red-200', count: d.margin_distribution.negative },
@@ -1195,6 +1182,19 @@ const App = () => {
                     <p className={`text-xs text-purple-500 font-semibold mt-1`}>Click for details →</p>
                   </button>
                 ))}
+              </div>
+              {/* Pie chart */}
+              <div className="w-full">
+                <ResponsiveContainer width="100%" height={220}>
+                  <PieChart>
+                    <Pie data={marginPieData} cx="50%" cy="50%" innerRadius={55} outerRadius={88}
+                      dataKey="value" labelLine={false} label={renderPctLabel}>
+                      {marginPieData.map((_,i)=><Cell key={i} fill={CPIE[i]}/>)}
+                    </Pie>
+                    <Tooltip formatter={(v,n)=>[`${fmtNum(v)} PO (${totalCompleted ? Math.round(v/totalCompleted*100) : 0}%)`, n]}
+                      contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
+                  </PieChart>
+                </ResponsiveContainer>
               </div>
             </div>
           </div>
