@@ -4,7 +4,7 @@ from flask_cors import CORS
 import pandas as pd
 import re
 import os
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import io
 from sqlalchemy import func, text
 from openpyxl import Workbook
@@ -12,6 +12,86 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
 app = Flask(__name__)
+
+# ─── Indonesian Public Holidays (multi-year) ───────────────────────────────
+# Source: Official Indonesian government calendar
+_ID_HOLIDAYS = {
+    # 2023
+    date(2023,1,1), date(2023,1,22), date(2023,1,23), date(2023,2,18),
+    date(2023,3,22), date(2023,3,23), date(2023,4,7), date(2023,4,21),
+    date(2023,4,22), date(2023,4,23), date(2023,4,24), date(2023,4,25),
+    date(2023,5,1), date(2023,5,18), date(2023,5,24), date(2023,6,1),
+    date(2023,6,2), date(2023,6,3), date(2023,6,4), date(2023,7,19),
+    date(2023,8,17), date(2023,9,28), date(2023,12,25), date(2023,12,26),
+    # 2024
+    date(2024,1,1), date(2024,2,8), date(2024,2,9), date(2024,2,10),
+    date(2024,3,11), date(2024,3,29), date(2024,4,8), date(2024,4,9),
+    date(2024,4,10), date(2024,4,11), date(2024,4,12), date(2024,5,1),
+    date(2024,5,9), date(2024,5,23), date(2024,6,1), date(2024,6,17),
+    date(2024,6,18), date(2024,7,7), date(2024,8,17), date(2024,9,16),
+    date(2024,12,25), date(2024,12,26),
+    # 2025
+    date(2025,1,1), date(2025,1,27), date(2025,1,28), date(2025,1,29),
+    date(2025,3,28), date(2025,3,29), date(2025,3,30), date(2025,3,31),
+    date(2025,4,1), date(2025,4,2), date(2025,4,18), date(2025,5,1),
+    date(2025,5,12), date(2025,5,13), date(2025,5,29), date(2025,6,1),
+    date(2025,6,6), date(2025,6,7), date(2025,7,27), date(2025,8,17),
+    date(2025,9,5), date(2025,12,25), date(2025,12,26),
+    # 2026
+    date(2026,1,1), date(2026,1,16), date(2026,1,17), date(2026,3,20),
+    date(2026,3,21), date(2026,4,2), date(2026,4,3), date(2026,5,1),
+    date(2026,5,14), date(2026,5,16), date(2026,5,24), date(2026,5,25),
+    date(2026,6,15), date(2026,6,16), date(2026,7,17), date(2026,8,17),
+    date(2026,9,10), date(2026,12,25),
+}
+
+def is_workday(d):
+    """Return True if date is a working day (Mon–Fri, not a public holiday)."""
+    return d.weekday() < 5 and d not in _ID_HOLIDAYS
+
+def count_workdays(start, end):
+    """Count working days between start and end (exclusive of end).
+    Returns negative if end < start (overdue).
+    """
+    if start is None or end is None:
+        return None
+    if start == end:
+        return 0
+    if end > start:
+        count = 0
+        cur = start
+        while cur < end:
+            if is_workday(cur):
+                count += 1
+            cur += timedelta(days=1)
+        return count
+    else:
+        # overdue — count negatively
+        count = 0
+        cur = end
+        while cur < start:
+            if is_workday(cur):
+                count += 1
+            cur += timedelta(days=1)
+        return -count
+
+def workdays_since(past_date, today=None):
+    """Count working days from past_date to today (aging)."""
+    if past_date is None:
+        return None
+    if today is None:
+        today = date.today()
+    return count_workdays(past_date, today)
+
+def workdays_until(future_date, today=None):
+    """Count working days from today to future_date (days remaining)."""
+    if future_date is None:
+        return None
+    if today is None:
+        today = date.today()
+    return count_workdays(today, future_date)
+
+
 CORS(app, resources={r"/api/*": {
     "origins": "*",
     "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -205,16 +285,17 @@ def find_column(df, names):
 def df_val(row, col):
     return row.get(col) if col else None
 
-def get_aging_label(days):
-    if days is None: return 'No Date'
-    if days >= 180: return '180+'
-    if days >= 90: return '90-180'
-    if days >= 30: return '30-90'
+def get_aging_label(workday_count):
+    """Classify aging bucket based on working days."""
+    if workday_count is None: return 'No Date'
+    if workday_count >= 180: return '180+'
+    if workday_count >= 90:  return '90-180'
+    if workday_count >= 30:  return '30-90'
     return '0-30'
 
 def so_dict(s):
     today = date.today()
-    age_days = (today - s.so_create_date).days if s.so_create_date else None
+    age_days = workdays_since(s.so_create_date, today)
     return {
         'id': s.id, 'so_number': s.so_number, 'so_item': s.so_item,
         'so_status': s.so_status, 'operation_unit_name': s.operation_unit_name,
@@ -535,7 +616,7 @@ def get_po_without_so():
             if op_unit in EXCLUDED_OP_UNITS:
                 continue
             if not po_is_matched(p.po_number, p.item_no, matched_set):
-                days_remaining = (p.request_delivery - today).days if p.request_delivery else None
+                days_remaining = workdays_until(p.request_delivery, today)
                 result.append({
                     'id': p.id, 'po_no': p.po_number, 'item_no': p.item_no,
                     'item_code': p.item_code,
@@ -591,7 +672,8 @@ def get_aging_data():
             if v not in vendors:
                 vendors[v] = {'vendor': v, 'less_30': 0, 'days_30_90': 0,
                               'days_90_180': 0, 'more_180': 0, 'total_open': 0, 'sales_amount': 0.0}
-            age = (today - s.so_create_date).days
+            age = workdays_since(s.so_create_date, today)
+            if age is None: continue
             if age < 30:      vendors[v]['less_30']     += 1
             elif age < 90:    vendors[v]['days_30_90']  += 1
             elif age < 180:   vendors[v]['days_90_180'] += 1
@@ -615,7 +697,7 @@ def get_aging_detail(vendor_name):
         sos = [s for s in sos if so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
         if bucket:
             bucket = bucket.strip().replace(' ', '+')
-            sos = [s for s in sos if get_aging_label((today - s.so_create_date).days if s.so_create_date else None) == bucket]
+            sos = [s for s in sos if get_aging_label(workdays_since(s.so_create_date, today)) == bucket]
         return jsonify([so_dict(s) for s in sos])
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -633,7 +715,7 @@ def get_aging_detail_all():
         ).order_by(SOData.vendor_name.asc(), SOData.so_create_date.asc()).all()
         sos = [s for s in sos if so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
         if bucket:
-            sos = [s for s in sos if get_aging_label((today - s.so_create_date).days if s.so_create_date else None) == bucket]
+            sos = [s for s in sos if get_aging_label(workdays_since(s.so_create_date, today)) == bucket]
         return jsonify([so_dict(s) for s in sos])
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -662,7 +744,7 @@ def get_all_so():
 
         if aging:
             def matches_aging(s):
-                age = (today - s.so_create_date).days if s.so_create_date else None
+                age = workdays_since(s.so_create_date, today)
                 return get_aging_label(age) in aging
             all_sos = [s for s in all_sos if matches_aging(s)]
 
@@ -1190,7 +1272,7 @@ def export_po_without_so():
                        'PO Date','Purchase Member','Request Delivery','Days Remaining',
                        'Delivery Plan Date','Remarks'], num_cols=[8,10,11])
         for p, op_unit in pos:
-            days_rem = (p.request_delivery - today).days if p.request_delivery else ''
+            days_rem = workdays_until(p.request_delivery, today) if p.request_delivery else ''
             ws.append([p.po_number, p.po_item_type or '', p.item_no or '', p.item_code or '', op_unit,
                 p.po_item_detail, p.supplier,
                 p.qty or 0, p.unit or '', p.price or 0, p.amount or 0, p.currency or 'IDR',
@@ -1336,7 +1418,124 @@ def upload_hide_batch():
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/completed/summary', methods=['GET'])
+def completed_summary():
+    try:
+        year_filter = request.args.get('year', 'all')
+        is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
+
+        q = db.session.query(SOData).filter(SOData.so_status == 'Delivery Completed')
+        if year_filter != 'all':
+            try:
+                yr = int(year_filter)
+                if is_sqlite:
+                    q = q.filter(func.strftime('%Y', SOData.so_create_date) == str(yr))
+                else:
+                    q = q.filter(func.extract('year', SOData.so_create_date) == yr)
+            except ValueError:
+                pass
+
+        rows = q.filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all()
+
+        # Monthly trend
+        monthly = {}
+        for s in rows:
+            if not s.so_create_date:
+                continue
+            key = s.so_create_date.strftime('%Y-%m')
+            if key not in monthly:
+                monthly[key] = {'month': key, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0}
+            monthly[key]['count'] += 1
+            monthly[key]['sales_amount'] += float(s.sales_amount or 0)
+            monthly[key]['purchase_amount'] += float(s.purchasing_amount or 0)
+        monthly_trend = sorted(monthly.values(), key=lambda x: x['month'])
+
+        # Top 5 vendors by sales amount
+        vendor_map = {}
+        for s in rows:
+            v = s.vendor_name or 'Unknown'
+            if v not in vendor_map:
+                vendor_map[v] = {'vendor': v, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0, 'margin': 0.0}
+            vendor_map[v]['count'] += 1
+            vendor_map[v]['sales_amount'] += float(s.sales_amount or 0)
+            vendor_map[v]['purchase_amount'] += float(s.purchasing_amount or 0)
+            vendor_map[v]['margin'] += float((s.sales_amount or 0) - (s.purchasing_amount or 0))
+        top_vendors = sorted(vendor_map.values(), key=lambda x: x['sales_amount'], reverse=True)[:5]
+
+        # Top 20 items by sales amount
+        item_map = {}
+        for s in rows:
+            key = s.product_name or s.so_item or 'Unknown'
+            if key not in item_map:
+                item_map[key] = {'item': key, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0, 'margin': 0.0}
+            item_map[key]['count'] += 1
+            item_map[key]['sales_amount'] += float(s.sales_amount or 0)
+            item_map[key]['purchase_amount'] += float(s.purchasing_amount or 0)
+            item_map[key]['margin'] += float((s.sales_amount or 0) - (s.purchasing_amount or 0))
+        top_items = sorted(item_map.values(), key=lambda x: x['sales_amount'], reverse=True)[:20]
+
+        # Margin distribution
+        pos_count = neg_count = zero_count = 0
+        for s in rows:
+            m = float((s.sales_amount or 0) - (s.purchasing_amount or 0))
+            if m > 0:   pos_count += 1
+            elif m < 0: neg_count += 1
+            else:       zero_count += 1
+
+        # Vendors with worst total margin
+        neg_vendor_map = {}
+        for s in rows:
+            m = float((s.sales_amount or 0) - (s.purchasing_amount or 0))
+            v = s.vendor_name or 'Unknown'
+            if v not in neg_vendor_map:
+                neg_vendor_map[v] = {'vendor': v, 'margin': 0.0, 'count': 0}
+            neg_vendor_map[v]['margin'] += m
+            neg_vendor_map[v]['count'] += 1
+        worst_vendors = sorted([x for x in neg_vendor_map.values() if x['margin'] < 0],
+                               key=lambda x: x['margin'])[:10]
+
+        # Top 10 transactions with worst margin
+        tx_list = []
+        for s in rows:
+            m = float((s.sales_amount or 0) - (s.purchasing_amount or 0))
+            if m < 0:
+                tx_list.append({
+                    'so_item': s.so_item,
+                    'so_number': s.so_number,
+                    'product': s.product_name or '-',
+                    'vendor': s.vendor_name or '-',
+                    'op_unit': s.operation_unit_name or '-',
+                    'sales_amount': float(s.sales_amount or 0),
+                    'purchase_amount': float(s.purchasing_amount or 0),
+                    'margin': m,
+                    'margin_pct': round(m / float(s.sales_amount) * 100, 1) if s.sales_amount else None,
+                    'date': s.so_create_date.isoformat() if s.so_create_date else None,
+                })
+        worst_tx = sorted(tx_list, key=lambda x: x['margin'])[:10]
+
+        # Available years
+        all_years_q = db.session.query(SOData.so_create_date).filter(
+            SOData.so_status == 'Delivery Completed', SOData.so_create_date.isnot(None))
+        years = sorted(set(r[0].year for r in all_years_q.all()), reverse=True)
+
+        return jsonify({
+            'total_count': len(rows),
+            'total_sales': sum(float(s.sales_amount or 0) for s in rows),
+            'total_purchase': sum(float(s.purchasing_amount or 0) for s in rows),
+            'total_margin': sum(float((s.sales_amount or 0) - (s.purchasing_amount or 0)) for s in rows),
+            'monthly_trend': monthly_trend,
+            'top_vendors': top_vendors,
+            'top_items': top_items,
+            'margin_distribution': {'positive': pos_count, 'negative': neg_count, 'zero': zero_count},
+            'worst_margin_vendors': worst_vendors,
+            'worst_margin_transactions': worst_tx,
+            'available_years': years,
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 
+if __name__ == '__main__':
     print("Backend: http://127.0.0.1:5000")
     app.run(debug=True, host='0.0.0.0', port=5000)
