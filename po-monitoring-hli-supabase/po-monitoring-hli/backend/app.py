@@ -363,7 +363,17 @@ def get_dashboard_stats():
 
         po_count = db.session.query(func.count(POData.id)).scalar() or 0
         total_po_amount = db.session.query(func.sum(POData.amount)).scalar() or 0
-        total_so_count = db.session.query(func.count(SOData.id)).filter(open_so_filter()).scalar() or 0
+
+        # total_so_count: count only "countable" open SOs (same logic as aging)
+        # excludes: return items (SO item starting with '9'), internal PO refs, excluded op units, hidden items
+        total_so_count = 0
+        for s in db.session.query(SOData).filter(
+                open_so_filter(),
+                ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
+            if s.so_item in hidden_so or s.so_number in hidden_so:
+                continue
+            if so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
+                total_so_count += 1
 
         po_numbers = get_po_hli_key_set()
 
@@ -730,6 +740,9 @@ def get_all_so():
         aging         = request.args.getlist('aging')
         so_items      = request.args.getlist('so_item')
         margin_filter = request.args.get('margin_filter', 'all')
+        date_year     = request.args.get('date_year', '')
+        date_from     = request.args.get('date_from', '')
+        date_to       = request.args.get('date_to', '')
         page          = max(1, int(request.args.get('page', 1)))
         per_page      = min(500, int(request.args.get('per_page', 20)))
 
@@ -739,6 +752,21 @@ def get_all_so():
         if vendors:   q = q.filter(SOData.vendor_name.in_(vendors))
         if statuses:  q = q.filter(SOData.so_status.in_(statuses))
         if so_items:  q = q.filter(SOData.so_item.in_(so_items))
+        is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
+        if date_year:
+            try:
+                yr = int(date_year)
+                if is_sqlite:
+                    q = q.filter(func.strftime('%Y', SOData.so_create_date) == str(yr))
+                else:
+                    q = q.filter(func.extract('year', SOData.so_create_date) == yr)
+            except ValueError:
+                pass
+        elif date_from or date_to:
+            if date_from:
+                q = q.filter(SOData.so_create_date >= date_from)
+            if date_to:
+                q = q.filter(SOData.so_create_date <= date_to)
 
         all_sos = q.order_by(SOData.so_create_date.asc()).all()
 
@@ -1422,10 +1450,27 @@ def upload_hide_batch():
 def completed_summary():
     try:
         year_filter = request.args.get('year', 'all')
+        date_from   = request.args.get('date_from', '')
+        date_to     = request.args.get('date_to', '')
+        date_year   = request.args.get('date_year', '')
         is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
 
         q = db.session.query(SOData).filter(SOData.so_status == 'Delivery Completed')
-        if year_filter != 'all':
+        if date_year:
+            try:
+                yr = int(date_year)
+                if is_sqlite:
+                    q = q.filter(func.strftime('%Y', SOData.so_create_date) == str(yr))
+                else:
+                    q = q.filter(func.extract('year', SOData.so_create_date) == yr)
+            except ValueError:
+                pass
+        elif date_from or date_to:
+            if date_from:
+                q = q.filter(SOData.so_create_date >= date_from)
+            if date_to:
+                q = q.filter(SOData.so_create_date <= date_to)
+        elif year_filter != 'all':
             try:
                 yr = int(year_filter)
                 if is_sqlite:
@@ -1445,10 +1490,21 @@ def completed_summary():
             key = s.so_create_date.strftime('%Y-%m')
             if key not in monthly:
                 monthly[key] = {'month': key, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0}
+            # purchase_amount: prefer purchasing_amount from DB; fallback to purchasing_price * so_qty
+            po_amt = float(s.purchasing_amount or 0)
+            if po_amt == 0 and s.purchasing_price:
+                po_amt = float(s.purchasing_price) * float(s.so_qty or 0)
             monthly[key]['count'] += 1
             monthly[key]['sales_amount'] += float(s.sales_amount or 0)
-            monthly[key]['purchase_amount'] += float(s.purchasing_amount or 0)
+            monthly[key]['purchase_amount'] += po_amt
         monthly_trend = sorted(monthly.values(), key=lambda x: x['month'])
+
+        # Helper: compute purchase amount for a row
+        def get_po_amt(s):
+            po_amt = float(s.purchasing_amount or 0)
+            if po_amt == 0 and s.purchasing_price:
+                po_amt = float(s.purchasing_price) * float(s.so_qty or 0)
+            return po_amt
 
         # Top 5 vendors by sales amount
         vendor_map = {}
@@ -1456,10 +1512,11 @@ def completed_summary():
             v = s.vendor_name or 'Unknown'
             if v not in vendor_map:
                 vendor_map[v] = {'vendor': v, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0, 'margin': 0.0}
+            po_amt = get_po_amt(s)
             vendor_map[v]['count'] += 1
             vendor_map[v]['sales_amount'] += float(s.sales_amount or 0)
-            vendor_map[v]['purchase_amount'] += float(s.purchasing_amount or 0)
-            vendor_map[v]['margin'] += float((s.sales_amount or 0) - (s.purchasing_amount or 0))
+            vendor_map[v]['purchase_amount'] += po_amt
+            vendor_map[v]['margin'] += float((s.sales_amount or 0)) - po_amt
         top_vendors = sorted(vendor_map.values(), key=lambda x: x['sales_amount'], reverse=True)[:5]
 
         # Top 20 items by sales amount
@@ -1468,16 +1525,17 @@ def completed_summary():
             key = s.product_name or s.so_item or 'Unknown'
             if key not in item_map:
                 item_map[key] = {'item': key, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0, 'margin': 0.0}
+            po_amt = get_po_amt(s)
             item_map[key]['count'] += 1
             item_map[key]['sales_amount'] += float(s.sales_amount or 0)
-            item_map[key]['purchase_amount'] += float(s.purchasing_amount or 0)
-            item_map[key]['margin'] += float((s.sales_amount or 0) - (s.purchasing_amount or 0))
+            item_map[key]['purchase_amount'] += po_amt
+            item_map[key]['margin'] += float(s.sales_amount or 0) - po_amt
         top_items = sorted(item_map.values(), key=lambda x: x['sales_amount'], reverse=True)[:20]
 
         # Margin distribution
         pos_count = neg_count = zero_count = 0
         for s in rows:
-            m = float((s.sales_amount or 0) - (s.purchasing_amount or 0))
+            m = float(s.sales_amount or 0) - get_po_amt(s)
             if m > 0:   pos_count += 1
             elif m < 0: neg_count += 1
             else:       zero_count += 1
@@ -1485,7 +1543,8 @@ def completed_summary():
         # Vendors with worst total margin
         neg_vendor_map = {}
         for s in rows:
-            m = float((s.sales_amount or 0) - (s.purchasing_amount or 0))
+            po_amt = get_po_amt(s)
+            m = float(s.sales_amount or 0) - po_amt
             v = s.vendor_name or 'Unknown'
             if v not in neg_vendor_map:
                 neg_vendor_map[v] = {'vendor': v, 'margin': 0.0, 'count': 0}
@@ -1497,7 +1556,8 @@ def completed_summary():
         # Top 10 transactions with worst margin
         tx_list = []
         for s in rows:
-            m = float((s.sales_amount or 0) - (s.purchasing_amount or 0))
+            po_amt = get_po_amt(s)
+            m = float(s.sales_amount or 0) - po_amt
             if m < 0:
                 tx_list.append({
                     'so_item': s.so_item,
@@ -1506,7 +1566,7 @@ def completed_summary():
                     'vendor': s.vendor_name or '-',
                     'op_unit': s.operation_unit_name or '-',
                     'sales_amount': float(s.sales_amount or 0),
-                    'purchase_amount': float(s.purchasing_amount or 0),
+                    'purchase_amount': po_amt,
                     'margin': m,
                     'margin_pct': round(m / float(s.sales_amount) * 100, 1) if s.sales_amount else None,
                     'date': s.so_create_date.isoformat() if s.so_create_date else None,
@@ -1521,8 +1581,8 @@ def completed_summary():
         return jsonify({
             'total_count': len(rows),
             'total_sales': sum(float(s.sales_amount or 0) for s in rows),
-            'total_purchase': sum(float(s.purchasing_amount or 0) for s in rows),
-            'total_margin': sum(float((s.sales_amount or 0) - (s.purchasing_amount or 0)) for s in rows),
+            'total_purchase': sum(get_po_amt(s) for s in rows),
+            'total_margin': sum(float(s.sales_amount or 0) - get_po_amt(s) for s in rows),
             'monthly_trend': monthly_trend,
             'top_vendors': top_vendors,
             'top_items': top_items,
