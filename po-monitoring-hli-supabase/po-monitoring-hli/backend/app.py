@@ -460,8 +460,8 @@ def df_val(row, col):
     return row.get(col) if col else None
 
 def get_aging_label(workday_count):
-    """Classify aging bucket based on working days."""
-    if workday_count is None: return 'No Date'
+    """Classify aging bucket based on working days. None (no date) → '180+' bucket."""
+    if workday_count is None: return '180+'
     if workday_count >= 180: return '180+'
     if workday_count >= 90:  return '90-180'
     if workday_count >= 30:  return '30-90'
@@ -788,6 +788,41 @@ def debug_matching():
     })
 
 
+@app.route('/api/debug/so-fields', methods=['GET'])
+def debug_so_fields():
+    """Debug endpoint — inspect spec/product_id fill rate and a sample of SO data."""
+    try:
+        total = db.session.query(func.count(SOData.id)).scalar() or 0
+        has_spec = db.session.query(func.count(SOData.id)).filter(
+            SOData.specification.isnot(None), SOData.specification != ''
+        ).scalar() or 0
+        has_pid = db.session.query(func.count(SOData.id)).filter(
+            SOData.product_id.isnot(None), SOData.product_id != ''
+        ).scalar() or 0
+        samples = db.session.query(
+            SOData.so_item, SOData.product_name, SOData.specification, SOData.product_id
+        ).limit(10).all()
+        return jsonify({
+            'total_so_records': total,
+            'records_with_specification': has_spec,
+            'records_with_product_id': has_pid,
+            'spec_fill_pct': round(has_spec / total * 100, 1) if total else 0,
+            'pid_fill_pct': round(has_pid / total * 100, 1) if total else 0,
+            'sample_rows': [
+                {'so_item': r[0], 'product_name': r[1], 'specification': r[2], 'product_id': r[3]}
+                for r in samples
+            ],
+            'hint': (
+                'If spec_fill_pct and pid_fill_pct are 0%, your SMRO Excel file likely uses '
+                'different column headers. Re-upload SMRO after checking column names. '
+                'Supported names: Specification|Spec|Specifications — Product ID|Product Id|'
+                'Product Code|Material|Material No|Material Number|Material Code|SKU'
+            )
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 def po_is_matched(po_number, item_no, matched_set):
     """Return True if this PO item has a matching SO."""
     if po_number in matched_set:
@@ -888,24 +923,51 @@ def get_so_without_po():
 
 @app.route('/api/data/aging', methods=['GET'])
 def get_aging_data():
+    """SO Aging by vendor.
+    Uses IDENTICAL filtering logic as total_so_count in /api/dashboard/stats so
+    the TOTAL row in the aging table always matches the KPI card:
+      - open SO only (open_so_filter)
+      - excludes EXCLUDED_OP_UNITS
+      - excludes hidden SO items
+      - excludes return items (so_item starts with '9')
+      - excludes internal PO refs
+      - SO records without so_create_date are bucketed as '180+' (not silently dropped)
+    """
     try:
         today = date.today()
+        hidden_so = get_hidden_so_items()
         vendors = {}
-        for s in db.session.query(SOData).filter(open_so_filter(), SOData.so_create_date.isnot(None)).all():
+
+        for s in db.session.query(SOData).filter(
+            open_so_filter(),
+            ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))
+        ).all():
+            # Apply same exclusions as total_so_count
+            if s.so_item in hidden_so or s.so_number in hidden_so:
+                continue
             if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
                 continue
+
             v = s.vendor_name or 'Unknown'
             if v not in vendors:
                 vendors[v] = {'vendor': v, 'less_30': 0, 'days_30_90': 0,
                               'days_90_180': 0, 'more_180': 0, 'total_open': 0, 'sales_amount': 0.0}
-            age = workdays_since(s.so_create_date, today)
-            if age is None: continue
-            if age < 30:      vendors[v]['less_30']     += 1
-            elif age < 90:    vendors[v]['days_30_90']  += 1
-            elif age < 180:   vendors[v]['days_90_180'] += 1
-            else:             vendors[v]['more_180']    += 1
+
+            age = workdays_since(s.so_create_date, today) if s.so_create_date else None
+            if age is None:
+                # No SO create date — put in 180+ bucket (same as total_so_count which counts them)
+                vendors[v]['more_180'] += 1
+            elif age < 30:
+                vendors[v]['less_30'] += 1
+            elif age < 90:
+                vendors[v]['days_30_90'] += 1
+            elif age < 180:
+                vendors[v]['days_90_180'] += 1
+            else:
+                vendors[v]['more_180'] += 1
             vendors[v]['total_open'] += 1
             vendors[v]['sales_amount'] += float(s.sales_amount or 0)
+
         return jsonify(sorted(vendors.values(), key=lambda x: x['total_open'], reverse=True))
     except Exception as e:
         import traceback; traceback.print_exc()
@@ -917,13 +979,18 @@ def get_aging_detail(vendor_name):
     try:
         bucket = request.args.get('bucket')
         today = date.today()
+        hidden_so = get_hidden_so_items()
         sos = db.session.query(SOData).filter(
-            open_so_filter(), SOData.vendor_name == vendor_name
+            open_so_filter(),
+            SOData.vendor_name == vendor_name,
+            ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))
         ).order_by(SOData.so_create_date.asc()).all()
-        sos = [s for s in sos if so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
+        sos = [s for s in sos
+               if s.so_item not in hidden_so and s.so_number not in hidden_so
+               and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
         if bucket:
             bucket = bucket.strip().replace(' ', '+')
-            sos = [s for s in sos if get_aging_label(workdays_since(s.so_create_date, today)) == bucket]
+            sos = [s for s in sos if get_aging_label(workdays_since(s.so_create_date, today) if s.so_create_date else None) == bucket]
         return jsonify([so_dict(s) for s in sos])
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -936,12 +1003,16 @@ def get_aging_detail_all():
         if bucket:
             bucket = bucket.strip().replace(' ', '+')
         today = date.today()
+        hidden_so = get_hidden_so_items()
         sos = db.session.query(SOData).filter(
-            open_so_filter(), SOData.so_create_date.isnot(None)
+            open_so_filter(),
+            ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))
         ).order_by(SOData.vendor_name.asc(), SOData.so_create_date.asc()).all()
-        sos = [s for s in sos if so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
+        sos = [s for s in sos
+               if s.so_item not in hidden_so and s.so_number not in hidden_so
+               and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
         if bucket:
-            sos = [s for s in sos if get_aging_label(workdays_since(s.so_create_date, today)) == bucket]
+            sos = [s for s in sos if get_aging_label(workdays_since(s.so_create_date, today) if s.so_create_date else None) == bucket]
         return jsonify([so_dict(s) for s in sos])
     except Exception as e:
         return jsonify({'error': str(e)}), 500
