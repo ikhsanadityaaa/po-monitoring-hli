@@ -5,7 +5,7 @@ import {
 } from 'recharts';
 import {
   Upload, Download, AlertCircle, CheckCircle, XCircle,
-  Package, DollarSign, TrendingUp, Calendar, ChevronLeft,
+  Package, DollarSign, TrendingUp, TrendingDown, Award, Calendar, ChevronLeft,
   ChevronRight, Moon, Sun, FileText, BarChart3, FileSpreadsheet,
   Filter, X, ChevronDown, ChevronUp, Building2, Search, Loader2,
   EyeOff, Eye, Trash2, RotateCcw, Plus
@@ -193,7 +193,7 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
   const toggleAll = () => {
     if (noneSelected) {
       // Currently all checked → uncheck all (set to explicit empty selection = nothing shown)
-      // We use a sentinel: store all items as "selected" but display as "0 dipilih"
+      // We use a sentinel: store all items as "selected" but display as "0 selected"
       // Better UX: uncheck all means filter passes nothing, so we store all as excluded
       // Actually Excel behavior: uncheck all → nothing shows. We store [] but invert logic.
       // Simplest: use null/special state — instead use a "noneMode" approach:
@@ -232,10 +232,10 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
   const isNoneMode   = selected === '__NONE__';
 
   const displayLabel = isNoneMode
-    ? `0 dipilih`
+    ? `0 selected`
     : noneSelected
-    ? `Semua ${label}`
-    : `${selected.length} dipilih`;
+    ? `All ${label}`
+    : `${selected.length} selected`;
 
   return (
     <div className="relative flex-1 min-w-[180px]" ref={ref}>
@@ -258,7 +258,7 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
               ref={el => { if (el) el.indeterminate = someSelected; }}
               onChange={toggleAll}
               className="accent-purple-600" style={{cursor:'pointer'}}/>
-            <span>(Pilih Semua)</span>
+            <span>(Select All)</span>
           </label>
           {options.map(opt => (
             <label key={opt} style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs
@@ -268,7 +268,7 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
               <span className="truncate" title={opt}>{opt}</span>
             </label>
           ))}
-          {options.length === 0 && <div className={`px-3 py-2 text-xs ${txt2}`}>Tidak ada opsi</div>}
+          {options.length === 0 && <div className={`px-3 py-2 text-xs ${txt2}`}>No options</div>}
         </div>
       )}
     </div>
@@ -314,7 +314,7 @@ const SearchInput = ({ placeholder, onSearch, darkMode, txt2, label }) => {
       {open && (
         <div className={`absolute left-0 top-full mt-1 z-50 rounded-xl shadow-2xl border p-3 w-64 ${darkMode?'bg-gray-800 border-gray-700':'bg-white border-gray-200'}`}>
           <p className={`text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>
-            Masukkan {label} (satu per baris):
+            Enter {label} (one per line):
           </p>
           <textarea
             value={value}
@@ -328,7 +328,7 @@ const SearchInput = ({ placeholder, onSearch, darkMode, txt2, label }) => {
           <div className="flex gap-2 mt-2">
             <button onClick={handleSearch}
               className="flex-1 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-semibold">
-              Cari
+              Search
             </button>
             <button onClick={handleClear}
               className={`px-3 py-1.5 rounded-lg text-xs font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>
@@ -426,7 +426,7 @@ const DeleteRequestModal = ({ darkMode, onClose, deleteForm, setDeleteForm, dele
           </div>
           <div>
             <label className={`block text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>
-              {deleteForm.ref_type === 'PO' ? 'Nomor PO HLI' : 'Nomor SO / SO Item'}
+              {deleteForm.ref_type === 'PO' ? 'PO HLI Number' : 'SO Number / SO Item'}
             </label>
             <input
               type="text"
@@ -437,11 +437,11 @@ const DeleteRequestModal = ({ darkMode, onClose, deleteForm, setDeleteForm, dele
             />
           </div>
           <div>
-            <label className={`block text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>Alasan</label>
+            <label className={`block text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>Reason</label>
             <textarea
               value={deleteForm.reason}
               onChange={e=>setDeleteForm(f=>({...f,reason:e.target.value}))}
-              placeholder="Masukkan alasan kenapa data ini disembunyikan dari dashboard..."
+              placeholder="Enter reason why this data should be hidden from dashboard..."
               rows={3}
               className={`w-full px-3 py-2 rounded-lg text-sm border resize-none ${inp}`}
             />
@@ -453,9 +453,9 @@ const DeleteRequestModal = ({ darkMode, onClose, deleteForm, setDeleteForm, dele
           )}
         </div>
         <div className={`px-6 py-4 border-t flex justify-end gap-3 ${darkMode?'border-gray-700':'border-gray-200'}`}>
-          <button onClick={onClose} className={`px-4 py-2 rounded-lg text-sm font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>Batal</button>
+          <button onClick={onClose} className={`px-4 py-2 rounded-lg text-sm font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>Cancel</button>
           <button onClick={onSubmit} className="px-5 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-sm font-semibold flex items-center gap-2">
-            <EyeOff className="w-4 h-4"/>Sembunyikan
+            <EyeOff className="w-4 h-4"/>Hide
           </button>
         </div>
       </div>
@@ -484,7 +484,7 @@ const HiddenItemsPanel = ({ darkMode, requests, onRestore, onClose }) => {
           {hidden.length === 0 ? (
             <div className={`text-center py-12 ${txt2}`}>
               <Eye className="w-10 h-10 mx-auto mb-2 opacity-40"/>
-              <p className="text-sm">Tidak ada data yang disembunyikan</p>
+              <p className="text-sm">No hidden data</p>
             </div>
           ) : (
             <div className="space-y-3">
@@ -495,12 +495,12 @@ const HiddenItemsPanel = ({ darkMode, requests, onRestore, onClose }) => {
                       <span className={`px-2 py-0.5 rounded text-xs font-bold ${r.ref_type==='PO'?'bg-red-100 text-red-700':'bg-orange-100 text-orange-700'}`}>{r.ref_type}</span>
                       <span className="font-semibold text-sm">{r.ref_number}</span>
                     </div>
-                    <p className={`text-xs ${txt2} mb-1`}><span className="font-medium">Alasan:</span> {r.reason}</p>
+                    <p className={`text-xs ${txt2} mb-1`}><span className="font-medium">Reason:</span> {r.reason}</p>
                     <p className={`text-xs ${txt2}`}>📅 {fmtDt(r.requested_at)}</p>
                   </div>
                   <button onClick={()=>onRestore(r)}
                     className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-xs font-semibold flex-shrink-0">
-                    <RotateCcw className="w-3.5 h-3.5"/>Tampilkan Lagi
+                    <RotateCcw className="w-3.5 h-3.5"/>Restore
                   </button>
                 </div>
               ))}
@@ -558,8 +558,9 @@ const App = () => {
   const [showHiddenPanel, setShowHiddenPanel] = useState(false);
   const [deleteForm, setDeleteForm] = useState({ ref_type: 'PO', ref_number: '', reason: '' });
   const [deleteFormError, setDeleteFormError] = useState('');
-  // Hide batch upload
-  const [showHideMenu, setShowHideMenu] = useState(false);
+  const [completedData, setCompletedData] = useState(null);
+  const [completedYear, setCompletedYear] = useState('all');
+  const [completedLoading, setCompletedLoading] = useState(false);
   const hideMenuRef = useRef(null);
   useEffect(() => {
     const handler = (e) => { if (hideMenuRef.current && !hideMenuRef.current.contains(e.target)) setShowHideMenu(false); };
@@ -619,7 +620,7 @@ const App = () => {
       setSoTotal(res.data.total || 0);
       setSoFilterOptions(res.data.filters || { op_units: [], vendors: [], statuses: [] });
     } catch (e) {
-      addToast(`Gagal memuat SO: ${e.message}`, 'error');
+      addToast(`Failed to load SO: ${e.message}`, 'error');
     } finally { setLoading(false); }
   }, [addToast]);
 
@@ -633,11 +634,11 @@ const App = () => {
 
   const submitDeleteRequest = async () => {
     setDeleteFormError('');
-    if (!deleteForm.ref_number.trim()) { setDeleteFormError('Nomor referensi wajib diisi'); return; }
-    if (!deleteForm.reason.trim()) { setDeleteFormError('Alasan wajib diisi'); return; }
+    if (!deleteForm.ref_number.trim()) { setDeleteFormError('Reference number is required'); return; }
+    if (!deleteForm.reason.trim()) { setDeleteFormError('Reason is required'); return; }
     try {
       await api.post('/api/delete-requests', deleteForm);
-      addToast(`✅ ${deleteForm.ref_type} ${deleteForm.ref_number} berhasil disembunyikan dari dashboard`, 'success');
+      addToast(`✅ ${deleteForm.ref_type} ${deleteForm.ref_number} successfully hidden from dashboard`, 'success');
       setDeleteForm({ ref_type: 'PO', ref_number: '', reason: '' });
       setShowDeleteModal(false);
       fetchDeleteRequests();
@@ -650,11 +651,11 @@ const App = () => {
   const restoreDeleteRequest = async (req) => {
     try {
       await api.put(`/api/delete-requests/${req.id}/restore`);
-      addToast(`✅ ${req.ref_type} ${req.ref_number} berhasil ditampilkan kembali`, 'success');
+      addToast(`✅ ${req.ref_type} ${req.ref_number} successfully restored`, 'success');
       fetchDeleteRequests();
       fetchDashboard();
     } catch (e) {
-      addToast(`❌ Gagal restore: ${e.response?.data?.error || e.message}`, 'error');
+      addToast(`❌ Failed to restore: ${e.response?.data?.error || e.message}`, 'error');
     }
   };
 
@@ -736,13 +737,13 @@ const App = () => {
       }
       if (missing.length >= 3) {
         addToast(
-          `❌ File tidak valid — ${missing.length} kolom penting tidak ditemukan: ${missing.join(', ')}. Pastikan file ${label} yang benar, lalu cek kembali.`,
+          `❌ Invalid file — ${missing.length} required columns not found: ${missing.join(', ')}. Please check the ${label} file is correct and try again.`,
           'error'
         );
         return;
       }
     } catch (readErr) {
-      addToast(`❌ Gagal membaca file: ${readErr.message}`, 'error');
+      addToast(`❌ Failed to read file: ${readErr.message}`, 'error');
       return;
     }
     // ── End client-side header validation ──────────────────────────────
@@ -761,7 +762,7 @@ const App = () => {
       setSoPage(1);
     } catch (e) {
       setUploadProgress(null);
-      addToast(`❌ Gagal upload ${label}: ${e.response?.data?.error || e.message}`, 'error');
+      addToast(`❌ Failed to upload ${label}: ${e.response?.data?.error || e.message}`, 'error');
     }
   };
 
@@ -776,11 +777,11 @@ const App = () => {
         onUploadProgress: (ev) => setUploadProgress({ label: 'Batch Update', pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
       });
       setUploadProgress(null);
-      addToast(`✅ Batch update: ${res.data.updated} records diperbarui`, 'success');
+      addToast(`✅ Batch update: ${res.data.updated} records updated`, 'success');
       fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter);
     } catch (e) {
       setUploadProgress(null);
-      addToast(`❌ Gagal batch upload: ${e.response?.data?.error || e.message}`, 'error');
+      addToast(`❌ Failed to batch upload: ${e.response?.data?.error || e.message}`, 'error');
     }
   };
 
@@ -794,14 +795,21 @@ const App = () => {
       link.setAttribute('download', filename);
       document.body.appendChild(link); link.click(); link.remove();
       setDownloadToast(null);
-      addToast(`✅ File "${filename}" berhasil didownload`, 'success');
+      addToast(`✅ File "${filename}" downloaded successfully`, 'success');
     } catch (e) {
       setDownloadToast(null);
-      addToast('❌ Gagal download file', 'error');
+      addToast('❌ Failed to download file', 'error');
     }
   };
 
-  const downloadHideTemplate = (type) => {
+  const fetchCompletedData = useCallback(async (year='all') => {
+    setCompletedLoading(true);
+    try {
+      const res = await api.get(`/api/completed/summary?year=${year}`);
+      setCompletedData(res.data);
+    } catch(e) { addToast(`❌ Failed to load completed data: ${e.message}`, 'error'); }
+    finally { setCompletedLoading(false); }
+  }, []);
     setShowHideMenu(false);
     downloadBlob(`/api/template/hide?type=${type}`, `Template_Hide_${type === 'SO' ? 'SO' : 'PO_HLI'}.xlsx`, `Template Hide ${type}`);
   };
@@ -825,7 +833,7 @@ const App = () => {
       fetchDashboard();
     } catch (e) {
       setUploadProgress(null);
-      addToast(`❌ Gagal upload hide batch: ${e.response?.data?.error || e.message}`, 'error');
+      addToast(`❌ Failed to upload hide batch: ${e.response?.data?.error || e.message}`, 'error');
     }
   };
 
@@ -844,7 +852,7 @@ const App = () => {
       const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Template');
       saveAs(new Blob([XLSX.write(wb,{bookType:'xlsx',type:'array'})],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),`SO_Template_${new Date().toISOString().slice(0,10)}.xlsx`);
       setDownloadToast(null);
-      addToast('✅ Template berhasil didownload', 'success');
+      addToast('✅ Template downloaded successfully', 'success');
     }, 300);
   };
 
@@ -853,7 +861,7 @@ const App = () => {
     try {
       await api.put(`/api/data/so/${soId}`, { [field]: value });
       setAllSOData(prev => prev.map(s => s.id === soId ? { ...s, [field]: value } : s));
-    } catch (e) { addToast(`❌ Gagal update: ${e.message}`, 'error'); }
+    } catch (e) { addToast(`❌ Failed to update: ${e.message}`, 'error'); }
   };
 
   const openModal = async (title, endpointOrData) => {
@@ -861,7 +869,7 @@ const App = () => {
     try {
       const res = await api.get(endpointOrData);
       setModal({ title, data: Array.isArray(res.data) ? res.data : [] });
-    } catch (e) { addToast(`❌ Gagal memuat detail: ${e.message}`, 'error'); }
+    } catch (e) { addToast(`❌ Failed to load details: ${e.message}`, 'error'); }
   };
 
   const toggleAgingFilter = (label) => {
@@ -885,8 +893,268 @@ const App = () => {
   const tblDv = darkMode ? 'divide-gray-700' : 'divide-gray-100';
   const trHov = darkMode ? 'hover:bg-gray-700' : 'hover:bg-purple-50';
 
+  // ══════════════════════════════════════════════════════════════
+  // RENDER COMPLETED TRANSACTIONS PAGE
+  // ══════════════════════════════════════════════════════════════
+  const renderCompleted = () => {
+    const d = completedData;
+    const COLORS_PIE = ['#10B981','#EF4444','#9CA3AF'];
+    const fmtM = (v) => v >= 1e9 ? `${(v/1e9).toFixed(1)}B` : v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `${(v/1e3).toFixed(0)}K` : String(Math.round(v));
+    const marginColor = (m) => m > 0 ? 'text-green-600' : m < 0 ? 'text-red-600 font-bold' : 'text-gray-500';
+
+    if (completedLoading) return (
+      <div className="flex items-center justify-center h-64">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-12 h-12 border-4 border-purple-600 border-t-transparent rounded-full animate-spin"/>
+          <p className={`text-sm ${txt2}`}>Loading completed transactions...</p>
+        </div>
+      </div>
+    );
+
+    if (!d) return (
+      <div className={`flex flex-col items-center justify-center h-64 rounded-2xl ${card}`}>
+        <Award className="w-16 h-16 text-gray-300 mb-4"/>
+        <p className={`text-lg font-semibold ${txt}`}>No data yet</p>
+        <p className={`text-sm ${txt2} mt-1`}>Upload SMRO data to see completed transactions</p>
+      </div>
+    );
+
+    const marginPieData = [
+      { name: 'Positive Margin', value: d.margin_distribution.positive },
+      { name: 'Negative Margin', value: d.margin_distribution.negative },
+      { name: 'Zero', value: d.margin_distribution.zero },
+    ].filter(x => x.value > 0);
+
+    return (
+      <div className="space-y-6">
+        {/* Year filter */}
+        <div className={`flex flex-wrap items-center gap-3 px-5 py-3 rounded-xl ${card} shadow`}>
+          <span className={`text-sm font-semibold ${txt}`}>Filter Year:</span>
+          {['all', ...(d.available_years||[]).map(String)].map(y => (
+            <button key={y} onClick={()=>{ setCompletedYear(y); fetchCompletedData(y); }}
+              className={`px-4 py-1.5 rounded-full text-sm font-semibold transition-all ${completedYear===y?'bg-purple-600 text-white shadow':'bg-gray-100 text-gray-700 hover:bg-purple-100'}`}>
+              {y==='all'?'All Years':y}
+            </button>
+          ))}
+        </div>
+
+        {/* KPI Cards */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          {[
+            { label:'Total Transactions', value: fmtNum(d.total_count), icon:<CheckCircle className="w-6 h-6 text-green-500"/>, bg:'bg-green-100', color:'text-green-600' },
+            { label:'Total Sales Amount', value: fmtCurShort(d.total_sales), sub: fmtCur(d.total_sales), icon:<DollarSign className="w-6 h-6 text-blue-500"/>, bg:'bg-blue-100', color:'text-blue-600' },
+            { label:'Total Purchase Amount', value: fmtCurShort(d.total_purchase), sub: fmtCur(d.total_purchase), icon:<Package className="w-6 h-6 text-purple-500"/>, bg:'bg-purple-100', color:'text-purple-600' },
+            { label:'Total Margin', value: fmtCurShort(d.total_margin), sub: fmtCur(d.total_margin), icon: d.total_margin>=0?<TrendingUp className="w-6 h-6 text-emerald-500"/>:<TrendingDown className="w-6 h-6 text-red-500"/>, bg: d.total_margin>=0?'bg-emerald-100':'bg-red-100', color: d.total_margin>=0?'text-emerald-600':'text-red-600' },
+          ].map((k,i) => (
+            <div key={i} className={`p-5 rounded-2xl shadow ${card}`}>
+              <div className="flex justify-between items-start">
+                <div>
+                  <p className={`text-sm font-medium ${txt2}`}>{k.label}</p>
+                  <h3 className={`text-2xl font-bold mt-1 ${k.color}`}>{k.value}</h3>
+                  {k.sub && <p className={`text-xs mt-0.5 ${txt2}`}>{k.sub}</p>}
+                </div>
+                <div className={`p-3 ${k.bg} rounded-xl`}>{k.icon}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Monthly Trend Chart */}
+        <div className={`p-5 rounded-2xl shadow ${card}`}>
+          <h3 className={`text-base font-bold mb-4 ${txt}`}>Monthly Transactions — Sales & Purchase Amount</h3>
+          <ResponsiveContainer width="100%" height={280}>
+            <BarChart data={d.monthly_trend} barGap={2}>
+              <defs>
+                <linearGradient id="cSales" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#8B5CF6" stopOpacity={0.9}/><stop offset="95%" stopColor="#8B5CF6" stopOpacity={0.5}/>
+                </linearGradient>
+                <linearGradient id="cPurchase" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#F97316" stopOpacity={0.9}/><stop offset="95%" stopColor="#F97316" stopOpacity={0.5}/>
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke={darkMode?'#374151':'#F3F4F6'}/>
+              <XAxis dataKey="month" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10}/>
+              <YAxis stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10} tickFormatter={fmtM}/>
+              <Tooltip formatter={(v,n)=>[fmtCur(v),n]} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
+              <Legend wrapperStyle={{fontSize:12}}/>
+              <Bar dataKey="sales_amount" name="Sales Amount" fill="url(#cSales)" radius={[4,4,0,0]}/>
+              <Bar dataKey="purchase_amount" name="Purchase Amount" fill="url(#cPurchase)" radius={[4,4,0,0]}/>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+
+        {/* Transaction Count per Month */}
+        <div className={`p-5 rounded-2xl shadow ${card}`}>
+          <h3 className={`text-base font-bold mb-4 ${txt}`}>Transaction Count per Month</h3>
+          <ResponsiveContainer width="100%" height={200}>
+            <AreaChart data={d.monthly_trend}>
+              <defs>
+                <linearGradient id="cCount" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#10B981" stopOpacity={0.3}/><stop offset="95%" stopColor="#10B981" stopOpacity={0}/>
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke={darkMode?'#374151':'#F3F4F6'}/>
+              <XAxis dataKey="month" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10}/>
+              <YAxis stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10}/>
+              <Tooltip contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
+              <Area type="monotone" dataKey="count" name="Transactions" stroke="#10B981" strokeWidth={2} fill="url(#cCount)"/>
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+
+        {/* Top 5 Vendors + Margin Pie */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Top 5 Vendors */}
+          <div className={`p-5 rounded-2xl shadow ${card}`}>
+            <h3 className={`text-base font-bold mb-4 ${txt}`}>Top 5 Vendors by Sales Amount</h3>
+            <div className="space-y-3">
+              {d.top_vendors.map((v,i) => {
+                const maxVal = d.top_vendors[0]?.sales_amount || 1;
+                const pct = Math.round(v.sales_amount / maxVal * 100);
+                return (
+                  <div key={i}>
+                    <div className="flex justify-between items-center mb-1">
+                      <span className={`text-sm font-semibold truncate max-w-[55%] ${txt}`}>#{i+1} {v.vendor}</span>
+                      <span className={`text-xs font-bold text-purple-600`}>{fmtCurShort(v.sales_amount)}</span>
+                    </div>
+                    <div className={`w-full h-2 rounded-full ${darkMode?'bg-gray-700':'bg-gray-100'}`}>
+                      <div className="h-2 rounded-full bg-gradient-to-r from-purple-600 to-purple-400 transition-all" style={{width:`${pct}%`}}/>
+                    </div>
+                    <div className="flex justify-between text-xs mt-0.5">
+                      <span className={txt2}>{fmtNum(v.count)} transactions</span>
+                      <span className={marginColor(v.margin)}>Margin: {fmtCurShort(v.margin)}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Margin Distribution Pie */}
+          <div className={`p-5 rounded-2xl shadow ${card}`}>
+            <h3 className={`text-base font-bold mb-2 ${txt}`}>Margin Distribution</h3>
+            <div className="flex gap-2 mb-3">
+              <div className="flex-1 text-center p-3 bg-green-50 rounded-xl">
+                <p className="text-xl font-bold text-green-600">{fmtNum(d.margin_distribution.positive)}</p>
+                <p className="text-xs text-green-700 font-semibold">Positive</p>
+              </div>
+              <div className="flex-1 text-center p-3 bg-red-50 rounded-xl">
+                <p className="text-xl font-bold text-red-600">{fmtNum(d.margin_distribution.negative)}</p>
+                <p className="text-xs text-red-700 font-semibold">Negative</p>
+              </div>
+              <div className="flex-1 text-center p-3 bg-gray-50 rounded-xl">
+                <p className="text-xl font-bold text-gray-500">{fmtNum(d.margin_distribution.zero)}</p>
+                <p className="text-xs text-gray-600 font-semibold">Zero</p>
+              </div>
+            </div>
+            <ResponsiveContainer width="100%" height={200}>
+              <PieChart>
+                <Pie data={marginPieData} cx="50%" cy="50%" outerRadius={80} dataKey="value" label={({name,percent})=>`${name} ${(percent*100).toFixed(0)}%`} labelLine={false} fontSize={11}>
+                  {marginPieData.map((_,i)=><Cell key={i} fill={COLORS_PIE[i]}/>)}
+                </Pie>
+                <Tooltip formatter={(v)=>[fmtNum(v),'Transactions']} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        {/* Top 20 Items */}
+        <div className={`p-5 rounded-2xl shadow ${card}`}>
+          <h3 className={`text-base font-bold mb-4 ${txt}`}>Top 20 Items by Sales Amount</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className={tblHd}>
+                  {['#','Item / Product','Transactions','Sales Amount','Purchase Amount','Margin','Margin %'].map(h=>(
+                    <th key={h} className="px-3 py-2 text-left font-semibold text-purple-700">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className={`divide-y ${tblDv}`}>
+                {d.top_items.map((item,i)=>{
+                  const mPct = item.sales_amount ? (item.margin/item.sales_amount*100).toFixed(1) : '—';
+                  return (
+                    <tr key={i} className={trHov}>
+                      <td className={`px-3 py-2 font-bold ${txt2}`}>{i+1}</td>
+                      <td className={`px-3 py-2 font-medium ${txt} max-w-xs truncate`} title={item.item}>{item.item}</td>
+                      <td className={`px-3 py-2 ${txt2}`}>{fmtNum(item.count)}</td>
+                      <td className="px-3 py-2 text-purple-600 font-semibold">{fmtCurShort(item.sales_amount)}</td>
+                      <td className="px-3 py-2 text-orange-600">{fmtCurShort(item.purchase_amount)}</td>
+                      <td className={`px-3 py-2 font-bold ${marginColor(item.margin)}`}>{fmtCurShort(item.margin)}</td>
+                      <td className={`px-3 py-2 font-semibold ${marginColor(item.margin)}`}>{mPct}%</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Worst Margin Vendors + Worst Transactions */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Worst vendors by margin */}
+          <div className={`p-5 rounded-2xl shadow ${card}`}>
+            <h3 className={`text-base font-bold mb-4 ${txt} flex items-center gap-2`}>
+              <TrendingDown className="w-5 h-5 text-red-500"/> Vendors with Largest Negative Margin
+            </h3>
+            {d.worst_margin_vendors.length === 0
+              ? <p className={`text-sm ${txt2}`}>No vendors with negative margin 🎉</p>
+              : <div className="space-y-2">
+                  {d.worst_margin_vendors.map((v,i)=>(
+                    <div key={i} className="flex items-center justify-between px-3 py-2 rounded-lg bg-red-50">
+                      <div>
+                        <span className="text-xs font-bold text-red-700">#{i+1}</span>
+                        <span className={`text-sm font-semibold ml-2 ${txt}`}>{v.vendor}</span>
+                        <span className={`text-xs ml-2 ${txt2}`}>({fmtNum(v.count)} tx)</span>
+                      </div>
+                      <span className="text-sm font-bold text-red-600">{fmtCurShort(v.margin)}</span>
+                    </div>
+                  ))}
+                </div>
+            }
+          </div>
+
+          {/* Top 10 worst margin transactions */}
+          <div className={`p-5 rounded-2xl shadow ${card}`}>
+            <h3 className={`text-base font-bold mb-4 ${txt} flex items-center gap-2`}>
+              <TrendingDown className="w-5 h-5 text-red-500"/> Top 10 Transactions — Largest Negative Margin
+            </h3>
+            {d.worst_margin_transactions.length === 0
+              ? <p className={`text-sm ${txt2}`}>No negative margin transactions 🎉</p>
+              : <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className={tblHd}>
+                        {['SO Item','Vendor','Margin','Margin %','Date'].map(h=>(
+                          <th key={h} className="px-2 py-2 text-left font-semibold text-purple-700">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className={`divide-y ${tblDv}`}>
+                      {d.worst_margin_transactions.map((t,i)=>(
+                        <tr key={i} className={trHov}>
+                          <td className="px-2 py-2">
+                            <p className="font-semibold text-purple-600">{t.so_item}</p>
+                            <p className={`truncate max-w-[120px] ${txt2}`} title={t.product}>{t.product}</p>
+                          </td>
+                          <td className={`px-2 py-2 ${txt} truncate max-w-[100px]`} title={t.vendor}>{t.vendor}</td>
+                          <td className="px-2 py-2 font-bold text-red-600">{fmtCurShort(t.margin)}</td>
+                          <td className="px-2 py-2 font-semibold text-red-500">{t.margin_pct ?? '—'}%</td>
+                          <td className={`px-2 py-2 ${txt2}`}>{t.date ? fmtDate(t.date) : '-'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+            }
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const fmtDateRange = (range) => {
-    if (!range?.min) return 'Belum ada data';
+    if (!range?.min) return 'No data available';
     return `${fmtDate(range.min)} — ${fmtDate(range.max)}`;
   };
 
@@ -920,22 +1188,22 @@ const App = () => {
           }}>
           <div className="flex justify-between items-start">
             <div>
-              <p className={`text-sm font-medium ${txt2}`}>PO HLI tanpa SO</p>
+              <p className={`text-sm font-medium ${txt2}`}>PO HLI without SO</p>
               {/* Use client-side filtered count which excludes CONSUMABLE */}
               <h3 className="text-3xl font-bold mt-1 text-red-500">{fmtNum(uniquePOCount)}</h3>
-              <p className={`text-xs mt-1 ${txt2}`}>nomor PO unik · klik untuk detail</p>
+              <p className={`text-xs mt-1 ${txt2}`}>unique PO numbers · click for details</p>
             </div>
             <div className="p-3 bg-red-100 rounded-xl"><AlertCircle className="w-6 h-6 text-red-500"/></div>
           </div>
         </div>
 
         <div className={`p-5 rounded-2xl shadow hover:shadow-lg transition-all cursor-pointer ${card}`}
-          onClick={() => openModal('SO Tanpa PO HLI', '/api/data/so-without-po')}>
+          onClick={() => openModal('SO without PO HLI', '/api/data/so-without-po')}>
           <div className="flex justify-between items-start">
             <div>
-              <p className={`text-sm font-medium ${txt2}`}>SO tanpa PO HLI</p>
+              <p className={`text-sm font-medium ${txt2}`}>SO without PO HLI</p>
               <h3 className="text-3xl font-bold mt-1 text-orange-500">{fmtNum(stats?.so_without_po)}</h3>
-              <p className={`text-xs mt-1 ${txt2}`}>Klik untuk detail</p>
+              <p className={`text-xs mt-1 ${txt2}`}>Click for details</p>
             </div>
             <div className="p-3 bg-orange-100 rounded-xl"><XCircle className="w-6 h-6 text-orange-500"/></div>
           </div>
@@ -992,8 +1260,8 @@ const App = () => {
               <YAxis yAxisId="right" orientation="right" stroke="#F97316" fontSize={10}/>
               <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}}/>
               <Legend iconSize={8} wrapperStyle={{fontSize:'11px'}}/>
-              <Area yAxisId="left" type="monotone" dataKey="so_count" name="Jumlah SO" stroke="#8B5CF6" strokeWidth={2} fill="url(#cSO)"/>
-              <Area yAxisId="right" type="monotone" dataKey="amount" name="Nilai (IDR Juta)" stroke="#F97316" strokeWidth={2} fill="url(#cAmt)"/>
+              <Area yAxisId="left" type="monotone" dataKey="so_count" name="SO Count" stroke="#8B5CF6" strokeWidth={2} fill="url(#cSO)"/>
+              <Area yAxisId="right" type="monotone" dataKey="amount" name="Value (IDR Mil)" stroke="#F97316" strokeWidth={2} fill="url(#cAmt)"/>
             </AreaChart>
           </ResponsiveContainer>
         </div>
@@ -1095,7 +1363,7 @@ const App = () => {
                         <td key={m} className="px-2 py-2 text-center">
                           {totByMonth[m] ? (
                             <button
-                              onClick={() => openModal(`Semua Status — ${m}`, `/api/data/so-status-detail-all?month=${encodeURIComponent(m)}`)}
+                              onClick={() => openModal(`All Status — ${m}`, `/api/data/so-status-detail-all?month=${encodeURIComponent(m)}`)}
                               className="font-bold text-purple-600 hover:underline cursor-pointer">
                               {fmtNum(totByMonth[m])}
                             </button>
@@ -1104,7 +1372,7 @@ const App = () => {
                       ))}
                       <td className="px-3 py-2 text-right">
                         <button
-                          onClick={() => openModal('Semua SO', '/api/data/so-status-detail-all')}
+                          onClick={() => openModal('All SO', '/api/data/so-status-detail-all')}
                           className="font-bold text-purple-600 hover:underline cursor-pointer">
                           {fmtNum(grandTotal)}
                         </button>
@@ -1153,10 +1421,10 @@ const App = () => {
             </div>
             {(() => {
               const agingPieData = [
-                { name:'< 30 Hari', value:agingData.reduce((s,v)=>s+(v.less_30||0),0), fill:'#10B981' },
-                { name:'30–90 Hari', value:agingData.reduce((s,v)=>s+(v.days_30_90||0),0), fill:'#F59E0B' },
-                { name:'90–180 Hari', value:agingData.reduce((s,v)=>s+(v.days_90_180||0),0), fill:'#F97316' },
-                { name:'> 180 Hari', value:agingData.reduce((s,v)=>s+(v.more_180||0),0), fill:'#EF4444' },
+                { name:'< 30 Days', value:agingData.reduce((s,v)=>s+(v.less_30||0),0), fill:'#10B981' },
+                { name:'30–90 Days', value:agingData.reduce((s,v)=>s+(v.days_30_90||0),0), fill:'#F59E0B' },
+                { name:'90–180 Days', value:agingData.reduce((s,v)=>s+(v.days_90_180||0),0), fill:'#F97316' },
+                { name:'> 180 Days', value:agingData.reduce((s,v)=>s+(v.more_180||0),0), fill:'#EF4444' },
               ].filter(d=>d.value>0);
               return (
                 <div className={`p-5 rounded-2xl shadow ${card}`}>
@@ -1185,7 +1453,7 @@ const App = () => {
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className={tblHd}>
-              <tr>{['Vendor (SMRO)','< 30 Hari','30–90 Hari','90–180 Hari','> 180 Hari','Total Open','Sales Amount'].map(h=>(
+              <tr>{['Vendor (SMRO)','< 30 Days','30–90 Days','90–180 Days','> 180 Days','Total Open','Sales Amount'].map(h=>(
                 <th key={h} className={`p-3 text-center font-semibold ${txt2} first:text-left`}>{h}</th>
               ))}</tr>
             </thead>
@@ -1195,7 +1463,7 @@ const App = () => {
                   const url = bucket
                     ? `/api/data/aging-detail/${encodeURIComponent(v.vendor)}?bucket=${encodeURIComponent(bucket)}`
                     : `/api/data/aging-detail/${encodeURIComponent(v.vendor)}`;
-                  const label = bucket ? `${v.vendor} — ${bucket} hari` : `Aging Detail: ${v.vendor}`;
+                  const label = bucket ? `${v.vendor} — ${bucket} days` : `Aging Detail: ${v.vendor}`;
                   openModal(label, url);
                 };
                 const cellBtn = (val, bucket, colorClass) => val > 0 ? (
@@ -1232,7 +1500,7 @@ const App = () => {
                 }), {less_30:0,days_30_90:0,days_90_180:0,more_180:0,total_open:0,sales_amount:0});
                 const totCellBtn = (val, bucket, colorClass) => val > 0 ? (
                   <button
-                    onClick={() => openModal(`All Vendors — ${bucket} hari`, `/api/data/aging-detail-all?bucket=${encodeURIComponent(bucket)}`)}
+                    onClick={() => openModal(`All Vendors — ${bucket} days`, `/api/data/aging-detail-all?bucket=${encodeURIComponent(bucket)}`)}
                     className={`font-bold underline-offset-2 hover:underline cursor-pointer ${colorClass}`}>
                     {fmtNum(val)}
                   </button>
@@ -1246,7 +1514,7 @@ const App = () => {
                     <td className="p-3 text-center">{totCellBtn(tot.more_180,'180+','text-red-700')}</td>
                     <td className="p-3 text-center">
                       <button
-                        onClick={() => openModal('All Vendors — Semua Aging', '/api/data/aging-detail-all')}
+                        onClick={() => openModal('All Vendors — All Aging', '/api/data/aging-detail-all')}
                         className="font-bold text-purple-700 hover:underline cursor-pointer">
                         {fmtNum(tot.total_open)}
                       </button>
@@ -1297,7 +1565,7 @@ const App = () => {
               <button key={label} onClick={()=>toggleAgingFilter(label)}
                 className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${active?'text-white border-transparent':'border-gray-200 text-gray-400 bg-gray-100'}`}
                 style={active ? {backgroundColor: AGING_COLORS[label], borderColor: AGING_COLORS[label]} : {}}>
-                {label} hari
+                {label} working days
               </button>
             );
           })}
@@ -1337,13 +1605,13 @@ const App = () => {
               <label className={`block text-xs font-medium mb-1 ${txt2}`}>Filter Margin</label>
               <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                 value={soMarginFilter} onChange={e=>setSoMarginFilter(e.target.value)}>
-                <option value="all">Semua Data</option>
+                <option value="all">All Data</option>
                 <option value="positive">Ada Margin (≥ 0)</option>
                 <option value="negative">Margin Minus (&lt; 0)</option>
               </select>
             </div>
             <div className="flex-1 min-w-[100px]">
-              <label className={`block text-xs font-medium mb-1 ${txt2}`}>Baris per Halaman</label>
+              <label className={`block text-xs font-medium mb-1 ${txt2}`}>Rows per Page</label>
               <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                 value={soPerPage} onChange={e=>setSoPerPage(Number(e.target.value))}>
                 <option value={20}>20</option>
@@ -1406,7 +1674,7 @@ const App = () => {
               {(() => {
                 if (allSOData.length === 0) return (
                   <tr><td colSpan={16} className={`px-4 py-10 text-center ${txt2}`}>
-                    <FileText className="w-10 h-10 mx-auto mb-2 opacity-40"/>Tidak ada data
+                    <FileText className="w-10 h-10 mx-auto mb-2 opacity-40"/>No data
                   </td></tr>
                 );
                 return allSOData.map((so) => {
@@ -1521,7 +1789,7 @@ const App = () => {
             <AlertCircle className="w-5 h-5 text-yellow-600"/>
             <h3 className={`text-base font-bold ${txt}`}>PO HLI yang Belum Ada SO-nya</h3>
             <span className={`text-sm ${txt2}`}>
-              ({fmtNum(new Set(poFiltered.map(p=>p.po_no)).size)} PO · {fmtNum(poFiltered.length)} item baris)
+              ({fmtNum(new Set(poFiltered.map(p=>p.po_no)).size)} PO · {fmtNum(poFiltered.length)} line items)
             </span>
           </div>
           <div className="flex gap-2 items-center">
@@ -1558,7 +1826,7 @@ const App = () => {
             darkMode={darkMode} txt2={txt2}
           />
           <div className="flex-1 min-w-[120px]">
-            <label className={`block text-xs font-medium mb-1 ${txt2}`}>Baris per Halaman</label>
+            <label className={`block text-xs font-medium mb-1 ${txt2}`}>Rows per Page</label>
             <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
               value={poPerPage} onChange={e=>setPoPerPage(Number(e.target.value))}>
               <option value={20}>20</option>
@@ -1600,7 +1868,7 @@ const App = () => {
           <table className="w-full text-sm">
             <thead className={tblHd}>
               <tr>
-                {['PO HLI NUMBER','PO ITEM TYPE','ITEM CODE','OPERATION UNIT','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','HARI TERSISA'].map(h=>(
+                {['PO HLI NUMBER','PO ITEM TYPE','ITEM CODE','OPERATION UNIT','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','WORKING DAYS LEFT'].map(h=>(
                   <th key={h} className={`px-4 py-3 text-left font-semibold whitespace-nowrap ${txt2} ${h==='PRICE'||h==='AMOUNT'?'min-w-[140px]':''}`}>{h}</th>
                 ))}
               </tr>
@@ -1608,7 +1876,7 @@ const App = () => {
             <tbody className={`divide-y ${tblDv}`}>
               {poRows.length === 0 ? (
                 <tr><td colSpan={16} className={`px-4 py-10 text-center ${txt2}`}>
-                  <Package className="w-10 h-10 mx-auto mb-2 opacity-40"/>Tidak ada data
+                  <Package className="w-10 h-10 mx-auto mb-2 opacity-40"/>No data
                 </td></tr>
               ) : poRows.map((row,i)=>{
                 const daysLeft = row.days_remaining;
@@ -1638,8 +1906,7 @@ const App = () => {
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.purchase_member||'-'}</td>
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.req_delivery||'-'}</td>
                     <td className={`px-4 py-3 text-center whitespace-nowrap ${daysColor}`}>
-                      {daysLeft === null ? '-' : daysLeft < 0 ? `${Math.abs(daysLeft)} hari lewat` : `${daysLeft} hari`}
-                    </td>
+                      {daysLeft === null ? '-' : daysLeft < 0 ? `${Math.abs(daysLeft)} days overdue` : `${daysLeft} days`}                    </td>
                   </tr>
                 );
               })}
@@ -1647,7 +1914,7 @@ const App = () => {
           </table>
         </div>
         <div className={`p-4 border-t ${darkMode?'border-gray-700':'border-gray-100'} flex justify-between items-center`}>
-          <span className={`text-sm ${txt2}`}>Menampilkan {(poPage-1)*poPerPage+1}–{Math.min(poPage*poPerPage,poFiltered.length)} dari {fmtNum(poFiltered.length)}</span>
+          <span className={`text-sm ${txt2}`}>Showing {(poPage-1)*poPerPage+1}–{Math.min(poPage*poPerPage,poFiltered.length)} of {fmtNum(poFiltered.length)}</span>
           <div className="flex gap-1 items-center">
             <button disabled={poPage===1} onClick={()=>setPoPage(p=>p-1)} className={`p-1.5 rounded ${poPage===1?'opacity-40':'hover:bg-purple-100'}`}><ChevronLeft className="w-4 h-4"/></button>
             <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-purple-100 text-purple-700'}`}>{poPage}/{poTotalPages}</span>
@@ -1695,6 +1962,10 @@ const App = () => {
             className={`p-3 rounded-xl flex justify-center transition-all ${activePage==='all-so'?'bg-white/30 text-white shadow-lg':'text-purple-100 hover:bg-white/20'}`} title="Open SO (Sales Order)">
             <FileText className="w-6 h-6"/>
           </button>
+          <button onClick={()=>{ setActivePage('completed'); fetchCompletedData(completedYear); window.scrollTo({top:0,behavior:'smooth'}); }}
+            className={`p-3 rounded-xl flex justify-center transition-all ${activePage==='completed'?'bg-white/30 text-white shadow-lg':'text-purple-100 hover:bg-white/20'}`} title="Completed Transactions">
+            <Award className="w-6 h-6"/>
+          </button>
         </nav>
         <button onClick={()=>setDarkMode(d=>!d)} className="p-3 rounded-xl text-white hover:bg-white/20 transition-all">
           {darkMode?<Sun className="w-6 h-6"/>:<Moon className="w-6 h-6"/>}
@@ -1709,7 +1980,9 @@ const App = () => {
               HLI PO Monitoring <span className="text-purple-600">Dashboard</span>
             </h1>
             <p className={`mt-0.5 text-sm ${txt2}`}>
-              {activePage==='dashboard'?'Purchase Orders & Sales Orders Overview':'Manage Open SO (Sales Order) & PO Without SO'}
+              {activePage==='dashboard'?'Purchase Orders & Sales Orders Overview'
+               :activePage==='completed'?'Completed Transactions Analytics'
+               :'Manage Open SO (Sales Order) & PO Without SO'}
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -1730,12 +2003,12 @@ const App = () => {
               {showHideMenu && (
                 <div className={`absolute right-0 mt-2 z-50 rounded-xl shadow-2xl border w-72 p-3 ${darkMode?'bg-gray-800 border-gray-700 text-white':'bg-white border-gray-200'}`}>
                   <p className={`text-xs font-semibold mb-3 px-1 ${darkMode?'text-gray-300':'text-gray-600'}`}>
-                    Sembunyikan data dari dashboard via template Excel
+                    Hide data from dashboard via Excel template
                   </p>
                   {/* PO HLI */}
                   <div className={`mb-2 p-3 rounded-lg ${darkMode?'bg-gray-700':'bg-orange-50'}`}>
-                    <p className="text-xs font-bold mb-1 text-orange-700">🔵 PO HLI (dari PO List)</p>
-                    <p className={`text-xs mb-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>Format: PO Number-Item No (mis: 4502358819-10)</p>
+                    <p className="text-xs font-bold mb-1 text-orange-700">🔵 PO HLI (from PO List)</p>
+                    <p className={`text-xs mb-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>Format: PO Number-Item No (e.g. 4502358819-10)</p>
                     <div className="flex gap-2">
                       <button onClick={()=>downloadHideTemplate('PO')}
                         className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-xs font-semibold">
@@ -1749,8 +2022,8 @@ const App = () => {
                   </div>
                   {/* SO */}
                   <div className={`p-3 rounded-lg ${darkMode?'bg-gray-700':'bg-blue-50'}`}>
-                    <p className="text-xs font-bold mb-1 text-blue-700">🟠 SO (dari SMRO)</p>
-                    <p className={`text-xs mb-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>Format: SO Number atau SO Number-Item No</p>
+                    <p className="text-xs font-bold mb-1 text-blue-700">🟠 SO (from SMRO)</p>
+                    <p className={`text-xs mb-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>Format: SO Number or SO Number-Item No</p>
                     <div className="flex gap-2">
                       <button onClick={()=>downloadHideTemplate('SO')}
                         className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold">
@@ -1779,7 +2052,7 @@ const App = () => {
           </div>
         </header>
 
-        {activePage==='dashboard' ? renderDashboard() : renderAllSO()}
+        {activePage==='dashboard' ? renderDashboard() : activePage==='completed' ? renderCompleted() : renderAllSO()}
       </main>
 
       {modal && <SOModal title={modal.title} data={modal.data} darkMode={darkMode} onClose={()=>setModal(null)}/>}
@@ -1798,8 +2071,8 @@ const App = () => {
           <div className={`${darkMode?'bg-gray-800':'bg-white'} p-8 rounded-2xl shadow-2xl flex flex-col items-center gap-4 w-80`}>
             <div className="w-14 h-14 border-4 border-purple-600 border-t-transparent rounded-full animate-spin"/>
             <div className="w-full text-center">
-              <p className={`font-bold text-lg mb-1 ${txt}`}>Mengupload {uploadProgress.label}...</p>
-              <p className={`text-xs mb-3 ${txt2}`}>Mohon tunggu, jangan tutup browser</p>
+              <p className={`font-bold text-lg mb-1 ${txt}`}>Uploading {uploadProgress.label}...</p>
+              <p className={`text-xs mb-3 ${txt2}`}>Please wait, do not close the browser</p>
               <div className={`w-full rounded-full h-3 ${darkMode?'bg-gray-700':'bg-gray-200'}`}>
                 <div className="bg-gradient-to-r from-purple-600 to-purple-400 h-3 rounded-full transition-all duration-300" style={{width:`${uploadProgress.pct}%`}}/>
               </div>
@@ -1813,7 +2086,7 @@ const App = () => {
         <div className="fixed inset-0 bg-black/30 z-[55] flex items-center justify-center">
           <div className={`${darkMode?'bg-gray-800':'bg-white'} px-6 py-4 rounded-xl shadow-xl flex items-center gap-3`}>
             <div className="w-6 h-6 border-3 border-purple-600 border-t-transparent rounded-full animate-spin"/>
-            <p className={`text-sm font-semibold ${txt}`}>Memuat data...</p>
+            <p className={`text-sm font-semibold ${txt}`}>Loading data...</p>
           </div>
         </div>
       )}
