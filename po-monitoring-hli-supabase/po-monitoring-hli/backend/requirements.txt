@@ -8,3 +8,4 @@ reportlab
 matplotlib
 gunicorn
 psycopg2-binary
+holidays>=0.50

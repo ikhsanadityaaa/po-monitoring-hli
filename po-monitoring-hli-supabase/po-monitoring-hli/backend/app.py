@@ -4,6 +4,7 @@ from flask_cors import CORS
 import pandas as pd
 import re
 import os
+import json
 from datetime import datetime, date, timedelta
 import io
 from sqlalchemy import func, text
@@ -13,41 +14,60 @@ from openpyxl.utils import get_column_letter
 
 app = Flask(__name__)
 
-# ─── Indonesian Public Holidays (multi-year) ───────────────────────────────
-# Source: Official Indonesian government calendar
-_ID_HOLIDAYS = {
-    # 2023
-    date(2023,1,1), date(2023,1,22), date(2023,1,23), date(2023,2,18),
-    date(2023,3,22), date(2023,3,23), date(2023,4,7), date(2023,4,21),
-    date(2023,4,22), date(2023,4,23), date(2023,4,24), date(2023,4,25),
-    date(2023,5,1), date(2023,5,18), date(2023,5,24), date(2023,6,1),
-    date(2023,6,2), date(2023,6,3), date(2023,6,4), date(2023,7,19),
-    date(2023,8,17), date(2023,9,28), date(2023,12,25), date(2023,12,26),
-    # 2024
-    date(2024,1,1), date(2024,2,8), date(2024,2,9), date(2024,2,10),
-    date(2024,3,11), date(2024,3,29), date(2024,4,8), date(2024,4,9),
-    date(2024,4,10), date(2024,4,11), date(2024,4,12), date(2024,5,1),
-    date(2024,5,9), date(2024,5,23), date(2024,6,1), date(2024,6,17),
-    date(2024,6,18), date(2024,7,7), date(2024,8,17), date(2024,9,16),
-    date(2024,12,25), date(2024,12,26),
-    # 2025
-    date(2025,1,1), date(2025,1,27), date(2025,1,28), date(2025,1,29),
-    date(2025,3,28), date(2025,3,29), date(2025,3,30), date(2025,3,31),
-    date(2025,4,1), date(2025,4,2), date(2025,4,18), date(2025,5,1),
-    date(2025,5,12), date(2025,5,13), date(2025,5,29), date(2025,6,1),
-    date(2025,6,6), date(2025,6,7), date(2025,7,27), date(2025,8,17),
-    date(2025,9,5), date(2025,12,25), date(2025,12,26),
-    # 2026
-    date(2026,1,1), date(2026,1,16), date(2026,1,17), date(2026,3,20),
-    date(2026,3,21), date(2026,4,2), date(2026,4,3), date(2026,5,1),
-    date(2026,5,14), date(2026,5,16), date(2026,5,24), date(2026,5,25),
-    date(2026,6,15), date(2026,6,16), date(2026,7,17), date(2026,8,17),
-    date(2026,9,10), date(2026,12,25),
-}
+# ─── Indonesian Public Holidays (auto-generated, year-flexible) ───────────
+# We use the `holidays` package to generate Indonesian national holidays for
+# any year automatically — no need to hand-maintain a list when the year
+# rolls over.  Government-announced "cuti bersama" / replacement days that
+# the package doesn't know about live in `holiday_extras.json` next to this
+# file; that file is a plain JSON array of "YYYY-MM-DD" strings the user can
+# edit when SKB tahunan is published.
+_HOLIDAY_CACHE = None
+_HOLIDAY_CACHE_KEY = None
+
+def _holiday_set():
+    """Return cached set of Indonesian non-working public holidays.
+
+    The cache covers a sliding ±10-year window around today, so once a new
+    year arrives the holidays are picked up automatically without code
+    changes."""
+    global _HOLIDAY_CACHE, _HOLIDAY_CACHE_KEY
+    today_year = date.today().year
+    cache_key = today_year
+    if _HOLIDAY_CACHE is not None and _HOLIDAY_CACHE_KEY == cache_key:
+        return _HOLIDAY_CACHE
+
+    years = list(range(today_year - 5, today_year + 11))
+    try:
+        import holidays as _holidays_pkg
+        s = set(_holidays_pkg.country_holidays('ID', years=years).keys())
+    except Exception:
+        # If the package fails to import (e.g. dependency not installed),
+        # fall back to weekends-only — the extras JSON still applies below.
+        s = set()
+
+    extras_path = os.path.join(os.path.dirname(__file__), 'holiday_extras.json')
+    try:
+        with open(extras_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        # Accept either {"dates": [...]} or a bare list for forward-compat.
+        items = data.get('dates', []) if isinstance(data, dict) else data
+        for ds in items or []:
+            try:
+                s.add(date.fromisoformat(str(ds).strip()))
+            except (ValueError, TypeError):
+                pass
+    except FileNotFoundError:
+        pass
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    _HOLIDAY_CACHE = s
+    _HOLIDAY_CACHE_KEY = cache_key
+    return s
 
 def is_workday(d):
     """Return True if date is a working day (Mon–Fri, not a public holiday)."""
-    return d.weekday() < 5 and d not in _ID_HOLIDAYS
+    return d.weekday() < 5 and d not in _holiday_set()
 
 def count_workdays(start, end):
     """Count working days between start and end (exclusive of end).
@@ -191,7 +211,21 @@ CLOSED_STATUSES = {
 
 EXCLUDED_OP_UNITS = {'HLI GREEN POWER (CONSUMABLE)'}
 
-PO_HLI_RE = re.compile(r'(?:[A-Za-z]{1,4}[-]?)?(\d{7,})(?:-(\d+))?')
+# ─── PO HLI extraction patterns ──────────────────────────────────────────
+# Full PO HLI: 7+ digit number, optionally followed by an item-line suffix
+# (separator may be `-`, `_`, `/`, space, or `.`).  Examples we want to
+# capture from free-text Customer PO Number / Delivery Memo:
+#   "4502342011-10"
+#   "4502342011"               (bare, no item)
+#   "Po No 4502202743_Yudhistira_2 Item_Delivery asap"
+#   "PO 4502342011/20"
+PO_HLI_RE = re.compile(r'(\d{7,})(?:[\-_/. ](\d{1,4}))?')
+# Short reference like "PO 626", "P.O #626", "PO-626", "po:626" — used to
+# match against the *suffix* of full PO HLI keys in the PO table.
+PO_SHORT_REF_RE = re.compile(
+    r'\bP\s*\.?\s*O\s*\.?\s*[#:.\-]?\s*(\d{2,6})\b',
+    re.IGNORECASE,
+)
 
 def _normalize_item_no(item_no):
     if item_no is None:
@@ -211,6 +245,7 @@ def _normalize_item_no(item_no):
     return variants
 
 def extract_po_hli(val):
+    """Return all candidate PO HLI keys (full PO and PO-item) found in `val`."""
     if not val:
         return []
     text = str(val).strip()
@@ -218,11 +253,65 @@ def extract_po_hli(val):
     for m in PO_HLI_RE.finditer(text):
         po_num  = m.group(1)
         item_no = m.group(2)
+        # Skip leading-2 numbers — those are non-HLI internal PO refs the user
+        # explicitly wants ignored (e.g. "2123456789").  Real HLI POs start
+        # with 4/5/6 etc.  This also avoids accidentally matching dates that
+        # happen to be 8+ digits (e.g. "20240105") when written without
+        # separators.
+        if po_num.startswith('2'):
+            continue
         result.add(po_num)
         if item_no:
             for item_var in _normalize_item_no(item_no):
                 result.add(f"{po_num}-{item_var}")
     return list(result)
+
+
+def extract_po_short_refs(val):
+    """Return short numeric references like '626' parsed from 'PO 626'.
+
+    Used as a fallback to suffix-match against full PO HLI numbers in the PO
+    table when the customer wrote the PO in shorthand form."""
+    if not val:
+        return []
+    text = str(val).strip()
+    refs = set()
+    for m in PO_SHORT_REF_RE.finditer(text):
+        n = m.group(1)
+        # Avoid double-counting full POs that already came out of extract_po_hli.
+        if len(n) >= 7:
+            continue
+        refs.add(n)
+    return list(refs)
+
+
+def so_has_matching_po_hli(s, po_hli_keys, po_suffix_index=None):
+    """Return True if SO `s` references at least one PO HLI present in
+    `po_hli_keys`.  Considers both the full-number extraction and the
+    short-reference (suffix) fallback."""
+    candidates = extract_po_hli(s.customer_po_number) + extract_po_hli(s.delivery_memo)
+    if any(c in po_hli_keys for c in candidates):
+        return True
+    short_refs = extract_po_short_refs(s.customer_po_number) + extract_po_short_refs(s.delivery_memo)
+    if not short_refs:
+        return False
+    if po_suffix_index is not None:
+        return any(r in po_suffix_index for r in short_refs)
+    # Fallback: linear suffix scan when caller didn't precompute the index.
+    return any(any(k.endswith(r) for k in po_hli_keys) for r in short_refs)
+
+
+def build_po_suffix_index(po_hli_keys):
+    """Map every meaningful trailing-N-digit suffix (length 2..6) of every
+    full PO HLI number in `po_hli_keys` to True, for O(1) suffix lookups."""
+    idx = set()
+    for k in po_hli_keys:
+        # Only index pure-digit full PO numbers (skip composite "po-item" keys).
+        if not k or '-' in k or not k.isdigit():
+            continue
+        for n in range(2, min(len(k), 7)):
+            idx.add(k[-n:])
+    return idx
 
 def open_so_filter():
     return db.or_(
@@ -445,6 +534,7 @@ def get_dashboard_stats():
             if not po_is_matched(p.po_number, p.item_no, matched_set):
                 po_without_so_count += 1
 
+        po_suffix_index = build_po_suffix_index(po_numbers)
         so_without_po_count = 0
         for s in so_q(open_so_filter(),
                       ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
@@ -452,8 +542,7 @@ def get_dashboard_stats():
                 continue
             if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
                 continue
-            candidates = extract_po_hli(s.customer_po_number) + extract_po_hli(s.delivery_memo)
-            if not candidates or not any(c in po_numbers for c in candidates):
+            if not so_has_matching_po_hli(s, po_numbers, po_suffix_index):
                 so_without_po_count += 1
 
         # Monthly trend (open SO, sum of sales by month)
@@ -745,13 +834,13 @@ def get_so_without_po():
             date_year, date_from, date_to,
         )
         result = []
+        po_suffix_index = build_po_suffix_index(po_hli_keys)
         for s in q.all():
             if s.so_item in hidden_so or s.so_number in hidden_so:
                 continue
             if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
                 continue
-            candidates = extract_po_hli(s.customer_po_number) + extract_po_hli(s.delivery_memo)
-            if not candidates or not any(c in po_hli_keys for c in candidates):
+            if not so_has_matching_po_hli(s, po_hli_keys, po_suffix_index):
                 result.append(so_dict(s))
         return jsonify(result)
     except Exception as e:
@@ -1653,11 +1742,11 @@ def completed_summary():
 
         worst_margin_vendors = sorted(neg_vendor_map.values(), key=lambda x: x['margin'])[:50]
 
-        # Top 10 worst-margin transactions
+        # Top 30 worst-margin transactions (UI scrolls within fixed-height box)
         neg_txns = [(s, po_amt, sales, m) for s, po_amt, sales, m in enriched if m < 0]
         neg_txns.sort(key=lambda x: x[3])  # most negative first
         worst_margin_transactions = []
-        for s, po_amt, sales, m in neg_txns[:10]:
+        for s, po_amt, sales, m in neg_txns[:30]:
             pct = round(m / sales * 100, 1) if sales else None
             worst_margin_transactions.append({
                 'so_item': s.so_item,
