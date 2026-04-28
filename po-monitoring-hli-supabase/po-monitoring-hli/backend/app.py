@@ -1506,22 +1506,26 @@ def upload_smro():
             'rows_with_product_id':    pid_filled,
             'all_file_columns':        df.columns.tolist(),
         }
-        warning = None
+        # Build the warning by *accumulating* every condition that applies,
+        # so we never silently drop a Product ID warning when Specification
+        # also has an issue (or vice versa).
+        warnings = []
         if not col_spec and not col_pid:
-            warning = (
+            warnings.append(
                 "File ini tidak mengandung kolom 'Specification' maupun 'Product ID' "
                 "(atau alias yang dikenal). Spec/Product ID di DB tidak diubah."
             )
-        elif not col_spec:
-            warning = "Kolom 'Specification' tidak ditemukan di file ini — Specification di DB dipertahankan."
-        elif not col_pid:
-            warning = "Kolom 'Product ID' tidak ditemukan di file ini — Product ID di DB dipertahankan."
-        elif col_spec and spec_filled == 0:
-            warning = f"Kolom '{col_spec}' terdeteksi tapi semua baris kosong."
-        elif col_pid and pid_filled == 0:
-            warning = f"Kolom '{col_pid}' terdeteksi tapi semua baris kosong."
-        if warning:
-            diagnostics['warning'] = warning
+        else:
+            if not col_spec:
+                warnings.append("Kolom 'Specification' tidak ditemukan di file ini — Specification di DB dipertahankan.")
+            elif spec_filled == 0:
+                warnings.append(f"Kolom '{col_spec}' terdeteksi tapi semua baris kosong.")
+            if not col_pid:
+                warnings.append("Kolom 'Product ID' tidak ditemukan di file ini — Product ID di DB dipertahankan.")
+            elif pid_filled == 0:
+                warnings.append(f"Kolom '{col_pid}' terdeteksi tapi semua baris kosong.")
+        if warnings:
+            diagnostics['warning'] = ' '.join(warnings)
 
         return jsonify({
             'message': f'Berhasil: {inserted} SO baru ditambahkan, {updated} SO diperbarui. Data lama yang tidak ada di file ini tetap dipertahankan.',
