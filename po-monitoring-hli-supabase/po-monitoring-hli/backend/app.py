@@ -1467,6 +1467,86 @@ def upload_smro():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/upload/smro-backfill-spec', methods=['POST'])
+def upload_smro_backfill_spec():
+    """Backfill-only upload: reads Specification and Product ID from an SMRO
+    Excel file and updates those two fields on existing SO records matched by
+    SO Item.  All other fields are left untouched.  Safe to run multiple times.
+    Returns counts of matched/unmatched rows so the user can verify."""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file'}), 400
+        file = request.files['file']
+        df = pd.read_excel(file, engine='openpyxl')
+        df.columns = [str(c).strip() for c in df.columns]
+
+        col_soitem = find_column(df, ['SO Item', 'SO Item No', 'SO Line', 'Item No', 'Line'])
+        col_spec   = find_column(df, ['Specification', 'Spec', 'Specifications', 'Product Specification'])
+        col_pid    = find_column(df, ['Product ID', 'Product Id', 'Product Code',
+                                      'Material', 'Material No', 'Material Number', 'Material Code', 'SKU'])
+
+        if not col_soitem:
+            return jsonify({'error': f'SO Item column not found. Columns: {df.columns.tolist()}'}), 400
+        if not col_spec and not col_pid:
+            return jsonify({'error': 'Neither Specification nor Product ID column found.'}), 400
+
+        # Ensure columns exist in DB before writing
+        _ensure_so_extra_columns()
+
+        # Build lookup: so_item → SOData row
+        existing_so = {s.so_item: s for s in SOData.query.all() if s.so_item}
+
+        updated = 0
+        skipped_no_match = 0
+        skipped_no_data = 0
+
+        for _, row in df.iterrows():
+            so_item_val = clean(df_val(row, col_soitem))
+            if not so_item_val:
+                continue
+            spec_val = clean(df_val(row, col_spec)) if col_spec else None
+            pid_val  = clean(df_val(row, col_pid))  if col_pid  else None
+
+            if spec_val is None and pid_val is None:
+                skipped_no_data += 1
+                continue
+
+            rec = existing_so.get(so_item_val)
+            if rec is None:
+                skipped_no_match += 1
+                continue
+
+            changed = False
+            if spec_val is not None and rec.specification != spec_val:
+                rec.specification = spec_val
+                changed = True
+            if pid_val is not None and rec.product_id != pid_val:
+                rec.product_id = pid_val
+                changed = True
+            if changed:
+                updated += 1
+
+            if updated % 200 == 0 and updated > 0:
+                db.session.flush()
+
+        db.session.commit()
+        return jsonify({
+            'message': f'Backfill selesai: {updated} SO diperbarui, '
+                       f'{skipped_no_match} SO Item tidak ditemukan di DB, '
+                       f'{skipped_no_data} baris tidak punya data Spec/PID.',
+            'updated': updated,
+            'skipped_no_match': skipped_no_match,
+            'skipped_no_data': skipped_no_data,
+            'spec_column_detected': col_spec,
+            'pid_column_detected': col_pid,
+            'soitem_column_detected': col_soitem,
+        })
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/data/so/<int:so_id>', methods=['PUT'])
 def update_so(so_id):
     try:
