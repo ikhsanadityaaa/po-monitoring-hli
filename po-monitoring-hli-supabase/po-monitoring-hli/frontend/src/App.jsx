@@ -893,7 +893,20 @@ const App = () => {
         onUploadProgress: (ev) => setUploadProgress({ label, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
       });
       setUploadProgress(null);
-      addToast(`✅ ${res.data.message}`, 'success');
+      // Combine success message and SMRO Specification/Product ID diagnostics
+      // into a single toast so the success and diagnostic don't get the same
+      // Date.now() ID and trample each other.
+      const diag = res.data.diagnostics;
+      let toastMsg = `✅ ${res.data.message}`;
+      let toastKind = 'success';
+      if (type === 'smro' && diag) {
+        const det = diag.columns_detected || {};
+        const detail = `Specification col=${det.specification||'(none)'}; Product ID col=${det.product_id||'(none)'}. ` +
+                       `Filled rows: spec=${diag.rows_with_specification||0}, pid=${diag.rows_with_product_id||0}.`;
+        toastMsg += diag.warning ? `\n⚠️ ${diag.warning} ${detail}` : `\nℹ️ ${detail}`;
+        if (diag.warning) toastKind = 'warning';
+      }
+      addToast(toastMsg, toastKind);
       fetchDashboard();
       if (activePage === 'all-so') fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
       setSoPage(1);
