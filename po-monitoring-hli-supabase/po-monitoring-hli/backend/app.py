@@ -229,9 +229,17 @@ def _fetch_rate_from_api(d):
     except Exception:
         return None
 
-def get_usd_to_idr(d):
+def _get_fallback_rate():
+    last = ExchangeRate.query.order_by(ExchangeRate.rate_date.desc()).first()
+    return last.usd_to_idr if last else 16000.0
+
+def get_usd_to_idr(d, cache_only=False):
     """Return USD->IDR rate for date d.
-    Order: in-memory cache -> DB exact -> API fetch -> DB nearest -> hardcoded fallback."""
+    Order: in-memory cache -> DB exact -> (if not cache_only) API fetch -> DB nearest -> hardcoded fallback.
+
+    Pass cache_only=True when calling inside a loop that has already called
+    prefetch_exchange_rates() — this skips the expensive HTTP request path
+    entirely, relying on the already-warmed in-memory cache and DB."""
     if d is None:
         return _get_fallback_rate()
     if d in _RATE_CACHE:
@@ -240,7 +248,7 @@ def get_usd_to_idr(d):
     if rec:
         _RATE_CACHE[d] = rec.usd_to_idr
         return rec.usd_to_idr
-    if d <= date.today():
+    if not cache_only and d <= date.today():
         rate = _fetch_rate_from_api(d)
         if rate:
             try:
@@ -250,6 +258,7 @@ def get_usd_to_idr(d):
                 db.session.rollback()
             _RATE_CACHE[d] = rate
             return rate
+    # Nearest known rate (no HTTP call)
     nearest = ExchangeRate.query.order_by(
         func.abs(func.julianday(ExchangeRate.rate_date) - func.julianday(str(d)))
     ).first()
@@ -258,19 +267,84 @@ def get_usd_to_idr(d):
         return nearest.usd_to_idr
     return _get_fallback_rate()
 
-def _get_fallback_rate():
-    last = ExchangeRate.query.order_by(ExchangeRate.rate_date.desc()).first()
-    return last.usd_to_idr if last else 16000.0
 
-def convert_to_idr(amount, currency, rate_date=None):
-    """Convert amount to IDR. Non-USD/IDR currencies returned as-is."""
+def prefetch_exchange_rates(dates):
+    """Warm the in-memory _RATE_CACHE for a collection of dates, minimising
+    round-trips to the Frankfurter API.
+
+    Algorithm:
+    1. Skip dates already in _RATE_CACHE (already warm).
+    2. Bulk-load all ExchangeRate rows from the DB in a single query and
+       populate the cache — avoids N individual DB lookups.
+    3. For any remaining dates (still not in cache) that are ≤ today, fetch
+       from the Frankfurter API **sequentially** and persist to DB.
+    4. After API fetches, do one final pass: any date still missing gets the
+       nearest DB rate as a proxy (no additional HTTP call).
+
+    Call this once at the top of any endpoint that iterates over many rows and
+    calls convert_to_idr(), then pass cache_only=True to get_usd_to_idr()
+    inside the loop.
+    """
+    if not dates:
+        return
+
+    # 1. Filter to dates not already cached
+    needed = {d for d in dates if d is not None and d not in _RATE_CACHE}
+    if not needed:
+        return
+
+    # 2. Bulk DB load — single query for all needed dates
+    db_rows = ExchangeRate.query.filter(ExchangeRate.rate_date.in_(list(needed))).all()
+    for row in db_rows:
+        _RATE_CACHE[row.rate_date] = row.usd_to_idr
+    needed -= {row.rate_date for row in db_rows}
+
+    if not needed:
+        return
+
+    # 3. Fetch remaining from API (only past/today dates)
+    today = date.today()
+    to_api = sorted(d for d in needed if d <= today)
+    fetched_rows = []
+    for d in to_api:
+        rate = _fetch_rate_from_api(d)
+        if rate:
+            _RATE_CACHE[d] = rate
+            fetched_rows.append(ExchangeRate(rate_date=d, usd_to_idr=rate, source='frankfurter'))
+            needed.discard(d)
+
+    if fetched_rows:
+        try:
+            db.session.bulk_save_objects(fetched_rows)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+
+    # 4. Proxy remaining with nearest known rate (no extra HTTP calls)
+    if needed:
+        fallback = _get_fallback_rate()
+        # Load all rates once for proximity search
+        all_rates = ExchangeRate.query.order_by(ExchangeRate.rate_date).all()
+        for d in needed:
+            if all_rates:
+                nearest = min(all_rates, key=lambda r: abs((r.rate_date - d).days))
+                _RATE_CACHE[d] = nearest.usd_to_idr
+            else:
+                _RATE_CACHE[d] = fallback
+
+
+def convert_to_idr(amount, currency, rate_date=None, cache_only=False):
+    """Convert amount to IDR. Non-USD/IDR currencies returned as-is.
+
+    When called inside a loop preceded by prefetch_exchange_rates(), pass
+    cache_only=True to skip the per-row HTTP fallback path entirely."""
     if not amount:
         return 0.0
     cur = (currency or 'IDR').strip().upper()
     if cur in ('IDR', ''):
         return float(amount)
     if cur == 'USD':
-        return float(amount) * get_usd_to_idr(rate_date)
+        return float(amount) * get_usd_to_idr(rate_date, cache_only=cache_only)
     return float(amount)
 
 
@@ -579,13 +653,13 @@ def so_dict(s):
 # ─── Build hidden set from delete requests ────────────────────────────────
 def get_hidden_po_hli_keys():
     """Return set of hidden PO HLI keys. Format stored: 'po_number-item_no' or just 'po_number'."""
-    reqs = DeleteRequest.query.filter_by(ref_type='PO', is_hidden=True).all()
-    return {r.ref_number for r in reqs}
+    rows = db.session.query(DeleteRequest.ref_number).filter_by(ref_type='PO', is_hidden=True).all()
+    return {r[0] for r in rows}
 
 def get_hidden_so_items():
     """Return set of SO items/numbers that are hidden from dashboard."""
-    reqs = DeleteRequest.query.filter_by(ref_type='SO', is_hidden=True).all()
-    return {r.ref_number for r in reqs}
+    rows = db.session.query(DeleteRequest.ref_number).filter_by(ref_type='SO', is_hidden=True).all()
+    return {r[0] for r in rows}
 
 # Keep alias for backward compat in export
 def get_hidden_po_numbers():
@@ -638,22 +712,14 @@ def get_dashboard_stats():
         po_count = db.session.query(func.count(POData.id)).scalar() or 0
         total_po_amount = db.session.query(func.sum(POData.amount)).scalar() or 0
 
-        # total_so_count: count only "countable" open SOs (same logic as aging)
-        # excludes: return items (SO item starting with '9'), internal PO refs, excluded op units, hidden items
-        total_so_count = 0
-        for s in so_q(open_so_filter(),
-                      ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
-            if s.so_item in hidden_so or s.so_number in hidden_so:
-                continue
-            if so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
-                total_so_count += 1
-
         po_numbers = get_po_hli_key_set()
 
         matched_set = build_matched_set()
 
         po_without_so_count = 0
-        for p in POData.query.all():
+        for p in POData.query.with_entities(
+            POData.po_number, POData.item_no, POData.po_item_type, POData.item_code
+        ).all():
             if is_po_hidden(p.po_number, p.item_no, hidden_po):
                 continue
             op_unit = get_operation_unit(p.po_item_type, p.item_code)
@@ -663,13 +729,22 @@ def get_dashboard_stats():
                 po_without_so_count += 1
 
         po_suffix_index = build_po_suffix_index(po_numbers)
+
+        # Single pass over open SO rows — compute total_so_count AND so_without_po_count
+        # together instead of two separate full-table scans.
+        open_so_rows = so_q(
+            open_so_filter(),
+            ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))
+        ).all()
+
+        total_so_count = 0
         so_without_po_count = 0
-        for s in so_q(open_so_filter(),
-                      ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
+        for s in open_so_rows:
             if s.so_item in hidden_so or s.so_number in hidden_so:
                 continue
             if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
                 continue
+            total_so_count += 1
             if not so_has_matching_po_hli(s, po_numbers, po_suffix_index):
                 so_without_po_count += 1
 
@@ -820,10 +895,11 @@ def build_matched_set():
     (even if Delivery Completed or SO Cancel) should NOT appear as 'PO without SO'.
     """
     matched = set()
-    for s in db.session.query(
-            SOData.customer_po_number, SOData.delivery_memo, SOData.so_item,
-            SOData.operation_unit_name).all():
-        cust_po, memo, so_item, op_unit = s[0], s[1], s[2], s[3]
+    # Only load the four columns we actually need — avoids fetching every field
+    for row in db.session.query(
+            SOData.customer_po_number, SOData.delivery_memo,
+            SOData.so_item, SOData.operation_unit_name).all():
+        cust_po, memo, so_item, op_unit = row
         # Skip excluded op units
         if op_unit in EXCLUDED_OP_UNITS:
             continue
@@ -1195,8 +1271,13 @@ def get_all_so():
             all_sos = [s for s in all_sos if matches_aging(s)]
 
         if margin_filter in ('positive', 'negative'):
+            # Warm cache before filtering loop to avoid per-row HTTP calls.
+            usd_sos = [s for s in all_sos if (s.purchasing_currency or '').strip().upper() == 'USD']
+            if usd_sos:
+                prefetch_exchange_rates({s.so_create_date for s in usd_sos if s.so_create_date})
+
             def calc_margin(s):
-                po_amt = convert_to_idr((s.purchasing_amount or 0) or (s.purchasing_price or 0) * (s.so_qty or 0), s.purchasing_currency, s.so_create_date)
+                po_amt = convert_to_idr((s.purchasing_amount or 0) or (s.purchasing_price or 0) * (s.so_qty or 0), s.purchasing_currency, s.so_create_date, cache_only=True)
                 return float(s.sales_amount or 0) - po_amt
             if margin_filter == 'negative':
                 all_sos = [s for s in all_sos if calc_margin(s) < 0]
@@ -1947,8 +2028,13 @@ def download_so_batch_template():
 
         # Margin filter
         if margin_filter in ('positive', 'negative'):
+            # Warm cache before filtering loop to avoid per-row HTTP calls.
+            usd_sos = [s for s in all_sos if (s.purchasing_currency or '').strip().upper() == 'USD']
+            if usd_sos:
+                prefetch_exchange_rates({s.so_create_date for s in usd_sos if s.so_create_date})
+
             def calc_margin(s):
-                po_amt = convert_to_idr((s.purchasing_amount or 0) or (s.purchasing_price or 0) * (s.so_qty or 0), s.purchasing_currency, s.so_create_date)
+                po_amt = convert_to_idr((s.purchasing_amount or 0) or (s.purchasing_price or 0) * (s.so_qty or 0), s.purchasing_currency, s.so_create_date, cache_only=True)
                 return float(s.sales_amount or 0) - po_amt
             if margin_filter == 'negative':
                 all_sos = [s for s in all_sos if calc_margin(s) < 0]
@@ -2299,11 +2385,18 @@ def completed_summary():
         # SOData query in the codebase (see /api/completed/margin-detail, etc.).
         rows = q.filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all()
 
+        # Warm exchange-rate cache for all unique SO dates in one shot, so the
+        # per-row convert_to_idr() calls below never trigger individual HTTP
+        # fetches to the Frankfurter API.
+        usd_rows = [s for s in rows if (s.purchasing_currency or '').strip().upper() == 'USD']
+        if usd_rows:
+            prefetch_exchange_rates({s.so_create_date for s in usd_rows if s.so_create_date})
+
         def po_amt_of(s):
             raw = float(s.purchasing_amount or 0)
             if raw == 0 and s.purchasing_price:
                 raw = float(s.purchasing_price) * float(s.so_qty or 0)
-            return convert_to_idr(raw, s.purchasing_currency, s.so_create_date)
+            return convert_to_idr(raw, s.purchasing_currency, s.so_create_date, cache_only=True)
 
         # Pre-compute per-row sales/purchase/margin once, then reuse.
         enriched = []
@@ -2472,11 +2565,16 @@ def completed_margin_detail():
 
         rows = q.filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all()
 
+        # Warm exchange-rate cache before the per-row loop.
+        usd_rows = [s for s in rows if (s.purchasing_currency or '').strip().upper() == 'USD']
+        if usd_rows:
+            prefetch_exchange_rates({s.so_create_date for s in usd_rows if s.so_create_date})
+
         def get_po_amt(s):
             raw = float(s.purchasing_amount or 0)
             if raw == 0 and s.purchasing_price:
                 raw = float(s.purchasing_price) * float(s.so_qty or 0)
-            return convert_to_idr(raw, s.purchasing_currency, s.so_create_date)
+            return convert_to_idr(raw, s.purchasing_currency, s.so_create_date, cache_only=True)
 
         result = []
         for s in rows:
