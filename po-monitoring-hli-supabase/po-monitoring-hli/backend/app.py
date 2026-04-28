@@ -1687,37 +1687,88 @@ def update_so(so_id):
 
 @app.route('/api/data/so/template', methods=['GET'])
 def download_so_batch_template():
-    """Download Excel template for SO batch upload (Delivery Plan Date & Remarks)."""
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "SO Batch Upload"
+    """Download Excel template for SO batch upload.
+    If filters are supplied (same params as /api/data/all-so), the filtered SO Items
+    are pre-populated in the template starting from row 3, with existing
+    delivery_plan_date and remarks already filled in so the user only needs to
+    update what changed.  Either column may be left blank on upload.
+    """
+    try:
+        # ── Apply same filters as fetchSOData ──────────────────────────────
+        op_units   = request.args.getlist('op_unit')
+        vendors    = request.args.getlist('vendor')
+        statuses   = request.args.getlist('status')
+        aging_list = request.args.getlist('aging')
+        so_items   = request.args.getlist('so_item')
+        margin_filter = request.args.get('margin_filter', 'all')
+        date_year, date_from, date_to = parse_so_date_args()
 
-    headers = ['SO Item', 'Delivery Plan Date', 'Remarks']
-    ws.append(headers)
+        q = SOData.query.filter(open_so_filter())
+        if op_units:  q = q.filter(SOData.operation_unit_name.in_(op_units))
+        if vendors:   q = q.filter(SOData.vendor_name.in_(vendors))
+        if statuses:  q = q.filter(SOData.so_status.in_(statuses))
+        if so_items:  q = q.filter(SOData.so_item.in_(so_items))
+        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
+        all_sos = q.order_by(SOData.so_create_date.asc()).all()
 
-    # Row 1: header — yellow, bold, centered
-    header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-    for i, cell in enumerate(ws[1], 1):
-        cell.fill = header_fill
-        cell.font = Font(bold=True, color="000000")
-        cell.alignment = Alignment(horizontal='center')
-        ws.column_dimensions[get_column_letter(i)].width = 35 if i == 1 else 25 if i == 2 else 50
+        # Aging filter (post-query, same as all-so endpoint)
+        if aging_list:
+            today = date.today()
+            def matches_aging(s):
+                return get_aging_label(workdays_since(s.so_create_date, today)) in aging_list
+            all_sos = [s for s in all_sos if matches_aging(s)]
 
-    # Row 2: example — red font, light grey background
-    ws.append(['example : 9008988017-10', 'example : 2025-12-31', 'example : Waiting for vendor confirmation'])
-    grey_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
-    red_font  = Font(color="FF0000")
-    for cell in ws[2]:
-        cell.font = red_font
-        cell.fill = grey_fill
+        # Margin filter
+        if margin_filter in ('positive', 'negative'):
+            def calc_margin(s):
+                return (s.sales_amount or 0) - (s.purchasing_price or 0) * (s.so_qty or 0)
+            if margin_filter == 'negative':
+                all_sos = [s for s in all_sos if calc_margin(s) < 0]
+            else:
+                all_sos = [s for s in all_sos if calc_margin(s) >= 0]
 
-    output = io.BytesIO()
-    wb.save(output)
-    output.seek(0)
-    return send_file(output,
-        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        as_attachment=True,
-        download_name=f"Template_SO_BatchUpload_{datetime.now().strftime('%Y%m%d')}.xlsx")
+        # ── Build workbook ─────────────────────────────────────────────────
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "SO Batch Upload"
+
+        headers = ['SO Item', 'Delivery Plan Date', 'Remarks']
+        ws.append(headers)
+
+        # Row 1: header — yellow, bold, centered
+        header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+        col_widths   = [35, 25, 50]
+        for i, cell in enumerate(ws[1], 1):
+            cell.fill = header_fill
+            cell.font = Font(bold=True, color="000000")
+            cell.alignment = Alignment(horizontal='center')
+            ws.column_dimensions[get_column_letter(i)].width = col_widths[i - 1]
+
+        # Row 2: example — red font, light grey background
+        grey_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+        red_font  = Font(color="FF0000")
+        ws.append(['example : 9008988017-10', 'example : 2025-12-31', 'example : Waiting for vendor confirmation'])
+        for cell in ws[2]:
+            cell.font = red_font
+            cell.fill = grey_fill
+
+        # Rows 3+: pre-populate with filtered SO items (if any filter active)
+        for s in all_sos:
+            if not s.so_item:
+                continue
+            plan = s.delivery_plan_date.isoformat() if s.delivery_plan_date else ''
+            ws.append([s.so_item, plan, s.remarks or ''])
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return send_file(output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f"Template_SO_BatchUpload_{datetime.now().strftime('%Y%m%d')}.xlsx")
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/data/so/batch-upload', methods=['POST'])
