@@ -177,6 +177,7 @@ class SOData(db.Model):
     currency = db.Column(db.String(10))
     purchasing_price = db.Column(db.Float)
     purchasing_amount = db.Column(db.Float)
+    purchasing_currency = db.Column(db.String(10))
     so_create_date = db.Column(db.Date)
     delivery_possible_date = db.Column(db.Date)
     matched_po_number = db.Column(db.String(50))
@@ -202,6 +203,77 @@ class DeleteRequest(db.Model):
     requested_at = db.Column(db.DateTime, default=datetime.utcnow)
     is_hidden = db.Column(db.Boolean, default=True)  # True = hidden from dashboard
 
+
+class ExchangeRate(db.Model):
+    """USD->IDR exchange rate per date. Auto-fetched via Frankfurter API on first need,
+    or set manually via /api/exchange-rate endpoint."""
+    __tablename__ = 'exchange_rate'
+    id         = db.Column(db.Integer, primary_key=True)
+    rate_date  = db.Column(db.Date, nullable=False, unique=True, index=True)
+    usd_to_idr = db.Column(db.Float, nullable=False)
+    source     = db.Column(db.String(50), default='manual')  # 'frankfurter'|'manual'|'fallback'
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+# ─── Exchange rate helpers ─────────────────────────────────────────────────
+_RATE_CACHE = {}   # {date: float} in-process cache
+
+def _fetch_rate_from_api(d):
+    """Try Frankfurter (ECB data) for historical USD->IDR. Returns float or None."""
+    try:
+        import urllib.request, json as _json
+        url = f"https://api.frankfurter.app/{d.isoformat()}?from=USD&to=IDR"
+        with urllib.request.urlopen(url, timeout=6) as resp:
+            data = _json.loads(resp.read())
+        return float(data['rates']['IDR'])
+    except Exception:
+        return None
+
+def get_usd_to_idr(d):
+    """Return USD->IDR rate for date d.
+    Order: in-memory cache -> DB exact -> API fetch -> DB nearest -> hardcoded fallback."""
+    if d is None:
+        return _get_fallback_rate()
+    if d in _RATE_CACHE:
+        return _RATE_CACHE[d]
+    rec = ExchangeRate.query.filter_by(rate_date=d).first()
+    if rec:
+        _RATE_CACHE[d] = rec.usd_to_idr
+        return rec.usd_to_idr
+    if d <= date.today():
+        rate = _fetch_rate_from_api(d)
+        if rate:
+            try:
+                db.session.add(ExchangeRate(rate_date=d, usd_to_idr=rate, source='frankfurter'))
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+            _RATE_CACHE[d] = rate
+            return rate
+    nearest = ExchangeRate.query.order_by(
+        func.abs(func.julianday(ExchangeRate.rate_date) - func.julianday(str(d)))
+    ).first()
+    if nearest:
+        _RATE_CACHE[d] = nearest.usd_to_idr
+        return nearest.usd_to_idr
+    return _get_fallback_rate()
+
+def _get_fallback_rate():
+    last = ExchangeRate.query.order_by(ExchangeRate.rate_date.desc()).first()
+    return last.usd_to_idr if last else 16000.0
+
+def convert_to_idr(amount, currency, rate_date=None):
+    """Convert amount to IDR. Non-USD/IDR currencies returned as-is."""
+    if not amount:
+        return 0.0
+    cur = (currency or 'IDR').strip().upper()
+    if cur in ('IDR', ''):
+        return float(amount)
+    if cur == 'USD':
+        return float(amount) * get_usd_to_idr(rate_date)
+    return float(amount)
+
+
 def _ensure_so_extra_columns():
     """Online migration: add `specification` and `product_id` columns to
     so_data if they don't exist yet.
@@ -214,8 +286,9 @@ def _ensure_so_extra_columns():
     """
     is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
     needed = [
-        ('specification', 'TEXT'),
-        ('product_id',    'VARCHAR(100)'),
+        ('specification',        'TEXT'),
+        ('product_id',           'VARCHAR(100)'),
+        ('purchasing_currency',  'VARCHAR(10)'),
     ]
     try:
         if is_sqlite:
@@ -494,6 +567,7 @@ def so_dict(s):
         'specification': s.specification, 'product_id': s.product_id,
         'so_qty': s.so_qty, 'sales_price': s.sales_price, 'sales_amount': s.sales_amount,
         'purchasing_price': s.purchasing_price, 'purchasing_amount': s.purchasing_amount,
+        'purchasing_currency': s.purchasing_currency,
         'so_create_date': s.so_create_date.isoformat() if s.so_create_date else '',
         'delivery_possible_date': s.delivery_possible_date.isoformat() if s.delivery_possible_date else '',
         'delivery_plan_date': s.delivery_plan_date.isoformat() if s.delivery_plan_date else '',
@@ -839,6 +913,47 @@ def debug_so_fields():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/debug/smro-columns', methods=['POST'])
+def debug_smro_columns():
+    """Inspect column names of an uploaded SMRO file without saving anything.
+    Returns all column names and which ones were detected as spec/pid/so_item."""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
+        file = request.files['file']
+        df = pd.read_excel(file, engine='openpyxl', nrows=3)
+        df.columns = [str(c).strip() for c in df.columns]
+        all_cols = df.columns.tolist()
+
+        detected = {
+            'col_so':      find_column(df, ['SO Number','SO No','SO No.','SO','SO Item','Sales Order Number','No SO','Nomor SO']),
+            'col_soitem':  find_column(df, ['SO Item No','Item No','Line','SO Line','SO Item']),
+            'col_spec':    find_column(df, ['Specification','Spec','Specifications','Product Specification','Material Description','Material Desc','Short Text']),
+            'col_pid':     find_column(df, ['Product ID','Product Id','Product Code','Material','Material No','Material Number','Material Code','SKU','Article','Article Number']),
+            'col_prod':    find_column(df, ['Product Name','Item Name','Description','Product']),
+            'col_status':  find_column(df, ['SO Status','Status','Order Status']),
+            'col_vendor':  find_column(df, ['Vendor Name','Vendor','Supplier']),
+            'col_sodate':  find_column(df, ['SO Create Date','Order Date','SO Date','Create Date']),
+        }
+
+        missing_critical = [k for k in ('col_spec', 'col_pid') if not detected[k]]
+
+        return jsonify({
+            'total_columns': len(all_cols),
+            'all_columns': all_cols,
+            'detected': detected,
+            'missing_critical': missing_critical,
+            'diagnosis': (
+                'col_spec and col_pid NOT detected — column names in this file do not match any known alias. '
+                'Check "all_columns" list and update backend aliases.'
+                if missing_critical else
+                'col_spec and col_pid both detected — upload should populate Specification and Product ID correctly.'
+            )
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 def po_is_matched(po_number, item_no, matched_set):
     """Return True if this PO item has a matching SO."""
     if po_number in matched_set:
@@ -1081,8 +1196,8 @@ def get_all_so():
 
         if margin_filter in ('positive', 'negative'):
             def calc_margin(s):
-                po_amt = (s.purchasing_price or 0) * (s.so_qty or 0)
-                return (s.sales_amount or 0) - po_amt
+                po_amt = convert_to_idr((s.purchasing_amount or 0) or (s.purchasing_price or 0) * (s.so_qty or 0), s.purchasing_currency, s.so_create_date)
+                return float(s.sales_amount or 0) - po_amt
             if margin_filter == 'negative':
                 all_sos = [s for s in all_sos if calc_margin(s) < 0]
             else:
@@ -1141,6 +1256,116 @@ def get_top_vendor_detail(vendor_name):
         sos = db.session.query(SOData).filter(
             open_so_filter(), SOData.vendor_name == vendor_name).all()
         return jsonify([so_dict(s) for s in sos])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════
+# EXCHANGE RATE ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════
+
+@app.route('/api/exchange-rate', methods=['GET'])
+def list_exchange_rates():
+    """Return all stored USD->IDR rates, newest first."""
+    try:
+        rates = ExchangeRate.query.order_by(ExchangeRate.rate_date.desc()).limit(120).all()
+        return jsonify([{
+            'id': r.id, 'date': r.rate_date.isoformat(),
+            'usd_to_idr': r.usd_to_idr, 'source': r.source,
+        } for r in rates])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/exchange-rate', methods=['POST'])
+def upsert_exchange_rate():
+    """Manually set or update a USD->IDR rate for a specific date."""
+    try:
+        data = request.json
+        d = parse_date(data.get('date'))
+        rate = float(data.get('usd_to_idr', 0))
+        if not d:
+            return jsonify({'error': 'Invalid date'}), 400
+        if rate <= 0:
+            return jsonify({'error': 'Rate must be > 0'}), 400
+        rec = ExchangeRate.query.filter_by(rate_date=d).first()
+        if rec:
+            rec.usd_to_idr = rate
+            rec.source = 'manual'
+        else:
+            rec = ExchangeRate(rate_date=d, usd_to_idr=rate, source='manual')
+            db.session.add(rec)
+        db.session.commit()
+        # Invalidate cache for this date
+        _RATE_CACHE.pop(d, None)
+        return jsonify({'success': True, 'date': d.isoformat(), 'usd_to_idr': rate})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/exchange-rate/fetch', methods=['POST'])
+def fetch_exchange_rates_bulk():
+    """Auto-fetch USD->IDR rates from Frankfurter API for all SO create dates
+    that have USD purchasing currency but no rate stored yet.
+    Returns count of rates fetched."""
+    try:
+        # Find distinct SO create dates where purchasing_currency = USD and no rate stored
+        is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
+        usd_rows = db.session.query(SOData.so_create_date).filter(
+            SOData.purchasing_currency == 'USD',
+            SOData.so_create_date.isnot(None)
+        ).distinct().all()
+
+        dates_needed = {r[0] for r in usd_rows}
+        existing_dates = {r[0] for r in db.session.query(ExchangeRate.rate_date).all()}
+        to_fetch = sorted(dates_needed - existing_dates)
+
+        fetched = 0
+        failed = []
+        for d in to_fetch:
+            rate = _fetch_rate_from_api(d)
+            if rate:
+                try:
+                    db.session.add(ExchangeRate(rate_date=d, usd_to_idr=rate, source='frankfurter'))
+                    db.session.flush()
+                    _RATE_CACHE[d] = rate
+                    fetched += 1
+                except Exception:
+                    db.session.rollback()
+            else:
+                failed.append(d.isoformat())
+
+        db.session.commit()
+        return jsonify({
+            'dates_needed': len(dates_needed),
+            'already_stored': len(existing_dates & dates_needed),
+            'fetched': fetched,
+            'failed': failed,
+            'message': f'{fetched} kurs berhasil di-fetch dari Frankfurter API.'
+                       + (f' {len(failed)} tanggal gagal: {", ".join(failed[:5])}' if failed else '')
+        })
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/exchange-rate/preview', methods=['GET'])
+def preview_exchange_rate():
+    """Preview what rate would be used for a given date (for debugging)."""
+    try:
+        d = parse_date(request.args.get('date', ''))
+        if not d:
+            return jsonify({'error': 'Provide ?date=YYYY-MM-DD'}), 400
+        rate = get_usd_to_idr(d)
+        rec = ExchangeRate.query.filter_by(rate_date=d).first()
+        return jsonify({
+            'date': d.isoformat(),
+            'usd_to_idr': rate,
+            'source': rec.source if rec else 'fallback/nearest',
+            'stored_exact': rec is not None,
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -1405,6 +1630,7 @@ def upload_smro():
         col_cur     = find_column(df, ['Currency','Curr'])
         col_pprice  = find_column(df, ['Purchasing Price','Purchase Price','PO Price'])
         col_pamt    = find_column(df, ['Purchasing Amount','Purchase Amount','PO Amount'])
+        col_pcur    = find_column(df, ['Purchasing Currency','Purchase Currency','PO Currency','Purchasing Curr','Purchase Curr'])
         col_sodate  = find_column(df, ['SO Create Date','Order Date','SO Date','Create Date'])
         col_delposs = find_column(df, ['Delivery Possible Date','Possible Delivery Date','Est Delivery'])
         col_matchpo = find_column(df, ['Matched PO Number','Matched PO','PO HLI','PO HLI Number'])
@@ -1452,6 +1678,7 @@ def upload_smro():
                 'currency': clean(df_val(row, col_cur)) or 'IDR',
                 'purchasing_price': safe_float(df_val(row, col_pprice)),
                 'purchasing_amount': safe_float(df_val(row, col_pamt)),
+                'purchasing_currency': clean(df_val(row, col_pcur)) if col_pcur else None,
                 'so_create_date': parse_date(df_val(row, col_sodate)),
                 'delivery_possible_date': parse_date(df_val(row, col_delposs)),
                 'matched_po_number': clean(df_val(row, col_matchpo)),
@@ -1721,7 +1948,8 @@ def download_so_batch_template():
         # Margin filter
         if margin_filter in ('positive', 'negative'):
             def calc_margin(s):
-                return (s.sales_amount or 0) - (s.purchasing_price or 0) * (s.so_qty or 0)
+                po_amt = convert_to_idr((s.purchasing_amount or 0) or (s.purchasing_price or 0) * (s.so_qty or 0), s.purchasing_currency, s.so_create_date)
+                return float(s.sales_amount or 0) - po_amt
             if margin_filter == 'negative':
                 all_sos = [s for s in all_sos if calc_margin(s) < 0]
             else:
@@ -2072,10 +2300,10 @@ def completed_summary():
         rows = q.filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all()
 
         def po_amt_of(s):
-            v = float(s.purchasing_amount or 0)
-            if v == 0 and s.purchasing_price:
-                v = float(s.purchasing_price) * float(s.so_qty or 0)
-            return v
+            raw = float(s.purchasing_amount or 0)
+            if raw == 0 and s.purchasing_price:
+                raw = float(s.purchasing_price) * float(s.so_qty or 0)
+            return convert_to_idr(raw, s.purchasing_currency, s.so_create_date)
 
         # Pre-compute per-row sales/purchase/margin once, then reuse.
         enriched = []
@@ -2245,10 +2473,10 @@ def completed_margin_detail():
         rows = q.filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all()
 
         def get_po_amt(s):
-            po_amt = float(s.purchasing_amount or 0)
-            if po_amt == 0 and s.purchasing_price:
-                po_amt = float(s.purchasing_price) * float(s.so_qty or 0)
-            return po_amt
+            raw = float(s.purchasing_amount or 0)
+            if raw == 0 and s.purchasing_price:
+                raw = float(s.purchasing_price) * float(s.so_qty or 0)
+            return convert_to_idr(raw, s.purchasing_currency, s.so_create_date)
 
         result = []
         for s in rows:
