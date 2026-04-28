@@ -302,7 +302,12 @@ def so_has_matching_po_hli(s, po_hli_keys, po_suffix_index=None):
     if po_suffix_index is not None:
         return any(r in po_suffix_index for r in short_refs)
     # Fallback: linear suffix scan when caller didn't precompute the index.
-    return any(any(k.endswith(r) for k in po_hli_keys) for r in short_refs)
+    # Skip composite "po-item" keys so short refs like "10" don't falsely
+    # match the trailing item-line of every PO HLI.
+    return any(
+        any(k.endswith(r) for k in po_hli_keys if '-' not in k)
+        for r in short_refs
+    )
 
 
 def build_po_suffix_index(po_hli_keys):
