@@ -5,10 +5,10 @@ import {
 } from 'recharts';
 import {
   Upload, Download, AlertCircle, CheckCircle, XCircle,
-  Package, DollarSign, TrendingUp, TrendingDown, Award, Calendar, ChevronLeft,
+  Package, TrendingUp, TrendingDown, Award, Calendar, ChevronLeft,
   ChevronRight, Moon, Sun, FileText, BarChart3, FileSpreadsheet,
   Filter, X, ChevronDown, ChevronUp, Building2, Search, Loader2,
-  EyeOff, Eye, Trash2, RotateCcw, Plus, Banknote
+  EyeOff, Eye, Trash2, RotateCcw, Plus, Coins, Wallet
 } from 'lucide-react';
 import axios from 'axios';
 import { format, parseISO } from 'date-fns';
@@ -513,7 +513,7 @@ const HiddenItemsPanel = ({ darkMode, requests, onRestore, onClose }) => {
 };
 
 // ─── Date Range Filter ────────────────────────────────────────────────────
-const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, label = 'Filter Tanggal SO Create' }) => {
+const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, label = 'Filter SO Create Date' }) => {
   const currentYear = new Date().getFullYear();
   const years = Array.from({ length: 6 }, (_, i) => currentYear - i);
   const [mode, setMode] = useState('all'); // 'all' | 'year' | 'range'
@@ -540,7 +540,7 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, label = 'Filter 
       <span className={`text-sm font-semibold ${txt} flex-shrink-0`}>{label}:</span>
       {/* Mode selector */}
       <div className="flex gap-1">
-        {[['all','Semua'], ['year','Per Tahun'], ['range','Range Tanggal']].map(([m, lbl]) => (
+        {[['all','All'], ['year','Per Year'], ['range','Date Range']].map(([m, lbl]) => (
           <button key={m} onClick={() => setMode(m)}
             className={`px-3 py-1 rounded-full text-xs font-semibold transition-all
               ${mode === m ? 'bg-purple-600 text-white shadow' : darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-100 text-gray-600 hover:bg-purple-100'}`}>
@@ -558,14 +558,14 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, label = 'Filter 
         <div className="flex items-center gap-2">
           <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
             className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300'}`}/>
-          <span className={`text-xs ${txt2}`}>s/d</span>
+          <span className={`text-xs ${txt2}`}>to</span>
           <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)}
             className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300'}`}/>
         </div>
       )}
       <button onClick={apply}
         className="px-4 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-semibold">
-        Terapkan
+        Apply
       </button>
       {mode !== 'all' && (
         <button onClick={reset} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${darkMode ? 'bg-gray-600 text-gray-200 hover:bg-gray-500' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}>
@@ -626,6 +626,7 @@ const App = () => {
   const [completedYear, setCompletedYear] = useState('all');
   const [completedLoading, setCompletedLoading] = useState(false);
   const [showHideMenu, setShowHideMenu] = useState(false);
+  const [marginDetailModal, setMarginDetailModal] = useState(null); // {category, data}
   const hideMenuRef = useRef(null);
 
   // ── Date filter states per page ──────────────────────────────────────────
@@ -1027,7 +1028,7 @@ const App = () => {
 
     if (!d) return (
       <div className={`flex flex-col items-center justify-center h-64 rounded-2xl ${card}`}>
-        <Banknote className="w-16 h-16 text-gray-300 mb-4"/>
+        <Coins className="w-16 h-16 text-gray-300 mb-4"/>
         <p className={`text-lg font-semibold ${txt}`}>No completed data yet</p>
         <p className={`text-sm ${txt2} mt-1`}>Upload SMRO data to see completed transactions</p>
       </div>
@@ -1046,7 +1047,7 @@ const App = () => {
         {/* ── Date Range Filter ───────────────────────────────── */}
         <DateRangeFilter
           darkMode={darkMode} txt={txt} txt2={txt2} card={card}
-          label="Filter Tanggal SO Create"
+          label="Filter SO Create Date"
           onFilter={(f) => {
             setCompletedDateFilter(f);
             if (f.mode === 'year') { setCompletedYear(f.year); fetchCompletedData(f.year, f); }
@@ -1054,33 +1055,20 @@ const App = () => {
           }}
         />
 
-        {/* ── Year Filter ─────────────────────────────────────── */}
-        <div className={`flex flex-wrap items-center gap-3 px-5 py-3 rounded-xl ${card} shadow`}>
-          <Calendar className="w-4 h-4 text-purple-500"/>
-          <span className={`text-sm font-semibold ${txt}`}>Filter Year:</span>
-          {['all', ...(d.available_years||[]).map(String)].map(y => (
-            <button key={y} onClick={()=>{ setCompletedYear(y); fetchCompletedData(y, completedDateFilter); }}
-              className={`px-4 py-1.5 rounded-full text-sm font-semibold transition-all
-                ${completedYear===y?'bg-purple-600 text-white shadow':'bg-gray-100 text-gray-700 hover:bg-purple-100'}`}>
-              {y==='all'?'All Years':y}
-            </button>
-          ))}
-        </div>
-
         {/* ── KPI Cards ───────────────────────────────────────── */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           {[
             { label:'Completed Transactions', value: fmtNum(d.total_count),
               icon:<CheckCircle className="w-6 h-6 text-green-500"/>, bg:'bg-green-100', color:'text-green-600' },
             { label:'Total Sales Amount', value: fmtCurShort(d.total_sales), sub: fmtCur(d.total_sales),
-              icon:<DollarSign className="w-6 h-6 text-blue-500"/>, bg:'bg-blue-100', color:'text-blue-600' },
+              icon:<Wallet className="w-6 h-6 text-blue-500"/>, bg:'bg-blue-100', color:'text-blue-600' },
             { label:'Total Purchase Amount', value: fmtCurShort(d.total_purchase), sub: fmtCur(d.total_purchase),
-              icon:<Package className="w-6 h-6 text-purple-500"/>, bg:'bg-purple-100', color:'text-purple-600' },
+              icon:<Coins className="w-6 h-6 text-purple-500"/>, bg:'bg-purple-100', color:'text-purple-600' },
             { label:'Total Margin', value: fmtCurShort(d.total_margin), sub: fmtCur(d.total_margin),
               icon: d.total_margin>=0?<TrendingUp className="w-6 h-6 text-emerald-500"/>:<TrendingDown className="w-6 h-6 text-red-500"/>,
               bg: d.total_margin>=0?'bg-emerald-100':'bg-red-100', color: d.total_margin>=0?'text-emerald-600':'text-red-600' },
           ].map((k,i)=>(
-            <div key={i} className={`p-5 rounded-2xl shadow ${card}`}>
+            <div key={i} className={`p-5 rounded-2xl shadow hover:shadow-lg transition-all ${card}`}>
               <div className="flex justify-between items-start">
                 <div>
                   <p className={`text-sm font-medium ${txt2}`}>{k.label}</p>
@@ -1097,28 +1085,31 @@ const App = () => {
         <div className={`p-5 rounded-2xl shadow ${card}`}>
           <h3 className={`text-base font-bold mb-1 ${txt}`}>Monthly Trend — Delivery Completed</h3>
           <p className={`text-xs mb-4 ${txt2}`}>Sales Amount, Purchase Amount (bar) & Transaction Count (line)</p>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={d.monthly_trend} barGap={2}>
+          <ResponsiveContainer width="100%" height={320}>
+            <ComposedChart data={(d.monthly_trend||[]).map(m => ({
+              ...m,
+              monthLabel: (() => { try { const [y,mo] = m.month.split('-'); return format(new Date(parseInt(y), parseInt(mo)-1, 1), 'MMM yy'); } catch { return m.month; } })()
+            }))} barGap={2}>
               <defs>
                 <linearGradient id="cgSales" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor="#8B5CF6" stopOpacity={0.9}/><stop offset="95%" stopColor="#8B5CF6" stopOpacity={0.5}/>
                 </linearGradient>
                 <linearGradient id="cgPurchase" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#F97316" stopOpacity={0.9}/><stop offset="95%" stopColor="#F97316" stopOpacity={0.5}/>
+                  <stop offset="5%" stopColor="#3B82F6" stopOpacity={0.9}/><stop offset="95%" stopColor="#3B82F6" stopOpacity={0.5}/>
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke={darkMode?'#374151':'#F3F4F6'}/>
-              <XAxis dataKey="month" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10}/>
+              <XAxis dataKey="monthLabel" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10}/>
               <YAxis yAxisId="amt" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10} tickFormatter={fmtM}/>
-              <YAxis yAxisId="cnt" orientation="right" stroke="#10B981" fontSize={10}/>
+              <YAxis yAxisId="cnt" orientation="right" stroke="#F97316" fontSize={10}/>
               <Tooltip
                 formatter={(v, n) => n === 'Transactions' ? [fmtNum(v), n] : [fmtCur(v), n]}
                 contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
               <Legend wrapperStyle={{fontSize:12}}/>
               <Bar yAxisId="amt" dataKey="sales_amount" name="Sales Amount" fill="url(#cgSales)" radius={[4,4,0,0]}/>
               <Bar yAxisId="amt" dataKey="purchase_amount" name="Purchase Amount" fill="url(#cgPurchase)" radius={[4,4,0,0]}/>
-              <Line yAxisId="cnt" type="monotone" dataKey="count" name="Transactions" stroke="#10B981" strokeWidth={2.5} dot={{r:3}} activeDot={{r:5}}/>
-            </BarChart>
+              <Line yAxisId="cnt" type="monotone" dataKey="count" name="Transactions" stroke="#F97316" strokeWidth={3} dot={{r:3,fill:'#F97316'}} activeDot={{r:5}} z={10}/>
+            </ComposedChart>
           </ResponsiveContainer>
         </div>
 
@@ -1162,24 +1153,50 @@ const App = () => {
             <h3 className={`text-base font-bold mb-3 ${txt} flex items-center gap-2`}>
               <BarChart3 className="w-5 h-5 text-green-500"/> Margin Distribution — PO Count
             </h3>
-            <ResponsiveContainer width="100%" height={260}>
-              <PieChart>
-                <Pie data={marginPieData} cx="50%" cy="45%" innerRadius={55} outerRadius={90}
-                  dataKey="value" labelLine={false} label={renderPctLabel}>
-                  {marginPieData.map((_,i)=><Cell key={i} fill={CPIE[i]}/>)}
-                </Pie>
-                <Tooltip formatter={(v,n)=>[`${fmtNum(v)} PO (${totalCompleted ? Math.round(v/totalCompleted*100) : 0}%)`, n]}
-                  contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
-                <Legend iconSize={10} wrapperStyle={{fontSize:12}}
-                  formatter={(value, entry) => (
-                    <span style={{color: darkMode?'#D1D5DB':'#374151'}}>
-                      {value}: <strong>{fmtNum(entry.payload.value)}</strong>
-                      {' '}({totalCompleted ? Math.round(entry.payload.value/totalCompleted*100) : 0}%)
-                    </span>
-                  )}
-                />
-              </PieChart>
-            </ResponsiveContainer>
+            <div className="flex gap-4">
+              {/* Pie chart */}
+              <div className="flex-1 min-w-0">
+                <ResponsiveContainer width="100%" height={220}>
+                  <PieChart>
+                    <Pie data={marginPieData} cx="50%" cy="45%" innerRadius={55} outerRadius={88}
+                      dataKey="value" labelLine={false} label={renderPctLabel}>
+                      {marginPieData.map((_,i)=><Cell key={i} fill={CPIE[i]}/>)}
+                    </Pie>
+                    <Tooltip formatter={(v,n)=>[`${fmtNum(v)} PO (${totalCompleted ? Math.round(v/totalCompleted*100) : 0}%)`, n]}
+                      contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+              {/* Side boxes */}
+              <div className="flex flex-col gap-2 justify-center min-w-[160px]">
+                {[
+                  { cat:'positive', label:'Positive', color:'text-green-600', bg: darkMode?'bg-green-900/30 border-green-700':'bg-green-50 border-green-200', count: d.margin_distribution.positive },
+                  { cat:'negative', label:'Negative', color:'text-red-600', bg: darkMode?'bg-red-900/30 border-red-700':'bg-red-50 border-red-200', count: d.margin_distribution.negative },
+                  { cat:'zero', label:'Zero / No Data', color:'text-gray-500', bg: darkMode?'bg-gray-700 border-gray-600':'bg-gray-50 border-gray-200', count: d.margin_distribution.zero },
+                ].map(({cat, label, color, bg, count}) => (
+                  <button key={cat} onClick={async () => {
+                    try {
+                      const params = new URLSearchParams({category: cat});
+                      if (completedDateFilter && completedDateFilter.mode !== 'all') {
+                        if (completedDateFilter.mode === 'year') params.append('date_year', completedDateFilter.year);
+                        else if (completedDateFilter.mode === 'range') {
+                          if (completedDateFilter.start) params.append('date_from', completedDateFilter.start);
+                          if (completedDateFilter.end) params.append('date_to', completedDateFilter.end);
+                        }
+                      }
+                      const res = await api.get(`/api/completed/margin-detail?${params}`);
+                      setMarginDetailModal({ category: label, data: Array.isArray(res.data) ? res.data : [] });
+                    } catch(e) { addToast(`Failed to load detail: ${e.message}`, 'error'); }
+                  }}
+                    className={`text-left p-3 rounded-xl border cursor-pointer transition-all hover:shadow-md ${bg}`}>
+                    <p className={`text-xs font-bold ${color} mb-1`}>{label}</p>
+                    <p className={`text-lg font-bold ${color}`}>{fmtNum(count)} <span className="text-xs font-normal">PO</span></p>
+                    <p className={`text-xs ${txt2} mt-0.5`}>{totalCompleted ? Math.round(count/totalCompleted*100) : 0}% of total</p>
+                    <p className={`text-xs text-purple-500 font-semibold mt-1`}>Click for details →</p>
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         </div>
 
@@ -1246,7 +1263,10 @@ const App = () => {
                         <div className={`w-full h-1.5 rounded-full ${darkMode?'bg-gray-600':'bg-red-100'} mb-1`}>
                           <div className="h-1.5 rounded-full bg-red-500" style={{width:`${barPct}%`}}/>
                         </div>
-                        <p className={`text-xs ${txt2}`}>{fmtNum(v.count)} transactions</p>
+                        <div className="flex justify-between text-xs">
+                          <span className={txt2}>{fmtNum(v.count)} negative txn{v.count!==1?'s':''}</span>
+                          <span className={txt2}>Sales: {fmtCurShort(v.total_sales||0)} · PO: {fmtCurShort(v.total_purchase||0)}</span>
+                        </div>
                       </div>
                     );
                   })}
@@ -1268,7 +1288,7 @@ const App = () => {
                   <table className="w-full text-xs">
                     <thead>
                       <tr className={tblHd}>
-                        {['#','SO Item','Vendor','Sales','Purchase','Margin','%','Date'].map(h=>(
+                        {['#','Product ID','Product','Vendor','Sales','Purchase','Margin','%','Txns','Last Date'].map(h=>(
                           <th key={h} className={`px-2 py-2 text-left font-semibold ${darkMode?'text-purple-300':'text-purple-700'}`}>{h}</th>
                         ))}
                       </tr>
@@ -1278,14 +1298,17 @@ const App = () => {
                         <tr key={i} className={`${trHov} ${i===0?darkMode?'bg-red-900/20':'bg-red-50':''}`}>
                           <td className={`px-2 py-2 font-bold text-red-600`}>{i+1}</td>
                           <td className="px-2 py-2">
-                            <p className="font-semibold text-purple-600">{t.so_item}</p>
-                            <p className={`truncate max-w-[100px] ${txt2}`} title={t.product}>{t.product}</p>
+                            <p className="font-semibold text-purple-600 whitespace-nowrap">{t.item_code||'-'}</p>
+                          </td>
+                          <td className="px-2 py-2">
+                            <p className={`truncate max-w-[120px] ${txt}`} title={t.product}>{t.product}</p>
                           </td>
                           <td className={`px-2 py-2 ${txt} truncate max-w-[90px]`} title={t.vendor}>{t.vendor}</td>
                           <td className="px-2 py-2 text-blue-600 whitespace-nowrap">{fmtCurShort(t.sales_amount)}</td>
                           <td className="px-2 py-2 text-orange-600 whitespace-nowrap">{fmtCurShort(t.purchase_amount)}</td>
                           <td className="px-2 py-2 font-bold text-red-600 whitespace-nowrap">{fmtCurShort(t.margin)}</td>
                           <td className="px-2 py-2 font-semibold text-red-500 whitespace-nowrap">{t.margin_pct != null ? `${t.margin_pct}%` : '—'}</td>
+                          <td className={`px-2 py-2 text-center ${txt2}`}>{fmtNum(t.count||1)}</td>
                           <td className={`px-2 py-2 ${txt2} whitespace-nowrap`}>{t.date ? fmtDate(t.date) : '-'}</td>
                         </tr>
                       ))}
@@ -1330,23 +1353,33 @@ const App = () => {
 
     return (
     <>
-      {/* Date Range Filter */}
-      <DateRangeFilter
-        darkMode={darkMode} txt={txt} txt2={txt2} card={card}
-        label="Filter Tanggal SO Create"
-        onFilter={(f) => { setDashDateFilter(f); }}
-      />
-      {/* Date Range Info Bar */}
-      <div className={`mb-4 px-5 py-3 rounded-xl flex flex-wrap gap-6 text-xs ${darkMode?'bg-gray-800 border border-gray-700':'bg-white border border-gray-100'} shadow`}>
-        <div className="flex items-center gap-2">
-          <Calendar className="w-4 h-4 text-purple-500"/>
-          <span className={txt2}>PO Date Range:</span>
-          <span className={`font-semibold ${txt}`}>{fmtDateRange(stats?.po_date_range)}</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Calendar className="w-4 h-4 text-blue-500"/>
-          <span className={txt2}>SO Create Date Range:</span>
-          <span className={`font-semibold ${txt}`}>{fmtDateRange(stats?.so_date_range)}</span>
+      {/* Date Range Filter + Info Row */}
+      <div className="mb-4">
+        <DateRangeFilter
+          darkMode={darkMode} txt={txt} txt2={txt2} card={card}
+          label="Filter SO Create Date"
+          onFilter={(f) => { setDashDateFilter(f); }}
+        />
+        {/* Date range info row */}
+        <div className={`-mt-3 mb-4 px-5 py-2.5 rounded-b-xl flex flex-wrap gap-4 text-xs ${darkMode?'bg-gray-800/50':'bg-purple-50/80'} border-x border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
+          <div className="flex items-center gap-1.5">
+            <Calendar className="w-3.5 h-3.5 text-purple-400"/>
+            <span className={txt2}>PO Range:</span>
+            <span className={`font-semibold ${txt}`}>{fmtDateRange(stats?.po_date_range)}</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Calendar className="w-3.5 h-3.5 text-blue-400"/>
+            <span className={txt2}>SO Create Range:</span>
+            <span className={`font-semibold ${txt}`}>{fmtDateRange(stats?.so_date_range)}</span>
+          </div>
+          {stats?.last_updated && (
+            <div className="flex items-center gap-1.5 ml-auto">
+              <span className={txt2}>Last Updated:</span>
+              <span className={`font-semibold ${txt}`}>
+                {(() => { try { return new Date(stats.last_updated).toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); } catch { return stats.last_updated; } })()}
+              </span>
+            </div>
+          )}
         </div>
       </div>
 
@@ -1389,7 +1422,7 @@ const App = () => {
               <h3 className={`text-xl font-bold mt-1 text-purple-600`}>{fmtCurShort(stats?.total_po_amount)}</h3>
               <p className={`text-xs mt-1 ${txt2}`}>{fmtCur(stats?.total_po_amount)}</p>
             </div>
-            <div className="p-3 bg-purple-100 rounded-xl"><DollarSign className="w-6 h-6 text-purple-600"/></div>
+            <div className="p-3 bg-purple-100 rounded-xl"><Coins className="w-6 h-6 text-purple-600"/></div>
           </div>
         </div>
 
@@ -1711,7 +1744,7 @@ const App = () => {
       {/* Date Range Filter */}
       <DateRangeFilter
         darkMode={darkMode} txt={txt} txt2={txt2} card={card}
-        label="Filter Tanggal SO Create"
+        label="Filter SO Create Date"
         onFilter={(f) => {
           setSODateFilter(f);
           setSoPage(1);
@@ -1740,7 +1773,7 @@ const App = () => {
 
         {/* Aging Filter Chips */}
         <div className="mb-3 flex flex-wrap gap-2 items-center">
-          <span className={`text-xs font-medium ${txt2}`}>Filter Aging:</span>
+          <span className={`text-xs font-medium ${txt2}`}>Filter by Aging:</span>
           {AGING_LABELS.map(label => {
             const active = soFilters.aging.includes(label);
             return (
@@ -1888,9 +1921,9 @@ const App = () => {
                   <td className={`px-3 py-2 min-w-[180px] truncate ${txt2}`} title={so.operation_unit_name}>{so.operation_unit_name}</td>
                   <td className={`px-3 py-2 max-w-[120px] truncate ${txt2}`} title={so.vendor_name}>{so.vendor_name}</td>
                   <td className={`px-3 py-2 text-right ${txt2}`}>{fmtNum(so.so_qty)}</td>
-                  <td className="px-3 py-2 text-right whitespace-nowrap min-w-[130px]">{fmtCur(so.sales_price)}</td>
+                  <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${txt}`}>{fmtCur(so.sales_price)}</td>
                   <td className="px-3 py-2 text-right font-semibold text-orange-600 whitespace-nowrap min-w-[130px]">{fmtCur(so.sales_amount)}</td>
-                  <td className="px-3 py-2 text-right whitespace-nowrap min-w-[130px]">{fmtCur(so.purchasing_price)}</td>
+                  <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${txt}`}>{fmtCur(so.purchasing_price)}</td>
                   <td className="px-3 py-2 text-right font-semibold text-green-600 whitespace-nowrap min-w-[130px]">{fmtCur(poAmount)}</td>
                   <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${marginColor}`}>{fmtCur(margin)}</td>
                   <td className={`px-3 py-2 text-right whitespace-nowrap ${marginColor}`}>
@@ -2146,7 +2179,7 @@ const App = () => {
           </button>
           <button onClick={()=>{ setActivePage('completed'); fetchCompletedData(completedYear, completedDateFilter); window.scrollTo({top:0,behavior:'smooth'}); }}
             className={`p-3 rounded-xl flex justify-center transition-all ${activePage==='completed'?'bg-white/30 text-white shadow-lg':'text-purple-100 hover:bg-white/20'}`} title="Delivery Completed">
-            <Banknote className="w-6 h-6"/>
+            <Coins className="w-6 h-6"/>
           </button>
         </nav>
         <button onClick={()=>setDarkMode(d=>!d)} className="p-3 rounded-xl text-white hover:bg-white/20 transition-all">
@@ -2181,10 +2214,26 @@ const App = () => {
                 className="flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all bg-orange-600 hover:bg-orange-700 text-white">
                 <EyeOff className="w-4 h-4"/><span className="text-sm font-medium">Hide</span>
                 <ChevronDown className="w-3.5 h-3.5"/>
+                {deleteRequests.filter(r=>r.is_hidden).length > 0 && (
+                  <span className="px-1.5 py-0.5 bg-white text-orange-600 rounded-full text-xs font-bold">
+                    {deleteRequests.filter(r=>r.is_hidden).length}
+                  </span>
+                )}
               </button>
               {showHideMenu && (
-                <div className={`absolute right-0 mt-2 z-50 rounded-xl shadow-2xl border w-72 p-3 ${darkMode?'bg-gray-800 border-gray-700 text-white':'bg-white border-gray-200'}`}>
-                  <p className={`text-xs font-semibold mb-3 px-1 ${darkMode?'text-gray-300':'text-gray-600'}`}>
+                <div className={`absolute right-0 mt-2 z-50 rounded-xl shadow-2xl border w-80 p-3 ${darkMode?'bg-gray-800 border-gray-700 text-white':'bg-white border-gray-200'}`}>
+                  {/* View Hidden History */}
+                  <button onClick={()=>{ setShowHideMenu(false); fetchDeleteRequests(); setShowHiddenPanel(true); }}
+                    className={`w-full flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold mb-3 ${darkMode?'bg-gray-700 hover:bg-gray-600 text-white':'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>
+                    <Eye className="w-4 h-4 text-purple-500"/>
+                    View Hide History
+                    {deleteRequests.filter(r=>r.is_hidden).length > 0 && (
+                      <span className="ml-auto px-2 py-0.5 bg-orange-500 text-white rounded-full text-xs font-bold">
+                        {deleteRequests.filter(r=>r.is_hidden).length}
+                      </span>
+                    )}
+                  </button>
+                  <p className={`text-xs font-semibold mb-2 px-1 ${darkMode?'text-gray-300':'text-gray-600'}`}>
                     Hide data from dashboard via Excel template
                   </p>
                   {/* PO HLI */}
@@ -2220,17 +2269,6 @@ const App = () => {
                 </div>
               )}
             </div>
-
-            <button onClick={()=>{ fetchDeleteRequests(); setShowHiddenPanel(true); }}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all ${darkMode?'bg-gray-600 hover:bg-gray-500 text-white':'bg-gray-200 hover:bg-gray-300 text-gray-700'}`}>
-              <Eye className="w-4 h-4"/>
-              <span className="text-sm font-medium">Hide History</span>
-              {deleteRequests.filter(r=>r.is_hidden).length > 0 && (
-                <span className="px-1.5 py-0.5 bg-orange-500 text-white rounded-full text-xs font-bold">
-                  {deleteRequests.filter(r=>r.is_hidden).length}
-                </span>
-              )}
-            </button>
           </div>
         </header>
 
@@ -2238,6 +2276,42 @@ const App = () => {
       </main>
 
       {modal && <SOModal title={modal.title} data={modal.data} darkMode={darkMode} onClose={()=>setModal(null)}/>}
+
+      {marginDetailModal && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={()=>setMarginDetailModal(null)}>
+          <div className={`rounded-2xl shadow-2xl w-full max-w-5xl max-h-[85vh] flex flex-col ${darkMode?'bg-gray-800 text-white':'bg-white'}`} onClick={e=>e.stopPropagation()}>
+            <div className={`flex justify-between items-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
+              <h3 className="font-bold text-lg">Margin Detail — {marginDetailModal.category}
+                <span className={`text-sm font-normal ml-2 ${txt2}`}>({fmtNum(marginDetailModal.data?.length)} records)</span>
+              </h3>
+              <button onClick={()=>setMarginDetailModal(null)} className={`p-1.5 rounded-lg ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`}><X className="w-5 h-5"/></button>
+            </div>
+            <div className="overflow-auto flex-1">
+              <table className="w-full text-xs">
+                <thead className={`sticky top-0 ${darkMode?'bg-gray-700':'bg-purple-50'}`}>
+                  <tr>{['SO Item','Product','Vendor','Sales','Purchase','Margin','%','Date'].map(h=>(
+                    <th key={h} className={`px-3 py-2 text-left font-semibold ${darkMode?'text-gray-200':'text-gray-700'}`}>{h}</th>
+                  ))}</tr>
+                </thead>
+                <tbody className={`divide-y ${darkMode?'divide-gray-700':'divide-gray-100'}`}>
+                  {(marginDetailModal.data||[]).map((t,i)=>(
+                    <tr key={i} className={darkMode?'hover:bg-gray-700':'hover:bg-purple-50'}>
+                      <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{t.so_item||'-'}</td>
+                      <td className={`px-3 py-2 max-w-[160px] truncate ${txt}`}>{t.product||'-'}</td>
+                      <td className={`px-3 py-2 max-w-[120px] truncate ${txt2}`}>{t.vendor||'-'}</td>
+                      <td className="px-3 py-2 text-right text-blue-600 whitespace-nowrap">{fmtCur(t.sales_amount)}</td>
+                      <td className="px-3 py-2 text-right text-orange-600 whitespace-nowrap">{fmtCur(t.purchase_amount)}</td>
+                      <td className={`px-3 py-2 text-right font-bold whitespace-nowrap ${t.margin<0?'text-red-600':t.margin>0?'text-green-600':'text-gray-400'}`}>{fmtCur(t.margin)}</td>
+                      <td className={`px-3 py-2 text-right whitespace-nowrap ${t.margin<0?'text-red-500':t.margin>0?'text-green-500':'text-gray-400'}`}>{t.margin_pct!=null?`${t.margin_pct}%`:'—'}</td>
+                      <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{t.date?fmtDate(t.date):'-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showHiddenPanel && (
         <HiddenItemsPanel
