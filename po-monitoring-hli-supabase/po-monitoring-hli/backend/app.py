@@ -230,6 +230,49 @@ def open_so_filter():
         SOData.so_status.notin_(list(CLOSED_STATUSES))
     )
 
+
+def parse_so_date_args(args=None):
+    """Read date_year / date_from / date_to (with optional legacy `year`)
+    from a request args object and normalize them.
+    Returns (date_year_str, date_from_str, date_to_str)."""
+    args = args if args is not None else request.args
+    date_year = args.get('date_year', '')
+    date_from = args.get('date_from', '')
+    date_to   = args.get('date_to', '')
+    if not date_year:
+        legacy = args.get('year', '')
+        if legacy and legacy != 'all':
+            date_year = legacy
+    return date_year, date_from, date_to
+
+
+def apply_so_create_date_filter(query, date_year='', date_from='', date_to='', is_sqlite=None):
+    """Apply SO Create Date filter to any query that references SOData."""
+    if is_sqlite is None:
+        is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
+    if date_year:
+        try:
+            yr = int(date_year)
+            if is_sqlite:
+                return query.filter(func.strftime('%Y', SOData.so_create_date) == str(yr))
+            return query.filter(func.extract('year', SOData.so_create_date) == yr)
+        except (ValueError, TypeError):
+            return query
+    if date_from:
+        query = query.filter(SOData.so_create_date >= date_from)
+    if date_to:
+        query = query.filter(SOData.so_create_date <= date_to)
+    return query
+
+
+def utc_isoformat(dt):
+    """Serialize a (naive UTC) datetime as an ISO-8601 string with a trailing
+    'Z' so JS Date() parses it as UTC and the browser converts to local time."""
+    if dt is None:
+        return None
+    s = dt.isoformat()
+    return s if s.endswith('Z') or '+' in s[10:] else s + 'Z'
+
 def is_return_so_item(so_item):
     if not so_item:
         return False
@@ -361,15 +404,23 @@ def get_dashboard_stats():
         hidden_po = get_hidden_po_numbers()
         hidden_so = get_hidden_so_items()
 
+        # SO Create Date filter (applied to every SO-based aggregate below).
+        # PO-based metrics (total_po_amount, po_without_so_count) and the data
+        # range / last_updated metadata are intentionally NOT filtered.
+        date_year, date_from, date_to = parse_so_date_args()
+
+        def so_q(*extra_filters):
+            q = db.session.query(SOData).filter(*extra_filters) if extra_filters else db.session.query(SOData)
+            return apply_so_create_date_filter(q, date_year, date_from, date_to)
+
         po_count = db.session.query(func.count(POData.id)).scalar() or 0
         total_po_amount = db.session.query(func.sum(POData.amount)).scalar() or 0
 
         # total_so_count: count only "countable" open SOs (same logic as aging)
         # excludes: return items (SO item starting with '9'), internal PO refs, excluded op units, hidden items
         total_so_count = 0
-        for s in db.session.query(SOData).filter(
-                open_so_filter(),
-                ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
+        for s in so_q(open_so_filter(),
+                      ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
             if s.so_item in hidden_so or s.so_number in hidden_so:
                 continue
             if so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
@@ -390,9 +441,8 @@ def get_dashboard_stats():
                 po_without_so_count += 1
 
         so_without_po_count = 0
-        for s in db.session.query(SOData).filter(
-                open_so_filter(),
-                ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
+        for s in so_q(open_so_filter(),
+                      ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
             if s.so_item in hidden_so or s.so_number in hidden_so:
                 continue
             if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
@@ -401,9 +451,13 @@ def get_dashboard_stats():
             if not candidates or not any(c in po_numbers for c in candidates):
                 so_without_po_count += 1
 
+        # Monthly trend (open SO, sum of sales by month)
+        monthly_q = apply_so_create_date_filter(
+            db.session.query(SOData.so_create_date, SOData.sales_amount).filter(open_so_filter()),
+            date_year, date_from, date_to,
+        )
         monthly = {}
-        for d, amt in db.session.query(SOData.so_create_date, SOData.sales_amount)\
-                                 .filter(open_so_filter()).all():
+        for d, amt in monthly_q.all():
             if d:
                 k = d.strftime('%b %Y')
                 if k not in monthly:
@@ -413,39 +467,49 @@ def get_dashboard_stats():
         monthly_trend = sorted(monthly.values(), key=lambda x: x['_s'])
         for m in monthly_trend: del m['_s']
 
+        top_vendors_q = apply_so_create_date_filter(
+            db.session.query(
+                SOData.vendor_name, func.count(SOData.id), func.sum(SOData.sales_amount)
+            ).filter(open_so_filter(), SOData.vendor_name.isnot(None)),
+            date_year, date_from, date_to,
+        ).group_by(SOData.vendor_name).order_by(func.sum(SOData.sales_amount).desc()).limit(5)
         top_vendors = [
             {'vendor': r[0], 'so_count': r[1], 'total_amount': round(r[2] or 0, 2)}
-            for r in db.session.query(
-                SOData.vendor_name, func.count(SOData.id), func.sum(SOData.sales_amount)
-            ).filter(open_so_filter(), SOData.vendor_name.isnot(None))
-             .group_by(SOData.vendor_name)
-             .order_by(func.sum(SOData.sales_amount).desc()).limit(5).all()
+            for r in top_vendors_q.all()
         ]
 
+        top_op_units_q = apply_so_create_date_filter(
+            db.session.query(
+                SOData.operation_unit_name, func.count(SOData.id), func.sum(SOData.sales_amount)
+            ).filter(open_so_filter(), SOData.operation_unit_name.isnot(None)),
+            date_year, date_from, date_to,
+        ).group_by(SOData.operation_unit_name).order_by(func.sum(SOData.sales_amount).desc()).limit(10)
         top_op_units = [
             {'op_unit': r[0], 'so_count': r[1], 'total_amount': round(r[2] or 0, 2)}
-            for r in db.session.query(
-                SOData.operation_unit_name, func.count(SOData.id), func.sum(SOData.sales_amount)
-            ).filter(open_so_filter(), SOData.operation_unit_name.isnot(None))
-             .group_by(SOData.operation_unit_name)
-             .order_by(func.sum(SOData.sales_amount).desc()).limit(10).all()
+            for r in top_op_units_q.all()
         ]
 
         total_open_for_pct = total_so_count or 1
+        so_status_q = apply_so_create_date_filter(
+            db.session.query(
+                SOData.so_status, func.count(SOData.id), func.sum(SOData.sales_amount)
+            ).filter(open_so_filter(), SOData.so_status.isnot(None)),
+            date_year, date_from, date_to,
+        ).group_by(SOData.so_status).order_by(func.count(SOData.id).desc())
         so_status = [{'name': r[0], 'value': r[1],
             'percentage': round(r[1] / total_open_for_pct * 100, 1),
             'amount': round(r[2] or 0, 2)
-        } for r in db.session.query(
-            SOData.so_status, func.count(SOData.id), func.sum(SOData.sales_amount)
-        ).filter(open_so_filter(), SOData.so_status.isnot(None))
-         .group_by(SOData.so_status)
-         .order_by(func.count(SOData.id).desc()).all()]
+        } for r in so_status_q.all()]
 
+        monthly_by_status_q = apply_so_create_date_filter(
+            db.session.query(
+                SOData.so_status, SOData.so_create_date, SOData.sales_amount
+            ).filter(open_so_filter()),
+            date_year, date_from, date_to,
+        )
         monthly_by_status = {}
         all_months_set = set()
-        for s_status, s_date, s_amt in db.session.query(
-                SOData.so_status, SOData.so_create_date, SOData.sales_amount
-        ).filter(open_so_filter()).all():
+        for s_status, s_date, s_amt in monthly_by_status_q.all():
             st = s_status or 'Unknown'
             amt_v = float(s_amt or 0)
             if s_date:
@@ -469,8 +533,10 @@ def get_dashboard_stats():
             key=lambda x: x['total'], reverse=True
         )
 
-        total_open_so_amount = db.session.query(func.sum(SOData.sales_amount))\
-                                          .filter(open_so_filter()).scalar() or 0
+        total_open_so_amount = apply_so_create_date_filter(
+            db.session.query(func.sum(SOData.sales_amount)).filter(open_so_filter()),
+            date_year, date_from, date_to,
+        ).scalar() or 0
 
         po_date_range = db.session.query(func.min(POData.po_date), func.max(POData.po_date)).first()
         so_date_range = db.session.query(func.min(SOData.so_create_date), func.max(SOData.so_create_date)).first()
@@ -496,7 +562,7 @@ def get_dashboard_stats():
             'so_status': so_status,
             'so_status_monthly': so_status_monthly,
             'status_months': sorted_months,
-            'last_updated': last_upload.isoformat() if last_upload else None,
+            'last_updated': utc_isoformat(last_upload),
             'po_date_range': {
                 'min': po_date_range[0].isoformat() if po_date_range and po_date_range[0] else None,
                 'max': po_date_range[1].isoformat() if po_date_range and po_date_range[1] else None,

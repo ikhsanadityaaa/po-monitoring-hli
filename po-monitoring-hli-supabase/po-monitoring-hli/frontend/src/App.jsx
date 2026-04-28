@@ -513,13 +513,23 @@ const HiddenItemsPanel = ({ darkMode, requests, onRestore, onClose }) => {
 };
 
 // ─── Date Range Filter ────────────────────────────────────────────────────
-const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, label = 'Filter SO Create Date' }) => {
+const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = 'Filter SO Create Date' }) => {
   const currentYear = new Date().getFullYear();
   const years = Array.from({ length: 6 }, (_, i) => currentYear - i);
-  const [mode, setMode] = useState('all'); // 'all' | 'year' | 'range'
-  const [selectedYear, setSelectedYear] = useState(String(currentYear));
-  const [startDate, setStartDate] = useState('');
-  const [endDate, setEndDate] = useState('');
+  const [mode, setMode] = useState(value?.mode || 'all'); // 'all' | 'year' | 'range'
+  const [selectedYear, setSelectedYear] = useState(String(value?.year || currentYear));
+  const [startDate, setStartDate] = useState(value?.start || '');
+  const [endDate, setEndDate] = useState(value?.end || '');
+
+  // Keep internal state in sync when the controlled `value` changes externally
+  // (e.g. user changes filter on another page that shares the same global state).
+  useEffect(() => {
+    if (!value) return;
+    setMode(value.mode || 'all');
+    if (value.year)  setSelectedYear(String(value.year));
+    if (value.start !== undefined) setStartDate(value.start || '');
+    if (value.end   !== undefined) setEndDate(value.end || '');
+  }, [value?.mode, value?.year, value?.start, value?.end]);
 
   const apply = () => {
     if (mode === 'all') onFilter({ mode: 'all' });
@@ -629,10 +639,15 @@ const App = () => {
   const [marginDetailModal, setMarginDetailModal] = useState(null); // {category, data}
   const hideMenuRef = useRef(null);
 
-  // ── Date filter states per page ──────────────────────────────────────────
-  const [dashDateFilter, setDashDateFilter] = useState({ mode: 'all' });
-  const [soDateFilter, setSODateFilter] = useState({ mode: 'all' });
-  const [completedDateFilter, setCompletedDateFilter] = useState({ mode: 'all' });
+  // ── Global SO Create Date filter (shared across Dashboard / All SO / Delivery Completed)
+  const [globalDateFilter, setGlobalDateFilter] = useState({ mode: 'all' });
+  // Aliases kept so existing references continue to compile.
+  const dashDateFilter      = globalDateFilter;
+  const setDashDateFilter   = setGlobalDateFilter;
+  const soDateFilter        = globalDateFilter;
+  const setSODateFilter     = setGlobalDateFilter;
+  const completedDateFilter = globalDateFilter;
+  const setCompletedDateFilter = setGlobalDateFilter;
   useEffect(() => {
     const handler = (e) => { if (hideMenuRef.current && !hideMenuRef.current.contains(e.target)) setShowHideMenu(false); };
     document.addEventListener('mousedown', handler);
@@ -644,11 +659,21 @@ const App = () => {
   }, []);
   const removeToast = useCallback((id) => setToasts(t => t.filter(x => x.id !== id)), []);
 
-  const fetchDashboard = useCallback(async () => {
+  const fetchDashboard = useCallback(async (dateFilter) => {
     setLoading(true);
     try {
+      const params = new URLSearchParams();
+      const f = dateFilter || globalDateFilter;
+      if (f && f.mode !== 'all') {
+        if (f.mode === 'year') params.append('date_year', f.year);
+        else if (f.mode === 'range') {
+          if (f.start) params.append('date_from', f.start);
+          if (f.end)   params.append('date_to',   f.end);
+        }
+      }
+      const qs = params.toString() ? `?${params}` : '';
       const [sRes, pRes, aRes] = await Promise.all([
-        api.get('/api/dashboard/stats'),
+        api.get(`/api/dashboard/stats${qs}`),
         api.get('/api/data/po-without-so'),
         api.get('/api/data/aging')
       ]);
@@ -667,7 +692,7 @@ const App = () => {
     } catch (e) {
       addToast(`Error: ${e.response?.data?.error || e.message}`, 'error');
     } finally { setLoading(false); }
-  }, [addToast]);
+  }, [addToast, globalDateFilter]);
 
   // Helper: filter array of objects by date field using a DateRangeFilter config
   const applyDateFilter = useCallback((arr, dateField, filter) => {
@@ -795,6 +820,14 @@ const App = () => {
 
   useEffect(() => { fetchDashboard(); fetchDeleteRequests(); }, []);
   useEffect(() => { if (activePage === 'all-so') fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter); }, [activePage]);
+
+  // Refetch dashboard whenever the global SO Create Date filter changes
+  // (skip the very first run since the mount effect above already fetched).
+  const skipFirstFilterRefetch = useRef(true);
+  useEffect(() => {
+    if (skipFirstFilterRefetch.current) { skipFirstFilterRefetch.current = false; return; }
+    fetchDashboard(globalDateFilter);
+  }, [globalDateFilter, fetchDashboard]);
 
   const handleUpload = async (e, type) => {
     const file = e.target.files[0]; if (!file) return;
@@ -1047,9 +1080,10 @@ const App = () => {
         {/* ── Date Range Filter ───────────────────────────────── */}
         <DateRangeFilter
           darkMode={darkMode} txt={txt} txt2={txt2} card={card}
+          value={globalDateFilter}
           label="Filter SO Create Date"
           onFilter={(f) => {
-            setCompletedDateFilter(f);
+            setGlobalDateFilter(f);
             if (f.mode === 'year') { setCompletedYear(f.year); fetchCompletedData(f.year, f); }
             else { setCompletedYear('all'); fetchCompletedData('all', f); }
           }}
@@ -1357,8 +1391,9 @@ const App = () => {
       <div className="mb-4">
         <DateRangeFilter
           darkMode={darkMode} txt={txt} txt2={txt2} card={card}
+          value={globalDateFilter}
           label="Filter SO Create Date"
-          onFilter={(f) => { setDashDateFilter(f); }}
+          onFilter={(f) => { setGlobalDateFilter(f); }}
         />
         {/* Date range info row */}
         <div className={`-mt-3 mb-4 px-5 py-2.5 rounded-b-xl flex flex-wrap gap-4 text-xs ${darkMode?'bg-gray-800/50':'bg-purple-50/80'} border-x border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
@@ -1744,9 +1779,10 @@ const App = () => {
       {/* Date Range Filter */}
       <DateRangeFilter
         darkMode={darkMode} txt={txt} txt2={txt2} card={card}
+        value={globalDateFilter}
         label="Filter SO Create Date"
         onFilter={(f) => {
-          setSODateFilter(f);
+          setGlobalDateFilter(f);
           setSoPage(1);
           fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter, f);
         }}
