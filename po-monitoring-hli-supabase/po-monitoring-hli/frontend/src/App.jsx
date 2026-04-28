@@ -2256,6 +2256,29 @@ const App = () => {
               <Upload className="w-4 h-4"/><span className="text-sm font-medium">Upload SMRO - Search Client Odr</span>
               <input type="file" accept=".xlsx,.xls" onChange={e=>handleUpload(e,'smro')} className="hidden"/>
             </label>
+            <label title="Upload SMRO file to fill in missing Specification & Product ID data on existing records"
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all ${darkMode?'bg-teal-700 hover:bg-teal-800 text-white':'bg-teal-600 hover:bg-teal-700 text-white'}`}>
+              <Plus className="w-4 h-4"/><span className="text-sm font-medium">Backfill Spec & Product ID</span>
+              <input type="file" accept=".xlsx,.xls" onChange={async e => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                e.target.value = '';
+                setDownloadToast({ message: 'Backfilling Specification & Product ID...' });
+                try {
+                  const fd = new FormData();
+                  fd.append('file', file);
+                  const res = await api.post('/api/upload/smro-backfill-spec', fd);
+                  setDownloadToast(null);
+                  addToast(`✅ ${res.data.message}`, 'success');
+                  // Refresh dashboard data to show updated spec/pid
+                  fetchDashboard(globalDateFilter);
+                  if (activePage === 'completed') fetchCompletedData(completedYear, completedDateFilter);
+                } catch (err) {
+                  setDownloadToast(null);
+                  addToast(`❌ Backfill gagal: ${err.response?.data?.error || err.message}`, 'error');
+                }
+              }} className="hidden"/>
+            </label>
             <div className="relative" ref={hideMenuRef}>
               <button onClick={()=>setShowHideMenu(o=>!o)}
                 className="flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all bg-orange-600 hover:bg-orange-700 text-white">
