@@ -1690,16 +1690,22 @@ def batch_upload_so():
     try:
         if 'file' not in request.files: return jsonify({'error': 'No file'}), 400
         file = request.files['file']
-        df = pd.read_excel(file, engine='openpyxl')
+        # Row 0 = header, row 1 = example (red row) → skip with skiprows so
+        # actual data starts at row index 0 of the resulting DataFrame (Excel row 3+).
+        df = pd.read_excel(file, engine='openpyxl', skiprows=[1])
         df.columns = [str(c).strip() for c in df.columns]
-        col_so   = find_column(df, ['SO Number','SO No','SO Item'])
-        col_plan = find_column(df, ['Delivery Plan Date','Plan Date'])
-        col_rem  = find_column(df, ['Remarks','Remark'])
+        col_so_item = find_column(df, ['SO Item', 'SO Item No', 'SO Item Number'])
+        col_plan    = find_column(df, ['Delivery Plan Date', 'Plan Date'])
+        col_rem     = find_column(df, ['Remarks', 'Remark'])
+        if not col_so_item:
+            return jsonify({'error': f'Column "SO Item" not found. Available: {df.columns.tolist()}'}), 400
         updated = 0
+        not_found = 0
         for _, row in df.iterrows():
-            so_num = clean(df_val(row, col_so)) if col_so else None
-            if not so_num: continue
-            so = SOData.query.filter_by(so_number=so_num).first()
+            so_item_val = clean(df_val(row, col_so_item)) if col_so_item else None
+            if not so_item_val: continue
+            # Lookup by so_item (unique identifier) — NOT so_number
+            so = SOData.query.filter_by(so_item=so_item_val).first()
             if so:
                 if col_plan:
                     d = parse_date(df_val(row, col_plan))
@@ -1708,8 +1714,10 @@ def batch_upload_so():
                     r = clean(df_val(row, col_rem))
                     if r: so.remarks = r
                 updated += 1
+            else:
+                not_found += 1
         db.session.commit()
-        return jsonify({'updated': updated})
+        return jsonify({'updated': updated, 'not_found': not_found})
     except Exception as e:
         db.session.rollback(); import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
@@ -1820,32 +1828,36 @@ def download_hide_template():
 
     if hide_type == 'SO':
         ws.title = "Hide SO Template"
-        headers = ['SO Number', 'Reason']
+        headers = ['SO Item', 'Reason']
         ws.append(headers)
-        # Style header
-        fill = PatternFill(start_color="1D4ED8", end_color="1D4ED8", fill_type="solid")
+        # Header: yellow background, bold, centered
+        header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
         for i, cell in enumerate(ws[1], 1):
-            cell.fill = fill
-            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = header_fill
+            cell.font = Font(bold=True, color="000000")
             cell.alignment = Alignment(horizontal='center')
-            ws.column_dimensions[get_column_letter(i)].width = 30 if i == 1 else 50
-        # Example row
-        ws.append(['9008988017-10', 'Reason why this SO should be hidden'])
-        note_row = ws.append(['INSTRUCTIONS: Fill SO Number (format: SO_NUMBER-ITEM_NO or SO_NUMBER), and Reason (required)'])
+            ws.column_dimensions[get_column_letter(i)].width = 35 if i == 1 else 50
+        # Row 2: example row in red font
+        ws.append(['9008988017-10', 'Reason why this SO Item should be hidden'])
+        example_font = Font(color="FF0000")
+        for cell in ws[2]:
+            cell.font = example_font
     else:
         ws.title = "Hide PO HLI Template"
         headers = ['NO PO HLI (PO Number-Item No)', 'Reason']
         ws.append(headers)
-        # Style header
-        fill = PatternFill(start_color="7C3AED", end_color="7C3AED", fill_type="solid")
+        # Header: yellow background, bold, centered
+        header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
         for i, cell in enumerate(ws[1], 1):
-            cell.fill = fill
-            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = header_fill
+            cell.font = Font(bold=True, color="000000")
             cell.alignment = Alignment(horizontal='center')
             ws.column_dimensions[get_column_letter(i)].width = 35 if i == 1 else 50
-        # Example row
+        # Row 2: example row in red font
         ws.append(['4502358819-10', 'Reason why this PO HLI should be hidden'])
-        ws.append(['INSTRUCTIONS: Fill NO PO HLI with format PO_NUMBER-ITEM_NO (example: 4502358819-10), and Reason (required)'])
+        example_font = Font(color="FF0000")
+        for cell in ws[2]:
+            cell.font = example_font
 
     output = io.BytesIO()
     wb.save(output)
@@ -1865,12 +1877,12 @@ def upload_hide_batch():
         file = request.files['file']
         hide_type = request.form.get('type', 'PO').upper()
 
-        df = pd.read_excel(file, engine='openpyxl')
+        df = pd.read_excel(file, engine='openpyxl', skiprows=[1])
         df.columns = [str(c).strip() for c in df.columns]
 
         # Detect column names
         if hide_type == 'SO':
-            col_ref = find_column(df, ['SO Number', 'SO No', 'SO Item', 'SO Number-Item No'])
+            col_ref = find_column(df, ['SO Item', 'SO Item No', 'SO Number', 'SO No', 'SO Number-Item No'])
         else:
             col_ref = find_column(df, [
                 'NO PO HLI (PO Number-Item No)', 'NO PO HLI', 'PO HLI',
