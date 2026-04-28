@@ -1002,11 +1002,35 @@ const App = () => {
     (soFilters.op_units||[]).forEach(v => p.append('op_unit', v));
     (soFilters.vendors||[]).forEach(v => p.append('vendor', v));
     (soFilters.statuses||[]).forEach(v => p.append('status', v));
+    (soFilters.aging||[]).forEach(v => p.append('aging', v));
+    (soSearchNums||[]).forEach(n => p.append('so_item', n));
+    if (soMarginFilter && soMarginFilter !== 'all') p.append('margin_filter', soMarginFilter);
+    if (soDateFilter && soDateFilter.mode !== 'all') {
+      if (soDateFilter.mode === 'year') p.append('date_year', soDateFilter.year);
+      else if (soDateFilter.mode === 'range') {
+        if (soDateFilter.start) p.append('date_from', soDateFilter.start);
+        if (soDateFilter.end) p.append('date_to', soDateFilter.end);
+      }
+    }
     downloadBlob(`/api/export/all-so?${p}`, `SO_List_${new Date().toISOString().slice(0,10)}.xlsx`, 'SO List');
   };
   const downloadPOExcel = () => downloadBlob('/api/export/po-without-so', `PO_Without_SO_${new Date().toISOString().slice(0,10)}.xlsx`, 'PO Without SO');
   const downloadSOTemplate = () => {
-    downloadBlob('/api/data/so/template', `Template_SO_BatchUpload_${new Date().toISOString().slice(0,10)}.xlsx`, 'SO Batch Upload Template');
+    const p = new URLSearchParams();
+    (soFilters.op_units||[]).forEach(v => p.append('op_unit', v));
+    (soFilters.vendors||[]).forEach(v => p.append('vendor', v));
+    (soFilters.statuses||[]).forEach(v => p.append('status', v));
+    (soFilters.aging||[]).forEach(v => p.append('aging', v));
+    (soSearchNums||[]).forEach(n => p.append('so_item', n));
+    if (soMarginFilter && soMarginFilter !== 'all') p.append('margin_filter', soMarginFilter);
+    if (soDateFilter && soDateFilter.mode !== 'all') {
+      if (soDateFilter.mode === 'year') p.append('date_year', soDateFilter.year);
+      else if (soDateFilter.mode === 'range') {
+        if (soDateFilter.start) p.append('date_from', soDateFilter.start);
+        if (soDateFilter.end) p.append('date_to', soDateFilter.end);
+      }
+    }
+    downloadBlob(`/api/data/so/template?${p}`, `Template_SO_BatchUpload_${new Date().toISOString().slice(0,10)}.xlsx`, 'SO Batch Upload Template');
   };
 
   const updateSOCell = async (soId, field, value) => {
