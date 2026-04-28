@@ -1243,7 +1243,7 @@ const App = () => {
             <table className="w-full text-xs">
               <thead>
                 <tr className={tblHd}>
-                  {['#','Item / Product','Qty Transactions','Sales Amount','Purchase Amount','Margin','Margin %'].map(h=>(
+                  {['#','Item / Product','Specification','Product ID','Order Freq','Sales Amount','Purchase Amount','Margin','Margin %'].map(h=>(
                     <th key={h} className={`px-3 py-2 text-left font-semibold ${darkMode?'text-purple-300':'text-purple-700'}`}>{h}</th>
                   ))}
                 </tr>
@@ -1255,6 +1255,8 @@ const App = () => {
                     <tr key={i} className={trHov}>
                       <td className={`px-3 py-2 font-bold ${txt2}`}>{i+1}</td>
                       <td className={`px-3 py-2 font-medium ${txt} max-w-xs truncate`} title={item.item}>{item.item}</td>
+                      <td className={`px-3 py-2 ${txt2} max-w-xs truncate`} title={item.specification||''}>{item.specification||'—'}</td>
+                      <td className={`px-3 py-2 ${txt2} font-mono whitespace-nowrap`}>{item.product_id||'—'}</td>
                       <td className={`px-3 py-2 ${txt2}`}>{fmtNum(item.count)}</td>
                       <td className="px-3 py-2 text-purple-600 font-semibold">{fmtCurShort(item.sales_amount)}</td>
                       <td className="px-3 py-2 text-orange-600">{fmtCurShort(item.purchase_amount)}</td>

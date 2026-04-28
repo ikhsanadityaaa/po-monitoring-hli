@@ -148,6 +148,8 @@ class SOData(db.Model):
     customer_po_number = db.Column(db.String(200))
     delivery_memo = db.Column(db.Text)
     product_name = db.Column(db.Text)
+    specification = db.Column(db.Text)
+    product_id = db.Column(db.String(100))
     so_qty = db.Column(db.Float)
     sales_unit = db.Column(db.String(20))
     sales_price = db.Column(db.Float)
@@ -180,8 +182,34 @@ class DeleteRequest(db.Model):
     requested_at = db.Column(db.DateTime, default=datetime.utcnow)
     is_hidden = db.Column(db.Boolean, default=True)  # True = hidden from dashboard
 
+def _ensure_so_extra_columns():
+    """Best-effort online migration: add `specification` and `product_id`
+    columns to so_data if they don't exist yet.  `db.create_all()` only
+    creates tables that don't exist; it never adds columns to an existing
+    table.  Both SQLite and PostgreSQL support `ALTER TABLE ... ADD COLUMN
+    IF NOT EXISTS` (SQLite >= 3.35), so a single statement works on both."""
+    statements = [
+        "ALTER TABLE so_data ADD COLUMN IF NOT EXISTS specification TEXT",
+        "ALTER TABLE so_data ADD COLUMN IF NOT EXISTS product_id VARCHAR(100)",
+    ]
+    for sql in statements:
+        try:
+            db.session.execute(text(sql))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            # Older SQLite (<3.35) lacks IF NOT EXISTS — fall back and ignore
+            # the duplicate-column error from a plain ADD COLUMN.
+            try:
+                db.session.execute(text(sql.replace(' IF NOT EXISTS', '')))
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+
+
 with app.app_context():
     db.create_all()
+    _ensure_so_extra_columns()
     print('DB schema ready.')
 
 CLOSED_STATUSES = {
@@ -349,6 +377,7 @@ def so_dict(s):
         'so_status': s.so_status, 'operation_unit_name': s.operation_unit_name,
         'vendor_name': s.vendor_name, 'customer_po_number': s.customer_po_number,
         'delivery_memo': s.delivery_memo, 'product_name': s.product_name,
+        'specification': s.specification, 'product_id': s.product_id,
         'so_qty': s.so_qty, 'sales_price': s.sales_price, 'sales_amount': s.sales_amount,
         'purchasing_price': s.purchasing_price, 'purchasing_amount': s.purchasing_amount,
         'so_create_date': s.so_create_date.isoformat() if s.so_create_date else '',
@@ -1182,6 +1211,8 @@ def upload_smro():
         col_custpo  = find_column(df, ['Customer PO Number','Customer PO','PO Ref','PO Reference'])
         col_memo    = find_column(df, ['Delivery Memo','Memo','Delivery Note'])
         col_prod    = find_column(df, ['Product Name','Item Name','Description','Product'])
+        col_spec    = find_column(df, ['Specification','Spec','Specifications','Product Specification'])
+        col_pid     = find_column(df, ['Product ID','Product Id','Product Code','Material','Material No','Material Number','Material Code','SKU'])
         col_qty     = find_column(df, ['SO Quantity','SO Qty','Qty','Quantity'])
         col_sunit   = find_column(df, ['Sales Unit','Unit','UOM'])
         col_sprice  = find_column(df, ['Sales Price(Exclude Tax)','Sales Price','Price','Unit Price'])
@@ -1217,6 +1248,8 @@ def upload_smro():
                 'customer_po_number': clean(df_val(row, col_custpo)),
                 'delivery_memo': clean(df_val(row, col_memo)),
                 'product_name': clean(df_val(row, col_prod)),
+                'specification': clean(df_val(row, col_spec)),
+                'product_id': clean(df_val(row, col_pid)),
                 'so_qty': safe_float(df_val(row, col_qty)),
                 'sales_unit': clean(df_val(row, col_sunit)),
                 'sales_price': safe_float(df_val(row, col_sprice)),
@@ -1621,16 +1654,32 @@ def completed_summary():
             else:
                 zero += 1
 
-        # Top 20 items by sales amount (grouped by product / item label)
+        # Top 20 items by sales amount (grouped by product / item label).
+        # Also surface Specification + Product ID so the frontend table can
+        # display them.  Group key prefers Product ID when present so the
+        # same product across multiple SOs aggregates correctly even when
+        # `product_name` differs slightly.
         item_map = {}
         for s, po_amt, sales, m in enriched:
-            key = s.product_name or s.so_item or 'Unknown'
+            pid = (s.product_id or '').strip()
+            label = s.product_name or s.so_item or 'Unknown'
+            key = pid or label
             if key not in item_map:
-                item_map[key] = {'item': key, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0, 'margin': 0.0}
-            item_map[key]['count'] += 1
-            item_map[key]['sales_amount'] += sales
-            item_map[key]['purchase_amount'] += po_amt
-            item_map[key]['margin'] += m
+                item_map[key] = {
+                    'item': label,
+                    'specification': s.specification or '',
+                    'product_id': pid,
+                    'count': 0, 'sales_amount': 0.0,
+                    'purchase_amount': 0.0, 'margin': 0.0,
+                }
+            agg = item_map[key]
+            agg['count'] += 1
+            agg['sales_amount'] += sales
+            agg['purchase_amount'] += po_amt
+            agg['margin'] += m
+            # Backfill spec from later rows if the first one was empty.
+            if not agg['specification'] and s.specification:
+                agg['specification'] = s.specification
 
         top_items = sorted(item_map.values(), key=lambda x: x['sales_amount'], reverse=True)[:20]
 
