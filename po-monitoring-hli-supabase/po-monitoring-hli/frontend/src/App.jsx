@@ -350,7 +350,7 @@ const StatusPie = ({ data, darkMode }) => {
   const rest = sorted.slice(5);
   const etcValue = rest.reduce((s, d) => s + d.value, 0);
   const pieData = etcValue > 0
-    ? [...top5, { name: `Etc (${rest.length} lainnya)`, value: etcValue, isEtc: true, etcItems: rest }]
+    ? [...top5, { name: `Etc (${rest.length} others)`, value: etcValue, isEtc: true, etcItems: rest }]
     : top5;
   return (
     <div style={{position:'relative'}}>
@@ -384,7 +384,7 @@ const StatusPie = ({ data, darkMode }) => {
       {etcHover && rest.length > 0 && (
         <div className="fixed z-[200] bg-gray-900 text-white text-xs rounded-lg px-3 py-2 shadow-xl pointer-events-none max-w-xs"
           style={{left: etcPos.x + 12, top: etcPos.y - 10}}>
-          <div className="font-bold mb-1">Etc ({rest.length} status):</div>
+          <div className="font-bold mb-1">Etc ({rest.length} statuses):</div>
           {rest.map((r,i)=>(
             <div key={i} className="flex justify-between gap-3">
               <span>{r.name}</span><span className="font-semibold">{fmtNum(r.value)}</span>
@@ -407,13 +407,13 @@ const DeleteRequestModal = ({ darkMode, onClose, deleteForm, setDeleteForm, dele
         <div className={`flex justify-between items-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-200'}`}>
           <div className="flex items-center gap-2">
             <EyeOff className="w-5 h-5 text-orange-500"/>
-            <h3 className="font-bold text-base">Request Sembunyikan dari Dashboard</h3>
+            <h3 className="font-bold text-base">Hide from Dashboard</h3>
           </div>
           <button onClick={onClose} className={`p-1.5 rounded-lg ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`}><X className="w-5 h-5"/></button>
         </div>
         <div className="px-6 py-5 space-y-4">
           <div>
-            <label className={`block text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>Tipe Data</label>
+            <label className={`block text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>Data Type</label>
             <div className="flex gap-3">
               {['PO','SO'].map(t=>(
                 <label key={t} className="flex items-center gap-2 cursor-pointer">
@@ -468,14 +468,14 @@ const HiddenItemsPanel = ({ darkMode, requests, onRestore, onClose }) => {
   const bg = darkMode ? 'bg-gray-800 text-white' : 'bg-white text-gray-900';
   const txt2 = darkMode ? 'text-gray-400' : 'text-gray-500';
   const hidden = requests.filter(r=>r.is_hidden);
-  const fmtDt = (iso) => { try { return new Date(iso).toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); } catch { return iso; } };
+  const fmtDt = (iso) => { try { return new Date(iso).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); } catch { return iso; } };
   return (
     <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
       <div className={`rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col ${bg}`} onClick={e=>e.stopPropagation()}>
         <div className={`flex justify-between items-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-200'}`}>
           <div className="flex items-center gap-2">
             <Eye className="w-5 h-5 text-purple-500"/>
-            <h3 className="font-bold text-base">Data yang Disembunyikan dari Dashboard</h3>
+            <h3 className="font-bold text-base">Items Hidden from Dashboard</h3>
             <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${darkMode?'bg-gray-700 text-gray-300':'bg-gray-100 text-gray-600'}`}>{hidden.length} item</span>
           </div>
           <button onClick={onClose} className={`p-1.5 rounded-lg ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`}><X className="w-5 h-5"/></button>
@@ -787,7 +787,7 @@ const App = () => {
 
   const downloadBlob = async (url, filename, label) => {
     const toastId = Date.now();
-    setDownloadToast({ id: toastId, message: `Mengunduh ${label || filename}...` });
+    setDownloadToast({ id: toastId, message: `Downloading ${label || filename}...` });
     try {
       const res = await api.get(url, { responseType: 'blob' });
       const link = document.createElement('a');
@@ -846,7 +846,7 @@ const App = () => {
   };
   const downloadPOExcel = () => downloadBlob('/api/export/po-without-so', `PO_Without_SO_${new Date().toISOString().slice(0,10)}.xlsx`, 'PO Without SO');
   const downloadSOTemplate = () => {
-    setDownloadToast({ message: 'Menyiapkan template...' });
+    setDownloadToast({ message: 'Preparing template...' });
     setTimeout(() => {
       const ws = XLSX.utils.json_to_sheet(allSOData.map(s=>({'SO Number':s.so_number,'Delivery Plan Date':s.delivery_plan_date||'','Remarks':s.remarks||''})));
       const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Template');
@@ -1231,7 +1231,7 @@ const App = () => {
             <div>
               <p className={`text-sm font-medium ${txt2}`}>Total SO (Open)</p>
               <h3 className="text-3xl font-bold mt-1 text-green-600">{fmtNum(stats?.total_so_count)}</h3>
-              <p className={`text-xs mt-1 ${txt2}`}>{stats?.so_date_range?.max ? fmtDate(stats.so_date_range.max) : 'Belum ada upload'} · klik untuk detail</p>
+              <p className={`text-xs mt-1 ${txt2}`}>{stats?.so_date_range?.max ? fmtDate(stats.so_date_range.max) : 'No data uploaded'} · click for details</p>
             </div>
             <div className="p-3 bg-green-100 rounded-xl"><CheckCircle className="w-6 h-6 text-green-600"/></div>
           </div>
@@ -1540,7 +1540,7 @@ const App = () => {
         <div className="flex flex-wrap justify-between items-center gap-3 mb-5">
           <div>
             <h2 className={`text-xl font-bold ${txt}`}>Open SO (Sales Order)</h2>
-            <p className={`text-sm ${txt2}`}>{fmtNum(soTotal)} total records — halaman {soPage} dari {soTotalPages}</p>
+            <p className={`text-sm ${txt2}`}>{fmtNum(soTotal)} total records — page {soPage} of {soTotalPages}</p>
           </div>
           <div className="flex flex-wrap gap-2">
             <label className="flex items-center gap-1 px-3 py-1.5 bg-green-700 hover:bg-green-800 text-white rounded-lg text-sm font-medium shadow-sm">
@@ -1578,7 +1578,7 @@ const App = () => {
         {/* Multi-select Filters row — Search SO leftmost */}
         <div className={`p-4 rounded-xl mb-4 ${darkMode?'bg-gray-700':'bg-gray-50'}`}>
           <div className="flex flex-wrap gap-3 items-end">
-            {/* Search SO Item — paling kiri */}
+            {/* Search SO Item — leftmost */}
             <div>
               <label className={`block text-xs font-medium mb-1 ${txt2}`}>Search SO Item</label>
               <SearchInput
@@ -1606,8 +1606,8 @@ const App = () => {
               <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                 value={soMarginFilter} onChange={e=>setSoMarginFilter(e.target.value)}>
                 <option value="all">All Data</option>
-                <option value="positive">Ada Margin (≥ 0)</option>
-                <option value="negative">Margin Minus (&lt; 0)</option>
+                <option value="positive">With Margin (≥ 0)</option>
+                <option value="negative">Negative Margin (&lt; 0)</option>
               </select>
             </div>
             <div className="flex-1 min-w-[100px]">
@@ -1770,7 +1770,7 @@ const App = () => {
         {/* Pagination */}
         <div className={`mt-4 pt-3 border-t ${darkMode?'border-gray-700':'border-gray-200'} flex justify-between items-center`}>
           <span className={`text-sm ${txt2}`}>
-            Menampilkan {((soPage-1)*soPerPage)+1}–{Math.min(soPage*soPerPage,soTotal)} dari {fmtNum(soTotal)}
+            Showing {((soPage-1)*soPerPage)+1}–{Math.min(soPage*soPerPage,soTotal)} of {fmtNum(soTotal)}
           </span>
           <div className="flex gap-1 items-center">
             <button disabled={soPage===1} onClick={()=>{ const p=soPage-1; setSoPage(p); fetchSOData(soFilters,p,soPerPage,soSearchNums,soMarginFilter); }}
@@ -1787,7 +1787,7 @@ const App = () => {
         <div className={`p-5 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
           <div className="flex items-center gap-2">
             <AlertCircle className="w-5 h-5 text-yellow-600"/>
-            <h3 className={`text-base font-bold ${txt}`}>PO HLI yang Belum Ada SO-nya</h3>
+            <h3 className={`text-base font-bold ${txt}`}>PO HLI Without SO</h3>
             <span className={`text-sm ${txt2}`}>
               ({fmtNum(new Set(poFiltered.map(p=>p.po_no)).size)} PO · {fmtNum(poFiltered.length)} line items)
             </span>
@@ -1801,7 +1801,7 @@ const App = () => {
 
         {/* PO Filters row */}
         <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700 bg-gray-750':'border-gray-100 bg-gray-50'} flex flex-wrap gap-3 items-end`}>
-          {/* Search PO HLI Number — paling kiri */}
+          {/* Search PO HLI Number — leftmost */}
           <div>
             <label className={`block text-xs font-medium mb-1 ${txt2}`}>Search PO Number</label>
             <SearchInput
