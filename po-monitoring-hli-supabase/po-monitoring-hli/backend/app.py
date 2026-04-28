@@ -1459,9 +1459,38 @@ def upload_hide_batch():
 def completed_summary():
     try:
         year_filter = request.args.get('year', 'all')
+        date_year   = request.args.get('date_year', '')
+        date_from   = request.args.get('date_from', '')
+        date_to     = request.args.get('date_to', '')
+        is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
 
         q = db.session.query(SOData).filter(SOData.so_status == 'Delivery Completed')
+
+        # Apply SO Create Date filter (date_year takes precedence over range,
+        # and falls back to legacy `year` query param when present).
+        effective_year = date_year or (year_filter if year_filter and year_filter != 'all' else '')
+        if effective_year:
+            try:
+                yr = int(effective_year)
+                if is_sqlite:
+                    q = q.filter(func.strftime('%Y', SOData.so_create_date) == str(yr))
+                else:
+                    q = q.filter(func.extract('year', SOData.so_create_date) == yr)
+            except ValueError:
+                pass
+        else:
+            if date_from:
+                q = q.filter(SOData.so_create_date >= date_from)
+            if date_to:
+                q = q.filter(SOData.so_create_date <= date_to)
+
         rows = q.all()
+
+        def po_amt_of(s):
+            v = float(s.purchasing_amount or 0)
+            if v == 0 and s.purchasing_price:
+                v = float(s.purchasing_price) * float(s.so_qty or 0)
+            return v
 
         # Monthly trend
         monthly = {}
@@ -1472,10 +1501,7 @@ def completed_summary():
             if key not in monthly:
                 monthly[key] = {'month': key, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0}
 
-            po_amt = float(s.purchasing_amount or 0)
-            if po_amt == 0 and s.purchasing_price:
-                po_amt = float(s.purchasing_price) * float(s.so_qty or 0)
-
+            po_amt = po_amt_of(s)
             monthly[key]['count'] += 1
             monthly[key]['sales_amount'] += float(s.sales_amount or 0)
             monthly[key]['purchase_amount'] += po_amt
@@ -1489,10 +1515,7 @@ def completed_summary():
             if v not in vendor_map:
                 vendor_map[v] = {'vendor': v, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0, 'margin': 0.0}
 
-            po_amt = float(s.purchasing_amount or 0)
-            if po_amt == 0 and s.purchasing_price:
-                po_amt = float(s.purchasing_price) * float(s.so_qty or 0)
-
+            po_amt = po_amt_of(s)
             vendor_map[v]['count'] += 1
             vendor_map[v]['sales_amount'] += float(s.sales_amount or 0)
             vendor_map[v]['purchase_amount'] += po_amt
@@ -1500,14 +1523,17 @@ def completed_summary():
 
         top_vendors = sorted(vendor_map.values(), key=lambda x: x['sales_amount'], reverse=True)[:5]
 
-        # Margin distribution
+        # Margin distribution + totals (KPI cards)
         pos = neg = zero = 0
+        total_sales = 0.0
+        total_purchase = 0.0
         for s in rows:
-            po_amt = float(s.purchasing_amount or 0)
-            if po_amt == 0 and s.purchasing_price:
-                po_amt = float(s.purchasing_price) * float(s.so_qty or 0)
+            po_amt = po_amt_of(s)
+            sales = float(s.sales_amount or 0)
+            total_sales += sales
+            total_purchase += po_amt
 
-            m = float(s.sales_amount or 0) - po_amt
+            m = sales - po_amt
             if m > 0:
                 pos += 1
             elif m < 0:
@@ -1516,6 +1542,10 @@ def completed_summary():
                 zero += 1
 
         return jsonify({
+            'total_count': len(rows),
+            'total_sales': total_sales,
+            'total_purchase': total_purchase,
+            'total_margin': total_sales - total_purchase,
             'monthly_trend': monthly_trend,
             'top_vendors': top_vendors,
             'margin_distribution': {
