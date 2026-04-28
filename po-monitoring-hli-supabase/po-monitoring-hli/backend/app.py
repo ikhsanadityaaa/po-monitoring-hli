@@ -847,14 +847,14 @@ def create_delete_request():
         if ref_type not in ('PO', 'SO'):
             return jsonify({'error': 'ref_type harus PO atau SO'}), 400
         if not ref_number:
-            return jsonify({'error': 'Nomor referensi wajib diisi'}), 400
+            return jsonify({'error': 'Reference number is required'}), 400
         if not reason:
-            return jsonify({'error': 'Alasan wajib diisi'}), 400
+            return jsonify({'error': 'Reason is required'}), 400
 
         # Check if already requested
         existing = DeleteRequest.query.filter_by(ref_type=ref_type, ref_number=ref_number, is_hidden=True).first()
         if existing:
-            return jsonify({'error': f'{ref_type} {ref_number} sudah disembunyikan sebelumnya'}), 400
+            return jsonify({'error': f'{ref_type} {ref_number} is already hidden'}), 400
 
         req = DeleteRequest(
             ref_type=ref_type,
@@ -864,7 +864,7 @@ def create_delete_request():
         )
         db.session.add(req)
         db.session.commit()
-        return jsonify({'success': True, 'id': req.id, 'message': f'{ref_type} {ref_number} berhasil disembunyikan dari dashboard'})
+        return jsonify({'success': True, 'id': req.id, 'message': f'{ref_type} {ref_number} successfully hidden from dashboard'})
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
@@ -876,10 +876,10 @@ def restore_delete_request(req_id):
     try:
         req = db.session.get(DeleteRequest, req_id)
         if not req:
-            return jsonify({'error': 'Request tidak ditemukan'}), 404
+            return jsonify({'error': 'Request not found'}), 404
         req.is_hidden = False
         db.session.commit()
-        return jsonify({'success': True, 'message': f'{req.ref_type} {req.ref_number} berhasil ditampilkan kembali'})
+        return jsonify({'success': True, 'message': f'{req.ref_type} {req.ref_number} successfully restored to dashboard'})
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
@@ -891,7 +891,7 @@ def delete_request_permanently(req_id):
     try:
         req = db.session.get(DeleteRequest, req_id)
         if not req:
-            return jsonify({'error': 'Request tidak ditemukan'}), 404
+            return jsonify({'error': 'Request not found'}), 404
         db.session.delete(req)
         db.session.commit()
         return jsonify({'success': True})
@@ -931,15 +931,15 @@ def upload_po_list():
         if len(missing_required) >= 3:
             return jsonify({
                 'error': (
-                    f'❌ File tidak valid — {len(missing_required)} kolom penting tidak ditemukan: '
+                    f'❌ Invalid file — {len(missing_required)} required columns not found: '
                     f'{", ".join(missing_required)}. '
-                    f'Pastikan Anda mengupload file HLI PO List yang benar, lalu cek kembali.'
+                    f'Please make sure you are uploading the correct HLI PO List file and try again.'
                 )
             }), 400
 
         col_po   = find_column(df, ['PO No.','PO No','PO Number','PO'])
         if not col_po:
-            return jsonify({'error': f'Kolom PO Number tidak ditemukan. Kolom: {df.columns.tolist()}'}), 400
+            return jsonify({'error': f'PO Number column not found. Available columns: {df.columns.tolist()}'}), 400
 
         col_itemno = find_column(df, ['Item No.','Item No','Item Number','No. Item'])
         col_desc = find_column(df, ['PO Item Detail','Description','Item Description','Deskripsi'])
@@ -1049,16 +1049,16 @@ def upload_smro():
         if len(missing_required) >= 3:
             return jsonify({
                 'error': (
-                    f'❌ File tidak valid — {len(missing_required)} kolom penting tidak ditemukan: '
+                    f'❌ Invalid file — {len(missing_required)} required columns not found: '
                     f'{", ".join(missing_required)}. '
-                    f'Pastikan Anda mengupload file SMRO yang benar, lalu cek kembali.'
+                    f'Please make sure you are uploading the correct SMRO file and try again.'
                 )
             }), 400
 
         col_so = find_column(df, ['SO Number','SO No','SO No.','SO','SO Item',
                                    'Sales Order','Sales Order Number','No SO','Nomor SO'])
         if not col_so:
-            return jsonify({'error': f'Kolom SO Number tidak ditemukan. Kolom: {df.columns.tolist()}'}), 400
+            return jsonify({'error': f'SO Number column not found. Available columns: {df.columns.tolist()}'}), 400
 
         col_soitem  = find_column(df, ['SO Item No','Item No','Line','SO Line','SO Item'])
         col_status  = find_column(df, ['SO Status','Status','Order Status'])
@@ -1299,7 +1299,7 @@ def download_hide_template():
 
     if hide_type == 'SO':
         ws.title = "Hide SO Template"
-        headers = ['SO Number', 'Alasan']
+        headers = ['SO Number', 'Reason']
         ws.append(headers)
         # Style header
         fill = PatternFill(start_color="1D4ED8", end_color="1D4ED8", fill_type="solid")
@@ -1309,11 +1309,11 @@ def download_hide_template():
             cell.alignment = Alignment(horizontal='center')
             ws.column_dimensions[get_column_letter(i)].width = 30 if i == 1 else 50
         # Example row
-        ws.append(['9008988017-10', 'Alasan kenapa SO ini disembunyikan'])
-        note_row = ws.append(['PETUNJUK: Isi SO Number (format: SO_NUMBER-ITEM_NO atau SO_NUMBER), dan Alasan (wajib diisi)'])
+        ws.append(['9008988017-10', 'Reason why this SO should be hidden'])
+        note_row = ws.append(['INSTRUCTIONS: Fill SO Number (format: SO_NUMBER-ITEM_NO or SO_NUMBER), and Reason (required)'])
     else:
         ws.title = "Hide PO HLI Template"
-        headers = ['NO PO HLI (PO Number-Item No)', 'Alasan']
+        headers = ['NO PO HLI (PO Number-Item No)', 'Reason']
         ws.append(headers)
         # Style header
         fill = PatternFill(start_color="7C3AED", end_color="7C3AED", fill_type="solid")
@@ -1323,8 +1323,8 @@ def download_hide_template():
             cell.alignment = Alignment(horizontal='center')
             ws.column_dimensions[get_column_letter(i)].width = 35 if i == 1 else 50
         # Example row
-        ws.append(['4502358819-10', 'Alasan kenapa PO HLI ini disembunyikan'])
-        ws.append(['PETUNJUK: Isi NO PO HLI dengan format PO_NUMBER-ITEM_NO (contoh: 4502358819-10), dan Alasan (wajib diisi)'])
+        ws.append(['4502358819-10', 'Reason why this PO HLI should be hidden'])
+        ws.append(['INSTRUCTIONS: Fill NO PO HLI with format PO_NUMBER-ITEM_NO (example: 4502358819-10), and Reason (required)'])
 
     output = io.BytesIO()
     wb.save(output)
@@ -1356,12 +1356,12 @@ def upload_hide_batch():
                 'PO Number-Item No', 'PO HLI Number', 'PO Number'
             ])
 
-        col_reason = find_column(df, ['Alasan', 'Reason', 'Keterangan'])
+        col_reason = find_column(df, ['Reason', 'Alasan', 'Keterangan'])
 
         if not col_ref:
-            return jsonify({'error': f'Kolom nomor referensi tidak ditemukan. Kolom tersedia: {df.columns.tolist()}'}), 400
+            return jsonify({'error': f'Reference number column not found. Available columns: {df.columns.tolist()}'}), 400
         if not col_reason:
-            return jsonify({'error': f'Kolom Alasan tidak ditemukan. Kolom tersedia: {df.columns.tolist()}'}), 400
+            return jsonify({'error': f'Reason column not found. Available columns: {df.columns.tolist()}'}), 400
 
         success_count = 0
         skipped = []
@@ -1372,14 +1372,14 @@ def upload_hide_batch():
             reason = clean(df_val(row, col_reason))
 
             # Skip header-like rows (instructions)
-            if not ref_number or ref_number.upper().startswith('PETUNJUK'):
+            if not ref_number or ref_number.upper().startswith('PETUNJUK') or ref_number.upper().startswith('INSTRUCTIONS'):
                 continue
             # Skip example rows
-            if reason and reason.lower().startswith('alasan kenapa'):
+            if reason and (reason.lower().startswith('alasan kenapa') or reason.lower().startswith('reason why')):
                 continue
 
             if not reason:
-                errors.append(f"Baris {idx+2}: Alasan kosong untuk {ref_number}")
+                errors.append(f"Row {idx+2}: Reason is empty for {ref_number}")
                 continue
 
             # Check if already hidden
@@ -1401,9 +1401,9 @@ def upload_hide_batch():
 
         db.session.commit()
 
-        msg = f'{success_count} data berhasil disembunyikan'
+        msg = f'{success_count} items successfully hidden'
         if skipped:
-            msg += f'. {len(skipped)} sudah disembunyikan sebelumnya: {", ".join(skipped[:5])}'
+            msg += f'. {len(skipped)} were already hidden: {", ".join(skipped[:5])}'
         if errors:
             msg += f'. {len(errors)} error: {"; ".join(errors[:3])}'
 
