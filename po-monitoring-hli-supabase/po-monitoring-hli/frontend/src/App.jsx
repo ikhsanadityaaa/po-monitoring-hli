@@ -811,6 +811,8 @@ const App = () => {
     } catch(e) { addToast(`❌ Failed to load completed data: ${e.message}`, 'error'); }
     finally { setCompletedLoading(false); }
   }, []);
+
+  const downloadHideTemplate = (type) => {
     setShowHideMenu(false);
     downloadBlob(`/api/template/hide?type=${type}`, `Template_Hide_${type === 'SO' ? 'SO' : 'PO_HLI'}.xlsx`, `Template Hide ${type}`);
   };
