@@ -1561,9 +1561,14 @@ def upload_smro_backfill_spec():
 
         col_sonum  = find_column(df, ['SO Number', 'SO No', 'SO No.', 'SO'])
         col_soitem = find_column(df, ['SO Item', 'SO Item No', 'SO Line', 'Item No', 'Line'])
-        col_spec   = find_column(df, ['Specification', 'Spec', 'Specifications', 'Product Specification'])
+        # Keep alias lists in sync with `upload_smro` so a user uploading a
+        # file with e.g. "Material Description" or "Article Number" gets the
+        # same recognition behavior across both endpoints.
+        col_spec   = find_column(df, ['Specification', 'Spec', 'Specifications', 'Product Specification',
+                                      'Material Description', 'Material Desc', 'Short Text'])
         col_pid    = find_column(df, ['Product ID', 'Product Id', 'Product Code',
-                                      'Material', 'Material No', 'Material Number', 'Material Code', 'SKU'])
+                                      'Material', 'Material No', 'Material Number', 'Material Code', 'SKU',
+                                      'Article', 'Article Number'])
 
         if not col_soitem and not col_sonum:
             return jsonify({'error': f'SO Item / SO Number column not found. Columns: {df.columns.tolist()}'}), 400

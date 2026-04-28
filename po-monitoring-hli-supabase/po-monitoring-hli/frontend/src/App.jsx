@@ -64,12 +64,22 @@ const DownloadToast = ({ message, onClose }) => {
 };
 
 const Toast = ({ message, type, onClose }) => {
-  useEffect(() => { const t = setTimeout(onClose, 3000); return () => clearTimeout(t); }, [onClose]);
-  const bg = type === 'success' ? 'bg-green-600' : type === 'error' ? 'bg-red-600' : 'bg-blue-600';
+  // Warnings should stay visible a bit longer than the default 3s because
+  // they typically include actionable diagnostic info the user needs to read.
+  useEffect(() => {
+    const dur = type === 'warning' ? 7000 : 3000;
+    const t = setTimeout(onClose, dur);
+    return () => clearTimeout(t);
+  }, [onClose, type]);
+  const bg =
+    type === 'success' ? 'bg-green-600' :
+    type === 'error'   ? 'bg-red-600'   :
+    type === 'warning' ? 'bg-amber-600' :
+                         'bg-blue-600';
   return (
-    <div className={`fixed top-5 right-5 z-[100] flex items-center gap-3 px-5 py-3 rounded-xl shadow-2xl text-white ${bg} max-w-sm`}>
-      {type === 'success' ? <CheckCircle className="w-5 h-5 flex-shrink-0" /> : <AlertCircle className="w-5 h-5 flex-shrink-0" />}
-      <span className="text-sm font-medium">{message}</span>
+    <div className={`fixed top-5 right-5 z-[100] flex items-start gap-3 px-5 py-3 rounded-xl shadow-2xl text-white ${bg} max-w-sm`}>
+      {type === 'success' ? <CheckCircle className="w-5 h-5 flex-shrink-0 mt-0.5" /> : <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />}
+      <span className="text-sm font-medium whitespace-pre-line">{message}</span>
       <button onClick={onClose} className="ml-2 hover:opacity-70"><X className="w-4 h-4" /></button>
     </div>
   );
