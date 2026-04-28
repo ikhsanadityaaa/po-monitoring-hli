@@ -1484,7 +1484,9 @@ def completed_summary():
             if date_to:
                 q = q.filter(SOData.so_create_date <= date_to)
 
-        rows = q.all()
+        # Exclude consumable / non-revenue op units, matching every other
+        # SOData query in the codebase (see /api/completed/margin-detail, etc.).
+        rows = q.filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all()
 
         def po_amt_of(s):
             v = float(s.purchasing_amount or 0)
