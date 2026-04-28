@@ -1685,6 +1685,41 @@ def update_so(so_id):
         db.session.rollback(); return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/data/so/template', methods=['GET'])
+def download_so_batch_template():
+    """Download Excel template for SO batch upload (Delivery Plan Date & Remarks)."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "SO Batch Upload"
+
+    headers = ['SO Item', 'Delivery Plan Date', 'Remarks']
+    ws.append(headers)
+
+    # Row 1: header — yellow, bold, centered
+    header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+    for i, cell in enumerate(ws[1], 1):
+        cell.fill = header_fill
+        cell.font = Font(bold=True, color="000000")
+        cell.alignment = Alignment(horizontal='center')
+        ws.column_dimensions[get_column_letter(i)].width = 35 if i == 1 else 25 if i == 2 else 50
+
+    # Row 2: example — red font, light grey background
+    ws.append(['example : 9008988017-10', 'example : 2025-12-31', 'example : Waiting for vendor confirmation'])
+    grey_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+    red_font  = Font(color="FF0000")
+    for cell in ws[2]:
+        cell.font = red_font
+        cell.fill = grey_fill
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return send_file(output,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        as_attachment=True,
+        download_name=f"Template_SO_BatchUpload_{datetime.now().strftime('%Y%m%d')}.xlsx")
+
+
 @app.route('/api/data/so/batch-upload', methods=['POST'])
 def batch_upload_so():
     try:
