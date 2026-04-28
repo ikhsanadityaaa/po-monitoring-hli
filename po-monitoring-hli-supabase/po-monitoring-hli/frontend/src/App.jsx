@@ -1439,7 +1439,16 @@ const App = () => {
         </div>
 
         <div className={`p-5 rounded-2xl shadow hover:shadow-lg transition-all cursor-pointer ${card}`}
-          onClick={() => openModal('SO without PO HLI', '/api/data/so-without-po')}>
+          onClick={() => openModal('SO without PO HLI', `/api/data/so-without-po${(() => {
+            const f = globalDateFilter; if (!f || f.mode === 'all') return '';
+            const p = new URLSearchParams();
+            if (f.mode === 'year') p.append('date_year', f.year);
+            else if (f.mode === 'range') {
+              if (f.start) p.append('date_from', f.start);
+              if (f.end)   p.append('date_to',   f.end);
+            }
+            return p.toString() ? `?${p}` : '';
+          })()}`)}>
           <div className="flex justify-between items-start">
             <div>
               <p className={`text-sm font-medium ${txt2}`}>SO without PO HLI</p>

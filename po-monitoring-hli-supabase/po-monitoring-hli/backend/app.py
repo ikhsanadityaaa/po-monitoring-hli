@@ -267,11 +267,16 @@ def apply_so_create_date_filter(query, date_year='', date_from='', date_to='', i
 
 def utc_isoformat(dt):
     """Serialize a (naive UTC) datetime as an ISO-8601 string with a trailing
-    'Z' so JS Date() parses it as UTC and the browser converts to local time."""
+    'Z' so JS Date() parses it as UTC and the browser converts to local time.
+    Datetimes that already carry a timezone designator (Z, +HH:MM, or -HH:MM
+    after the time portion) are returned unchanged."""
     if dt is None:
         return None
     s = dt.isoformat()
-    return s if s.endswith('Z') or '+' in s[10:] else s + 'Z'
+    tail = s[10:]  # everything after the date portion (skip the leading YYYY-MM-DD)
+    if s.endswith('Z') or '+' in tail or '-' in tail:
+        return s
+    return s + 'Z'
 
 def is_return_so_item(so_item):
     if not so_item:
@@ -729,10 +734,18 @@ def get_so_without_po():
     try:
         po_hli_keys = get_po_hli_key_set()
         hidden_so = get_hidden_so_items()
-        result = []
-        for s in db.session.query(SOData).filter(
+        # Apply the same SO Create Date filter the dashboard count uses, so the
+        # KPI count and the detail modal stay consistent.
+        date_year, date_from, date_to = parse_so_date_args()
+        q = apply_so_create_date_filter(
+            db.session.query(SOData).filter(
                 open_so_filter(),
-                ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all():
+                ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))
+            ),
+            date_year, date_from, date_to,
+        )
+        result = []
+        for s in q.all():
             if s.so_item in hidden_so or s.so_number in hidden_so:
                 continue
             if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
