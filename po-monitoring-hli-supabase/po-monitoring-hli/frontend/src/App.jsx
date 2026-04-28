@@ -1,14 +1,14 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area, ComposedChart
 } from 'recharts';
 import {
   Upload, Download, AlertCircle, CheckCircle, XCircle,
   Package, DollarSign, TrendingUp, TrendingDown, Award, Calendar, ChevronLeft,
   ChevronRight, Moon, Sun, FileText, BarChart3, FileSpreadsheet,
   Filter, X, ChevronDown, ChevronUp, Building2, Search, Loader2,
-  EyeOff, Eye, Trash2, RotateCcw, Plus
+  EyeOff, Eye, Trash2, RotateCcw, Plus, Banknote
 } from 'lucide-react';
 import axios from 'axios';
 import { format, parseISO } from 'date-fns';
@@ -512,6 +512,70 @@ const HiddenItemsPanel = ({ darkMode, requests, onRestore, onClose }) => {
   );
 };
 
+// ─── Date Range Filter ────────────────────────────────────────────────────
+const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, label = 'Filter Tanggal SO Create' }) => {
+  const currentYear = new Date().getFullYear();
+  const years = Array.from({ length: 6 }, (_, i) => currentYear - i);
+  const [mode, setMode] = useState('all'); // 'all' | 'year' | 'range'
+  const [selectedYear, setSelectedYear] = useState(String(currentYear));
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
+
+  const apply = () => {
+    if (mode === 'all') onFilter({ mode: 'all' });
+    else if (mode === 'year') onFilter({ mode: 'year', year: selectedYear });
+    else onFilter({ mode: 'range', start: startDate, end: endDate });
+  };
+
+  const reset = () => {
+    setMode('all');
+    setSelectedYear(String(currentYear));
+    setStartDate(''); setEndDate('');
+    onFilter({ mode: 'all' });
+  };
+
+  return (
+    <div className={`flex flex-wrap items-center gap-3 px-5 py-3 rounded-xl ${card} shadow mb-4`}>
+      <Calendar className="w-4 h-4 text-purple-500 flex-shrink-0"/>
+      <span className={`text-sm font-semibold ${txt} flex-shrink-0`}>{label}:</span>
+      {/* Mode selector */}
+      <div className="flex gap-1">
+        {[['all','Semua'], ['year','Per Tahun'], ['range','Range Tanggal']].map(([m, lbl]) => (
+          <button key={m} onClick={() => setMode(m)}
+            className={`px-3 py-1 rounded-full text-xs font-semibold transition-all
+              ${mode === m ? 'bg-purple-600 text-white shadow' : darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-100 text-gray-600 hover:bg-purple-100'}`}>
+            {lbl}
+          </button>
+        ))}
+      </div>
+      {mode === 'year' && (
+        <select value={selectedYear} onChange={e => setSelectedYear(e.target.value)}
+          className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300'}`}>
+          {years.map(y => <option key={y} value={y}>{y}</option>)}
+        </select>
+      )}
+      {mode === 'range' && (
+        <div className="flex items-center gap-2">
+          <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
+            className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300'}`}/>
+          <span className={`text-xs ${txt2}`}>s/d</span>
+          <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)}
+            className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300'}`}/>
+        </div>
+      )}
+      <button onClick={apply}
+        className="px-4 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-semibold">
+        Terapkan
+      </button>
+      {mode !== 'all' && (
+        <button onClick={reset} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${darkMode ? 'bg-gray-600 text-gray-200 hover:bg-gray-500' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}>
+          Reset
+        </button>
+      )}
+    </div>
+  );
+};
+
 // ═══════════════════════════════════════════════════════════════════
 // MAIN APP
 // ═══════════════════════════════════════════════════════════════════
@@ -563,6 +627,11 @@ const App = () => {
   const [completedLoading, setCompletedLoading] = useState(false);
   const [showHideMenu, setShowHideMenu] = useState(false);
   const hideMenuRef = useRef(null);
+
+  // ── Date filter states per page ──────────────────────────────────────────
+  const [dashDateFilter, setDashDateFilter] = useState({ mode: 'all' });
+  const [soDateFilter, setSODateFilter] = useState({ mode: 'all' });
+  const [completedDateFilter, setCompletedDateFilter] = useState({ mode: 'all' });
   useEffect(() => {
     const handler = (e) => { if (hideMenuRef.current && !hideMenuRef.current.contains(e.target)) setShowHideMenu(false); };
     document.addEventListener('mousedown', handler);
@@ -599,14 +668,39 @@ const App = () => {
     } finally { setLoading(false); }
   }, [addToast]);
 
-  // Helper: resolve filter array — __NONE__ means "nothing selected" (filter passes nothing)
+  // Helper: filter array of objects by date field using a DateRangeFilter config
+  const applyDateFilter = useCallback((arr, dateField, filter) => {
+    if (!filter || filter.mode === 'all') return arr;
+    return arr.filter(item => {
+      const d = item[dateField];
+      if (!d) return false;
+      const iso = d.slice(0, 10);
+      if (filter.mode === 'year') return iso.startsWith(filter.year);
+      if (filter.mode === 'range') {
+        if (filter.start && iso < filter.start) return false;
+        if (filter.end && iso > filter.end) return false;
+        return true;
+      }
+      return true;
+    });
+  }, []);
+
+  // Helper: build date query params for backend
+  const dateFilterParams = (filter) => {
+    if (!filter || filter.mode === 'all') return {};
+    if (filter.mode === 'year') return { date_year: filter.year };
+    if (filter.mode === 'range') return { date_from: filter.start || '', date_to: filter.end || '' };
+    return {};
+  };
+
+  // Helper: resolve filter array
   const resolveFilter = (val) => {
     if (val === '__NONE__') return ['__NONE_PLACEHOLDER__']; // backend will return 0 rows
     if (!Array.isArray(val) || val.length === 0) return []; // empty = no filter = all
     return val;
   };
 
-  const fetchSOData = useCallback(async (filters, page, perPage, searchNums, marginFilter) => {
+  const fetchSOData = useCallback(async (filters, page, perPage, searchNums, marginFilter, dateFilter) => {
     setLoading(true);
     try {
       const params = new URLSearchParams({ page, per_page: perPage });
@@ -616,6 +710,14 @@ const App = () => {
       (filters.aging || []).forEach(a => params.append('aging', a));
       (searchNums || []).forEach(n => params.append('so_item', n));
       if (marginFilter && marginFilter !== 'all') params.append('margin_filter', marginFilter);
+      // Date filter
+      if (dateFilter && dateFilter.mode !== 'all') {
+        if (dateFilter.mode === 'year') params.append('date_year', dateFilter.year);
+        else if (dateFilter.mode === 'range') {
+          if (dateFilter.start) params.append('date_from', dateFilter.start);
+          if (dateFilter.end) params.append('date_to', dateFilter.end);
+        }
+      }
       const res = await api.get(`/api/data/all-so?${params}`);
       setAllSOData(Array.isArray(res.data.data) ? res.data.data : []);
       setSoTotal(res.data.total || 0);
@@ -691,7 +793,7 @@ const App = () => {
   }, [poWithoutSO, poSearchNums, poFilterItemType, poFilterOpUnit]);
 
   useEffect(() => { fetchDashboard(); fetchDeleteRequests(); }, []);
-  useEffect(() => { if (activePage === 'all-so') fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter); }, [activePage]);
+  useEffect(() => { if (activePage === 'all-so') fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter); }, [activePage]);
 
   const handleUpload = async (e, type) => {
     const file = e.target.files[0]; if (!file) return;
@@ -759,7 +861,7 @@ const App = () => {
       setUploadProgress(null);
       addToast(`✅ ${res.data.message}`, 'success');
       fetchDashboard();
-      if (activePage === 'all-so') fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter);
+      if (activePage === 'all-so') fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
       setSoPage(1);
     } catch (e) {
       setUploadProgress(null);
@@ -779,7 +881,7 @@ const App = () => {
       });
       setUploadProgress(null);
       addToast(`✅ Batch update: ${res.data.updated} records updated`, 'success');
-      fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter);
+      fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
     } catch (e) {
       setUploadProgress(null);
       addToast(`❌ Failed to batch upload: ${e.response?.data?.error || e.message}`, 'error');
@@ -803,10 +905,18 @@ const App = () => {
     }
   };
 
-  const fetchCompletedData = useCallback(async (year='all') => {
+  const fetchCompletedData = useCallback(async (year='all', dateFilter=null) => {
     setCompletedLoading(true);
     try {
-      const res = await api.get(`/api/completed/summary?year=${year}`);
+      const params = new URLSearchParams({ year });
+      if (dateFilter && dateFilter.mode !== 'all') {
+        if (dateFilter.mode === 'year') params.append('date_year', dateFilter.year);
+        else if (dateFilter.mode === 'range') {
+          if (dateFilter.start) params.append('date_from', dateFilter.start);
+          if (dateFilter.end) params.append('date_to', dateFilter.end);
+        }
+      }
+      const res = await api.get(`/api/completed/summary?${params}`);
       setCompletedData(res.data);
     } catch(e) { addToast(`❌ Failed to load completed data: ${e.message}`, 'error'); }
     finally { setCompletedLoading(false); }
@@ -917,7 +1027,7 @@ const App = () => {
 
     if (!d) return (
       <div className={`flex flex-col items-center justify-center h-64 rounded-2xl ${card}`}>
-        <Award className="w-16 h-16 text-gray-300 mb-4"/>
+        <Banknote className="w-16 h-16 text-gray-300 mb-4"/>
         <p className={`text-lg font-semibold ${txt}`}>No completed data yet</p>
         <p className={`text-sm ${txt2} mt-1`}>Upload SMRO data to see completed transactions</p>
       </div>
@@ -933,12 +1043,23 @@ const App = () => {
     return (
       <div className="space-y-6">
 
+        {/* ── Date Range Filter ───────────────────────────────── */}
+        <DateRangeFilter
+          darkMode={darkMode} txt={txt} txt2={txt2} card={card}
+          label="Filter Tanggal SO Create"
+          onFilter={(f) => {
+            setCompletedDateFilter(f);
+            if (f.mode === 'year') { setCompletedYear(f.year); fetchCompletedData(f.year, f); }
+            else { setCompletedYear('all'); fetchCompletedData('all', f); }
+          }}
+        />
+
         {/* ── Year Filter ─────────────────────────────────────── */}
         <div className={`flex flex-wrap items-center gap-3 px-5 py-3 rounded-xl ${card} shadow`}>
           <Calendar className="w-4 h-4 text-purple-500"/>
           <span className={`text-sm font-semibold ${txt}`}>Filter Year:</span>
           {['all', ...(d.available_years||[]).map(String)].map(y => (
-            <button key={y} onClick={()=>{ setCompletedYear(y); fetchCompletedData(y); }}
+            <button key={y} onClick={()=>{ setCompletedYear(y); fetchCompletedData(y, completedDateFilter); }}
               className={`px-4 py-1.5 rounded-full text-sm font-semibold transition-all
                 ${completedYear===y?'bg-purple-600 text-white shadow':'bg-gray-100 text-gray-700 hover:bg-purple-100'}`}>
               {y==='all'?'All Years':y}
@@ -972,10 +1093,11 @@ const App = () => {
           ))}
         </div>
 
-        {/* ── Monthly Trend: Amount ────────────────────────────── */}
+        {/* ── Monthly Trend: Combined Amount + Transaction Count ── */}
         <div className={`p-5 rounded-2xl shadow ${card}`}>
-          <h3 className={`text-base font-bold mb-4 ${txt}`}>Monthly Sales & Purchase Amount — Completed</h3>
-          <ResponsiveContainer width="100%" height={280}>
+          <h3 className={`text-base font-bold mb-1 ${txt}`}>Monthly Trend — Delivery Completed</h3>
+          <p className={`text-xs mb-4 ${txt2}`}>Sales Amount, Purchase Amount (bar) & Transaction Count (line)</p>
+          <ResponsiveContainer width="100%" height={300}>
             <BarChart data={d.monthly_trend} barGap={2}>
               <defs>
                 <linearGradient id="cgSales" x1="0" y1="0" x2="0" y2="1">
@@ -987,31 +1109,16 @@ const App = () => {
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke={darkMode?'#374151':'#F3F4F6'}/>
               <XAxis dataKey="month" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10}/>
-              <YAxis stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10} tickFormatter={fmtM}/>
-              <Tooltip formatter={(v,n)=>[fmtCur(v),n]} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
+              <YAxis yAxisId="amt" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10} tickFormatter={fmtM}/>
+              <YAxis yAxisId="cnt" orientation="right" stroke="#10B981" fontSize={10}/>
+              <Tooltip
+                formatter={(v, n) => n === 'Transactions' ? [fmtNum(v), n] : [fmtCur(v), n]}
+                contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
               <Legend wrapperStyle={{fontSize:12}}/>
-              <Bar dataKey="sales_amount" name="Sales Amount" fill="url(#cgSales)" radius={[4,4,0,0]}/>
-              <Bar dataKey="purchase_amount" name="Purchase Amount" fill="url(#cgPurchase)" radius={[4,4,0,0]}/>
+              <Bar yAxisId="amt" dataKey="sales_amount" name="Sales Amount" fill="url(#cgSales)" radius={[4,4,0,0]}/>
+              <Bar yAxisId="amt" dataKey="purchase_amount" name="Purchase Amount" fill="url(#cgPurchase)" radius={[4,4,0,0]}/>
+              <Line yAxisId="cnt" type="monotone" dataKey="count" name="Transactions" stroke="#10B981" strokeWidth={2.5} dot={{r:3}} activeDot={{r:5}}/>
             </BarChart>
-          </ResponsiveContainer>
-        </div>
-
-        {/* ── Monthly Trend: Transaction Count ────────────────── */}
-        <div className={`p-5 rounded-2xl shadow ${card}`}>
-          <h3 className={`text-base font-bold mb-4 ${txt}`}>Monthly Transaction Count — Completed</h3>
-          <ResponsiveContainer width="100%" height={200}>
-            <AreaChart data={d.monthly_trend}>
-              <defs>
-                <linearGradient id="cgCount" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#10B981" stopOpacity={0.35}/><stop offset="95%" stopColor="#10B981" stopOpacity={0}/>
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke={darkMode?'#374151':'#F3F4F6'}/>
-              <XAxis dataKey="month" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10}/>
-              <YAxis stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10}/>
-              <Tooltip contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
-              <Area type="monotone" dataKey="count" name="Transactions" stroke="#10B981" strokeWidth={2} fill="url(#cgCount)"/>
-            </AreaChart>
           </ResponsiveContainer>
         </div>
 
@@ -1055,33 +1162,22 @@ const App = () => {
             <h3 className={`text-base font-bold mb-3 ${txt} flex items-center gap-2`}>
               <BarChart3 className="w-5 h-5 text-green-500"/> Margin Distribution — PO Count
             </h3>
-            {/* Summary badges */}
-            <div className="flex gap-2 mb-3">
-              <div className="flex-1 text-center p-3 bg-green-50 dark:bg-green-900/20 rounded-xl">
-                <p className="text-xl font-bold text-green-600">{fmtNum(d.margin_distribution.positive)}</p>
-                <p className="text-xs text-green-700 font-semibold mt-0.5">Positive</p>
-                <p className="text-xs text-green-600">{totalCompleted ? Math.round(d.margin_distribution.positive/totalCompleted*100) : 0}%</p>
-              </div>
-              <div className="flex-1 text-center p-3 bg-red-50 dark:bg-red-900/20 rounded-xl">
-                <p className="text-xl font-bold text-red-600">{fmtNum(d.margin_distribution.negative)}</p>
-                <p className="text-xs text-red-700 font-semibold mt-0.5">Negative</p>
-                <p className="text-xs text-red-600">{totalCompleted ? Math.round(d.margin_distribution.negative/totalCompleted*100) : 0}%</p>
-              </div>
-              <div className="flex-1 text-center p-3 bg-gray-50 dark:bg-gray-700 rounded-xl">
-                <p className="text-xl font-bold text-gray-500">{fmtNum(d.margin_distribution.zero)}</p>
-                <p className="text-xs text-gray-600 font-semibold mt-0.5">Zero</p>
-                <p className="text-xs text-gray-500">{totalCompleted ? Math.round(d.margin_distribution.zero/totalCompleted*100) : 0}%</p>
-              </div>
-            </div>
-            <ResponsiveContainer width="100%" height={180}>
+            <ResponsiveContainer width="100%" height={260}>
               <PieChart>
-                <Pie data={marginPieData} cx="50%" cy="50%" innerRadius={45} outerRadius={75}
+                <Pie data={marginPieData} cx="50%" cy="45%" innerRadius={55} outerRadius={90}
                   dataKey="value" labelLine={false} label={renderPctLabel}>
                   {marginPieData.map((_,i)=><Cell key={i} fill={CPIE[i]}/>)}
                 </Pie>
-                <Tooltip formatter={(v,n)=>[fmtNum(v)+' PO', n]}
+                <Tooltip formatter={(v,n)=>[`${fmtNum(v)} PO (${totalCompleted ? Math.round(v/totalCompleted*100) : 0}%)`, n]}
                   contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
-                <Legend iconSize={8} wrapperStyle={{fontSize:11}}/>
+                <Legend iconSize={10} wrapperStyle={{fontSize:12}}
+                  formatter={(value, entry) => (
+                    <span style={{color: darkMode?'#D1D5DB':'#374151'}}>
+                      {value}: <strong>{fmtNum(entry.payload.value)}</strong>
+                      {' '}({totalCompleted ? Math.round(entry.payload.value/totalCompleted*100) : 0}%)
+                    </span>
+                  )}
+                />
               </PieChart>
             </ResponsiveContainer>
           </div>
@@ -1212,8 +1308,34 @@ const App = () => {
   // ══════════════════════════════════════════════════════════════
   // RENDER DASHBOARD
   // ══════════════════════════════════════════════════════════════
-  const renderDashboard = () => (
+  const renderDashboard = () => {
+    // Apply client-side date filter to dashboard data
+    const filteredMonthly = dashDateFilter.mode === 'all'
+      ? (stats?.monthly_trend || [])
+      : (stats?.monthly_trend || []).filter(m => {
+          if (!m.month) return false;
+          // month format: "Jan 2024"
+          try {
+            const d = new Date(m.month);
+            const iso = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+            if (dashDateFilter.mode === 'year') return iso.startsWith(dashDateFilter.year);
+            if (dashDateFilter.mode === 'range') {
+              if (dashDateFilter.start && iso < dashDateFilter.start.slice(0,7)) return false;
+              if (dashDateFilter.end && iso > dashDateFilter.end.slice(0,7)) return false;
+              return true;
+            }
+          } catch { return true; }
+          return true;
+        });
+
+    return (
     <>
+      {/* Date Range Filter */}
+      <DateRangeFilter
+        darkMode={darkMode} txt={txt} txt2={txt2} card={card}
+        label="Filter Tanggal SO Create"
+        onFilter={(f) => { setDashDateFilter(f); }}
+      />
       {/* Date Range Info Bar */}
       <div className={`mb-4 px-5 py-3 rounded-xl flex flex-wrap gap-6 text-xs ${darkMode?'bg-gray-800 border border-gray-700':'bg-white border border-gray-100'} shadow`}>
         <div className="flex items-center gap-2">
@@ -1234,7 +1356,7 @@ const App = () => {
           onClick={() => {
             setActivePage('all-so');
             setSoPage(1);
-            fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter);
+            fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
             setTimeout(() => { poTableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 300);
           }}>
           <div className="flex justify-between items-start">
@@ -1275,7 +1397,7 @@ const App = () => {
           onClick={() => {
             setActivePage('all-so');
             setSoPage(1);
-            fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter);
+            fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
             window.scrollTo({ top: 0, behavior: 'smooth' });
           }}>
           <div className="flex justify-between items-start">
@@ -1296,8 +1418,7 @@ const App = () => {
             <TrendingUp className="w-5 h-5 text-purple-600"/> Monthly Open SO Trend
           </h3>
           <ResponsiveContainer width="100%" height={190}>
-            <AreaChart data={stats?.monthly_trend||[]}>
-              <defs>
+            <AreaChart data={filteredMonthly}>              <defs>
                 <linearGradient id="cSO" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor="#8B5CF6" stopOpacity={0.3}/><stop offset="95%" stopColor="#8B5CF6" stopOpacity={0}/>
                 </linearGradient>
@@ -1579,14 +1700,24 @@ const App = () => {
         </div>
       </div>
     </>
-  );
+    );
+  };
 
   // ══════════════════════════════════════════════════════════════
   // RENDER ALL SO PAGE
   // ══════════════════════════════════════════════════════════════
   const renderAllSO = () => (
     <div>
-      {/* All SO Table */}
+      {/* Date Range Filter */}
+      <DateRangeFilter
+        darkMode={darkMode} txt={txt} txt2={txt2} card={card}
+        label="Filter Tanggal SO Create"
+        onFilter={(f) => {
+          setSODateFilter(f);
+          setSoPage(1);
+          fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter, f);
+        }}
+      />
       <div className={`p-6 rounded-2xl shadow mb-6 ${card}`}>
         <div className="flex flex-wrap justify-between items-center gap-3 mb-5">
           <div>
@@ -1638,7 +1769,7 @@ const App = () => {
                 onSearch={(nums) => {
                   setSoSearchNums(nums);
                   setSoPage(1);
-                  fetchSOData(soFilters, 1, soPerPage, nums, soMarginFilter);
+                  fetchSOData(soFilters, 1, soPerPage, nums, soMarginFilter, soDateFilter);
                 }}
                 darkMode={darkMode} txt2={txt2}
               />
@@ -1672,12 +1803,12 @@ const App = () => {
               </select>
             </div>
             <div className="flex gap-2">
-              <button onClick={()=>{ setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums,soMarginFilter); }}
+              <button onClick={()=>{ setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums,soMarginFilter,soDateFilter); }}
                 className="px-5 py-2 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-semibold shadow-sm">Apply</button>
               <button onClick={()=>{
                 const f={op_units:[],vendors:[],statuses:[],aging:[]};
                 setSoFilters(f); setSoSearchNums([]); setSoMarginFilter('all'); setSoPage(1);
-                fetchSOData(f,1,soPerPage,[],'all');
+                fetchSOData(f,1,soPerPage,[],'all',soDateFilter);
               }}
                 className={`px-4 py-2 rounded-lg text-sm font-medium shadow-sm ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Reset</button>
             </div>
@@ -1687,7 +1818,7 @@ const App = () => {
             <div className="mt-3 flex flex-wrap gap-1.5">
               {soSearchNums.map(v=>(
                 <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-xs">
-                  SO: {v}<button onClick={()=>{ const next=soSearchNums.filter(x=>x!==v); setSoSearchNums(next); setSoPage(1); fetchSOData(soFilters,1,soPerPage,next,soMarginFilter); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                  SO: {v}<button onClick={()=>{ const next=soSearchNums.filter(x=>x!==v); setSoSearchNums(next); setSoPage(1); fetchSOData(soFilters,1,soPerPage,next,soMarginFilter,soDateFilter); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                 </span>
               ))}
               {soFilters.op_units.map(v=>(
@@ -1824,10 +1955,10 @@ const App = () => {
             Showing {((soPage-1)*soPerPage)+1}–{Math.min(soPage*soPerPage,soTotal)} of {fmtNum(soTotal)}
           </span>
           <div className="flex gap-1 items-center">
-            <button disabled={soPage===1} onClick={()=>{ const p=soPage-1; setSoPage(p); fetchSOData(soFilters,p,soPerPage,soSearchNums,soMarginFilter); }}
+            <button disabled={soPage===1} onClick={()=>{ const p=soPage-1; setSoPage(p); fetchSOData(soFilters,p,soPerPage,soSearchNums,soMarginFilter,soDateFilter); }}
               className={`p-1.5 rounded ${soPage===1?'opacity-40':'hover:bg-purple-100'}`}><ChevronLeft className="w-4 h-4"/></button>
             <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-purple-100 text-purple-700'}`}>{soPage}/{soTotalPages}</span>
-            <button disabled={soPage===soTotalPages} onClick={()=>{ const p=soPage+1; setSoPage(p); fetchSOData(soFilters,p,soPerPage,soSearchNums,soMarginFilter); }}
+            <button disabled={soPage===soTotalPages} onClick={()=>{ const p=soPage+1; setSoPage(p); fetchSOData(soFilters,p,soPerPage,soSearchNums,soMarginFilter,soDateFilter); }}
               className={`p-1.5 rounded ${soPage===soTotalPages?'opacity-40':'hover:bg-purple-100'}`}><ChevronRight className="w-4 h-4"/></button>
           </div>
         </div>
@@ -2009,13 +2140,13 @@ const App = () => {
             className={`p-3 rounded-xl flex justify-center transition-all ${activePage==='dashboard'?'bg-white/30 text-white shadow-lg':'text-purple-100 hover:bg-white/20'}`} title="Dashboard">
             <BarChart3 className="w-6 h-6"/>
           </button>
-          <button onClick={()=>{ setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums,soMarginFilter); window.scrollTo({top:0, behavior:'smooth'}); }}
+          <button onClick={()=>{ setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums,soMarginFilter,soDateFilter); window.scrollTo({top:0, behavior:'smooth'}); }}
             className={`p-3 rounded-xl flex justify-center transition-all ${activePage==='all-so'?'bg-white/30 text-white shadow-lg':'text-purple-100 hover:bg-white/20'}`} title="Open SO (Sales Order)">
             <FileText className="w-6 h-6"/>
           </button>
-          <button onClick={()=>{ setActivePage('completed'); fetchCompletedData(completedYear); window.scrollTo({top:0,behavior:'smooth'}); }}
-            className={`p-3 rounded-xl flex justify-center transition-all ${activePage==='completed'?'bg-white/30 text-white shadow-lg':'text-purple-100 hover:bg-white/20'}`} title="Completed Transactions">
-            <Award className="w-6 h-6"/>
+          <button onClick={()=>{ setActivePage('completed'); fetchCompletedData(completedYear, completedDateFilter); window.scrollTo({top:0,behavior:'smooth'}); }}
+            className={`p-3 rounded-xl flex justify-center transition-all ${activePage==='completed'?'bg-white/30 text-white shadow-lg':'text-purple-100 hover:bg-white/20'}`} title="Delivery Completed">
+            <Banknote className="w-6 h-6"/>
           </button>
         </nav>
         <button onClick={()=>setDarkMode(d=>!d)} className="p-3 rounded-xl text-white hover:bg-white/20 transition-all">
@@ -2032,7 +2163,7 @@ const App = () => {
             </h1>
             <p className={`mt-0.5 text-sm ${txt2}`}>
               {activePage==='dashboard'?'Purchase Orders & Sales Orders Overview'
-               :activePage==='completed'?'Completed Transactions Analytics'
+               :activePage==='completed'?'Delivery Completed Analytics'
                :'Manage Open SO (Sales Order) & PO Without SO'}
             </p>
           </div>
