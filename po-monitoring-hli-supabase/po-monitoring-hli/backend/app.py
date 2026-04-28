@@ -212,14 +212,18 @@ CLOSED_STATUSES = {
 EXCLUDED_OP_UNITS = {'HLI GREEN POWER (CONSUMABLE)'}
 
 # ─── PO HLI extraction patterns ──────────────────────────────────────────
-# Full PO HLI: 7+ digit number, optionally followed by an item-line suffix
-# (separator may be `-`, `_`, `/`, space, or `.`).  Examples we want to
-# capture from free-text Customer PO Number / Delivery Memo:
-#   "4502342011-10"
-#   "4502342011"               (bare, no item)
-#   "Po No 4502202743_Yudhistira_2 Item_Delivery asap"
-#   "PO 4502342011/20"
-PO_HLI_RE = re.compile(r'(\d{7,})(?:[\-_/. ](\d{1,4}))?')
+# Full PO HLI: 7+ digit number, optionally followed by `-<item line>`.  We
+# only treat `-` as the item separator (the original convention) so that
+# two adjacent PO numbers separated by space / `/` / `_` / `.` parse as
+# *two* separate POs instead of being merged.  The trailing `(?!\d)`
+# lookahead protects against truncating into a longer adjacent number
+# (e.g. "4502342011-10245" still yields PO=4502342011 with no item, not a
+# bogus item="1024").  Examples we capture from free-text fields:
+#   "4502342011-10"          → 4502342011 + item 10
+#   "4502342011"             → 4502342011 (bare)
+#   "Po No 4502202743_..."   → 4502202743
+#   "4502342011 4502342012"  → both numbers separately
+PO_HLI_RE = re.compile(r'(\d{7,})(?:-(\d{1,4}))?(?!\d)')
 # Short reference like "PO 626", "P.O #626", "PO-626", "po:626" — used to
 # match against the *suffix* of full PO HLI keys in the PO table.
 PO_SHORT_REF_RE = re.compile(
