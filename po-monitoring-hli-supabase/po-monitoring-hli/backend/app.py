@@ -1396,8 +1396,8 @@ def upload_smro():
         col_custpo  = find_column(df, ['Customer PO Number','Customer PO','PO Ref','PO Reference'])
         col_memo    = find_column(df, ['Delivery Memo','Memo','Delivery Note'])
         col_prod    = find_column(df, ['Product Name','Item Name','Description','Product'])
-        col_spec    = find_column(df, ['Specification','Spec','Specifications','Product Specification'])
-        col_pid     = find_column(df, ['Product ID','Product Id','Product Code','Material','Material No','Material Number','Material Code','SKU'])
+        col_spec    = find_column(df, ['Specification','Spec','Specifications','Product Specification','Material Description','Material Desc','Short Text'])
+        col_pid     = find_column(df, ['Product ID','Product Id','Product Code','Material','Material No','Material Number','Material Code','SKU','Article','Article Number'])
         col_qty     = find_column(df, ['SO Quantity','SO Qty','Qty','Quantity'])
         col_sunit   = find_column(df, ['Sales Unit','Unit','UOM'])
         col_sprice  = find_column(df, ['Sales Price(Exclude Tax)','Sales Price','Price','Unit Price'])
@@ -1419,10 +1419,20 @@ def upload_smro():
         updated = 0
         inserted = 0
 
+        # Track how many rows had non-empty Specification / Product ID values
+        # so the user can see whether the upload actually carried that data.
+        spec_filled = 0
+        pid_filled  = 0
+
         for _, row in df.iterrows():
             so_val = clean(df_val(row, col_so))
             if not so_val: continue
             so_item_val = clean(df_val(row, col_soitem))
+
+            spec_val = clean(df_val(row, col_spec)) if col_spec else None
+            pid_val  = clean(df_val(row, col_pid))  if col_pid  else None
+            if spec_val: spec_filled += 1
+            if pid_val:  pid_filled  += 1
 
             new_data = {
                 'so_number': so_val,
@@ -1433,8 +1443,8 @@ def upload_smro():
                 'customer_po_number': clean(df_val(row, col_custpo)),
                 'delivery_memo': clean(df_val(row, col_memo)),
                 'product_name': clean(df_val(row, col_prod)),
-                'specification': clean(df_val(row, col_spec)),
-                'product_id': clean(df_val(row, col_pid)),
+                'specification': spec_val,
+                'product_id': pid_val,
                 'so_qty': safe_float(df_val(row, col_qty)),
                 'sales_unit': clean(df_val(row, col_sunit)),
                 'sales_price': safe_float(df_val(row, col_sprice)),
@@ -1449,14 +1459,25 @@ def upload_smro():
             }
 
             if so_item_val and so_item_val in existing_so:
-                # Update existing record — preserve remarks & delivery_plan_date
+                # Update existing record — preserve remarks & delivery_plan_date.
+                # Also preserve specification / product_id if either:
+                #  (a) the uploaded file doesn't have that column at all, or
+                #  (b) the row's value is blank in the file.
+                # This protects spec/pid that was previously populated via the
+                # SMRO upload itself or via the backfill endpoint.
                 existing = existing_so[so_item_val]
-                preserved_remarks = existing.remarks
+                preserved_remarks   = existing.remarks
                 preserved_plan_date = existing.delivery_plan_date
+                preserved_spec      = existing.specification
+                preserved_pid       = existing.product_id
                 for field, val in new_data.items():
                     setattr(existing, field, val)
                 existing.remarks = preserved_remarks
                 existing.delivery_plan_date = preserved_plan_date
+                if not col_spec or spec_val is None:
+                    existing.specification = preserved_spec
+                if not col_pid or pid_val is None:
+                    existing.product_id = preserved_pid
                 updated += 1
             else:
                 new_rec = SOData(**new_data)
@@ -1472,11 +1493,42 @@ def upload_smro():
 
         db.session.add(UploadLog(file_type='SO', filename=file.filename, records_count=count))
         db.session.commit()
+
+        # Diagnostic block — surfaces which Spec / Product ID columns were
+        # detected so the user can immediately tell whether the upload
+        # carried those values.  Returned even on success.
+        diagnostics = {
+            'columns_detected': {
+                'specification': col_spec,
+                'product_id':    col_pid,
+            },
+            'rows_with_specification': spec_filled,
+            'rows_with_product_id':    pid_filled,
+            'all_file_columns':        df.columns.tolist(),
+        }
+        warning = None
+        if not col_spec and not col_pid:
+            warning = (
+                "File ini tidak mengandung kolom 'Specification' maupun 'Product ID' "
+                "(atau alias yang dikenal). Spec/Product ID di DB tidak diubah."
+            )
+        elif not col_spec:
+            warning = "Kolom 'Specification' tidak ditemukan di file ini — Specification di DB dipertahankan."
+        elif not col_pid:
+            warning = "Kolom 'Product ID' tidak ditemukan di file ini — Product ID di DB dipertahankan."
+        elif col_spec and spec_filled == 0:
+            warning = f"Kolom '{col_spec}' terdeteksi tapi semua baris kosong."
+        elif col_pid and pid_filled == 0:
+            warning = f"Kolom '{col_pid}' terdeteksi tapi semua baris kosong."
+        if warning:
+            diagnostics['warning'] = warning
+
         return jsonify({
             'message': f'Berhasil: {inserted} SO baru ditambahkan, {updated} SO diperbarui. Data lama yang tidak ada di file ini tetap dipertahankan.',
             'uploaded': count,
             'inserted': inserted,
-            'updated': updated
+            'updated': updated,
+            'diagnostics': diagnostics,
         })
     except Exception as e:
         db.session.rollback(); import traceback; traceback.print_exc()

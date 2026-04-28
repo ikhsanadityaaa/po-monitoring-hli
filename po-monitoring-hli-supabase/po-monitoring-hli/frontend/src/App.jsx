@@ -894,6 +894,16 @@ const App = () => {
       });
       setUploadProgress(null);
       addToast(`✅ ${res.data.message}`, 'success');
+      // Surface SMRO-specific Specification / Product ID diagnostics so the
+      // user immediately sees whether the file actually carried that data.
+      const diag = res.data.diagnostics;
+      if (type === 'smro' && diag) {
+        const det = diag.columns_detected || {};
+        const detail = `Specification col=${det.specification||'(none)'}; Product ID col=${det.product_id||'(none)'}. ` +
+                       `Filled rows: spec=${diag.rows_with_specification||0}, pid=${diag.rows_with_product_id||0}.`;
+        if (diag.warning) addToast(`⚠️ ${diag.warning} ${detail}`, 'warning');
+        else addToast(`ℹ️ ${detail}`, 'info');
+      }
       fetchDashboard();
       if (activePage === 'all-so') fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
       setSoPage(1);
