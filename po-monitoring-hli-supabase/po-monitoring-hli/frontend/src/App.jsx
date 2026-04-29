@@ -152,7 +152,7 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
                   <td className="px-3 py-2 max-w-[160px] truncate">{s.delivery_memo||'-'}</td>
                   <td className="px-3 py-2 whitespace-nowrap">{s.so_create_date||'-'}</td>
                   <td className="px-3 py-2 whitespace-nowrap text-purple-600">{s.delivery_plan_date||'-'}</td>
-                  <td className="px-3 py-2 max-w-[140px] truncate">{s.remarks||'-'}</td>
+                  <td className="px-3 py-2 max-w-[560px] truncate">{s.remarks||'-'}</td>
                 </tr>
               ))}
             </tbody>
