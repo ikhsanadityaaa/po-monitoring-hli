@@ -134,7 +134,7 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
           <table className="w-full text-sm">
             <thead className={`sticky top-0 ${darkMode?'bg-gray-700':'bg-purple-50'}`}>
               <tr>{['SO Item', ...(!hasSoItem ? ['SO Number'] : []), 'Status','Op Unit','Vendor','Product','Qty','Sales Amount','Cust PO','Delivery Memo','SO Date','Plan Date','Remarks'].map(h=>(
-                <th key={h} className={`px-3 py-2 text-left font-semibold whitespace-nowrap ${darkMode?'text-gray-200':'text-gray-700'}`}>{h}</th>
+                <th key={h} className={`px-3 py-2 text-center font-bold whitespace-nowrap ${darkMode?'text-gray-200':'text-gray-700'}`}>{h}</th>
               ))}</tr>
             </thead>
             <tbody className={`divide-y ${darkMode?'divide-gray-700':'divide-gray-100'}`}>
@@ -147,7 +147,7 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
                   <td className="px-3 py-2 whitespace-nowrap max-w-[140px] truncate">{s.vendor_name}</td>
                   <td className="px-3 py-2 max-w-[160px] truncate">{s.product_name}</td>
                   <td className="px-3 py-2 text-right">{fmtNum(s.so_qty)}</td>
-                  <td className="px-3 py-2 text-right font-semibold text-orange-600 whitespace-nowrap">{fmtCur(s.sales_amount)}</td>
+                  <td className="px-3 py-2 text-center font-bold text-orange-600 whitespace-nowrap">{fmtCur(s.sales_amount)}</td>
                   <td className="px-3 py-2 whitespace-nowrap">{s.customer_po_number||'-'}</td>
                   <td className="px-3 py-2 max-w-[160px] truncate">{s.delivery_memo||'-'}</td>
                   <td className="px-3 py-2 whitespace-nowrap">{s.so_create_date||'-'}</td>
@@ -1274,7 +1274,7 @@ const App = () => {
               <thead>
                 <tr className={tblHd}>
                   {['#','Item / Product','Specification','Product ID','Order Freq','Sales Amount','Purchase Amount','Margin','Margin %'].map(h=>(
-                    <th key={h} className={`px-3 py-2 text-left font-semibold ${darkMode?'text-purple-300':'text-purple-700'}`}>{h}</th>
+                    <th key={h} className={`px-3 py-2 text-center font-bold ${darkMode?'text-purple-300':'text-purple-700'}`}>{h}</th>
                   ))}
                 </tr>
               </thead>
@@ -1355,7 +1355,7 @@ const App = () => {
                     <thead className={`sticky top-0 z-10 ${darkMode?'bg-gray-800':'bg-white'}`}>
                       <tr className={tblHd}>
                         {['#','Product ID','Product','Vendor','Sales','Purchase','Margin','%','Txns','Last Date'].map(h=>(
-                          <th key={h} className={`px-2 py-2 text-left font-semibold ${darkMode?'text-purple-300':'text-purple-700'}`}>{h}</th>
+                          <th key={h} className={`px-2 py-2 text-center font-bold ${darkMode?'text-purple-300':'text-purple-700'}`}>{h}</th>
                         ))}
                       </tr>
                     </thead>
@@ -1555,10 +1555,10 @@ const App = () => {
             <table className="w-full text-xs">
               <thead className={tblHd}>
                 <tr>
-                  <th className={`p-1.5 text-left font-semibold ${txt2}`}>#</th>
-                  <th className={`p-1.5 text-left font-semibold ${txt2}`}>Vendor</th>
-                  <th className={`p-1.5 text-right font-semibold ${txt2}`}>Open SO</th>
-                  <th className={`p-1.5 text-right font-semibold ${txt2}`}>Amount</th>
+                  <th className={`p-1.5 text-center font-bold ${txt2}`}>#</th>
+                  <th className={`p-1.5 text-center font-bold ${txt2}`}>Vendor</th>
+                  <th className={`p-1.5 text-center font-bold ${txt2}`}>Open SO</th>
+                  <th className={`p-1.5 text-center font-bold ${txt2}`}>Amount</th>
                 </tr>
               </thead>
               <tbody className={`divide-y ${tblDv}`}>
@@ -1569,8 +1569,8 @@ const App = () => {
                       <span className={`inline-flex items-center justify-center w-6 h-6 rounded text-xs font-bold ${i===0?'bg-yellow-100 text-yellow-700':i===1?'bg-gray-200 text-gray-700':i===2?'bg-orange-100 text-orange-700':'bg-purple-100 text-purple-700'}`}>#{i+1}</span>
                     </td>
                     <td className={`p-1.5 font-medium ${txt} max-w-[120px] truncate`} title={v.vendor}>{v.vendor}</td>
-                    <td className="p-1.5 text-right font-semibold text-purple-600">{fmtNum(v.so_count)}</td>
-                    <td className="p-1.5 text-right font-semibold text-orange-600">{fmtCurShort(v.total_amount)}</td>
+                    <td className="p-1.5 text-center font-bold text-purple-600">{fmtNum(v.so_count)}</td>
+                    <td className="p-1.5 text-center font-bold text-orange-600">{fmtCurShort(v.total_amount)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -1596,11 +1596,11 @@ const App = () => {
                 <table className="w-full text-xs" style={{minWidth: months.length > 4 ? `${160 + months.length * 72 + 200}px` : undefined}}>
                   <thead className={`sticky top-0 ${tblHd}`}>
                     <tr>
-                      <th className={`px-3 py-2 text-left font-semibold whitespace-nowrap ${txt2} sticky left-0 ${darkMode?'bg-gray-700':'bg-purple-50'}`}>Status</th>
-                      {months.map(m => <th key={m} className={`px-2 py-2 text-center font-semibold whitespace-nowrap ${txt2}`}>{m}</th>)}
-                      <th className={`px-3 py-2 text-right font-semibold whitespace-nowrap ${txt2}`}>Total</th>
-                      <th className={`px-3 py-2 text-right font-semibold whitespace-nowrap ${txt2}`}>%</th>
-                      <th className={`px-3 py-2 text-right font-semibold whitespace-nowrap ${txt2}`}>Sales Amount</th>
+                      <th className={`px-3 py-2 text-center font-bold whitespace-nowrap ${txt2} sticky left-0 ${darkMode?'bg-gray-700':'bg-purple-50'}`}>Status</th>
+                      {months.map(m => <th key={m} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{m}</th>)}
+                      <th className={`px-3 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>Total</th>
+                      <th className={`px-3 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>%</th>
+                      <th className={`px-3 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>Sales Amount</th>
                     </tr>
                   </thead>
                   <tbody className={`divide-y ${tblDv}`}>
@@ -1677,17 +1677,17 @@ const App = () => {
               <table className="w-full text-xs">
                 <thead className={`sticky top-0 ${tblHd}`}>
                   <tr>
-                    <th className={`p-1.5 text-left font-semibold ${txt2}`}>Operation Unit</th>
-                    <th className={`p-1.5 text-right font-semibold ${txt2}`}>Open SO</th>
-                    <th className={`p-1.5 text-right font-semibold ${txt2}`}>Amount</th>
+                    <th className={`p-1.5 text-center font-bold ${txt2}`}>Operation Unit</th>
+                    <th className={`p-1.5 text-center font-bold ${txt2}`}>Open SO</th>
+                    <th className={`p-1.5 text-center font-bold ${txt2}`}>Amount</th>
                   </tr>
                 </thead>
                 <tbody className={`divide-y ${tblDv}`}>
                   {(stats?.top_op_units||[]).map((u,i)=>(
                     <tr key={i} className={`${trHov} transition-colors`}>
                       <td className={`p-1.5 font-medium ${txt} max-w-[160px] truncate`} title={u.op_unit}>{u.op_unit}</td>
-                      <td className="p-1.5 text-right font-semibold text-purple-600">{fmtNum(u.so_count)}</td>
-                      <td className="p-1.5 text-right font-semibold text-orange-600">{fmtCurShort(u.total_amount)}</td>
+                      <td className="p-1.5 text-center font-bold text-purple-600">{fmtNum(u.so_count)}</td>
+                      <td className="p-1.5 text-center font-bold text-orange-600">{fmtCurShort(u.total_amount)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -1735,7 +1735,7 @@ const App = () => {
           <table className="w-full text-sm">
             <thead className={tblHd}>
               <tr>{['Vendor (SMRO)','< 30 Days','30–90 Days','90–180 Days','> 180 Days','Total Open','Sales Amount'].map(h=>(
-                <th key={h} className={`p-3 text-center font-semibold ${txt2} first:text-left`}>{h}</th>
+                <th key={h} className={`p-3 text-center font-bold`}>{h}</th>
               ))}</tr>
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
@@ -1767,7 +1767,7 @@ const App = () => {
                         {fmtNum(v.total_open)}
                       </button>
                     </td>
-                    <td className="p-3 text-right font-semibold text-orange-600 text-xs">{fmtCurShort(v.sales_amount)}</td>
+                    <td className="p-3 text-center font-bold text-orange-600 text-xs">{fmtCurShort(v.sales_amount)}</td>
                   </tr>
                 );
               })}
@@ -1958,7 +1958,7 @@ const App = () => {
                 {['Aging','SO Item','Item Name','Status','Op Unit','Vendor','Qty',
                   'Sales Price','Sales Amount','PO Price','PO Amount','Margin','%Margin',
                   'Possible Delivery','Plan Date','Remarks'].map(h=>(
-                  <th key={h} className={`px-3 py-2.5 text-left font-semibold whitespace-nowrap ${txt2} ${h==='Remarks'?'min-w-[560px]':''}`}>{h}</th>
+                  <th key={h} className={`px-3 py-2.5 text-center font-bold whitespace-nowrap ${txt2} ${h==='Remarks'?'min-w-[560px]':''}`}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -1999,9 +1999,9 @@ const App = () => {
                   <td className={`px-3 py-2 max-w-[120px] truncate ${txt2}`} title={so.vendor_name}>{so.vendor_name}</td>
                   <td className={`px-3 py-2 text-right ${txt2}`}>{fmtNum(so.so_qty)}</td>
                   <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${txt}`}>{fmtCur(so.sales_price)}</td>
-                  <td className="px-3 py-2 text-right font-semibold text-orange-600 whitespace-nowrap min-w-[130px]">{fmtCur(so.sales_amount)}</td>
+                  <td className="px-3 py-2 text-center font-bold text-orange-600 whitespace-nowrap min-w-[130px]">{fmtCur(so.sales_amount)}</td>
                   <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${txt}`}>{fmtCur(so.purchasing_price)}</td>
-                  <td className="px-3 py-2 text-right font-semibold text-green-600 whitespace-nowrap min-w-[130px]">{fmtCur(poAmount)}</td>
+                  <td className="px-3 py-2 text-center font-bold text-green-600 whitespace-nowrap min-w-[130px]">{fmtCur(poAmount)}</td>
                   <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${marginColor}`}>{fmtCur(margin)}</td>
                   <td className={`px-3 py-2 text-right whitespace-nowrap ${marginColor}`}>
                     {marginPct !== null ? `${marginPct.toFixed(1)}%` : '-'}
@@ -2161,7 +2161,7 @@ const App = () => {
             <thead className={tblHd}>
               <tr>
                 {['PO HLI NUMBER','PO ITEM TYPE','ITEM CODE','OPERATION UNIT','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','WORKING DAYS LEFT'].map(h=>(
-                  <th key={h} className={`px-4 py-3 text-left font-semibold whitespace-nowrap ${txt2} ${h==='PRICE'||h==='AMOUNT'?'min-w-[140px]':''}`}>{h}</th>
+                  <th key={h} className={`px-4 py-3 text-center font-bold whitespace-nowrap ${txt2} ${h==='PRICE'||h==='AMOUNT'?'min-w-[140px]':''}`}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -2192,7 +2192,7 @@ const App = () => {
                     <td className={`px-4 py-3 text-right ${txt2}`}>{fmtNum(row.qty)}</td>
                     <td className={`px-4 py-3 ${txt2}`}>{row.unit||'-'}</td>
                     <td className={`px-4 py-3 text-right whitespace-nowrap min-w-[140px] ${txt}`}>{fmtCur(row.price)}</td>
-                    <td className="px-4 py-3 text-right font-semibold text-orange-600 whitespace-nowrap min-w-[140px]">{fmtCur(row.amount)}</td>
+                    <td className="px-4 py-3 text-center font-bold text-orange-600 whitespace-nowrap min-w-[140px]">{fmtCur(row.amount)}</td>
                     <td className={`px-4 py-3 ${txt2}`}>{row.currency||'IDR'}</td>
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.po_date||'-'}</td>
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.purchase_member||'-'}</td>
@@ -2368,7 +2368,7 @@ const App = () => {
               <table className="w-full text-xs">
                 <thead className={`sticky top-0 ${darkMode?'bg-gray-700':'bg-purple-50'}`}>
                   <tr>{['SO Item','Product','Vendor','Sales','Purchase','Margin','%','Date'].map(h=>(
-                    <th key={h} className={`px-3 py-2 text-left font-semibold ${darkMode?'text-gray-200':'text-gray-700'}`}>{h}</th>
+                    <th key={h} className={`px-3 py-2 text-center font-bold ${darkMode?'text-gray-200':'text-gray-700'}`}>{h}</th>
                   ))}</tr>
                 </thead>
                 <tbody className={`divide-y ${darkMode?'divide-gray-700':'divide-gray-100'}`}>
