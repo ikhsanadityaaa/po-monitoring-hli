@@ -1958,7 +1958,7 @@ const App = () => {
                 {['Aging','SO Item','Item Name','Status','Op Unit','Vendor','Qty',
                   'Sales Price','Sales Amount','PO Price','PO Amount','Margin','%Margin',
                   'Possible Delivery','Plan Date','Remarks'].map(h=>(
-                  <th key={h} className={`px-3 py-2.5 text-left font-semibold whitespace-nowrap ${txt2}`}>{h}</th>
+                  <th key={h} className={`px-3 py-2.5 text-left font-semibold whitespace-nowrap ${txt2} ${h==='Remarks'?'min-w-[560px]':''}`}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -2036,7 +2036,7 @@ const App = () => {
                       </div>
                     )}
                   </td>
-                  <td className="px-3 py-2">
+                  <td className="px-3 py-2 min-w-[560px]">
                     {editingCell?.id===so.id && editingCell.field==='remarks' ? (
                       <input type="text" defaultValue={so.remarks}
                         className={`w-full px-2 py-1 rounded text-xs border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
