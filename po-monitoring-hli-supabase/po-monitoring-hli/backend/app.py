@@ -348,6 +348,48 @@ def convert_to_idr(amount, currency, rate_date=None, cache_only=False):
     return float(amount)
 
 
+def _ensure_extra_columns():
+    """Online migration: add optional columns that older local DBs may miss."""
+    is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
+
+    def existing_columns(table_name):
+        try:
+            if is_sqlite:
+                result = db.session.execute(text(f"PRAGMA table_info({table_name})"))
+                return {row[1].lower() for row in result}
+            result = db.session.execute(text(
+                "SELECT column_name FROM information_schema.columns "
+                f"WHERE table_name = '{table_name}'"
+            ))
+            return {row[0].lower() for row in result}
+        except Exception:
+            return set()
+
+    migration_plan = {
+        'so_data': [
+            ('specification',        'TEXT'),
+            ('product_id',           'VARCHAR(100)'),
+            ('purchasing_currency',  'VARCHAR(10)'),
+        ],
+        'po_data': [
+            ('delivery_plan_date',   'DATE'),
+            ('remarks',              'TEXT'),
+        ],
+    }
+
+    for table_name, columns in migration_plan.items():
+        cols = existing_columns(table_name)
+        for col_name, col_type in columns:
+            if col_name.lower() not in cols:
+                try:
+                    db.session.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}"))
+                    db.session.commit()
+                    print(f'DB migration: added column {table_name}.{col_name}')
+                except Exception as exc:
+                    db.session.rollback()
+                    print(f'DB migration warning ({table_name}.{col_name}): {exc}')
+
+
 def _ensure_so_extra_columns():
     """Online migration: add `specification` and `product_id` columns to
     so_data if they don't exist yet.
@@ -392,7 +434,7 @@ def _ensure_so_extra_columns():
 
 with app.app_context():
     db.create_all()
-    _ensure_so_extra_columns()
+    _ensure_extra_columns()
     print('DB schema ready.')
 
 CLOSED_STATUSES = {
@@ -838,14 +880,15 @@ def get_dashboard_stats():
         po_date_range = db.session.query(func.min(POData.po_date), func.max(POData.po_date)).first()
         so_date_range = db.session.query(func.min(SOData.so_create_date), func.max(SOData.so_create_date)).first()
 
-        # Last updated: most recent upload timestamp
-        last_upload = db.session.query(func.max(UploadLog.uploaded_at)).scalar()
-        if not last_upload:
-            # fallback: most recent SO or PO record
-            last_so = db.session.query(func.max(SOData.uploaded_at)).scalar()
-            last_po = db.session.query(func.max(POData.uploaded_at)).scalar()
-            candidates = [x for x in [last_so, last_po] if x]
-            last_upload = max(candidates) if candidates else None
+        # Last updated: latest successful upload timestamp per source file.
+        last_po_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'PO').scalar()
+        last_so_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'SO').scalar()
+        if not last_po_upload:
+            last_po_upload = db.session.query(func.max(POData.uploaded_at)).scalar()
+        if not last_so_upload:
+            last_so_upload = db.session.query(func.max(SOData.uploaded_at)).scalar()
+        candidates = [x for x in [last_po_upload, last_so_upload] if x]
+        last_upload = max(candidates) if candidates else None
 
         return jsonify({
             'po_without_so': po_without_so_count,
@@ -860,6 +903,8 @@ def get_dashboard_stats():
             'so_status_monthly': so_status_monthly,
             'status_months': sorted_months,
             'last_updated': utc_isoformat(last_upload),
+            'last_updated_po': utc_isoformat(last_po_upload),
+            'last_updated_smro': utc_isoformat(last_so_upload),
             'po_date_range': {
                 'min': po_date_range[0].isoformat() if po_date_range and po_date_range[0] else None,
                 'max': po_date_range[1].isoformat() if po_date_range and po_date_range[1] else None,
@@ -1056,6 +1101,8 @@ def get_po_hli_key_set():
 @app.route('/api/data/po-without-so', methods=['GET'])
 def get_po_without_so():
     try:
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 10))
         matched_set = build_matched_set()
         hidden_po = get_hidden_po_numbers()
         today = date.today()
@@ -1092,6 +1139,20 @@ def get_po_without_so():
                     'delivery_plan_date': p.delivery_plan_date.isoformat() if p.delivery_plan_date else '',
                     'remarks': p.remarks or ''
                 })
+        # Keep backward compatibility: existing dashboard calls this endpoint
+        # without pagination params and expects a plain array. When pagination
+        # params are supplied, default/start rows per page is 10.
+        if 'page' in request.args or 'per_page' in request.args:
+            total = len(result)
+            start = (page - 1) * per_page
+            end = page * per_page
+            return jsonify({
+                'data': result[start:end],
+                'total': total,
+                'page': page,
+                'per_page': per_page,
+            })
+
         return jsonify(result)
     except Exception as e:
         import traceback; traceback.print_exc()
@@ -1227,25 +1288,26 @@ def get_aging_detail_all():
 
 @app.route('/api/data/all-so', methods=['GET'])
 def get_all_so():
+    """Paginated SO list with filters."""
     try:
-        op_units      = request.args.getlist('op_unit')
-        vendors       = request.args.getlist('vendor')
-        statuses      = request.args.getlist('status')
-        aging         = request.args.getlist('aging')
-        so_items      = request.args.getlist('so_item')
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 10))
+        op_units = request.args.getlist('op_unit')
+        vendors = request.args.getlist('vendor')
+        statuses = request.args.getlist('status')
+        aging_list = request.args.getlist('aging')
+        so_items = request.args.getlist('so_item')
         margin_filter = request.args.get('margin_filter', 'all')
-        date_year     = request.args.get('date_year', '')
-        date_from     = request.args.get('date_from', '')
-        date_to       = request.args.get('date_to', '')
-        page          = max(1, int(request.args.get('page', 1)))
-        per_page      = min(500, int(request.args.get('per_page', 20)))
+        sort_order = request.args.get('sort_order', 'newest')  # 'newest' or 'oldest'
+        date_year, date_from, date_to = parse_so_date_args()
 
-        today = date.today()
         q = SOData.query.filter(open_so_filter())
-        if op_units:  q = q.filter(SOData.operation_unit_name.in_(op_units))
-        if vendors:   q = q.filter(SOData.vendor_name.in_(vendors))
-        if statuses:  q = q.filter(SOData.so_status.in_(statuses))
-        if so_items:  q = q.filter(SOData.so_item.in_(so_items))
+        if op_units: q = q.filter(SOData.operation_unit_name.in_(op_units))
+        if vendors: q = q.filter(SOData.vendor_name.in_(vendors))
+        if statuses: q = q.filter(SOData.so_status.in_(statuses))
+        if so_items: q = q.filter(SOData.so_item.in_(so_items))
+
+        # SO Create Date filter
         is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
         if date_year:
             try:
@@ -1256,18 +1318,23 @@ def get_all_so():
                     q = q.filter(func.extract('year', SOData.so_create_date) == yr)
             except ValueError:
                 pass
-        elif date_from or date_to:
+        else:
             if date_from:
                 q = q.filter(SOData.so_create_date >= date_from)
             if date_to:
                 q = q.filter(SOData.so_create_date <= date_to)
 
-        all_sos = q.order_by(SOData.so_create_date.asc()).all()
+        # Apply sort order (deterministic by SO Create Date, then SO Item).
+        if sort_order == 'oldest':
+            all_sos = q.order_by(SOData.so_create_date.asc(), SOData.so_item.asc()).all()
+        else:  # newest
+            all_sos = q.order_by(SOData.so_create_date.desc(), SOData.so_item.asc()).all()
 
-        if aging:
+        if aging_list:
+            today = date.today()
             def matches_aging(s):
                 age = workdays_since(s.so_create_date, today)
-                return get_aging_label(age) in aging
+                return get_aging_label(age) in aging_list
             all_sos = [s for s in all_sos if matches_aging(s)]
 
         if margin_filter in ('positive', 'negative'):
@@ -1285,6 +1352,7 @@ def get_all_so():
                 all_sos = [s for s in all_sos if calc_margin(s) >= 0]
 
         total = len(all_sos)
+        subtotal_amount = sum(float(s.sales_amount or 0) for s in all_sos)
         paged = all_sos[(page-1)*per_page : page*per_page]
 
         op_units_opts = sorted({s.operation_unit_name for s in all_sos if s.operation_unit_name})
@@ -1293,7 +1361,7 @@ def get_all_so():
 
         return jsonify({
             'data': [so_dict(s) for s in paged],
-            'total': total, 'page': page, 'per_page': per_page,
+            'total': total, 'subtotal_amount': round(subtotal_amount, 2), 'page': page, 'per_page': per_page,
             'filters': {'op_units': list(op_units_opts), 'vendors': list(vendors_opts), 'statuses': list(statuses_opts)}
         })
     except Exception as e:
@@ -1991,6 +2059,131 @@ def update_so(so_id):
         return jsonify({'success': True})
     except Exception as e:
         db.session.rollback(); return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/data/po/<int:po_id>', methods=['PUT'])
+def update_po(po_id):
+    try:
+        data = request.json
+        po = db.session.get(POData, po_id)
+        if not po:
+            return jsonify({'error': 'Not found'}), 404
+        if 'delivery_plan_date' in data:
+            po.delivery_plan_date = parse_date(data['delivery_plan_date'])
+        if 'remarks' in data:
+            po.remarks = data['remarks']
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/data/po/template', methods=['GET'])
+def download_po_batch_template():
+    """Download Excel template for PO HLI Without SO editable fields."""
+    try:
+        matched_set = build_matched_set()
+        hidden_po = get_hidden_po_numbers()
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "PO Batch Upload"
+        headers = ['PO HLI Number', 'Delivery Plan Date', 'Remarks']
+        ws.append(headers)
+
+        header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+        widths = [35, 25, 60]
+        for i, cell in enumerate(ws[1], 1):
+            cell.fill = header_fill
+            cell.font = Font(bold=True, color="000000")
+            cell.alignment = Alignment(horizontal='center')
+            ws.column_dimensions[get_column_letter(i)].width = widths[i - 1]
+
+        ws.append(['example : 4502358819-10', 'example : 2025-12-31', 'example : Waiting for vendor confirmation'])
+        grey_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+        red_font = Font(color="FF0000")
+        for cell in ws[2]:
+            cell.font = red_font
+            cell.fill = grey_fill
+
+        seen_keys = set()
+        for p in POData.query.all():
+            key = (p.po_number, p.item_no)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            if is_po_hidden(p.po_number, p.item_no, hidden_po):
+                continue
+            op_unit = get_operation_unit(p.po_item_type, p.item_code)
+            if op_unit in EXCLUDED_OP_UNITS:
+                continue
+            if not po_is_matched(p.po_number, p.item_no, matched_set):
+                po_key = po_hli_key(p.po_number, p.item_no) or p.po_number
+                ws.append([
+                    po_key,
+                    p.delivery_plan_date.isoformat() if p.delivery_plan_date else '',
+                    p.remarks or ''
+                ])
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return send_file(output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f"Template_PO_BatchUpload_{datetime.now().strftime('%Y%m%d')}.xlsx")
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/data/po/batch-upload', methods=['POST'])
+def batch_upload_po():
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file'}), 400
+        file = request.files['file']
+        df = pd.read_excel(file, engine='openpyxl', skiprows=[1])
+        df.columns = [str(c).strip() for c in df.columns]
+        col_po = find_column(df, ['PO HLI Number', 'NO PO HLI', 'PO HLI', 'PO Number-Item No', 'PO Number'])
+        col_plan = find_column(df, ['Delivery Plan Date', 'Plan Date'])
+        col_rem = find_column(df, ['Remarks', 'Remark'])
+        if not col_po:
+            return jsonify({'error': f'Column "PO HLI Number" not found. Available: {df.columns.tolist()}'}), 400
+
+        updated = 0
+        not_found = 0
+        for _, row in df.iterrows():
+            ref = clean(df_val(row, col_po))
+            if not ref or ref.lower().startswith('example'):
+                continue
+            ref = ref.replace('example :', '').replace('example:', '').strip()
+            po_num, item_no = ref, None
+            if '-' in ref:
+                po_num, item_no = ref.split('-', 1)
+                po_num = po_num.strip()
+                item_no = item_no.strip()
+            candidates = POData.query.filter_by(po_number=po_num).all()
+            if item_no:
+                item_variants = _normalize_item_no(item_no)
+                candidates = [p for p in candidates if any(str(p.item_no or '').strip() == v for v in item_variants)]
+            if not candidates:
+                not_found += 1
+                continue
+            for po in candidates:
+                if col_plan:
+                    d = parse_date(df_val(row, col_plan))
+                    if d or clean(df_val(row, col_plan)) == '':
+                        po.delivery_plan_date = d
+                if col_rem:
+                    po.remarks = clean(df_val(row, col_rem)) or ''
+                updated += 1
+        db.session.commit()
+        return jsonify({'updated': updated, 'not_found': not_found})
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/data/so/template', methods=['GET'])
