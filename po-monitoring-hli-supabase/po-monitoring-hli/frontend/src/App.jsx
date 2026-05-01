@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area, ComposedChart
@@ -52,6 +52,26 @@ const fmtCurShort = (v) => {
   return `IDR ${n.toLocaleString('id-ID')}`;
 };
 const fmtDate = (d) => { try { return d ? format(parseISO(d),'dd MMM yyyy') : '-'; } catch { return d||'-'; } };
+
+const workingDaysUntilToday = (dateValue) => {
+  if (!dateValue) return null;
+  const start = new Date(dateValue);
+  if (Number.isNaN(start.getTime())) return null;
+
+  const today = new Date();
+  const cur = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+  const end = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+
+  if (cur > end) return 0;
+
+  let days = 0;
+  while (cur <= end) {
+    const day = cur.getDay();
+    if (day !== 0 && day !== 6) days += 1;
+    cur.setDate(cur.getDate() + 1);
+  }
+  return days;
+};
 
 // ─── Download Toast ────────────────────────────────────────────────────────
 const DownloadToast = ({ message, onClose }) => {
@@ -176,66 +196,93 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
 // ─── MultiSelect dropdown — Excel-style (all checked by default) ─────────
 const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => {
   const [open, setOpen] = useState(false);
+  const [draftSelected, setDraftSelected] = useState([]);
+  const [draftNone, setDraftNone] = useState(false);
   const ref = useRef(null);
-  // "all selected" = selected array is empty (no filter = show all)
-  const noneSelected = selected.length === 0;
-  const allSelected  = selected.length === options.length;
-  const someSelected = !noneSelected && !allSelected;
-  // visually "all checked" when no filter applied
-  const allVisuallyChecked = noneSelected;
+
+  const safeSelected = Array.isArray(selected) ? selected : [];
+  const noneSelected = safeSelected.length === 0;
+  const currentSelected = open ? draftSelected : safeSelected;
+  const currentNone = open ? draftNone : false;
+  const currentAll = !currentNone && currentSelected.length === 0;
+  const someSelected = !currentNone && currentSelected.length > 0 && currentSelected.length < options.length;
+
+  const closeDropdown = () => {
+    setOpen(false);
+    setDraftSelected([]);
+    setDraftNone(false);
+  };
 
   useEffect(() => {
-    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const handler = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) {
+        closeDropdown();
+      }
+    };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
+  useEffect(() => {
+    if (!open) return;
+    setDraftSelected(safeSelected);
+    setDraftNone(false);
+  }, [open, selected]);
+
   const toggleAll = () => {
-    if (noneSelected) {
-      // Currently all checked → uncheck all (set to explicit empty selection = nothing shown)
-      // We use a sentinel: store all items as "selected" but display as "0 selected"
-      // Better UX: uncheck all means filter passes nothing, so we store all as excluded
-      // Actually Excel behavior: uncheck all → nothing shows. We store [] but invert logic.
-      // Simplest: use null/special state — instead use a "noneMode" approach:
-      // When noneSelected (was all-checked), clicking unchecks all → store special marker
-      onChange('__NONE__');
+    if (currentAll) {
+      // Uncheck all only changes the temporary dropdown state.
+      // If the user clicks outside without choosing an item, it is cancelled.
+      setDraftSelected([]);
+      setDraftNone(true);
     } else {
-      // Currently some/all explicitly selected OR none-mode → check all → reset to []
+      setDraftSelected([]);
+      setDraftNone(false);
       onChange([]);
     }
   };
 
   const toggle = (val) => {
-    // If currently in all-checked visual state (noneSelected)
-    if (noneSelected) {
-      // Click one item: keep only that one checked (deselect all others)
-      onChange([val]);
+    if (currentAll || currentNone) {
+      const next = [val];
+      setDraftSelected(next);
+      setDraftNone(false);
+      onChange(next);
       return;
     }
-    const currentSelected = selected === '__NONE__' ? [] : selected;
+
     if (currentSelected.includes(val)) {
       const next = currentSelected.filter(x => x !== val);
-      onChange(next.length === 0 ? '__NONE__' : next);
+      if (next.length === 0) {
+        setDraftSelected([]);
+        setDraftNone(true);
+        return;
+      }
+      setDraftSelected(next);
+      onChange(next.length === options.length ? [] : next);
     } else {
       const next = [...currentSelected, val];
-      onChange(next.length === options.length ? [] : next);
+      const normalized = next.length === options.length ? [] : next;
+      setDraftSelected(normalized);
+      setDraftNone(false);
+      onChange(normalized);
     }
   };
 
   const isChecked = (val) => {
-    if (selected === '__NONE__') return false;
-    if (noneSelected) return true; // all visually checked
-    return selected.includes(val);
+    if (currentNone) return false;
+    if (currentAll) return true;
+    return currentSelected.includes(val);
   };
 
-  const isAllChecked = selected !== '__NONE__' && noneSelected;
-  const isNoneMode   = selected === '__NONE__';
+  const isAllChecked = currentAll;
 
-  const displayLabel = isNoneMode
+  const displayLabel = currentNone
     ? `0 selected`
     : noneSelected
     ? `All ${label}`
-    : `${selected.length} selected`;
+    : `${safeSelected.length} selected`;
+  const hasActiveFilter = !noneSelected;
 
   return (
     <div className="relative flex-1 min-w-[180px]" ref={ref}>
@@ -243,9 +290,13 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
       <button onClick={()=>setOpen(o=>!o)} style={{cursor:'pointer'}}
         className={`w-full px-3 py-2 rounded-lg text-sm border text-left flex justify-between items-center transition-colors
           ${darkMode
-            ? 'bg-gray-600 border-gray-500 text-white hover:bg-gray-500'
-            : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
-        <span className="truncate">{displayLabel}</span>
+            ? hasActiveFilter
+              ? 'bg-orange-900/30 border-orange-500 text-orange-200 hover:bg-orange-900/40'
+              : 'bg-gray-600 border-gray-500 text-white hover:bg-gray-500'
+            : hasActiveFilter
+              ? 'bg-orange-50 border-orange-300 text-orange-700 hover:bg-orange-100'
+              : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
+        <span className={`truncate ${hasActiveFilter ? 'font-semibold text-orange-600' : ''}`}>{displayLabel}</span>
         <ChevronDown className="w-4 h-4 flex-shrink-0 ml-1"/>
       </button>
       {open && (
@@ -300,16 +351,18 @@ const SearchInput = ({ placeholder, onSearch, darkMode, txt2, label }) => {
   };
 
   return (
-    <div className="relative" ref={ref}>
+    <div className="relative w-full" ref={ref}>
       <button
         onClick={() => setOpen(o => !o)}
         title={`Search ${label}`}
-        className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm border font-medium transition-all
+        className={`w-full flex items-center justify-between gap-1.5 px-3 py-2 rounded-lg text-sm border font-medium transition-all
           ${darkMode ? 'bg-gray-600 border-gray-500 text-white hover:bg-gray-500' : 'bg-white border-gray-300 text-gray-700 hover:bg-purple-50 hover:border-purple-400'}`}
       >
-        <Search className="w-4 h-4"/>
-        <span>Search {label}</span>
-        <ChevronDown className="w-3.5 h-3.5 ml-0.5 opacity-60"/>
+        <span className="flex items-center gap-1.5 min-w-0">
+          <Search className="w-4 h-4 flex-shrink-0"/>
+          <span className="truncate">Search {label}</span>
+        </span>
+        <ChevronDown className="w-3.5 h-3.5 opacity-60 flex-shrink-0"/>
       </button>
       {open && (
         <div className={`absolute left-0 top-full mt-1 z-50 rounded-xl shadow-2xl border p-3 w-64 ${darkMode?'bg-gray-800 border-gray-700':'bg-white border-gray-200'}`}>
@@ -531,11 +584,11 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
     if (value.end   !== undefined) setEndDate(value.end || '');
   }, [value?.mode, value?.year, value?.start, value?.end]);
 
-  const apply = () => {
+  useEffect(() => {
     if (mode === 'all') onFilter({ mode: 'all' });
     else if (mode === 'year') onFilter({ mode: 'year', year: selectedYear });
     else onFilter({ mode: 'range', start: startDate, end: endDate });
-  };
+  }, [mode, selectedYear, startDate, endDate]);
 
   const reset = () => {
     setMode('all');
@@ -573,10 +626,6 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
             className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300'}`}/>
         </div>
       )}
-      <button onClick={apply}
-        className="px-4 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-semibold">
-        Apply
-      </button>
       {mode !== 'all' && (
         <button onClick={reset} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${darkMode ? 'bg-gray-600 text-gray-200 hover:bg-gray-500' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}>
           Reset
@@ -592,6 +641,8 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
 const App = () => {
   const [darkMode, setDarkMode] = useState(false);
   const [activePage, setActivePage] = useState('dashboard');
+  const [showUploadDropdown, setShowUploadDropdown] = useState(false);
+  const uploadDropdownRef = useRef(null);
 
   const [stats, setStats] = useState(null);
   const [poWithoutSO, setPoWithoutSO] = useState([]);
@@ -605,15 +656,17 @@ const App = () => {
   const [soFilters, setSoFilters] = useState({ op_units: [], vendors: [], statuses: [], aging: [] });
   const [soSearchNums, setSoSearchNums] = useState([]); // search SO Item
   const [soMarginFilter, setSoMarginFilter] = useState('all'); // 'all' | 'positive' | 'negative'
+  const [soSortOrder, setSoSortOrder] = useState('oldest'); // 'oldest' | 'newest'
   const [soPage, setSoPage] = useState(1);
-  const [soPerPage, setSoPerPage] = useState(20);
+  const [soPerPage, setSoPerPage] = useState(10);
 
   // PO filters
   const [poPage, setPoPage] = useState(1);
-  const [poPerPage, setPoPerPage] = useState(20);
+  const [poPerPage, setPoPerPage] = useState(10);
   const [poSearchNums, setPoSearchNums] = useState([]); // search PO HLI Number
   const [poFilterItemType, setPoFilterItemType] = useState([]); // multi-select
   const [poFilterOpUnit, setPoFilterOpUnit] = useState([]);   // multi-select
+  const [poSortOrder, setPoSortOrder] = useState('oldest'); // 'oldest' | 'newest'
   const [poItemTypeOptions, setPoItemTypeOptions] = useState([]);
   const [poOpUnitOptions, setPoOpUnitOptions] = useState([]);
 
@@ -648,8 +701,16 @@ const App = () => {
   const setSODateFilter     = setGlobalDateFilter;
   const completedDateFilter = globalDateFilter;
   const setCompletedDateFilter = setGlobalDateFilter;
+  
+  // Click-outside handlers
   useEffect(() => {
     const handler = (e) => { if (hideMenuRef.current && !hideMenuRef.current.contains(e.target)) setShowHideMenu(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  useEffect(() => {
+    const handler = (e) => { if (uploadDropdownRef.current && !uploadDropdownRef.current.contains(e.target)) setShowUploadDropdown(false); };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, []);
@@ -726,10 +787,10 @@ const App = () => {
     return val;
   };
 
-  const fetchSOData = useCallback(async (filters, page, perPage, searchNums, marginFilter, dateFilter) => {
+  const fetchSOData = useCallback(async (filters, page, perPage, searchNums, marginFilter, dateFilter, sortOrder = soSortOrder) => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ page, per_page: perPage });
+      const params = new URLSearchParams({ page, per_page: perPage, sort_order: sortOrder });
       resolveFilter(filters.op_units).forEach(v => params.append('op_unit', v));
       resolveFilter(filters.vendors).forEach(v => params.append('vendor', v));
       resolveFilter(filters.statuses).forEach(v => params.append('status', v));
@@ -751,7 +812,7 @@ const App = () => {
     } catch (e) {
       addToast(`Failed to load SO: ${e.message}`, 'error');
     } finally { setLoading(false); }
-  }, [addToast]);
+  }, [addToast, soSortOrder]);
 
   // ─── Delete Request API functions ────────────────────────────────────────
   const fetchDeleteRequests = useCallback(async () => {
@@ -814,12 +875,21 @@ const App = () => {
     } else if (Array.isArray(poFilterOpUnit) && poFilterOpUnit.length > 0) {
       filtered = filtered.filter(p => poFilterOpUnit.includes(p.operation_unit));
     }
+    filtered.sort((a, b) => {
+      const da = a.po_date ? new Date(a.po_date).getTime() : Number.MAX_SAFE_INTEGER;
+      const db = b.po_date ? new Date(b.po_date).getTime() : Number.MAX_SAFE_INTEGER;
+      return poSortOrder === 'newest' ? db - da : da - db;
+    });
     setPoFiltered(filtered);
     setPoPage(1);
-  }, [poWithoutSO, poSearchNums, poFilterItemType, poFilterOpUnit]);
+  }, [poWithoutSO, poSearchNums, poFilterItemType, poFilterOpUnit, poSortOrder]);
 
   useEffect(() => { fetchDashboard(); fetchDeleteRequests(); }, []);
-  useEffect(() => { if (activePage === 'all-so') fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter); }, [activePage]);
+  useEffect(() => {
+    if (activePage === 'all-so') {
+      fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter, soSortOrder);
+    }
+  }, [activePage, soSortOrder, soPage, soPerPage, soFilters, soSearchNums, soMarginFilter, soDateFilter, fetchSOData]);
 
   // Refetch dashboard whenever the global SO Create Date filter changes
   // (skip the very first run since the mount effect above already fetched).
@@ -1058,6 +1128,11 @@ const App = () => {
 
   const poTotalPages = Math.max(1, Math.ceil(poFiltered.length / poPerPage));
   const poRows = poFiltered.slice((poPage-1)*poPerPage, poPage*poPerPage);
+  const sortedSOData = [...allSOData].sort((a, b) => {
+    const da = a.so_create_date ? new Date(a.so_create_date).getTime() : 0;
+    const db = b.so_create_date ? new Date(b.so_create_date).getTime() : 0;
+    return soSortOrder === 'newest' ? db - da : da - db;
+  });
   const soTotalPages = Math.max(1, Math.ceil(soTotal / soPerPage));
 
   // PO KPI — unique PO numbers from filtered set (excluding consumable)
@@ -1168,8 +1243,10 @@ const App = () => {
               <YAxis yAxisId="cnt" orientation="right" stroke="#F97316" fontSize={10}/>
               <Tooltip
                 formatter={(v, n) => n === 'Transactions' ? [fmtNum(v), n] : [fmtCur(v), n]}
-                contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
-              <Legend wrapperStyle={{fontSize:12}}/>
+                contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}
+                labelStyle={{color:darkMode?'#F3F4F6':'#111827'}}
+                itemStyle={{color:darkMode?'#F3F4F6':'#111827'}}/>
+              <Legend wrapperStyle={{fontSize:12,color:darkMode?'#F3F4F6':'#111827'}} iconType="rect"/>
               <Bar yAxisId="amt" dataKey="sales_amount" name="Sales Amount" fill="url(#cgSales)" radius={[4,4,0,0]}/>
               <Bar yAxisId="amt" dataKey="purchase_amount" name="Purchase Amount" fill="url(#cgPurchase)" radius={[4,4,0,0]}/>
               <Line yAxisId="cnt" type="monotone" dataKey="count" name="Transactions" stroke="#F97316" strokeWidth={3} dot={{r:3,fill:'#F97316'}} activeDot={{r:5}} z={10}/>
@@ -1439,14 +1516,6 @@ const App = () => {
             <span className={txt2}>SO Create Range:</span>
             <span className={`font-semibold ${txt}`}>{fmtDateRange(stats?.so_date_range)}</span>
           </div>
-          {stats?.last_updated && (
-            <div className="flex items-center gap-1.5 ml-auto">
-              <span className={txt2}>Last Updated:</span>
-              <span className={`font-semibold ${txt}`}>
-                {(() => { try { return new Date(stats.last_updated).toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); } catch { return stats.last_updated; } })()}
-              </span>
-            </div>
-          )}
         </div>
       </div>
 
@@ -1710,15 +1779,39 @@ const App = () => {
               return (
                 <div className={`p-5 rounded-2xl shadow ${card}`}>
                   <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><Calendar className="w-4 h-4 text-red-500"/> SO Aging (Pie)</h3>
-                  <ResponsiveContainer width="100%" height={300}>
-                    <PieChart>
-                      <Pie data={agingPieData} cx="50%" cy="40%" innerRadius={52} outerRadius={88} paddingAngle={0} dataKey="value" labelLine={false} label={renderPctLabel}>
-                        {agingPieData.map((d,i)=><Cell key={i} fill={d.fill}/>)}
-                      </Pie>
-                      <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}} formatter={(v,n)=>[fmtNum(v)+' SO',n]}/>
-                      <Legend layout="horizontal" align="center" verticalAlign="bottom" iconSize={8} formatter={(v)=><span className="text-xs">{v}</span>}/>
-                    </PieChart>
-                  </ResponsiveContainer>
+                  <div className="w-full overflow-hidden">
+                    <ResponsiveContainer width="100%" height={300}>
+                      <PieChart margin={{ top: 8, right: 8, bottom: 28, left: 8 }}>
+                        <Pie
+                          data={agingPieData}
+                          cx="50%"
+                          cy="42%"
+                          innerRadius={52}
+                          outerRadius={88}
+                          paddingAngle={0}
+                          dataKey="value"
+                          labelLine={false}
+                          label={renderPctLabel}
+                        >
+                          {agingPieData.map((d,i)=><Cell key={i} fill={d.fill}/>)}
+                        </Pie>
+                        <Tooltip
+                          contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}}
+                          formatter={(v,n)=>[fmtNum(v)+' SO',n]}
+                          labelStyle={{color:darkMode?'#F3F4F6':'#111827'}}
+                          itemStyle={{color:darkMode?'#F3F4F6':'#111827'}}
+                        />
+                        <Legend
+                          layout="horizontal"
+                          align="center"
+                          verticalAlign="bottom"
+                          iconSize={8}
+                          wrapperStyle={{ fontSize: 12, color: darkMode ? '#F3F4F6' : '#111827' }}
+                          formatter={(v)=><span className="text-xs" style={{ color: darkMode ? '#F3F4F6' : '#111827' }}>{v}</span>}
+                        />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
                 </div>
               );
             })()}
@@ -1735,7 +1828,7 @@ const App = () => {
           <table className="w-full text-sm">
             <thead className={tblHd}>
               <tr>{['Vendor (SMRO)','< 30 Days','30–90 Days','90–180 Days','> 180 Days','Total Open','Sales Amount'].map(h=>(
-                <th key={h} className={`p-3 text-center font-bold`}>{h}</th>
+                <th key={h} className={`p-3 text-center font-bold ${darkMode?'text-gray-200':'text-gray-700'}`}>{h}</th>
               ))}</tr>
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
@@ -1800,7 +1893,7 @@ const App = () => {
                         {fmtNum(tot.total_open)}
                       </button>
                     </td>
-                    <td className="p-3 text-right font-bold text-orange-700 text-xs">{fmtCurShort(tot.sales_amount)}</td>
+                    <td className="p-3 text-center font-bold text-orange-700 text-xs">{fmtCurShort(tot.sales_amount)}</td>
                   </tr>
                 );
               })()}
@@ -1828,18 +1921,18 @@ const App = () => {
           fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter, f);
         }}
       />
-      <div className={`p-6 rounded-2xl shadow mb-6 ${card}`}>
-        <div className="flex flex-wrap justify-between items-center gap-3 mb-5">
+      <div className={`p-4 rounded-2xl shadow mb-5 ${card}`}>
+        <div className="flex flex-wrap justify-between items-center gap-3 mb-3">
           <div>
             <h2 className={`text-xl font-bold ${txt}`}>Open SO (Sales Order)</h2>
             <p className={`text-sm ${txt2}`}>{fmtNum(soTotal)} total records — page {soPage} of {soTotalPages}</p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <label className="flex items-center gap-1 px-3 py-1.5 bg-green-700 hover:bg-green-800 text-white rounded-lg text-sm font-medium shadow-sm">
+            <label className="flex items-center gap-1 px-3 py-1.5 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg text-sm font-medium shadow-sm">
               <Upload className="w-4 h-4"/>Batch Upload
               <input type="file" accept=".xlsx,.xls" onChange={handleBatchUpload} className="hidden"/>
             </label>
-            <DownloadButton onClick={downloadSOTemplate} className="flex items-center gap-1 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm font-medium shadow-sm">
+            <DownloadButton onClick={downloadSOTemplate} className="flex items-center gap-1 px-3 py-1.5 bg-orange-500 hover:bg-orange-600 text-white rounded-lg text-sm font-medium shadow-sm">
               <FileSpreadsheet className="w-4 h-4"/>Template
             </DownloadButton>
             <DownloadButton onClick={downloadSOExcel} className="flex items-center gap-1 px-3 py-1.5 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-medium shadow-sm">
@@ -1849,7 +1942,7 @@ const App = () => {
         </div>
 
         {/* Aging Filter Chips */}
-        <div className="mb-3 flex flex-wrap gap-2 items-center">
+        <div className="mb-2 flex flex-wrap gap-2 items-center">
           <span className={`text-xs font-medium ${txt2}`}>Filter by Aging:</span>
           {AGING_LABELS.map(label => {
             const active = soFilters.aging.includes(label);
@@ -1867,12 +1960,19 @@ const App = () => {
           )}
         </div>
 
-        {/* Multi-select Filters row — Search SO leftmost */}
-        <div className={`p-4 rounded-xl mb-4 ${darkMode?'bg-gray-700':'bg-gray-50'}`}>
-          <div className="flex flex-wrap gap-3 items-end">
-            {/* Search SO Item — leftmost */}
-            <div>
-              <label className={`block text-xs font-medium mb-1 ${txt2}`}>Search SO Item</label>
+        {/* Multi-select Filters row — compact single-line layout */}
+        <div className={`px-4 py-3 rounded-xl mb-3 ${darkMode?'bg-gray-700':'bg-gray-50'}`}>
+          <div className="grid grid-cols-12 gap-2 items-end">
+            <div className="col-span-12 sm:col-span-2 xl:col-span-1 min-w-0">
+              <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ SO Date</label>
+              <select className={`w-full px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                value={soSortOrder} onChange={e=>{ setSoSortOrder(e.target.value); setSoPage(1); }} title="Sort SO Date">
+                <option value="oldest">Oldest ↑</option>
+                <option value="newest">Newest ↓</option>
+              </select>
+            </div>
+            <div className="col-span-12 sm:col-span-3 xl:col-span-2 min-w-0">
+              <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Search SO Item</label>
               <SearchInput
                 label="SO Item"
                 placeholder={"e.g.\n1234-10\n1234-20"}
@@ -1884,43 +1984,53 @@ const App = () => {
                 darkMode={darkMode} txt2={txt2}
               />
             </div>
-            <MultiSelect label="Operation Unit" options={soFilterOptions.op_units}
-              selected={soFilters.op_units} onChange={v=>setSoFilters(f=>({...f,op_units:v}))}
-              darkMode={darkMode} txt2={txt2}/>
-            <MultiSelect label="Vendor Name" options={soFilterOptions.vendors}
-              selected={soFilters.vendors} onChange={v=>setSoFilters(f=>({...f,vendors:v}))}
-              darkMode={darkMode} txt2={txt2}/>
-            <MultiSelect label="SO Status" options={soFilterOptions.statuses}
-              selected={soFilters.statuses} onChange={v=>setSoFilters(f=>({...f,statuses:v}))}
-              darkMode={darkMode} txt2={txt2}/>
-            <div className="flex-1 min-w-[140px]">
-              <label className={`block text-xs font-medium mb-1 ${txt2}`}>Filter Margin</label>
-              <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
-                value={soMarginFilter} onChange={e=>setSoMarginFilter(e.target.value)}>
-                <option value="all">All Data</option>
-                <option value="positive">With Margin (≥ 0)</option>
-                <option value="negative">Negative Margin (&lt; 0)</option>
+            <div className="col-span-12 sm:col-span-4 xl:col-span-2 min-w-0">
+              <MultiSelect label="Operation Unit" options={soFilterOptions.op_units}
+                selected={soFilters.op_units} onChange={v=>{
+                  const next = {...soFilters, op_units: v};
+                  setSoFilters(next); setSoPage(1);
+                  fetchSOData(next, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+                }}
+                darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="col-span-12 sm:col-span-4 xl:col-span-2 min-w-0">
+              <MultiSelect label="Vendor Name" options={soFilterOptions.vendors}
+                selected={soFilters.vendors} onChange={v=>{
+                  const next = {...soFilters, vendors: v};
+                  setSoFilters(next); setSoPage(1);
+                  fetchSOData(next, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+                }}
+                darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="col-span-12 sm:col-span-4 xl:col-span-2 min-w-0">
+              <MultiSelect label="SO Status" options={soFilterOptions.statuses}
+                selected={soFilters.statuses} onChange={v=>{
+                  const next = {...soFilters, statuses: v};
+                  setSoFilters(next); setSoPage(1);
+                  fetchSOData(next, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+                }}
+                darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="col-span-6 sm:col-span-3 xl:col-span-1 min-w-0">
+              <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Margin</label>
+              <select className={`w-full px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                value={soMarginFilter} onChange={e=>{
+                  const next = e.target.value;
+                  setSoMarginFilter(next); setSoPage(1);
+                  fetchSOData(soFilters, 1, soPerPage, soSearchNums, next, soDateFilter);
+                }}>
+                <option value="all">All</option>
+                <option value="positive">≥ 0</option>
+                <option value="negative">Below 0</option>
               </select>
             </div>
-            <div className="flex-1 min-w-[100px]">
-              <label className={`block text-xs font-medium mb-1 ${txt2}`}>Rows per Page</label>
-              <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
-                value={soPerPage} onChange={e=>setSoPerPage(Number(e.target.value))}>
-                <option value={20}>20</option>
-                <option value={50}>50</option>
-                <option value={100}>100</option>
-                <option value={500}>500</option>
-              </select>
-            </div>
-            <div className="flex gap-2">
-              <button onClick={()=>{ setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums,soMarginFilter,soDateFilter); }}
-                className="px-5 py-2 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-semibold shadow-sm">Apply</button>
+            <div className="col-span-6 sm:col-span-3 xl:col-span-1 min-w-0">
               <button onClick={()=>{
                 const f={op_units:[],vendors:[],statuses:[],aging:[]};
                 setSoFilters(f); setSoSearchNums([]); setSoMarginFilter('all'); setSoPage(1);
                 fetchSOData(f,1,soPerPage,[],'all',soDateFilter);
               }}
-                className={`px-4 py-2 rounded-lg text-sm font-medium shadow-sm ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Reset</button>
+                className={`w-full px-3 py-2 rounded-lg text-sm font-medium shadow-sm ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Reset</button>
             </div>
           </div>
           {/* Active filter tags */}
@@ -1933,17 +2043,17 @@ const App = () => {
               ))}
               {soFilters.op_units.map(v=>(
                 <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full text-xs">
-                  {v}<button onClick={()=>setSoFilters(f=>({...f,op_units:f.op_units.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                  {v}<button onClick={()=>{ setSoFilters(f=>({...f,op_units:f.op_units.filter(x=>x!==v)})); setSoPage(1); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                 </span>
               ))}
               {soFilters.vendors.map(v=>(
                 <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">
-                  {v}<button onClick={()=>setSoFilters(f=>({...f,vendors:f.vendors.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                  {v}<button onClick={()=>{ setSoFilters(f=>({...f,vendors:f.vendors.filter(x=>x!==v)})); setSoPage(1); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                 </span>
               ))}
               {soFilters.statuses.map(v=>(
                 <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs">
-                  {v}<button onClick={()=>setSoFilters(f=>({...f,statuses:f.statuses.filter(x=>x!==v)}))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                  {v}<button onClick={()=>{ setSoFilters(f=>({...f,statuses:f.statuses.filter(x=>x!==v)})); setSoPage(1); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                 </span>
               ))}
             </div>
@@ -1955,25 +2065,26 @@ const App = () => {
           <table className="w-full text-sm">
             <thead className={tblHd}>
               <tr>
-                {['Aging','SO Item','Item Name','Status','Op Unit','Vendor','Qty',
+                {['Aging','Day','SO Item','Item Name','Status','Op Unit','Vendor','Qty',
                   'Sales Price','Sales Amount','PO Price','PO Amount','Margin','%Margin',
-                  'Possible Delivery','Plan Date','Remarks'].map(h=>(
+                  'SO Create Date','Possible Delivery','Plan Date','Remarks'].map(h=>(
                   <th key={h} className={`px-3 py-2.5 text-center font-bold whitespace-nowrap ${txt2} ${h==='Remarks'?'min-w-[560px]':''}`}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
               {(() => {
-                if (allSOData.length === 0) return (
-                  <tr><td colSpan={16} className={`px-4 py-10 text-center ${txt2}`}>
+                if (sortedSOData.length === 0) return (
+                <tr><td colSpan={18} className={`px-4 py-10 text-center ${txt2}`}>
                     <FileText className="w-10 h-10 mx-auto mb-2 opacity-40"/>No data
                   </td></tr>
                 );
-                return allSOData.map((so) => {
+                return sortedSOData.map((so) => {
                 const isDeliveryCompleted = so.so_status === 'Delivery Completed';
                 const poAmount = (so.purchasing_price || 0) * (so.so_qty || 0);
                 const margin = (so.sales_amount || 0) - poAmount;
                 const marginPct = poAmount !== 0 ? (margin / poAmount) * 100 : null;
+                const workingDays = workingDaysUntilToday(so.so_create_date);
                 const marginColor = margin < 0 ? 'text-red-600 font-semibold' : margin > 0 ? 'text-green-600 font-semibold' : txt2;
                 return (
                 <tr key={so.id} className={`${trHov} transition-colors`}>
@@ -1984,6 +2095,9 @@ const App = () => {
                         {so.aging_label}
                       </span>
                     ) : null}
+                  </td>
+                  <td className={`px-3 py-2 text-center whitespace-nowrap ${workingDays !== null && workingDays > 180 ? 'text-red-600 font-bold' : workingDays !== null && workingDays > 90 ? 'text-orange-600 font-semibold' : workingDays !== null && workingDays > 30 ? 'text-yellow-600 font-semibold' : 'text-green-600 font-semibold'}`}>
+                    {workingDays !== null ? workingDays : '-'}
                   </td>
                   {/* SO Item first, no SO Number column */}
                   <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{so.so_item}</td>
@@ -2006,6 +2120,7 @@ const App = () => {
                   <td className={`px-3 py-2 text-right whitespace-nowrap ${marginColor}`}>
                     {marginPct !== null ? `${marginPct.toFixed(1)}%` : '-'}
                   </td>
+                  <td className={`px-3 py-2 text-center text-xs ${txt2} whitespace-nowrap`}>{so.so_create_date||'-'}</td>
                   <td className={`px-3 py-2 text-center text-xs ${txt2}`}>{so.delivery_possible_date||'-'}</td>
                   <td className="px-3 py-2 text-center">
                     {editingCell?.id===so.id && editingCell.field==='delivery_plan_date' ? (
@@ -2060,10 +2175,23 @@ const App = () => {
         </div>
 
         {/* Pagination */}
-        <div className={`mt-4 pt-3 border-t ${darkMode?'border-gray-700':'border-gray-200'} flex justify-between items-center`}>
-          <span className={`text-sm ${txt2}`}>
-            Showing {((soPage-1)*soPerPage)+1}–{Math.min(soPage*soPerPage,soTotal)} of {fmtNum(soTotal)}
-          </span>
+        <div className={`mt-3 pt-2 border-t ${darkMode?'border-gray-700':'border-gray-200'} flex flex-wrap justify-between items-center gap-3`}>
+          <div className="flex items-center gap-3">
+            <span className={`text-sm ${txt2}`}>
+              Showing {((soPage-1)*soPerPage)+1}–{Math.min(soPage*soPerPage,soTotal)} of {fmtNum(soTotal)}
+            </span>
+            <label className={`flex items-center gap-1 text-xs ${txt2}`}>
+              Rows
+              <select className={`px-2 py-1 rounded-lg text-xs border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-300'}`}
+                value={soPerPage} onChange={e=>{ setSoPerPage(Number(e.target.value)); setSoPage(1); fetchSOData(soFilters,1,Number(e.target.value),soSearchNums,soMarginFilter,soDateFilter); }}>
+                <option value={10}>10</option>
+                <option value={20}>20</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+                <option value={500}>500</option>
+              </select>
+            </label>
+          </div>
           <div className="flex gap-1 items-center">
             <button disabled={soPage===1} onClick={()=>{ const p=soPage-1; setSoPage(p); fetchSOData(soFilters,p,soPerPage,soSearchNums,soMarginFilter,soDateFilter); }}
               className={`p-1.5 rounded ${soPage===1?'opacity-40':'hover:bg-purple-100'}`}><ChevronLeft className="w-4 h-4"/></button>
@@ -2076,7 +2204,7 @@ const App = () => {
 
       {/* PO HLI Without SO Table */}
       <div ref={poTableRef} className={`rounded-2xl shadow overflow-hidden ${card}`}>
-        <div className={`p-5 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+        <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
           <div className="flex items-center gap-2">
             <AlertCircle className="w-5 h-5 text-yellow-600"/>
             <h3 className={`text-base font-bold ${txt}`}>PO HLI Without SO</h3>
@@ -2092,46 +2220,47 @@ const App = () => {
         </div>
 
         {/* PO Filters row */}
-        <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700 bg-gray-750':'border-gray-100 bg-gray-50'} flex flex-wrap gap-3 items-end`}>
-          {/* Search PO HLI Number — leftmost */}
-          <div>
-            <label className={`block text-xs font-medium mb-1 ${txt2}`}>Search PO Number</label>
-            <SearchInput
-              label="PO HLI Number"
-              placeholder={"e.g.\n4502358819\n4502358819-10"}
-              onSearch={(nums) => { setPoSearchNums(nums); setPoPage(1); }}
-              darkMode={darkMode} txt2={txt2}
-            />
-          </div>
-          <MultiSelect
-            label="PO Item Type"
-            options={poItemTypeOptions}
-            selected={poFilterItemType}
-            onChange={v => { setPoFilterItemType(v); setPoPage(1); }}
-            darkMode={darkMode} txt2={txt2}
-          />
-          <MultiSelect
-            label="Operation Unit"
-            options={poOpUnitOptions}
-            selected={poFilterOpUnit}
-            onChange={v => { setPoFilterOpUnit(v); setPoPage(1); }}
-            darkMode={darkMode} txt2={txt2}
-          />
-          <div className="flex-1 min-w-[120px]">
-            <label className={`block text-xs font-medium mb-1 ${txt2}`}>Rows per Page</label>
-            <select className={`w-full px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
-              value={poPerPage} onChange={e=>setPoPerPage(Number(e.target.value))}>
-              <option value={20}>20</option>
-              <option value={50}>50</option>
-              <option value={100}>100</option>
-              <option value={500}>500</option>
-            </select>
-          </div>
-          <div className="flex gap-2 items-end">
-            <button onClick={()=>setPoPage(1)}
-              className="px-5 py-2 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-semibold shadow-sm">Apply</button>
-            <button onClick={()=>{ setPoSearchNums([]); setPoFilterItemType([]); setPoFilterOpUnit([]); setPoPage(1); }}
-              className={`px-4 py-2 rounded-lg text-sm font-medium shadow-sm ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Reset</button>
+        <div className={`px-5 py-2.5 border-b ${darkMode?'border-gray-700 bg-gray-750':'border-gray-100 bg-gray-50'}`}>
+          <div className="grid grid-cols-12 gap-2 items-end">
+            <div className="col-span-12 sm:col-span-2 xl:col-span-1 min-w-0">
+              <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ PO Date</label>
+              <select className={`w-full px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                value={poSortOrder} onChange={e=>{ setPoSortOrder(e.target.value); setPoPage(1); }} title="Sort PO Date">
+                <option value="oldest">Oldest ↑</option>
+                <option value="newest">Newest ↓</option>
+              </select>
+            </div>
+            <div className="col-span-12 sm:col-span-3 xl:col-span-2 min-w-0">
+              <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Search PO Number</label>
+              <SearchInput
+                label="PO HLI Number"
+                placeholder={"e.g.\n4502358819\n4502358819-10"}
+                onSearch={(nums) => { setPoSearchNums(nums); setPoPage(1); }}
+                darkMode={darkMode} txt2={txt2}
+              />
+            </div>
+            <div className="col-span-12 sm:col-span-4 xl:col-span-2 min-w-0">
+              <MultiSelect
+                label="PO Item Type"
+                options={poItemTypeOptions}
+                selected={poFilterItemType}
+                onChange={v => { setPoFilterItemType(v); setPoPage(1); }}
+                darkMode={darkMode} txt2={txt2}
+              />
+            </div>
+            <div className="col-span-12 sm:col-span-4 xl:col-span-2 min-w-0">
+              <MultiSelect
+                label="Operation Unit"
+                options={poOpUnitOptions}
+                selected={poFilterOpUnit}
+                onChange={v => { setPoFilterOpUnit(v); setPoPage(1); }}
+                darkMode={darkMode} txt2={txt2}
+              />
+            </div>
+            <div className="col-span-12 sm:col-span-4 xl:col-span-1 min-w-0">
+              <button onClick={()=>{ setPoSearchNums([]); setPoFilterItemType([]); setPoFilterOpUnit([]); setPoPage(1); }}
+                className={`w-full px-3 py-2 rounded-lg text-sm font-medium shadow-sm ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Reset</button>
+            </div>
           </div>
         </div>
 
@@ -2205,8 +2334,21 @@ const App = () => {
             </tbody>
           </table>
         </div>
-        <div className={`p-4 border-t ${darkMode?'border-gray-700':'border-gray-100'} flex justify-between items-center`}>
-          <span className={`text-sm ${txt2}`}>Showing {(poPage-1)*poPerPage+1}–{Math.min(poPage*poPerPage,poFiltered.length)} of {fmtNum(poFiltered.length)}</span>
+        <div className={`px-4 py-3 border-t ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+          <div className="flex items-center gap-3">
+            <span className={`text-sm ${txt2}`}>Showing {(poPage-1)*poPerPage+1}–{Math.min(poPage*poPerPage,poFiltered.length)} of {fmtNum(poFiltered.length)}</span>
+            <label className={`flex items-center gap-1 text-xs ${txt2}`}>
+              Rows
+              <select className={`px-2 py-1 rounded-lg text-xs border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-300'}`}
+                value={poPerPage} onChange={e=>{ setPoPerPage(Number(e.target.value)); setPoPage(1); }}>
+                <option value={10}>10</option>
+                <option value={20}>20</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+                <option value={500}>500</option>
+              </select>
+            </label>
+          </div>
           <div className="flex gap-1 items-center">
             <button disabled={poPage===1} onClick={()=>setPoPage(p=>p-1)} className={`p-1.5 rounded ${poPage===1?'opacity-40':'hover:bg-purple-100'}`}><ChevronLeft className="w-4 h-4"/></button>
             <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-purple-100 text-purple-700'}`}>{poPage}/{poTotalPages}</span>
@@ -2277,17 +2419,35 @@ const App = () => {
                :'Manage Open SO (Sales Order) & PO Without SO'}
             </p>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <label className={`flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all ${darkMode?'bg-purple-700 hover:bg-purple-800 text-white':'bg-purple-700 hover:bg-purple-800 text-white'}`}>
-              <Upload className="w-4 h-4"/><span className="text-sm font-medium">Upload HLI PO List (Item)</span>
-              <input type="file" accept=".xlsx,.xls" onChange={e=>handleUpload(e,'po')} className="hidden"/>
-            </label>
-            <label className={`flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all ${darkMode?'bg-blue-700 hover:bg-blue-800 text-white':'bg-blue-700 hover:bg-blue-800 text-white'}`}>
-              <Upload className="w-4 h-4"/><span className="text-sm font-medium">Upload SMRO - Search Client Odr</span>
-              <input type="file" accept=".xlsx,.xls" onChange={e=>handleUpload(e,'smro')} className="hidden"/>
-            </label>
+          <div className="flex flex-col items-end gap-1">
+            <div className="flex flex-wrap gap-2 justify-end">
+              <div className="relative" ref={uploadDropdownRef}>
+              <button
+                onClick={() => setShowUploadDropdown(v => !v)}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all bg-purple-700 hover:bg-purple-800 text-white"
+              >
+                <Upload className="w-4 h-4"/>
+                <span className="text-sm font-medium">Manual Update</span>
+                <ChevronDown className={`w-4 h-4 transition-transform ${showUploadDropdown ? 'rotate-180' : ''}`}/>
+              </button>
+              {showUploadDropdown && (
+                <div className={`absolute right-0 mt-2 z-50 rounded-xl shadow-2xl border min-w-[280px] overflow-hidden ${darkMode?'bg-gray-800 border-gray-700 text-white':'bg-white border-gray-200'}`}>
+                  <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-purple-50'}`}>
+                    <Upload className="w-4 h-4 text-purple-500"/>
+                    <span className={`text-sm font-medium ${txt}`}>Upload HLI PO List (Item)</span>
+                    <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUpload(e,'po'); setShowUploadDropdown(false);}} className="hidden"/>
+                  </label>
+                  <div className={`${darkMode?'border-t border-gray-700':'border-t border-gray-100'}`}></div>
+                  <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-purple-50'}`}>
+                    <Upload className="w-4 h-4 text-blue-500"/>
+                    <span className={`text-sm font-medium ${txt}`}>Upload SMRO - Search Client Odr</span>
+                    <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUpload(e,'smro'); setShowUploadDropdown(false);}} className="hidden"/>
+                  </label>
+                </div>
+              )}
+              </div>
 
-            <div className="relative" ref={hideMenuRef}>
+              <div className="relative" ref={hideMenuRef}>
               <button onClick={()=>setShowHideMenu(o=>!o)}
                 className="flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all bg-orange-600 hover:bg-orange-700 text-white">
                 <EyeOff className="w-4 h-4"/><span className="text-sm font-medium">Hide</span>
@@ -2346,6 +2506,25 @@ const App = () => {
                   </div>
                 </div>
               )}
+              </div>
+            </div>
+            <div className={`text-xs leading-relaxed text-right ${txt2}`}>
+              <div>
+                <span>Last Update HLI PO List: </span>
+                <span className={`font-semibold ${txt}`}>
+                  {stats?.last_updated_po
+                    ? (() => { try { return new Date(stats.last_updated_po).toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); } catch { return stats.last_updated_po; } })()
+                    : '-'}
+                </span>
+              </div>
+              <div>
+                <span>Last Update SMRO: </span>
+                <span className={`font-semibold ${txt}`}>
+                  {stats?.last_updated_smro
+                    ? (() => { try { return new Date(stats.last_updated_smro).toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); } catch { return stats.last_updated_smro; } })()
+                    : '-'}
+                </span>
+              </div>
             </div>
           </div>
         </header>
