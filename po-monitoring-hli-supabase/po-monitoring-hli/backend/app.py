@@ -24,6 +24,12 @@ app = Flask(__name__)
 _HOLIDAY_CACHE = None
 _HOLIDAY_CACHE_KEY = None
 
+# Short-lived in-memory response cache for heavy Delivery Completed analytics.
+# Keyed by request filters + cheap DB signature, so repeated page opens return
+# immediately while uploads/changed rows naturally invalidate the cache.
+_COMPLETED_SUMMARY_CACHE = {}
+_COMPLETED_SUMMARY_CACHE_TTL_SECONDS = 300
+
 def _holiday_set():
     """Return cached set of Indonesian non-working public holidays.
 
@@ -178,6 +184,8 @@ class SOData(db.Model):
     purchasing_price = db.Column(db.Float)
     purchasing_amount = db.Column(db.Float)
     purchasing_currency = db.Column(db.String(10))
+    purchasing_amount_idr = db.Column(db.Float)
+    purchasing_amount_idr_cached_at = db.Column(db.DateTime)
     so_create_date = db.Column(db.Date)
     delivery_possible_date = db.Column(db.Date)
     matched_po_number = db.Column(db.String(50))
@@ -268,7 +276,7 @@ def get_usd_to_idr(d, cache_only=False):
     return _get_fallback_rate()
 
 
-def prefetch_exchange_rates(dates):
+def prefetch_exchange_rates(dates, fetch_missing=True):
     """Warm the in-memory _RATE_CACHE for a collection of dates, minimising
     round-trips to the Frankfurter API.
 
@@ -276,10 +284,12 @@ def prefetch_exchange_rates(dates):
     1. Skip dates already in _RATE_CACHE (already warm).
     2. Bulk-load all ExchangeRate rows from the DB in a single query and
        populate the cache — avoids N individual DB lookups.
-    3. For any remaining dates (still not in cache) that are ≤ today, fetch
-       from the Frankfurter API **sequentially** and persist to DB.
-    4. After API fetches, do one final pass: any date still missing gets the
-       nearest DB rate as a proxy (no additional HTTP call).
+    3. If fetch_missing=True, for any remaining dates (still not in cache) that
+       are ≤ today, fetch from the Frankfurter API **sequentially** and persist
+       to DB. For latency-sensitive dashboard endpoints, pass
+       fetch_missing=False so page load never waits on external API calls.
+    4. After optional API fetches, one final pass stores any date still missing
+       in the in-process cache using the nearest DB rate / fallback (no HTTP).
 
     Call this once at the top of any endpoint that iterates over many rows and
     calls convert_to_idr(), then pass cache_only=True to get_usd_to_idr()
@@ -302,23 +312,27 @@ def prefetch_exchange_rates(dates):
     if not needed:
         return
 
-    # 3. Fetch remaining from API (only past/today dates)
-    today = date.today()
-    to_api = sorted(d for d in needed if d <= today)
-    fetched_rows = []
-    for d in to_api:
-        rate = _fetch_rate_from_api(d)
-        if rate:
-            _RATE_CACHE[d] = rate
-            fetched_rows.append(ExchangeRate(rate_date=d, usd_to_idr=rate, source='frankfurter'))
-            needed.discard(d)
+    # 3. Optionally fetch remaining from API (only past/today dates).
+    # Dashboard/page-load code should call this with fetch_missing=False; missing
+    # historical rates can be filled once via /api/exchange-rate/fetch and then
+    # reused from the DB forever.
+    if fetch_missing:
+        today = date.today()
+        to_api = sorted(d for d in needed if d <= today)
+        fetched_rows = []
+        for d in to_api:
+            rate = _fetch_rate_from_api(d)
+            if rate:
+                _RATE_CACHE[d] = rate
+                fetched_rows.append(ExchangeRate(rate_date=d, usd_to_idr=rate, source='frankfurter'))
+                needed.discard(d)
 
-    if fetched_rows:
-        try:
-            db.session.bulk_save_objects(fetched_rows)
-            db.session.commit()
-        except Exception:
-            db.session.rollback()
+        if fetched_rows:
+            try:
+                db.session.bulk_save_objects(fetched_rows)
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
 
     # 4. Proxy remaining with nearest known rate (no extra HTTP calls)
     if needed:
@@ -348,6 +362,59 @@ def convert_to_idr(amount, currency, rate_date=None, cache_only=False):
     return float(amount)
 
 
+def raw_purchase_amount(s):
+    """Return the original purchasing amount before currency conversion."""
+    raw = float(s.purchasing_amount or 0)
+    if raw == 0 and s.purchasing_price:
+        raw = float(s.purchasing_price) * float(s.so_qty or 0)
+    return raw
+
+
+def purchase_amount_idr(s, allow_persist=False):
+    """Return cached/persisted purchase amount in IDR for SOData.
+
+    Delivery Completed pages call this for every row. For IDR rows the value is
+    already final. For USD rows we persist the converted result in so_data, so
+    old rows are not converted again on every page load. Only rows whose cache
+    is still empty (typically newly uploaded/updated non-IDR rows) are computed.
+    """
+    cached = getattr(s, 'purchasing_amount_idr', None)
+    if cached is not None:
+        return float(cached)
+
+    raw = raw_purchase_amount(s)
+    cur = (s.purchasing_currency or 'IDR').strip().upper()
+    if cur in ('IDR', ''):
+        converted = raw
+    else:
+        converted = convert_to_idr(raw, s.purchasing_currency, s.so_create_date, cache_only=True)
+
+    if allow_persist:
+        s.purchasing_amount_idr = converted
+        s.purchasing_amount_idr_cached_at = datetime.utcnow()
+    return converted
+
+
+def ensure_purchase_amount_idr_cache(rows):
+    """Persist missing IDR purchase amounts for rows in the current result set."""
+    missing = [s for s in rows if getattr(s, 'purchasing_amount_idr', None) is None]
+    if not missing:
+        return 0
+
+    usd_missing = [s for s in missing if (s.purchasing_currency or '').strip().upper() == 'USD']
+    if usd_missing:
+        prefetch_exchange_rates({s.so_create_date for s in usd_missing if s.so_create_date}, fetch_missing=False)
+
+    for s in missing:
+        purchase_amount_idr(s, allow_persist=True)
+
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+    return len(missing)
+
+
 def _ensure_extra_columns():
     """Online migration: add optional columns that older local DBs may miss."""
     is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
@@ -367,9 +434,11 @@ def _ensure_extra_columns():
 
     migration_plan = {
         'so_data': [
-            ('specification',        'TEXT'),
-            ('product_id',           'VARCHAR(100)'),
-            ('purchasing_currency',  'VARCHAR(10)'),
+            ('specification',                      'TEXT'),
+            ('product_id',                         'VARCHAR(100)'),
+            ('purchasing_currency',                'VARCHAR(10)'),
+            ('purchasing_amount_idr',              'DOUBLE PRECISION'),
+            ('purchasing_amount_idr_cached_at',    'TIMESTAMP'),
         ],
         'po_data': [
             ('delivery_plan_date',   'DATE'),
@@ -402,9 +471,11 @@ def _ensure_so_extra_columns():
     """
     is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
     needed = [
-        ('specification',        'TEXT'),
-        ('product_id',           'VARCHAR(100)'),
-        ('purchasing_currency',  'VARCHAR(10)'),
+        ('specification',                      'TEXT'),
+        ('product_id',                         'VARCHAR(100)'),
+        ('purchasing_currency',                'VARCHAR(10)'),
+        ('purchasing_amount_idr',              'DOUBLE PRECISION'),
+        ('purchasing_amount_idr_cached_at',    'TIMESTAMP'),
     ]
     try:
         if is_sqlite:
@@ -614,6 +685,9 @@ def is_return_so_item(so_item):
         return False
     return str(so_item).strip().startswith('9')
 
+def is_return_so_status(so_status):
+    return 'return' in str(so_status or '').strip().lower()
+
 def has_internal_po_ref(customer_po_number, delivery_memo):
     for field in [customer_po_number, delivery_memo]:
         if not field:
@@ -626,8 +700,6 @@ def has_internal_po_ref(customer_po_number, delivery_memo):
     return False
 
 def so_is_countable(so_item, so_number=None, customer_po_number=None, delivery_memo=None):
-    if is_return_so_item(so_item):
-        return False
     if has_internal_po_ref(customer_po_number, delivery_memo):
         return False
     return True
@@ -775,8 +847,7 @@ def get_dashboard_stats():
         # Single pass over open SO rows — compute total_so_count AND so_without_po_count
         # together instead of two separate full-table scans.
         open_so_rows = so_q(
-            open_so_filter(),
-            ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))
+            open_so_filter()
         ).all()
 
         total_so_count = 0
@@ -787,81 +858,116 @@ def get_dashboard_stats():
             if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
                 continue
             total_so_count += 1
-            if not so_has_matching_po_hli(s, po_numbers, po_suffix_index):
+            # KPI SO without PO HLI excludes return statuses and HLI Consumable only.
+            # Open SO total and other Open SO analytics still include both.
+            if (
+                not is_return_so_status(s.so_status)
+                and s.operation_unit_name not in EXCLUDED_OP_UNITS
+                and not so_has_matching_po_hli(s, po_numbers, po_suffix_index)
+            ):
                 so_without_po_count += 1
 
-        # Monthly trend (open SO, sum of sales by month)
-        monthly_q = apply_so_create_date_filter(
-            db.session.query(SOData.so_create_date, SOData.sales_amount).filter(open_so_filter()),
-            date_year, date_from, date_to,
-        )
+        # All SO-based dashboard aggregates below must use exactly the same
+        # canonical Open SO dataset as the KPI above:
+        #   - SO create date filter
+        #   - open status filter
+        #   - excluded operation units removed
+        #   - hidden SO removed
+        #   - non-countable SO item/customer PO/delivery memo removed
+        # This keeps KPI, status distribution, pie chart, vendor, op unit, and
+        # aging-derived drilldowns consistent.
+        canonical_open_sos = []
+        total_open_so_amount = 0.0
         monthly = {}
-        for d, amt in monthly_q.all():
-            if d:
-                k = d.strftime('%b %Y')
-                if k not in monthly:
-                    monthly[k] = {'month': k, 'so_count': 0, 'amount': 0.0, '_s': d.replace(day=1)}
-                monthly[k]['so_count'] += 1
-                monthly[k]['amount'] += round((amt or 0) / 1_000_000, 2)
-        monthly_trend = sorted(monthly.values(), key=lambda x: x['_s'])
-        for m in monthly_trend: del m['_s']
-
-        top_vendors_q = apply_so_create_date_filter(
-            db.session.query(
-                SOData.vendor_name, func.count(SOData.id), func.sum(SOData.sales_amount)
-            ).filter(open_so_filter(), SOData.vendor_name.isnot(None)),
-            date_year, date_from, date_to,
-        ).group_by(SOData.vendor_name).order_by(func.sum(SOData.sales_amount).desc()).limit(5)
-        top_vendors = [
-            {'vendor': r[0], 'so_count': r[1], 'total_amount': round(r[2] or 0, 2)}
-            for r in top_vendors_q.all()
-        ]
-
-        top_op_units_q = apply_so_create_date_filter(
-            db.session.query(
-                SOData.operation_unit_name, func.count(SOData.id), func.sum(SOData.sales_amount)
-            ).filter(open_so_filter(), SOData.operation_unit_name.isnot(None)),
-            date_year, date_from, date_to,
-        ).group_by(SOData.operation_unit_name).order_by(func.sum(SOData.sales_amount).desc()).limit(10)
-        top_op_units = [
-            {'op_unit': r[0], 'so_count': r[1], 'total_amount': round(r[2] or 0, 2)}
-            for r in top_op_units_q.all()
-        ]
-
-        total_open_for_pct = total_so_count or 1
-        so_status_q = apply_so_create_date_filter(
-            db.session.query(
-                SOData.so_status, func.count(SOData.id), func.sum(SOData.sales_amount)
-            ).filter(open_so_filter(), SOData.so_status.isnot(None)),
-            date_year, date_from, date_to,
-        ).group_by(SOData.so_status).order_by(func.count(SOData.id).desc())
-        so_status = [{'name': r[0], 'value': r[1],
-            'percentage': round(r[1] / total_open_for_pct * 100, 1),
-            'amount': round(r[2] or 0, 2)
-        } for r in so_status_q.all()]
-
-        monthly_by_status_q = apply_so_create_date_filter(
-            db.session.query(
-                SOData.so_status, SOData.so_create_date, SOData.sales_amount
-            ).filter(open_so_filter()),
-            date_year, date_from, date_to,
-        )
+        vendor_map = {}
+        op_unit_map = {}
+        status_map = {}
         monthly_by_status = {}
         all_months_set = set()
-        for s_status, s_date, s_amt in monthly_by_status_q.all():
-            st = s_status or 'Unknown'
-            amt_v = float(s_amt or 0)
-            if s_date:
-                mk = s_date.strftime('%b %Y')
-                all_months_set.add((s_date.replace(day=1), mk))
+
+        for s in open_so_rows:
+            if s.so_item in hidden_so or s.so_number in hidden_so:
+                continue
+            if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
+                continue
+
+            canonical_open_sos.append(s)
+            amount = float(s.sales_amount or 0)
+            total_open_so_amount += amount
+
+            if s.so_create_date:
+                month_key = s.so_create_date.strftime('%b %Y')
+                if month_key not in monthly:
+                    monthly[month_key] = {
+                        'month': month_key,
+                        'so_count': 0,
+                        'amount': 0.0,
+                        '_s': s.so_create_date.replace(day=1)
+                    }
+                monthly[month_key]['so_count'] += 1
+                monthly[month_key]['amount'] += round(amount / 1_000_000, 2)
+                all_months_set.add((s.so_create_date.replace(day=1), month_key))
             else:
-                mk = None
-            if st not in monthly_by_status:
-                monthly_by_status[st] = {'monthly': {}, 'total': 0, 'amount': 0.0}
-            monthly_by_status[st]['total'] += 1
-            monthly_by_status[st]['amount'] += amt_v
-            if mk:
-                monthly_by_status[st]['monthly'][mk] = monthly_by_status[st]['monthly'].get(mk, 0) + 1
+                month_key = None
+
+            if s.vendor_name:
+                if s.vendor_name not in vendor_map:
+                    vendor_map[s.vendor_name] = {'vendor': s.vendor_name, 'so_count': 0, 'total_amount': 0.0}
+                vendor_map[s.vendor_name]['so_count'] += 1
+                vendor_map[s.vendor_name]['total_amount'] += amount
+
+            if s.operation_unit_name:
+                if s.operation_unit_name not in op_unit_map:
+                    op_unit_map[s.operation_unit_name] = {
+                        'op_unit': s.operation_unit_name,
+                        'so_count': 0,
+                        'total_amount': 0.0
+                    }
+                op_unit_map[s.operation_unit_name]['so_count'] += 1
+                op_unit_map[s.operation_unit_name]['total_amount'] += amount
+
+            status_name = s.so_status or 'Unknown'
+            if status_name not in status_map:
+                status_map[status_name] = {'name': status_name, 'value': 0, 'amount': 0.0}
+            status_map[status_name]['value'] += 1
+            status_map[status_name]['amount'] += amount
+
+            if status_name not in monthly_by_status:
+                monthly_by_status[status_name] = {'monthly': {}, 'total': 0, 'amount': 0.0}
+            monthly_by_status[status_name]['total'] += 1
+            monthly_by_status[status_name]['amount'] += amount
+            if month_key:
+                monthly_by_status[status_name]['monthly'][month_key] = (
+                    monthly_by_status[status_name]['monthly'].get(month_key, 0) + 1
+                )
+
+        monthly_trend = sorted(monthly.values(), key=lambda x: x['_s'])
+        for m in monthly_trend:
+            del m['_s']
+
+        top_vendors = sorted(
+            [{'vendor': v['vendor'], 'so_count': v['so_count'], 'total_amount': round(v['total_amount'], 2)}
+             for v in vendor_map.values()],
+            key=lambda x: x['total_amount'],
+            reverse=True
+        )[:5]
+
+        top_op_units = sorted(
+            [{'op_unit': v['op_unit'], 'so_count': v['so_count'], 'total_amount': round(v['total_amount'], 2)}
+             for v in op_unit_map.values()],
+            key=lambda x: x['total_amount'],
+            reverse=True
+        )[:10]
+
+        total_open_for_pct = total_so_count or 1
+        so_status = sorted(
+            [{'name': v['name'], 'value': v['value'],
+              'percentage': round(v['value'] / total_open_for_pct * 100, 1),
+              'amount': round(v['amount'], 2)}
+             for v in status_map.values()],
+            key=lambda x: x['value'],
+            reverse=True
+        )
 
         sorted_months = [mk for _, mk in sorted(all_months_set)]
         so_status_monthly = sorted(
@@ -871,11 +977,6 @@ def get_dashboard_stats():
              for st, d in monthly_by_status.items()],
             key=lambda x: x['total'], reverse=True
         )
-
-        total_open_so_amount = apply_so_create_date_filter(
-            db.session.query(func.sum(SOData.sales_amount)).filter(open_so_filter()),
-            date_year, date_from, date_to,
-        ).scalar() or 0
 
         po_date_range = db.session.query(func.min(POData.po_date), func.max(POData.po_date)).first()
         so_date_range = db.session.query(func.min(SOData.so_create_date), func.max(SOData.so_create_date)).first()
@@ -1169,8 +1270,7 @@ def get_so_without_po():
         date_year, date_from, date_to = parse_so_date_args()
         q = apply_so_create_date_filter(
             db.session.query(SOData).filter(
-                open_so_filter(),
-                ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))
+                open_so_filter()
             ),
             date_year, date_from, date_to,
         )
@@ -1180,6 +1280,10 @@ def get_so_without_po():
             if s.so_item in hidden_so or s.so_number in hidden_so:
                 continue
             if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
+                continue
+            if is_return_so_status(s.so_status):
+                continue
+            if s.operation_unit_name in EXCLUDED_OP_UNITS:
                 continue
             if not so_has_matching_po_hli(s, po_hli_keys, po_suffix_index):
                 result.append(so_dict(s))
@@ -1195,9 +1299,9 @@ def get_aging_data():
     Uses IDENTICAL filtering logic as total_so_count in /api/dashboard/stats so
     the TOTAL row in the aging table always matches the KPI card:
       - open SO only (open_so_filter)
-      - excludes EXCLUDED_OP_UNITS
+      - includes all operation units, including HLI GREEN POWER (CONSUMABLE)
       - excludes hidden SO items
-      - excludes return items (so_item starts with '9')
+      - includes return SO/statuses
       - excludes internal PO refs
       - SO records without so_create_date are bucketed as '180+' (not silently dropped)
     """
@@ -1207,8 +1311,7 @@ def get_aging_data():
         vendors = {}
 
         for s in db.session.query(SOData).filter(
-            open_so_filter(),
-            ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))
+            open_so_filter()
         ).all():
             # Apply same exclusions as total_so_count
             if s.so_item in hidden_so or s.so_number in hidden_so:
@@ -1250,8 +1353,7 @@ def get_aging_detail(vendor_name):
         hidden_so = get_hidden_so_items()
         sos = db.session.query(SOData).filter(
             open_so_filter(),
-            SOData.vendor_name == vendor_name,
-            ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))
+            SOData.vendor_name == vendor_name
         ).order_by(SOData.so_create_date.asc()).all()
         sos = [s for s in sos
                if s.so_item not in hidden_so and s.so_number not in hidden_so
@@ -1273,8 +1375,7 @@ def get_aging_detail_all():
         today = date.today()
         hidden_so = get_hidden_so_items()
         sos = db.session.query(SOData).filter(
-            open_so_filter(),
-            ~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))
+            open_so_filter()
         ).order_by(SOData.vendor_name.asc(), SOData.so_create_date.asc()).all()
         sos = [s for s in sos
                if s.so_item not in hidden_so and s.so_number not in hidden_so
@@ -1330,6 +1431,20 @@ def get_all_so():
         else:  # newest
             all_sos = q.order_by(SOData.so_create_date.desc(), SOData.so_item.asc()).all()
 
+        # Keep Open SO table count aligned with dashboard total_so_count KPI:
+        # exclude hidden SO rows and internal/HLI-referenced rows.
+        hidden_so = get_hidden_so_items()
+        all_sos = [
+            s for s in all_sos
+            if s.so_item not in hidden_so
+            and s.so_number not in hidden_so
+            and so_is_countable(
+                s.so_item,
+                customer_po_number=s.customer_po_number,
+                delivery_memo=s.delivery_memo
+            )
+        ]
+
         if aging_list:
             today = date.today()
             def matches_aging(s):
@@ -1351,6 +1466,28 @@ def get_all_so():
             else:
                 all_sos = [s for s in all_sos if calc_margin(s) >= 0]
 
+        approval_statuses = {'Approval Apply', 'Approval Complete Step', 'Approval Reject'}
+        approval_q = SOData.query.filter(SOData.so_status.in_(list(approval_statuses)))
+        if op_units: approval_q = approval_q.filter(SOData.operation_unit_name.in_(op_units))
+        if vendors: approval_q = approval_q.filter(SOData.vendor_name.in_(vendors))
+        if statuses: approval_q = approval_q.filter(SOData.so_status.in_(statuses))
+        if so_items: approval_q = approval_q.filter(SOData.so_item.in_(so_items))
+        approval_q = apply_so_create_date_filter(approval_q, date_year, date_from, date_to, is_sqlite)
+        if sort_order == 'oldest':
+            approval_sos = approval_q.order_by(SOData.so_create_date.asc(), SOData.so_item.asc()).all()
+        else:
+            approval_sos = approval_q.order_by(SOData.so_create_date.desc(), SOData.so_item.asc()).all()
+        approval_sos = [
+            s for s in approval_sos
+            if s.so_item not in hidden_so
+            and s.so_number not in hidden_so
+            and so_is_countable(
+                s.so_item,
+                customer_po_number=s.customer_po_number,
+                delivery_memo=s.delivery_memo
+            )
+        ]
+
         total = len(all_sos)
         subtotal_amount = sum(float(s.sales_amount or 0) for s in all_sos)
         paged = all_sos[(page-1)*per_page : page*per_page]
@@ -1361,6 +1498,7 @@ def get_all_so():
 
         return jsonify({
             'data': [so_dict(s) for s in paged],
+            'approval_data': [so_dict(s) for s in approval_sos],
             'total': total, 'subtotal_amount': round(subtotal_amount, 2), 'page': page, 'per_page': per_page,
             'filters': {'op_units': list(op_units_opts), 'vendors': list(vendors_opts), 'statuses': list(statuses_opts)}
         })
@@ -1828,6 +1966,8 @@ def upload_smro():
                 'purchasing_price': safe_float(df_val(row, col_pprice)),
                 'purchasing_amount': safe_float(df_val(row, col_pamt)),
                 'purchasing_currency': clean(df_val(row, col_pcur)) if col_pcur else None,
+                'purchasing_amount_idr': None,
+                'purchasing_amount_idr_cached_at': None,
                 'so_create_date': parse_date(df_val(row, col_sodate)),
                 'delivery_possible_date': parse_date(df_val(row, col_delposs)),
                 'matched_po_number': clean(df_val(row, col_matchpo)),
@@ -1846,10 +1986,30 @@ def upload_smro():
                 preserved_plan_date = existing.delivery_plan_date
                 preserved_spec      = existing.specification
                 preserved_pid       = existing.product_id
+                preserved_amount_idr = existing.purchasing_amount_idr
+                preserved_amount_idr_cached_at = existing.purchasing_amount_idr_cached_at
+                old_purchase_signature = (
+                    float(existing.purchasing_amount or 0),
+                    float(existing.purchasing_price or 0),
+                    float(existing.so_qty or 0),
+                    (existing.purchasing_currency or 'IDR').strip().upper(),
+                    existing.so_create_date,
+                )
+                new_purchase_signature = (
+                    float(new_data.get('purchasing_amount') or 0),
+                    float(new_data.get('purchasing_price') or 0),
+                    float(new_data.get('so_qty') or 0),
+                    (new_data.get('purchasing_currency') or 'IDR').strip().upper(),
+                    new_data.get('so_create_date'),
+                )
+                purchase_inputs_changed = old_purchase_signature != new_purchase_signature
                 for field, val in new_data.items():
                     setattr(existing, field, val)
                 existing.remarks = preserved_remarks
                 existing.delivery_plan_date = preserved_plan_date
+                if not purchase_inputs_changed:
+                    existing.purchasing_amount_idr = preserved_amount_idr
+                    existing.purchasing_amount_idr_cached_at = preserved_amount_idr_cached_at
                 if not col_spec or spec_val is None:
                     existing.specification = preserved_spec
                 if not col_pid or pid_val is None:
@@ -2576,20 +2736,43 @@ def completed_summary():
 
         # Exclude consumable / non-revenue op units, matching every other
         # SOData query in the codebase (see /api/completed/margin-detail, etc.).
-        rows = q.filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all()
+        q = q.filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS)))
 
-        # Warm exchange-rate cache for all unique SO dates in one shot, so the
-        # per-row convert_to_idr() calls below never trigger individual HTTP
-        # fetches to the Frankfurter API.
-        usd_rows = [s for s in rows if (s.purchasing_currency or '').strip().upper() == 'USD']
-        if usd_rows:
-            prefetch_exchange_rates({s.so_create_date for s in usd_rows if s.so_create_date})
+        cache_key = (
+            year_filter or 'all',
+            date_year or '',
+            date_from or '',
+            date_to or '',
+        )
+        db_signature = q.with_entities(
+            func.count(SOData.id),
+            func.max(SOData.id),
+            func.max(SOData.purchasing_amount_idr_cached_at),
+        ).one()
+        cache_entry = _COMPLETED_SUMMARY_CACHE.get(cache_key)
+        now_ts = datetime.utcnow().timestamp()
+        if (
+            cache_entry
+            and cache_entry.get('signature') == tuple(db_signature)
+            and now_ts - cache_entry.get('created_at', 0) < _COMPLETED_SUMMARY_CACHE_TTL_SECONDS
+        ):
+            return jsonify(cache_entry['payload'])
+
+        rows = q.all()
+
+        missing_conversion_count = sum(
+            1 for s in rows
+            if s.purchasing_amount_idr is None
+            and str(s.purchasing_currency or 'IDR').strip().upper() != 'IDR'
+            and raw_purchase_amount(s) > 0
+        )
+
+        # Persist missing converted purchase amounts once. Subsequent page loads
+        # reuse so_data.purchasing_amount_idr instead of converting every row.
+        converted_count = ensure_purchase_amount_idr_cache(rows)
 
         def po_amt_of(s):
-            raw = float(s.purchasing_amount or 0)
-            if raw == 0 and s.purchasing_price:
-                raw = float(s.purchasing_price) * float(s.so_qty or 0)
-            return convert_to_idr(raw, s.purchasing_currency, s.so_create_date, cache_only=True)
+            return purchase_amount_idr(s)
 
         # Pre-compute per-row sales/purchase/margin once, then reuse.
         enriched = []
@@ -2707,7 +2890,7 @@ def completed_summary():
                 'date': s.so_create_date.isoformat() if s.so_create_date else None,
             })
 
-        return jsonify({
+        payload = {
             'total_count': len(rows),
             'total_sales': total_sales,
             'total_purchase': total_purchase,
@@ -2721,8 +2904,25 @@ def completed_summary():
                 'positive': pos,
                 'negative': neg,
                 'zero': zero
+            },
+            'conversion_status': {
+                'checked': True,
+                'had_missing_cache': missing_conversion_count > 0,
+                'converted_count': converted_count,
+                'pending_count': max(missing_conversion_count - converted_count, 0),
+                'message': (
+                    f'Konversi currency selesai dan disimpan untuk {converted_count} data baru.'
+                    if converted_count
+                    else 'Tidak ada data currency baru yang perlu dikonversi.'
+                )
             }
-        })
+        }
+        _COMPLETED_SUMMARY_CACHE[cache_key] = {
+            'signature': tuple(db_signature),
+            'created_at': now_ts,
+            'payload': payload,
+        }
+        return jsonify(payload)
 
     except Exception as e:
         import traceback; traceback.print_exc()
@@ -2758,16 +2958,12 @@ def completed_margin_detail():
 
         rows = q.filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all()
 
-        # Warm exchange-rate cache before the per-row loop.
-        usd_rows = [s for s in rows if (s.purchasing_currency or '').strip().upper() == 'USD']
-        if usd_rows:
-            prefetch_exchange_rates({s.so_create_date for s in usd_rows if s.so_create_date})
+        # Persist missing converted purchase amounts once. Subsequent popup
+        # loads reuse the stored IDR value.
+        ensure_purchase_amount_idr_cache(rows)
 
         def get_po_amt(s):
-            raw = float(s.purchasing_amount or 0)
-            if raw == 0 and s.purchasing_price:
-                raw = float(s.purchasing_price) * float(s.so_qty or 0)
-            return convert_to_idr(raw, s.purchasing_currency, s.so_create_date, cache_only=True)
+            return purchase_amount_idr(s)
 
         result = []
         for s in rows:
