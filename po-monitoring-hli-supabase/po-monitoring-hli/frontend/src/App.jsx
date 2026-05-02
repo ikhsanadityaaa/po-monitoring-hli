@@ -288,7 +288,7 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
     <div className="relative flex-1 min-w-[180px]" ref={ref}>
       <label className={`block text-xs font-medium mb-1 ${txt2}`}>{label}</label>
       <button onClick={()=>setOpen(o=>!o)} style={{cursor:'pointer'}}
-        className={`w-full px-3 py-2 rounded-lg text-sm border text-left flex justify-between items-center transition-colors
+        className={`w-full h-10 px-3 py-2 rounded-lg text-sm border text-left flex justify-between items-center transition-colors
           ${darkMode
             ? hasActiveFilter
               ? 'bg-orange-900/30 border-orange-500 text-orange-200 hover:bg-orange-900/40'
@@ -355,7 +355,7 @@ const SearchInput = ({ placeholder, onSearch, darkMode, txt2, label }) => {
       <button
         onClick={() => setOpen(o => !o)}
         title={`Search ${label}`}
-        className={`w-full flex items-center justify-between gap-1.5 px-3 py-2 rounded-lg text-sm border font-medium transition-all
+        className={`w-full h-10 flex items-center justify-between gap-1.5 px-3 py-2 rounded-lg text-sm border font-medium transition-all
           ${darkMode ? 'bg-gray-600 border-gray-500 text-white hover:bg-gray-500' : 'bg-white border-gray-300 text-gray-700 hover:bg-purple-50 hover:border-purple-400'}`}
       >
         <span className="flex items-center gap-1.5 min-w-0">
@@ -585,10 +585,28 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
   }, [value?.mode, value?.year, value?.start, value?.end]);
 
   useEffect(() => {
-    if (mode === 'all') onFilter({ mode: 'all' });
-    else if (mode === 'year') onFilter({ mode: 'year', year: selectedYear });
-    else onFilter({ mode: 'range', start: startDate, end: endDate });
-  }, [mode, selectedYear, startDate, endDate]);
+    const next =
+      mode === 'all'
+        ? { mode: 'all' }
+        : mode === 'year'
+        ? { mode: 'year', year: selectedYear }
+        : { mode: 'range', start: startDate, end: endDate };
+
+    const current =
+      !value || value.mode === 'all'
+        ? { mode: 'all' }
+        : value.mode === 'year'
+        ? { mode: 'year', year: String(value.year || currentYear) }
+        : { mode: 'range', start: value.start || '', end: value.end || '' };
+
+    // Only notify the parent when the user actually changed the filter.
+    // Without this guard, mounting the filter emits a new `{ mode: 'all' }`
+    // object, which re-fetches Delivery Completed, hides the page behind the
+    // loading state, remounts the filter, and creates a fast blank/loading loop.
+    if (JSON.stringify(next) !== JSON.stringify(current)) {
+      onFilter(next);
+    }
+  }, [mode, selectedYear, startDate, endDate, value, currentYear, onFilter]);
 
   const reset = () => {
     setMode('all');
@@ -649,6 +667,7 @@ const App = () => {
   const [poFiltered, setPoFiltered] = useState([]); // after local filters
   const [agingData, setAgingData] = useState([]);
   const [allSOData, setAllSOData] = useState([]);
+  const [approvalSOData, setApprovalSOData] = useState([]);
   const [soTotal, setSoTotal] = useState(0);
   const [soFilterOptions, setSoFilterOptions] = useState({ op_units: [], vendors: [], statuses: [] });
 
@@ -659,6 +678,12 @@ const App = () => {
   const [soSortOrder, setSoSortOrder] = useState('oldest'); // 'oldest' | 'newest'
   const [soPage, setSoPage] = useState(1);
   const [soPerPage, setSoPerPage] = useState(10);
+
+  // SO Approval Status filters (same as Open SO except Vendor Name)
+  const [approvalFilters, setApprovalFilters] = useState({ op_units: [], statuses: [], aging: [] });
+  const [approvalSearchNums, setApprovalSearchNums] = useState([]);
+  const [approvalPage, setApprovalPage] = useState(1);
+  const [approvalPerPage, setApprovalPerPage] = useState(10);
 
   // PO filters
   const [poPage, setPoPage] = useState(1);
@@ -688,6 +713,7 @@ const App = () => {
   const [completedData, setCompletedData] = useState(null);
   const [completedYear, setCompletedYear] = useState('all');
   const [completedLoading, setCompletedLoading] = useState(false);
+  const [completedLoaded, setCompletedLoaded] = useState(false);
   const [showHideMenu, setShowHideMenu] = useState(false);
   const [marginDetailModal, setMarginDetailModal] = useState(null); // {category, data}
   const hideMenuRef = useRef(null);
@@ -807,6 +833,7 @@ const App = () => {
       }
       const res = await api.get(`/api/data/all-so?${params}`);
       setAllSOData(Array.isArray(res.data.data) ? res.data.data : []);
+      setApprovalSOData(Array.isArray(res.data.approval_data) ? res.data.approval_data : []);
       setSoTotal(res.data.total || 0);
       setSoFilterOptions(res.data.filters || { op_units: [], vendors: [], statuses: [] });
     } catch (e) {
@@ -1035,6 +1062,7 @@ const App = () => {
       }
       const res = await api.get(`/api/completed/summary?${params}`);
       setCompletedData(res.data);
+      setCompletedLoaded(true);
     } catch(e) { addToast(`❌ Failed to load completed data: ${e.message}`, 'error'); }
     finally { setCompletedLoading(false); }
   }, []);
@@ -1084,6 +1112,35 @@ const App = () => {
     }
     downloadBlob(`/api/export/all-so?${p}`, `SO_List_${new Date().toISOString().slice(0,10)}.xlsx`, 'SO List');
   };
+  const downloadApprovalSOExcel = () => {
+    const rows = sortedApprovalSOData.map((so) => {
+      const poAmount = (Number(so.purchasing_price) || 0) * (Number(so.so_qty) || 0);
+      const margin = (Number(so.sales_amount) || 0) - poAmount;
+      return {
+        'SO Item': so.so_item || '',
+        'Item Name': so.product_name || '',
+        'Status': so.so_status || '',
+        'Operation Unit': so.operation_unit_name || '',
+        'Vendor': so.vendor_name || '',
+        'Qty': Number(so.so_qty) || 0,
+        'Sales Amount': Number(so.sales_amount) || 0,
+        'PO Price': Number(so.purchasing_price) || 0,
+        'PO Amount': poAmount,
+        'Margin': margin,
+        'SO Create Date': so.so_create_date || '',
+        'Possible Delivery': so.delivery_possible_date || '',
+        'Plan Date': so.delivery_plan_date || '',
+        'Remarks': so.remarks || ''
+      };
+    });
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'SO Approval Status');
+    saveAs(new Blob([XLSX.write(wb,{bookType:'xlsx',type:'array'})],
+      {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),
+      `SO_Approval_Status_${new Date().toISOString().slice(0,10)}.xlsx`);
+    addToast('✅ SO Approval Status Excel downloaded successfully', 'success');
+  };
   const downloadPOExcel = () => downloadBlob('/api/export/po-without-so', `PO_Without_SO_${new Date().toISOString().slice(0,10)}.xlsx`, 'PO Without SO');
   const downloadSOTemplate = () => {
     const p = new URLSearchParams();
@@ -1128,6 +1185,27 @@ const App = () => {
 
   const poTotalPages = Math.max(1, Math.ceil(poFiltered.length / poPerPage));
   const poRows = poFiltered.slice((poPage-1)*poPerPage, poPage*poPerPage);
+  const sortedApprovalSOData = [...approvalSOData]
+    .filter((so) => {
+      if (approvalFilters.op_units.length && !approvalFilters.op_units.includes(so.operation_unit_name)) return false;
+      if (approvalFilters.statuses.length && !approvalFilters.statuses.includes(so.so_status)) return false;
+      if (approvalSearchNums.length && !approvalSearchNums.includes(so.so_item)) return false;
+      if (approvalFilters.aging.length) {
+        const age = so.so_create_date ? Math.floor((new Date() - new Date(so.so_create_date)) / (1000 * 60 * 60 * 24)) : null;
+        const label = age === null ? 'Unknown' : age <= 30 ? '0-30 days' : age <= 60 ? '31-60 days' : age <= 90 ? '61-90 days' : '>90 days';
+        if (!approvalFilters.aging.includes(label)) return false;
+      }
+      return true;
+    })
+    .sort((a, b) => {
+      const da = a.so_create_date ? new Date(a.so_create_date).getTime() : 0;
+      const db = b.so_create_date ? new Date(b.so_create_date).getTime() : 0;
+      return da - db;
+    });
+  const approvalSOTotalAmount = sortedApprovalSOData.reduce((sum, so) => sum + Number(so.sales_amount || 0), 0);
+  const approvalTotalPages = Math.max(1, Math.ceil(sortedApprovalSOData.length / approvalPerPage));
+  const approvalRows = sortedApprovalSOData.slice((approvalPage-1)*approvalPerPage, approvalPage*approvalPerPage);
+
   const sortedSOData = [...allSOData].sort((a, b) => {
     const da = a.so_create_date ? new Date(a.so_create_date).getTime() : 0;
     const db = b.so_create_date ? new Date(b.so_create_date).getTime() : 0;
@@ -1155,11 +1233,14 @@ const App = () => {
     const mc = (m) => m > 0 ? 'text-green-600' : m < 0 ? 'text-red-600' : 'text-gray-400';
     const mcBg = (m) => m < 0 ? (darkMode?'bg-red-900/20':'bg-red-50') : (darkMode?'bg-gray-700':'bg-gray-50');
 
-    if (completedLoading) return (
+    if (completedLoading || !completedLoaded) return (
       <div className="flex items-center justify-center h-64">
         <div className="flex flex-col items-center gap-3">
           <div className="w-12 h-12 border-4 border-purple-600 border-t-transparent rounded-full animate-spin"/>
           <p className={`text-sm ${txt2}`}>Loading completed transactions...</p>
+          <p className={`text-xs ${txt2} text-center max-w-sm`}>
+            Preparing cached USD to IDR values. Existing historical data will be reused, only new non-IDR rows are converted.
+          </p>
         </div>
       </div>
     );
@@ -1965,7 +2046,7 @@ const App = () => {
           <div className="grid grid-cols-12 gap-2 items-end">
             <div className="col-span-12 sm:col-span-2 xl:col-span-1 min-w-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ SO Date</label>
-              <select className={`w-full px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+              <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                 value={soSortOrder} onChange={e=>{ setSoSortOrder(e.target.value); setSoPage(1); }} title="Sort SO Date">
                 <option value="oldest">Oldest ↑</option>
                 <option value="newest">Newest ↓</option>
@@ -2013,7 +2094,7 @@ const App = () => {
             </div>
             <div className="col-span-6 sm:col-span-3 xl:col-span-1 min-w-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Margin</label>
-              <select className={`w-full px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+              <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                 value={soMarginFilter} onChange={e=>{
                   const next = e.target.value;
                   setSoMarginFilter(next); setSoPage(1);
@@ -2030,7 +2111,7 @@ const App = () => {
                 setSoFilters(f); setSoSearchNums([]); setSoMarginFilter('all'); setSoPage(1);
                 fetchSOData(f,1,soPerPage,[],'all',soDateFilter);
               }}
-                className={`w-full px-3 py-2 rounded-lg text-sm font-medium shadow-sm ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Reset</button>
+                className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Reset</button>
             </div>
           </div>
           {/* Active filter tags */}
@@ -2224,7 +2305,7 @@ const App = () => {
           <div className="grid grid-cols-12 gap-2 items-end">
             <div className="col-span-12 sm:col-span-2 xl:col-span-1 min-w-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ PO Date</label>
-              <select className={`w-full px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+              <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                 value={poSortOrder} onChange={e=>{ setPoSortOrder(e.target.value); setPoPage(1); }} title="Sort PO Date">
                 <option value="oldest">Oldest ↑</option>
                 <option value="newest">Newest ↓</option>
@@ -2259,7 +2340,7 @@ const App = () => {
             </div>
             <div className="col-span-12 sm:col-span-4 xl:col-span-1 min-w-0">
               <button onClick={()=>{ setPoSearchNums([]); setPoFilterItemType([]); setPoFilterOpUnit([]); setPoPage(1); }}
-                className={`w-full px-3 py-2 rounded-lg text-sm font-medium shadow-sm ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Reset</button>
+                className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Reset</button>
             </div>
           </div>
         </div>
@@ -2353,6 +2434,138 @@ const App = () => {
             <button disabled={poPage===1} onClick={()=>setPoPage(p=>p-1)} className={`p-1.5 rounded ${poPage===1?'opacity-40':'hover:bg-purple-100'}`}><ChevronLeft className="w-4 h-4"/></button>
             <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-purple-100 text-purple-700'}`}>{poPage}/{poTotalPages}</span>
             <button disabled={poPage===poTotalPages} onClick={()=>setPoPage(p=>p+1)} className={`p-1.5 rounded ${poPage===poTotalPages?'opacity-40':'hover:bg-purple-100'}`}><ChevronRight className="w-4 h-4"/></button>
+          </div>
+        </div>
+      </div>
+
+      {/* SO Approval Status Table */}
+      <div className={`mt-6 rounded-2xl shadow overflow-hidden ${card}`}>
+        <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+          <div className="flex items-center gap-2">
+            <FileText className="w-5 h-5 text-blue-600"/>
+            <h3 className={`text-base font-bold ${txt}`}>SO with Approval Status</h3>
+            <span className={`text-sm ${txt2}`}>
+              ({fmtNum(sortedApprovalSOData.length)} line items · {fmtCurShort(approvalSOTotalAmount)})
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-2 items-center">
+            <DownloadButton onClick={downloadApprovalSOExcel} className="flex items-center gap-1 px-4 py-1.5 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-medium shadow-sm">
+              <Download className="w-4 h-4"/>Download Excel
+            </DownloadButton>
+          </div>
+        </div>
+
+        <div className={`px-5 py-2.5 border-b ${darkMode?'border-gray-700 bg-gray-750':'border-gray-100 bg-gray-50'}`}>
+          <div className="grid grid-cols-12 gap-2 items-end">
+            <div className="col-span-12 sm:col-span-3 xl:col-span-2 min-w-0">
+              <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Search SO Item</label>
+              <SearchInput
+                label="SO Item"
+                placeholder={"e.g.\n1234-10\n1234-20"}
+                onSearch={(nums) => { setApprovalSearchNums(nums); setApprovalPage(1); }}
+                darkMode={darkMode} txt2={txt2}
+              />
+            </div>
+            <div className="col-span-12 sm:col-span-4 xl:col-span-2 min-w-0">
+              <MultiSelect label="Operation Unit" options={soFilterOptions.op_units}
+                selected={approvalFilters.op_units} onChange={v=>{ setApprovalFilters(f=>({...f, op_units: v})); setApprovalPage(1); }}
+                darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="col-span-12 sm:col-span-4 xl:col-span-2 min-w-0">
+              <MultiSelect label="SO Status" options={['Approval Apply','Approval Complete Step','Approval Reject']}
+                selected={approvalFilters.statuses} onChange={v=>{ setApprovalFilters(f=>({...f, statuses: v})); setApprovalPage(1); }}
+                darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="col-span-6 sm:col-span-3 xl:col-span-1 min-w-0">
+              <button onClick={()=>{ setApprovalFilters({ op_units: [], statuses: [], aging: [] }); setApprovalSearchNums([]); setApprovalPage(1); }}
+                className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Reset</button>
+            </div>
+          </div>
+          {(approvalSearchNums.length + approvalFilters.op_units.length + approvalFilters.statuses.length) > 0 && (
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {approvalSearchNums.map(v=>(
+                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-xs">
+                  SO: {v}<button onClick={()=>{ setApprovalSearchNums(prev=>prev.filter(x=>x!==v)); setApprovalPage(1); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                </span>
+              ))}
+              {approvalFilters.op_units.map(v=>(
+                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full text-xs">
+                  {v}<button onClick={()=>{ setApprovalFilters(f=>({...f,op_units:f.op_units.filter(x=>x!==v)})); setApprovalPage(1); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                </span>
+              ))}
+              {approvalFilters.statuses.map(v=>(
+                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs">
+                  {v}<button onClick={()=>{ setApprovalFilters(f=>({...f,statuses:f.statuses.filter(x=>x!==v)})); setApprovalPage(1); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className={tblHd}>
+              <tr>
+                {['SO ITEM','ITEM NAME','STATUS','OPERATION UNIT','VENDOR','QTY','SALES AMOUNT','PO PRICE','PO AMOUNT','MARGIN','SO CREATE DATE','POSSIBLE DELIVERY','PLAN DATE','REMARKS'].map(h=>(
+                  <th key={h} className={`px-4 py-3 text-center font-bold whitespace-nowrap ${txt2} ${h==='REMARKS'?'min-w-[360px]':''}`}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className={`divide-y ${tblDv}`}>
+              {approvalRows.length === 0 ? (
+                <tr><td colSpan={14} className={`px-4 py-10 text-center ${txt2}`}>
+                  <FileText className="w-10 h-10 mx-auto mb-2 opacity-40"/>No SO approval data
+                </td></tr>
+              ) : approvalRows.map((so) => {
+                const poAmount = (so.purchasing_price || 0) * (so.so_qty || 0);
+                const margin = (so.sales_amount || 0) - poAmount;
+                const marginColor = margin < 0 ? 'text-red-600 font-semibold' : margin > 0 ? 'text-green-600 font-semibold' : txt2;
+                return (
+                  <tr key={so.id} className={`${trHov} transition-colors`}>
+                    <td className="px-4 py-3 text-purple-600 font-medium whitespace-nowrap">{so.so_item||'-'}</td>
+                    <td className={`px-4 py-3 max-w-[220px] truncate ${txt2}`} title={so.product_name}>{so.product_name||'-'}</td>
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                        so.so_status==='Approval Reject'?'bg-red-100 text-red-700':
+                        so.so_status==='Approval Complete Step'?'bg-green-100 text-green-700':'bg-blue-100 text-blue-700'}`}>
+                        {so.so_status||'-'}
+                      </span>
+                    </td>
+                    <td className={`px-4 py-3 min-w-[180px] truncate ${txt2}`} title={so.operation_unit_name}>{so.operation_unit_name||'-'}</td>
+                    <td className={`px-4 py-3 max-w-[140px] truncate ${txt2}`} title={so.vendor_name}>{so.vendor_name||'-'}</td>
+                    <td className={`px-4 py-3 text-right ${txt2}`}>{fmtNum(so.so_qty)}</td>
+                    <td className="px-4 py-3 text-center font-bold text-orange-600 whitespace-nowrap min-w-[130px]">{fmtCur(so.sales_amount)}</td>
+                    <td className={`px-4 py-3 text-right whitespace-nowrap min-w-[130px] ${txt}`}>{fmtCur(so.purchasing_price)}</td>
+                    <td className="px-4 py-3 text-center font-bold text-green-600 whitespace-nowrap min-w-[130px]">{fmtCur(poAmount)}</td>
+                    <td className={`px-4 py-3 text-right whitespace-nowrap min-w-[130px] ${marginColor}`}>{fmtCur(margin)}</td>
+                    <td className={`px-4 py-3 text-center text-xs ${txt2} whitespace-nowrap`}>{so.so_create_date||'-'}</td>
+                    <td className={`px-4 py-3 text-center text-xs ${txt2} whitespace-nowrap`}>{so.delivery_possible_date||'-'}</td>
+                    <td className={`px-4 py-3 text-center text-xs ${txt2} whitespace-nowrap`}>{so.delivery_plan_date||'-'}</td>
+                    <td className={`px-4 py-3 min-w-[360px] text-xs ${txt2}`}>{so.remarks||'-'}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div className={`px-4 py-3 border-t ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+          <div className="flex items-center gap-3">
+            <span className={`text-sm ${txt2}`}>Showing {sortedApprovalSOData.length ? (approvalPage-1)*approvalPerPage+1 : 0}–{Math.min(approvalPage*approvalPerPage,sortedApprovalSOData.length)} of {fmtNum(sortedApprovalSOData.length)}</span>
+            <label className={`flex items-center gap-1 text-xs ${txt2}`}>
+              Rows
+              <select className={`px-2 py-1 rounded-lg text-xs border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-300'}`}
+                value={approvalPerPage} onChange={e=>{ setApprovalPerPage(Number(e.target.value)); setApprovalPage(1); }}>
+                <option value={10}>10</option>
+                <option value={20}>20</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+                <option value={500}>500</option>
+              </select>
+            </label>
+          </div>
+          <div className="flex gap-1 items-center">
+            <button disabled={approvalPage===1} onClick={()=>setApprovalPage(p=>p-1)} className={`p-1.5 rounded ${approvalPage===1?'opacity-40':'hover:bg-purple-100'}`}><ChevronLeft className="w-4 h-4"/></button>
+            <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-purple-100 text-purple-700'}`}>{approvalPage}/{approvalTotalPages}</span>
+            <button disabled={approvalPage===approvalTotalPages} onClick={()=>setApprovalPage(p=>p+1)} className={`p-1.5 rounded ${approvalPage===approvalTotalPages?'opacity-40':'hover:bg-purple-100'}`}><ChevronRight className="w-4 h-4"/></button>
           </div>
         </div>
       </div>
