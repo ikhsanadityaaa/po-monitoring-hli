@@ -161,6 +161,7 @@ class POData(db.Model):
     request_delivery = db.Column(db.Date)
     delivery_plan_date = db.Column(db.Date)
     remarks = db.Column(db.Text)
+    is_cancelled = db.Column(db.Boolean, default=False)
     uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class SOData(db.Model):
@@ -443,6 +444,7 @@ def _ensure_extra_columns():
         'po_data': [
             ('delivery_plan_date',   'DATE'),
             ('remarks',              'TEXT'),
+            ('is_cancelled',         'BOOLEAN'),
         ],
     }
 
@@ -1840,6 +1842,8 @@ def upload_po_list():
                     setattr(existing, field, val)
                 existing.delivery_plan_date = preserved_plan_date
                 existing.remarks = preserved_remarks
+                # Mark as not cancelled since it's in the new file
+                existing.is_cancelled = False
             else:
                 new_rec = POData(**new_data)
                 db.session.add(new_rec)
@@ -1848,12 +1852,25 @@ def upload_po_list():
             if count % CHUNK_SIZE == 0:
                 db.session.flush()
 
-        # FIX: Do not delete old PO data (preserve history)
-        # keys_to_delete logic removed
+        # NEW: Mark PO items as cancelled if they exist in DB but NOT in new file
+        cancelled_count = 0
+        for key, existing in existing_po.items():
+            if key not in new_keys_in_file and not existing.is_cancelled:
+                existing.is_cancelled = True
+                cancelled_count += 1
 
         db.session.add(UploadLog(file_type='PO', filename=file.filename, records_count=count))
         db.session.commit()
-        return jsonify({'message': f'Berhasil upload {count} PO items', 'uploaded': count})
+        
+        message = f'Berhasil upload {count} PO items'
+        if cancelled_count > 0:
+            message += f', {cancelled_count} PO items ditandai sebagai cancelled (tidak ada di file baru)'
+        
+        return jsonify({
+            'message': message,
+            'uploaded': count,
+            'cancelled': cancelled_count
+        })
     except Exception as e:
         db.session.rollback(); import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
