@@ -2146,7 +2146,7 @@ const App = () => {
           <table className="w-full text-sm">
             <thead className={tblHd}>
               <tr>
-                {['Aging','Day','SO Item','Item Name','Status','Op Unit','Vendor','Qty',
+                {['Aging','Day','SO Item','Product ID','Item Name','Status','Op Unit','Vendor','Qty',
                   'Sales Price','Sales Amount','PO Price','PO Amount','Margin','%Margin',
                   'SO Create Date','Possible Delivery','Plan Date','Remarks'].map(h=>(
                   <th key={h} className={`px-3 py-2.5 text-center font-bold whitespace-nowrap ${txt2} ${h==='Remarks'?'min-w-[560px]':''}`}>{h}</th>
@@ -2156,7 +2156,7 @@ const App = () => {
             <tbody className={`divide-y ${tblDv}`}>
               {(() => {
                 if (sortedSOData.length === 0) return (
-                <tr><td colSpan={18} className={`px-4 py-10 text-center ${txt2}`}>
+                <tr><td colSpan={19} className={`px-4 py-10 text-center ${txt2}`}>
                     <FileText className="w-10 h-10 mx-auto mb-2 opacity-40"/>No data
                   </td></tr>
                 );
@@ -2182,6 +2182,7 @@ const App = () => {
                   </td>
                   {/* SO Item first, no SO Number column */}
                   <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{so.so_item}</td>
+                  <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{so.product_id || '-'}</td>
                   <td className={`px-3 py-2 max-w-[160px] truncate ${txt2}`} title={so.product_name}>{so.product_name}</td>
                   <td className="px-3 py-2 whitespace-nowrap">
                     <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
