@@ -3070,7 +3070,10 @@ def upload_product_id():
         file = request.files.get('file')
         if not file:
             return jsonify({'error': 'No file provided'}), 400
-        df = pd.read_excel(file, sheet_name=0)
+
+        filename = (file.filename or '').lower()
+        engine = 'xlrd' if filename.endswith('.xls') else 'openpyxl'
+        df = pd.read_excel(file, sheet_name=0, engine=engine)
         df.columns = [str(c).strip() for c in df.columns]
 
         pid_col = next((c for c in df.columns if 'Product ID' in c or c.lower() == 'product id'), None)
@@ -3148,7 +3151,10 @@ def upload_master_pic():
         file = request.files.get('file')
         if not file:
             return jsonify({'error': 'No file provided'}), 400
-        df = pd.read_excel(file, sheet_name=0)
+
+        filename = (file.filename or '').lower()
+        engine = 'xlrd' if filename.endswith('.xls') else 'openpyxl'
+        df = pd.read_excel(file, sheet_name=0, engine=engine)
         df.columns = [str(c).strip() for c in df.columns]
 
         cat_col = next((c for c in df.columns if 'Category ID' in c or c.lower() == 'category id'), None)
