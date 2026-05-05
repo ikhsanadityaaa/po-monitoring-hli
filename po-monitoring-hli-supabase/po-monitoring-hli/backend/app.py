@@ -770,12 +770,24 @@ def get_aging_label(workday_count):
 def so_dict(s):
     today = date.today()
     age_days = workdays_since(s.so_create_date, today)
+    
+    # Get category from ProductIDDB (level 1 only — before first >)
+    category_name = ''
+    if s.product_id:
+        prod = db.session.query(ProductIDDB).filter_by(product_id=str(s.product_id).strip()).first()
+        if prod and prod.category_name:
+            # Extract level 1 category only (before first >)
+            full_category = prod.category_name.strip()
+            category_name = full_category.split('>')[0].strip() if '>' in full_category else full_category
+    
     return {
         'id': s.id, 'so_number': s.so_number, 'so_item': s.so_item,
         'so_status': s.so_status, 'operation_unit_name': s.operation_unit_name,
         'vendor_name': s.vendor_name, 'customer_po_number': s.customer_po_number,
         'delivery_memo': s.delivery_memo, 'product_name': s.product_name,
         'specification': s.specification, 'product_id': s.product_id,
+        'category_name': category_name,
+        'svo_po': s.matched_po_number or '',
         'so_qty': s.so_qty, 'sales_price': s.sales_price, 'sales_amount': s.sales_amount,
         'purchasing_price': s.purchasing_price, 'purchasing_amount': s.purchasing_amount,
         'purchasing_currency': s.purchasing_currency,
@@ -1961,7 +1973,7 @@ def upload_smro():
         col_pcur    = find_column(df, ['Purchasing Currency','Purchase Currency','PO Currency','Purchasing Curr','Purchase Curr'])
         col_sodate  = find_column(df, ['SO Create Date','Order Date','SO Date','Create Date'])
         col_delposs = find_column(df, ['Delivery Possible Date','Possible Delivery Date','Est Delivery'])
-        col_matchpo = find_column(df, ['Matched PO Number','Matched PO','PO HLI','PO HLI Number'])
+        col_matchpo = find_column(df, ['Matched PO Number','Matched PO','PO HLI','PO HLI Number','Purchasing Order Number','PO Number'])
 
         # Build lookup of existing SO records by so_item
         existing_so = {}
