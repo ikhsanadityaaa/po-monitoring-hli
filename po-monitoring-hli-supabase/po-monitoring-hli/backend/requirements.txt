@@ -5,8 +5,6 @@ pandas
 openpyxl
 xlrd>=2.0.1
 python-dateutil
-reportlab
-matplotlib
 gunicorn
 psycopg2-binary
 holidays>=0.50
