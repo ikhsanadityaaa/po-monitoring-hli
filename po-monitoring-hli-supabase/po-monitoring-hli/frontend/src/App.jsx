@@ -229,16 +229,25 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
     setDraftNone(false);
   }, [open, selected]);
 
+  const applySelection = () => {
+    onChange(currentNone ? '__NONE__' : currentSelected);
+    closeDropdown();
+  };
+
+  const resetSelection = () => {
+    setDraftSelected([]);
+    setDraftNone(false);
+  };
+
   const toggleAll = () => {
     if (currentAll) {
       // Uncheck all only changes the temporary dropdown state.
-      // If the user clicks outside without choosing an item, it is cancelled.
+      // It is applied only when the user clicks Apply.
       setDraftSelected([]);
       setDraftNone(true);
     } else {
       setDraftSelected([]);
       setDraftNone(false);
-      onChange([]);
     }
   };
 
@@ -247,7 +256,6 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
       const next = [val];
       setDraftSelected(next);
       setDraftNone(false);
-      onChange(next);
       return;
     }
 
@@ -259,13 +267,11 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
         return;
       }
       setDraftSelected(next);
-      onChange(next.length === options.length ? [] : next);
     } else {
       const next = [...currentSelected, val];
       const normalized = next.length === options.length ? [] : next;
       setDraftSelected(normalized);
       setDraftNone(false);
-      onChange(normalized);
     }
   };
 
@@ -285,7 +291,7 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
   const hasActiveFilter = !noneSelected;
 
   return (
-    <div className="relative flex-1 min-w-[180px]" ref={ref}>
+    <div className="relative w-full min-w-0" ref={ref}>
       <label className={`block text-xs font-medium mb-1 ${txt2}`}>{label}</label>
       <button onClick={()=>setOpen(o=>!o)} style={{cursor:'pointer'}}
         className={`w-full h-10 px-3 py-2 rounded-lg text-sm border text-left flex justify-between items-center transition-colors
@@ -300,26 +306,44 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
         <ChevronDown className="w-4 h-4 flex-shrink-0 ml-1"/>
       </button>
       {open && (
-        <div className={`absolute z-50 mt-1 w-full max-h-56 overflow-auto rounded-lg shadow-xl border ${darkMode?'bg-gray-700 border-gray-600':'bg-white border-gray-200'}`}>
-          {/* Select All row — like Excel */}
-          <label style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold border-b
-            ${darkMode?'border-gray-600 hover:bg-gray-600 text-white':'border-gray-100 hover:bg-purple-50 text-gray-700'}`}>
-            <input type="checkbox"
-              checked={isAllChecked}
-              ref={el => { if (el) el.indeterminate = someSelected; }}
-              onChange={toggleAll}
-              className="accent-purple-600" style={{cursor:'pointer'}}/>
-            <span>(Select All)</span>
-          </label>
-          {options.map(opt => (
-            <label key={opt} style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs
-              ${darkMode?'hover:bg-gray-600 text-white':'hover:bg-purple-50 text-gray-700'}`}>
-              <input type="checkbox" checked={isChecked(opt)} onChange={()=>toggle(opt)}
+        <div className={`absolute z-50 mt-1 w-full rounded-lg shadow-xl border overflow-hidden ${darkMode?'bg-gray-700 border-gray-600':'bg-white border-gray-200'}`}>
+          <div className="max-h-48 overflow-auto">
+            {/* Select All row — like Excel */}
+            <label style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold border-b
+              ${darkMode?'border-gray-600 hover:bg-gray-600 text-white':'border-gray-100 hover:bg-purple-50 text-gray-700'}`}>
+              <input type="checkbox"
+                checked={isAllChecked}
+                ref={el => { if (el) el.indeterminate = someSelected; }}
+                onChange={toggleAll}
                 className="accent-purple-600" style={{cursor:'pointer'}}/>
-              <span className="truncate" title={opt}>{opt}</span>
+              <span>(Select All)</span>
             </label>
-          ))}
-          {options.length === 0 && <div className={`px-3 py-2 text-xs ${txt2}`}>No options</div>}
+            {options.map(opt => (
+              <label key={opt} style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs
+                ${darkMode?'hover:bg-gray-600 text-white':'hover:bg-purple-50 text-gray-700'}`}>
+                <input type="checkbox" checked={isChecked(opt)} onChange={()=>toggle(opt)}
+                  className="accent-purple-600" style={{cursor:'pointer'}}/>
+                <span className="truncate" title={opt}>{opt}</span>
+              </label>
+            ))}
+            {options.length === 0 && <div className={`px-3 py-2 text-xs ${txt2}`}>No options</div>}
+          </div>
+          <div className={`flex gap-2 px-3 py-2 border-t shadow-inner ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-gray-50 border-gray-200'}`}>
+            <button
+              type="button"
+              onClick={applySelection}
+              className="flex-1 px-3 py-2 rounded-lg text-xs font-bold bg-purple-600 text-white hover:bg-purple-700 shadow-sm"
+            >
+              Apply
+            </button>
+            <button
+              type="button"
+              onClick={resetSelection}
+              className={`flex-1 px-3 py-2 rounded-lg text-xs font-semibold ${darkMode ? 'bg-gray-600 text-gray-100 hover:bg-gray-500' : 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-100'}`}
+            >
+              Reset
+            </button>
+          </div>
         </div>
       )}
     </div>
@@ -2116,8 +2140,8 @@ const App = () => {
 
         {/* Multi-select Filters row — compact single-line layout */}
         <div className={`px-4 py-3 rounded-xl mb-3 ${darkMode?'bg-gray-700':'bg-gray-50'}`}>
-          <div className="flex flex-wrap gap-4 items-end">
-            <div className="flex-shrink-0" style={{minWidth: '100px', maxWidth: '120px'}}>
+          <div className="flex flex-nowrap gap-2 items-end">
+            <div className="flex-shrink-0" style={{width: '118px'}}>
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ SO Date</label>
               <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                 value={soSortOrder} onChange={e=>{ setSoSortOrder(e.target.value); setSoPage(1); }} title="Sort SO Date">
@@ -2125,7 +2149,7 @@ const App = () => {
                 <option value="newest">Newest ↓</option>
               </select>
             </div>
-            <div className="flex-shrink-0" style={{minWidth: '140px', maxWidth: '180px'}}>
+            <div className="flex-shrink-0" style={{width: '170px'}}>
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Search SO Item</label>
               <SearchInput
                 label="SO Item"
@@ -2138,7 +2162,7 @@ const App = () => {
                 darkMode={darkMode} txt2={txt2}
               />
             </div>
-            <div className="flex-shrink-0" style={{minWidth: '140px', maxWidth: '180px'}}>
+            <div className="flex-shrink-0" style={{width: '155px'}}>
               <MultiSelect label="PIC" options={soFilterOptions.pics || []}
                 selected={soFilters.pics} onChange={v=>{
                   const next = {...soFilters, pics: v};
@@ -2147,25 +2171,7 @@ const App = () => {
                 }}
                 darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-shrink-0" style={{minWidth: '160px', maxWidth: '200px'}}>
-              <MultiSelect label="Operation Unit" options={soFilterOptions.op_units}
-                selected={soFilters.op_units} onChange={v=>{
-                  const next = {...soFilters, op_units: v};
-                  setSoFilters(next); setSoPage(1);
-                  fetchSOData(next, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
-                }}
-                darkMode={darkMode} txt2={txt2}/>
-            </div>
-            <div className="flex-shrink-0" style={{minWidth: '160px', maxWidth: '200px'}}>
-              <MultiSelect label="Vendor Name" options={soFilterOptions.vendors}
-                selected={soFilters.vendors} onChange={v=>{
-                  const next = {...soFilters, vendors: v};
-                  setSoFilters(next); setSoPage(1);
-                  fetchSOData(next, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
-                }}
-                darkMode={darkMode} txt2={txt2}/>
-            </div>
-            <div className="flex-shrink-0" style={{minWidth: '140px', maxWidth: '160px'}}>
+            <div className="flex-shrink-0" style={{width: '175px'}}>
               <MultiSelect label="SO Status" options={soFilterOptions.statuses}
                 selected={soFilters.statuses} onChange={v=>{
                   const next = {...soFilters, statuses: v};
@@ -2174,7 +2180,25 @@ const App = () => {
                 }}
                 darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-shrink-0" style={{minWidth: '120px', maxWidth: '140px', marginLeft: '20px'}}>
+            <div className="flex-shrink-0" style={{width: '190px'}}>
+              <MultiSelect label="Operation Unit" options={soFilterOptions.op_units}
+                selected={soFilters.op_units} onChange={v=>{
+                  const next = {...soFilters, op_units: v};
+                  setSoFilters(next); setSoPage(1);
+                  fetchSOData(next, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+                }}
+                darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="flex-shrink-0" style={{width: '190px'}}>
+              <MultiSelect label="Vendor Name" options={soFilterOptions.vendors}
+                selected={soFilters.vendors} onChange={v=>{
+                  const next = {...soFilters, vendors: v};
+                  setSoFilters(next); setSoPage(1);
+                  fetchSOData(next, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+                }}
+                darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="flex-shrink-0" style={{width: '115px'}}>
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Margin</label>
               <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                 value={soMarginFilter} onChange={e=>{
@@ -2187,14 +2211,14 @@ const App = () => {
                 <option value="negative">Below 0</option>
               </select>
             </div>
-            <div className="flex-shrink-0" style={{minWidth: '96px', maxWidth: '110px'}}>
+            <div className="flex-shrink-0" style={{width: '118px'}}>
               <label className={`block text-xs font-medium mb-0.5 ${txt2} opacity-0`}>.</label>
               <button onClick={()=>{
                 const f={op_units:[],vendors:[],statuses:[],aging:[],pics:[]};
                 setSoFilters(f); setSoSearchNums([]); setSoMarginFilter('all'); setSoPage(1);
                 fetchSOData(f,1,soPerPage,[],'all',soDateFilter);
               }}
-                className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Reset</button>
+                className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear Filter</button>
             </div>
           </div>
           {/* Active filter tags */}
@@ -2237,17 +2261,17 @@ const App = () => {
           <table className="w-full text-sm">
             <thead className={tblHd}>
               <tr>
-                {['Aging','Day','SO Item','Product ID','Item Name','PIC','Status','Op Unit','Vendor','Qty',
+                {['Aging','Day','SO Item','SVO PO','Product ID','Category','Item Name','PIC','Status','Op Unit','Vendor','Customer PO Number','Delivery Memo','Qty',
                   'Sales Price','Sales Amount','PO Price','PO Amount','Margin','%Margin',
                   'SO Create Date','Possible Delivery','Plan Date','Remarks'].map(h=>(
-                  <th key={h} className={`px-3 py-2.5 text-center font-bold whitespace-nowrap ${txt2} ${h==='Remarks'?'min-w-[560px]':''}`}>{h}</th>
+                  <th key={h} className={`px-3 py-2.5 text-center font-bold whitespace-nowrap ${txt2} ${h==='Remarks'?'min-w-[560px]':h==='Delivery Memo'?'min-w-[200px]':''}`}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
               {(() => {
                 if (sortedSOData.length === 0) return (
-                <tr><td colSpan={20} className={`px-4 py-10 text-center ${txt2}`}>
+                <tr><td colSpan={24} className={`px-4 py-10 text-center ${txt2}`}>
                     <FileText className="w-10 h-10 mx-auto mb-2 opacity-40"/>No data
                   </td></tr>
                 );
@@ -2273,7 +2297,9 @@ const App = () => {
                   </td>
                   {/* SO Item first, no SO Number column */}
                   <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{so.so_item}</td>
+                  <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{so.svo_po || '-'}</td>
                   <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{so.product_id || '-'}</td>
+                  <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{so.category_name || '-'}</td>
                   <td className={`px-3 py-2 max-w-[160px] truncate ${txt2}`} title={so.product_name}>{so.product_name}</td>
                   <td className={`px-3 py-2 whitespace-nowrap`}>
                     {so.pic_name ? (
@@ -2291,6 +2317,8 @@ const App = () => {
                   </td>
                   <td className={`px-3 py-2 min-w-[180px] truncate ${txt2}`} title={so.operation_unit_name}>{so.operation_unit_name}</td>
                   <td className={`px-3 py-2 max-w-[120px] truncate ${txt2}`} title={so.vendor_name}>{so.vendor_name}</td>
+                  <td className={`px-3 py-2 max-w-[150px] truncate ${txt2}`} title={so.customer_po_number}>{so.customer_po_number || '-'}</td>
+                  <td className={`px-3 py-2 max-w-[200px] truncate ${txt2}`} title={so.delivery_memo}>{so.delivery_memo || '-'}</td>
                   <td className={`px-3 py-2 text-right ${txt2}`}>{fmtNum(so.so_qty)}</td>
                   <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${txt}`}>{fmtCur(so.sales_price)}</td>
                   <td className="px-3 py-2 text-center font-bold text-orange-600 whitespace-nowrap min-w-[130px]">{fmtCur(so.sales_amount)}</td>
@@ -2437,9 +2465,9 @@ const App = () => {
                 darkMode={darkMode} txt2={txt2}
               />
             </div>
-            <div className="col-span-12 sm:col-span-4 xl:col-span-1 min-w-0">
+            <div className="col-span-12 sm:col-span-4 xl:col-span-1 min-w-[110px]">
               <button onClick={()=>{ setPoSearchNums([]); setPoFilterItemType([]); setPoFilterOpUnit([]); setPoPage(1); }}
-                className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Reset</button>
+                className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear Filter</button>
             </div>
           </div>
         </div>
@@ -2575,9 +2603,9 @@ const App = () => {
                 selected={approvalFilters.statuses} onChange={v=>{ setApprovalFilters(f=>({...f, statuses: v})); setApprovalPage(1); }}
                 darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="col-span-6 sm:col-span-3 xl:col-span-1 min-w-0">
+            <div className="col-span-6 sm:col-span-3 xl:col-span-1 min-w-[110px]">
               <button onClick={()=>{ setApprovalFilters({ op_units: [], statuses: [], aging: [] }); setApprovalSearchNums([]); setApprovalPage(1); }}
-                className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Reset</button>
+                className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear Filter</button>
             </div>
           </div>
           {(approvalSearchNums.length + approvalFilters.op_units.length + approvalFilters.statuses.length) > 0 && (
