@@ -161,7 +161,6 @@ class POData(db.Model):
     request_delivery = db.Column(db.Date)
     delivery_plan_date = db.Column(db.Date)
     remarks = db.Column(db.Text)
-    is_cancelled = db.Column(db.Boolean, default=False)
     uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class SOData(db.Model):
@@ -192,6 +191,7 @@ class SOData(db.Model):
     matched_po_number = db.Column(db.String(50))
     delivery_plan_date = db.Column(db.Date)
     remarks = db.Column(db.Text)
+    pic_name = db.Column(db.String(100))
     uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class UploadLog(db.Model):
@@ -222,6 +222,27 @@ class ExchangeRate(db.Model):
     usd_to_idr = db.Column(db.Float, nullable=False)
     source     = db.Column(db.String(50), default='manual')  # 'frankfurter'|'manual'|'fallback'
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class ProductIDDB(db.Model):
+    """Database of Product ID → Category ID, downloaded from SAP."""
+    __tablename__ = 'product_id_db'
+    id            = db.Column(db.Integer, primary_key=True)
+    product_id    = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    category_id   = db.Column(db.String(100))
+    category_name = db.Column(db.String(255))
+    product_name  = db.Column(db.Text)
+    updated_at    = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class MasterPIC(db.Model):
+    """Master mapping: Category ID → PIC name. Updated manually via UI."""
+    __tablename__ = 'master_pic'
+    id            = db.Column(db.Integer, primary_key=True)
+    category_id   = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    category_name = db.Column(db.String(255))
+    pic_name      = db.Column(db.String(100))
+    updated_at    = db.Column(db.DateTime, default=datetime.utcnow)
 
 
 # ─── Exchange rate helpers ─────────────────────────────────────────────────
@@ -440,11 +461,11 @@ def _ensure_extra_columns():
             ('purchasing_currency',                'VARCHAR(10)'),
             ('purchasing_amount_idr',              'DOUBLE PRECISION'),
             ('purchasing_amount_idr_cached_at',    'TIMESTAMP'),
+            ('pic_name',                           'VARCHAR(100)'),
         ],
         'po_data': [
             ('delivery_plan_date',   'DATE'),
             ('remarks',              'TEXT'),
-            ('is_cancelled',         'BOOLEAN'),
         ],
     }
 
@@ -762,6 +783,7 @@ def so_dict(s):
         'delivery_possible_date': s.delivery_possible_date.isoformat() if s.delivery_possible_date else '',
         'delivery_plan_date': s.delivery_plan_date.isoformat() if s.delivery_plan_date else '',
         'remarks': s.remarks or '',
+        'pic_name': s.pic_name or '',
         'aging_days': age_days,
         'aging_label': get_aging_label(age_days)
     }
@@ -860,11 +882,14 @@ def get_dashboard_stats():
             if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
                 continue
             total_so_count += 1
-            # KPI SO without PO HLI excludes return statuses and HLI Consumable only.
-            # Open SO total and other Open SO analytics still include both.
+            # KPI SO without PO HLI excludes:
+            # - return statuses
+            # - HLI Consumable operation unit
+            # - SOs created before 2024
             if (
                 not is_return_so_status(s.so_status)
                 and s.operation_unit_name not in EXCLUDED_OP_UNITS
+                and s.so_create_date and s.so_create_date.year >= 2024
                 and not so_has_matching_po_hli(s, po_numbers, po_suffix_index)
             ):
                 so_without_po_count += 1
@@ -1041,6 +1066,9 @@ def build_matched_set():
     """Build set of PO references that appear in ANY SO record (open or closed).
     We use ALL statuses here because a PO that has ever been linked to an SO
     (even if Delivery Completed or SO Cancel) should NOT appear as 'PO without SO'.
+    
+    Checks both Customer PO Number (primary) and Delivery Memo (secondary) fields.
+    Any PO HLI number found in either field counts as matched.
     """
     matched = set()
     # Only load the four columns we actually need — avoids fetching every field
@@ -1054,7 +1082,7 @@ def build_matched_set():
         # Skip return items (SO Item starting with 9)
         if is_return_so_item(so_item):
             continue
-        # Extract ALL PO references from Customer PO Number and Delivery Memo
+        # Extract PO references from BOTH Customer PO Number and Delivery Memo
         for ref in extract_po_hli(cust_po) + extract_po_hli(memo):
             matched.add(ref)
     return matched
@@ -1400,6 +1428,7 @@ def get_all_so():
         statuses = request.args.getlist('status')
         aging_list = request.args.getlist('aging')
         so_items = request.args.getlist('so_item')
+        pics = request.args.getlist('pic')
         margin_filter = request.args.get('margin_filter', 'all')
         sort_order = request.args.get('sort_order', 'newest')  # 'newest' or 'oldest'
         date_year, date_from, date_to = parse_so_date_args()
@@ -1409,6 +1438,15 @@ def get_all_so():
         if vendors: q = q.filter(SOData.vendor_name.in_(vendors))
         if statuses: q = q.filter(SOData.so_status.in_(statuses))
         if so_items: q = q.filter(SOData.so_item.in_(so_items))
+        if pics:
+            if '(Kosong)' in pics:
+                others = [p for p in pics if p != '(Kosong)']
+                if others:
+                    q = q.filter(db.or_(SOData.pic_name.in_(others), SOData.pic_name.is_(None), SOData.pic_name == ''))
+                else:
+                    q = q.filter(db.or_(SOData.pic_name.is_(None), SOData.pic_name == ''))
+            else:
+                q = q.filter(SOData.pic_name.in_(pics))
 
         # SO Create Date filter
         is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
@@ -1497,12 +1535,13 @@ def get_all_so():
         op_units_opts = sorted({s.operation_unit_name for s in all_sos if s.operation_unit_name})
         vendors_opts  = sorted({s.vendor_name for s in all_sos if s.vendor_name})
         statuses_opts = sorted({s.so_status for s in all_sos if s.so_status})
+        pics_opts     = sorted({s.pic_name for s in all_sos if s.pic_name})
 
         return jsonify({
             'data': [so_dict(s) for s in paged],
             'approval_data': [so_dict(s) for s in approval_sos],
             'total': total, 'subtotal_amount': round(subtotal_amount, 2), 'page': page, 'per_page': per_page,
-            'filters': {'op_units': list(op_units_opts), 'vendors': list(vendors_opts), 'statuses': list(statuses_opts)}
+            'filters': {'op_units': list(op_units_opts), 'vendors': list(vendors_opts), 'statuses': list(statuses_opts), 'pics': list(pics_opts)}
         })
     except Exception as e:
         import traceback; traceback.print_exc()
@@ -1842,8 +1881,6 @@ def upload_po_list():
                     setattr(existing, field, val)
                 existing.delivery_plan_date = preserved_plan_date
                 existing.remarks = preserved_remarks
-                # Mark as not cancelled since it's in the new file
-                existing.is_cancelled = False
             else:
                 new_rec = POData(**new_data)
                 db.session.add(new_rec)
@@ -1852,25 +1889,12 @@ def upload_po_list():
             if count % CHUNK_SIZE == 0:
                 db.session.flush()
 
-        # NEW: Mark PO items as cancelled if they exist in DB but NOT in new file
-        cancelled_count = 0
-        for key, existing in existing_po.items():
-            if key not in new_keys_in_file and not existing.is_cancelled:
-                existing.is_cancelled = True
-                cancelled_count += 1
+        # FIX: Do not delete old PO data (preserve history)
+        # keys_to_delete logic removed
 
         db.session.add(UploadLog(file_type='PO', filename=file.filename, records_count=count))
         db.session.commit()
-        
-        message = f'Berhasil upload {count} PO items'
-        if cancelled_count > 0:
-            message += f', {cancelled_count} PO items ditandai sebagai cancelled (tidak ada di file baru)'
-        
-        return jsonify({
-            'message': message,
-            'uploaded': count,
-            'cancelled': cancelled_count
-        })
+        return jsonify({'message': f'Berhasil upload {count} PO items', 'uploaded': count})
     except Exception as e:
         db.session.rollback(); import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
@@ -2031,9 +2055,17 @@ def upload_smro():
                     existing.specification = preserved_spec
                 if not col_pid or pid_val is None:
                     existing.product_id = preserved_pid
+                # Auto-fill pic_name from ProductIDDB + MasterPIC
+                _pid_for_pic = existing.product_id
+                if _pid_for_pic:
+                    existing.pic_name = _lookup_pic(_pid_for_pic)
                 updated += 1
             else:
                 new_rec = SOData(**new_data)
+                # Auto-fill pic_name on insert
+                _pid_for_pic = new_data.get('product_id')
+                if _pid_for_pic:
+                    new_rec.pic_name = _lookup_pic(_pid_for_pic)
                 db.session.add(new_rec)
                 inserted += 1
 
@@ -2520,14 +2552,15 @@ def export_all_so():
         sos = q.all()
         today = date.today()
         wb = Workbook(); ws = wb.active; ws.title = "SO List"
-        _style_wb(ws, ['Aging','SO Number','SO Item','Status','Op Unit','Vendor','Product',
+        _style_wb(ws, ['Aging','SO Number','SO Item','Status','Op Unit','Vendor','Product','PIC',
                        'SO Qty','Sales Price','Sales Amount','PO Price','PO Amount',
                        'SO Date','Delivery Possible','Customer PO','Delivery Memo',
-                       'Delivery Plan Date','Remarks'], num_cols=[8,9,10,11,12])
+                       'Delivery Plan Date','Remarks'], num_cols=[9,10,11,12,13])
         for s in sos:
             age = (today - s.so_create_date).days if s.so_create_date else None
             ws.append([get_aging_label(age), s.so_number, s.so_item, s.so_status,
                 s.operation_unit_name, s.vendor_name, s.product_name,
+                s.pic_name or '',
                 s.so_qty or 0, s.sales_price or 0, s.sales_amount or 0,
                 s.purchasing_price or 0, s.purchasing_amount or 0,
                 s.so_create_date.isoformat() if s.so_create_date else '',
@@ -3009,6 +3042,344 @@ def completed_margin_detail():
 
         result.sort(key=lambda x: x['margin'])
         return jsonify(result)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+
+
+# ─── Product ID Database & Master PIC endpoints ───────────────────────────
+
+def _lookup_pic(product_id_str):
+    """Return PIC name for a product_id string, or None if not found."""
+    if not product_id_str:
+        return None
+    pid = str(product_id_str).strip()
+    prod = db.session.query(ProductIDDB).filter_by(product_id=pid).first()
+    if not prod or not prod.category_id:
+        return None
+    pic = db.session.query(MasterPIC).filter_by(category_id=str(prod.category_id).strip()).first()
+    return pic.pic_name if pic else None
+
+
+@app.route('/api/upload/product-id', methods=['POST'])
+def upload_product_id():
+    """Upload Prod_ID Excel from SAP. Upserts product_id → category_id mapping."""
+    try:
+        file = request.files.get('file')
+        if not file:
+            return jsonify({'error': 'No file provided'}), 400
+        df = pd.read_excel(file, sheet_name=0)
+        df.columns = [str(c).strip() for c in df.columns]
+
+        pid_col = next((c for c in df.columns if 'Product ID' in c or c.lower() == 'product id'), None)
+        cat_col = next((c for c in df.columns if 'Category ID' in c or c.lower() == 'category id'), None)
+        catn_col = next((c for c in df.columns if 'Category Name' in c or c.lower() == 'category name'), None)
+        pname_col = next((c for c in df.columns if 'Product Name' in c and 'EN' not in c), None)
+
+        if not pid_col or not cat_col:
+            return jsonify({'error': f'Missing required columns. Found: {list(df.columns)[:10]}'}), 400
+
+        added = updated = 0
+        pic_cache = {}  # category_id → pic_name
+
+        for _, row in df.iterrows():
+            pid = str(row[pid_col]).strip() if pd.notna(row[pid_col]) else None
+            cat_id = str(row[cat_col]).strip() if pd.notna(row[cat_col]) else None
+            if not pid or pid == 'nan':
+                continue
+            cat_name = str(row[catn_col]).strip() if catn_col and pd.notna(row[catn_col]) else None
+            pname = str(row[pname_col]).strip() if pname_col and pd.notna(row[pname_col]) else None
+
+            existing = db.session.query(ProductIDDB).filter_by(product_id=pid).first()
+            if existing:
+                existing.category_id = cat_id
+                existing.category_name = cat_name
+                existing.product_name = pname
+                existing.updated_at = datetime.utcnow()
+                updated += 1
+            else:
+                db.session.add(ProductIDDB(
+                    product_id=pid, category_id=cat_id,
+                    category_name=cat_name, product_name=pname,
+                    updated_at=datetime.utcnow()
+                ))
+                added += 1
+
+        db.session.commit()
+
+        # After upserting ProductIDDB, refresh pic_name on SO rows that have a product_id
+        so_rows = db.session.query(SOData).filter(
+            SOData.product_id.isnot(None), SOData.product_id != ''
+        ).all()
+        refreshed = 0
+        for s in so_rows:
+            cat_id_key = None
+            prod = db.session.query(ProductIDDB).filter_by(product_id=str(s.product_id).strip()).first()
+            if prod and prod.category_id:
+                cat_id_key = str(prod.category_id).strip()
+            if cat_id_key:
+                if cat_id_key not in pic_cache:
+                    pic_obj = db.session.query(MasterPIC).filter_by(category_id=cat_id_key).first()
+                    pic_cache[cat_id_key] = pic_obj.pic_name if pic_obj else None
+                new_pic = pic_cache[cat_id_key]
+                if s.pic_name != new_pic:
+                    s.pic_name = new_pic
+                    refreshed += 1
+        db.session.commit()
+
+        return jsonify({
+            'status': 'ok',
+            'added': added, 'updated': updated,
+            'so_pic_refreshed': refreshed,
+            'total_in_db': db.session.query(ProductIDDB).count()
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/upload/master-pic', methods=['POST'])
+def upload_master_pic():
+    """Upload Master PIC Excel. Upserts category_id → PIC mapping, then refreshes SO pic_name."""
+    try:
+        file = request.files.get('file')
+        if not file:
+            return jsonify({'error': 'No file provided'}), 400
+        df = pd.read_excel(file, sheet_name=0)
+        df.columns = [str(c).strip() for c in df.columns]
+
+        cat_col = next((c for c in df.columns if 'Category ID' in c or c.lower() == 'category id'), None)
+        catn_col = next((c for c in df.columns if 'Category Name' in c or c.lower() == 'category name'), None)
+        pic_col = next((c for c in df.columns if c.upper() == 'PIC' or 'PIC' in c), None)
+
+        if not cat_col or not pic_col:
+            return jsonify({'error': f'Missing required columns. Found: {list(df.columns)}'}), 400
+
+        added = updated = 0
+        for _, row in df.iterrows():
+            cat_id = str(row[cat_col]).strip() if pd.notna(row[cat_col]) else None
+            if not cat_id or cat_id == 'nan':
+                continue
+            cat_name = str(row[catn_col]).strip() if catn_col and pd.notna(row[catn_col]) else None
+            pic_name = str(row[pic_col]).strip() if pd.notna(row[pic_col]) else None
+
+            existing = db.session.query(MasterPIC).filter_by(category_id=cat_id).first()
+            if existing:
+                existing.category_name = cat_name
+                existing.pic_name = pic_name
+                existing.updated_at = datetime.utcnow()
+                updated += 1
+            else:
+                db.session.add(MasterPIC(
+                    category_id=cat_id, category_name=cat_name,
+                    pic_name=pic_name, updated_at=datetime.utcnow()
+                ))
+                added += 1
+        db.session.commit()
+
+        # Rebuild pic_cache from DB for refreshing SO rows
+        pic_map = {m.category_id: m.pic_name for m in db.session.query(MasterPIC).all()}
+        prod_map = {p.product_id: p.category_id for p in db.session.query(ProductIDDB).all()}
+
+        so_rows = db.session.query(SOData).filter(
+            SOData.product_id.isnot(None), SOData.product_id != ''
+        ).all()
+        refreshed = 0
+        for s in so_rows:
+            cat_id_key = prod_map.get(str(s.product_id).strip())
+            new_pic = pic_map.get(cat_id_key) if cat_id_key else None
+            if s.pic_name != new_pic:
+                s.pic_name = new_pic
+                refreshed += 1
+        db.session.commit()
+
+        return jsonify({
+            'status': 'ok',
+            'added': added, 'updated': updated,
+            'so_pic_refreshed': refreshed,
+            'total_categories': db.session.query(MasterPIC).count()
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/master-pic/status', methods=['GET'])
+def master_pic_status():
+    """Return summary of Master PIC and ProductID database."""
+    try:
+        total_pid = db.session.query(ProductIDDB).count()
+        last_pid = db.session.query(func.max(ProductIDDB.updated_at)).scalar()
+        total_pic = db.session.query(MasterPIC).count()
+        last_pic = db.session.query(func.max(MasterPIC.updated_at)).scalar()
+        return jsonify({
+            'product_id_count': total_pid,
+            'last_product_id_upload': last_pid.isoformat() if last_pid else None,
+            'master_pic_count': total_pic,
+            'last_pic_update': last_pic.isoformat() if last_pic else None,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/data/pic-kpi', methods=['GET'])
+def get_pic_kpi():
+    """Return KPI metrics per PIC for Open SO."""
+    try:
+        # Get date filter params
+        date_from = request.args.get('date_from', '')
+        date_to = request.args.get('date_to', '')
+        date_year = request.args.get('date_year', '')
+        is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
+        
+        # Base query: Open SO only (exclude Delivery Completed and SO Cancel)
+        q = db.session.query(SOData).filter(
+            SOData.so_status.notin_(['Delivery Completed', 'SO Cancel'])
+        )
+        
+        # Apply date filters
+        if date_year:
+            try:
+                yr = int(date_year)
+                if is_sqlite:
+                    q = q.filter(func.strftime('%Y', SOData.so_create_date) == str(yr))
+                else:
+                    q = q.filter(func.extract('year', SOData.so_create_date) == yr)
+            except ValueError:
+                pass
+        elif date_from or date_to:
+            if date_from:
+                q = q.filter(SOData.so_create_date >= date_from)
+            if date_to:
+                q = q.filter(SOData.so_create_date <= date_to)
+        
+        rows = q.all()
+        
+        # Group by PIC
+        pic_map = {}
+        for s in rows:
+            pic = s.pic_name or 'Unassigned'
+            if pic not in pic_map:
+                pic_map[pic] = {
+                    'pic_name': pic,
+                    'so_count': 0,
+                    'total_sales': 0.0,
+                    'total_purchase': 0.0,
+                    'total_margin': 0.0,
+                    'positive_margin_count': 0,
+                    'negative_margin_count': 0,
+                }
+            
+            pic_map[pic]['so_count'] += 1
+            sales = float(s.sales_amount or 0)
+            po_price = float(s.purchasing_price or 0)
+            qty = float(s.so_qty or 0)
+            po_amount = po_price * qty
+            margin = sales - po_amount
+            
+            pic_map[pic]['total_sales'] += sales
+            pic_map[pic]['total_purchase'] += po_amount
+            pic_map[pic]['total_margin'] += margin
+            
+            if margin > 0:
+                pic_map[pic]['positive_margin_count'] += 1
+            elif margin < 0:
+                pic_map[pic]['negative_margin_count'] += 1
+        
+        # Convert to list and sort by SO count descending
+        result = sorted(pic_map.values(), key=lambda x: x['so_count'], reverse=True)
+        
+        return jsonify(result)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/template/master-pic', methods=['GET'])
+def download_master_pic_template():
+    """Generate and download Master PIC Excel template."""
+    try:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'Master PIC'
+        
+        # Header styling
+        header_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
+        header_font = Font(bold=True, color='FFFFFF', size=11)
+        header_align = Alignment(horizontal='center', vertical='center')
+        
+        # Headers
+        headers = ['Category ID', 'Category Name', 'PIC']
+        for col_idx, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_idx, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = header_align
+        
+        # Column widths
+        ws.column_dimensions['A'].width = 15
+        ws.column_dimensions['B'].width = 40
+        ws.column_dimensions['C'].width = 25
+        
+        # Sample data rows
+        sample_data = [
+            ['CAT001', 'Electronics', 'John Doe'],
+            ['CAT002', 'Mechanical Parts', 'Jane Smith'],
+            ['CAT003', 'Chemical Supplies', 'Bob Johnson'],
+        ]
+        
+        for row_idx, row_data in enumerate(sample_data, 2):
+            for col_idx, value in enumerate(row_data, 1):
+                cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                cell.alignment = Alignment(horizontal='left', vertical='center')
+        
+        # Instructions sheet
+        ws_inst = wb.create_sheet('Instructions')
+        instructions = [
+            ['Master PIC Template - Instructions'],
+            [''],
+            ['Column Descriptions:'],
+            ['1. Category ID: Unique identifier for the product category (required)'],
+            ['2. Category Name: Name of the product category (optional)'],
+            ['3. PIC: Person In Charge name for this category (required)'],
+            [''],
+            ['How to use:'],
+            ['1. Fill in the Category ID and PIC columns (required)'],
+            ['2. Category Name is optional but recommended for clarity'],
+            ['3. Delete the sample data rows before uploading'],
+            ['4. Upload the filled template via Manual Update > Update PIC'],
+            [''],
+            ['Notes:'],
+            ['- Existing categories will be updated with new PIC names'],
+            ['- New categories will be added to the database'],
+            ['- After upload, SO rows will automatically refresh their PIC assignments'],
+        ]
+        
+        for row_idx, row_data in enumerate(instructions, 1):
+            cell = ws_inst.cell(row=row_idx, column=1, value=row_data[0])
+            if row_idx == 1:
+                cell.font = Font(bold=True, size=14, color='4472C4')
+            elif 'Column Descriptions:' in row_data[0] or 'How to use:' in row_data[0] or 'Notes:' in row_data[0]:
+                cell.font = Font(bold=True, size=11)
+        
+        ws_inst.column_dimensions['A'].width = 80
+        
+        # Save to BytesIO
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        
+        return send_file(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name='Template_Master_PIC.xlsx'
+        )
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
