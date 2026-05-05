@@ -669,10 +669,10 @@ const App = () => {
   const [allSOData, setAllSOData] = useState([]);
   const [approvalSOData, setApprovalSOData] = useState([]);
   const [soTotal, setSoTotal] = useState(0);
-  const [soFilterOptions, setSoFilterOptions] = useState({ op_units: [], vendors: [], statuses: [] });
+  const [soFilterOptions, setSoFilterOptions] = useState({ op_units: [], vendors: [], statuses: [], pics: [] });
 
   // SO filters
-  const [soFilters, setSoFilters] = useState({ op_units: [], vendors: [], statuses: [], aging: [] });
+  const [soFilters, setSoFilters] = useState({ op_units: [], vendors: [], statuses: [], aging: [], pics: [] });
   const [soSearchNums, setSoSearchNums] = useState([]); // search SO Item
   const [soMarginFilter, setSoMarginFilter] = useState('all'); // 'all' | 'positive' | 'negative'
   const [soSortOrder, setSoSortOrder] = useState('oldest'); // 'oldest' | 'newest'
@@ -716,6 +716,34 @@ const App = () => {
   const [completedLoaded, setCompletedLoaded] = useState(false);
   const [showHideMenu, setShowHideMenu] = useState(false);
   const [marginDetailModal, setMarginDetailModal] = useState(null); // {category, data}
+  const [picDbStatus, setPicDbStatus] = useState(null); // {product_id_count, master_pic_count, last_product_id_upload, last_pic_update}
+  const [picUploadMsg, setPicUploadMsg] = useState(''); // feedback message for PIC uploads
+
+  // Dynamic color palette for PIC badges — each unique name gets a consistent color
+  const PIC_COLORS = [
+    { bg: 'bg-indigo-100',  text: 'text-indigo-700'  },
+    { bg: 'bg-emerald-100', text: 'text-emerald-700' },
+    { bg: 'bg-amber-100',   text: 'text-amber-700'   },
+    { bg: 'bg-cyan-100',    text: 'text-cyan-700'    },
+    { bg: 'bg-violet-100',  text: 'text-violet-700'  },
+    { bg: 'bg-orange-100',  text: 'text-orange-700'  },
+    { bg: 'bg-teal-100',    text: 'text-teal-700'    },
+    { bg: 'bg-pink-100',    text: 'text-pink-700'    },
+    { bg: 'bg-lime-100',    text: 'text-lime-700'    },
+    { bg: 'bg-fuchsia-100', text: 'text-fuchsia-700' },
+    { bg: 'bg-purple-100',  text: 'text-purple-700'  },
+    { bg: 'bg-yellow-100',  text: 'text-yellow-700'  },
+  ];
+  const picColorMap = useRef({});
+  const picColorCounter = useRef(0);
+  const getPicColor = (name) => {
+    if (!name) return null;
+    if (!picColorMap.current[name]) {
+      picColorMap.current[name] = PIC_COLORS[picColorCounter.current % PIC_COLORS.length];
+      picColorCounter.current += 1;
+    }
+    return picColorMap.current[name];
+  };
   const hideMenuRef = useRef(null);
 
   // ── Global SO Create Date filter (shared across Dashboard / All SO / Delivery Completed)
@@ -820,6 +848,7 @@ const App = () => {
       resolveFilter(filters.op_units).forEach(v => params.append('op_unit', v));
       resolveFilter(filters.vendors).forEach(v => params.append('vendor', v));
       resolveFilter(filters.statuses).forEach(v => params.append('status', v));
+      (filters.pics || []).forEach(v => params.append('pic', v));
       (filters.aging || []).forEach(a => params.append('aging', a));
       (searchNums || []).forEach(n => params.append('so_item', n));
       if (marginFilter && marginFilter !== 'all') params.append('margin_filter', marginFilter);
@@ -835,7 +864,7 @@ const App = () => {
       setAllSOData(Array.isArray(res.data.data) ? res.data.data : []);
       setApprovalSOData(Array.isArray(res.data.approval_data) ? res.data.approval_data : []);
       setSoTotal(res.data.total || 0);
-      setSoFilterOptions(res.data.filters || { op_units: [], vendors: [], statuses: [] });
+      setSoFilterOptions(res.data.filters || { op_units: [], vendors: [], statuses: [], pics: [] });
     } catch (e) {
       addToast(`Failed to load SO: ${e.message}`, 'error');
     } finally { setLoading(false); }
@@ -1010,6 +1039,45 @@ const App = () => {
     } catch (e) {
       setUploadProgress(null);
       addToast(`❌ Failed to upload ${label}: ${e.response?.data?.error || e.message}`, 'error');
+    }
+  };
+
+  const fetchPicDbStatus = async () => {
+    try {
+      const res = await api.get('/api/master-pic/status');
+      setPicDbStatus(res.data);
+    } catch {}
+  };
+
+  const handleUploadProductID = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    e.target.value = '';
+    const fd = new FormData(); fd.append('file', file);
+    setPicUploadMsg('⏳ Uploading Product ID database...');
+    try {
+      const res = await api.post('/api/upload/product-id', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+      const d = res.data;
+      setPicUploadMsg(`✅ Prod ID: +${d.added} added, ${d.updated} updated (total: ${d.total_in_db}). SO PIC refreshed: ${d.so_pic_refreshed} rows.`);
+      fetchPicDbStatus();
+      fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+    } catch (err) {
+      setPicUploadMsg(`❌ Error: ${err?.response?.data?.error || err.message}`);
+    }
+  };
+
+  const handleUpdatePIC = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    e.target.value = '';
+    const fd = new FormData(); fd.append('file', file);
+    setPicUploadMsg('⏳ Updating Master PIC...');
+    try {
+      const res = await api.post('/api/upload/master-pic', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+      const d = res.data;
+      setPicUploadMsg(`✅ Master PIC: +${d.added} added, ${d.updated} updated (total categories: ${d.total_categories}). SO rows updated: ${d.so_pic_refreshed}.`);
+      fetchPicDbStatus();
+      fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+    } catch (err) {
+      setPicUploadMsg(`❌ Error: ${err?.response?.data?.error || err.message}`);
     }
   };
 
@@ -2021,8 +2089,13 @@ const App = () => {
             </DownloadButton>
           </div>
         </div>
-
-        {/* Aging Filter Chips */}
+        {/* PIC upload feedback */}
+        {picUploadMsg && (
+          <div className={`mb-3 px-4 py-2 rounded-lg text-sm font-medium flex items-center justify-between gap-2 ${picUploadMsg.startsWith('✅') ? (darkMode?'bg-green-900/40 text-green-300':'bg-green-50 text-green-700') : picUploadMsg.startsWith('❌') ? (darkMode?'bg-red-900/40 text-red-300':'bg-red-50 text-red-700') : (darkMode?'bg-blue-900/40 text-blue-300':'bg-blue-50 text-blue-700')}`}>
+            <span>{picUploadMsg}</span>
+            <button onClick={()=>setPicUploadMsg('')} className="opacity-60 hover:opacity-100 font-bold text-lg leading-none">×</button>
+          </div>
+        )}
         <div className="mb-2 flex flex-wrap gap-2 items-center">
           <span className={`text-xs font-medium ${txt2}`}>Filter by Aging:</span>
           {AGING_LABELS.map(label => {
@@ -2043,8 +2116,8 @@ const App = () => {
 
         {/* Multi-select Filters row — compact single-line layout */}
         <div className={`px-4 py-3 rounded-xl mb-3 ${darkMode?'bg-gray-700':'bg-gray-50'}`}>
-          <div className="grid grid-cols-12 gap-2 items-end">
-            <div className="col-span-12 sm:col-span-2 xl:col-span-1 min-w-0">
+          <div className="flex flex-wrap gap-4 items-end">
+            <div className="flex-shrink-0" style={{minWidth: '100px', maxWidth: '120px'}}>
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ SO Date</label>
               <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                 value={soSortOrder} onChange={e=>{ setSoSortOrder(e.target.value); setSoPage(1); }} title="Sort SO Date">
@@ -2052,7 +2125,7 @@ const App = () => {
                 <option value="newest">Newest ↓</option>
               </select>
             </div>
-            <div className="col-span-12 sm:col-span-3 xl:col-span-2 min-w-0">
+            <div className="flex-shrink-0" style={{minWidth: '140px', maxWidth: '180px'}}>
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Search SO Item</label>
               <SearchInput
                 label="SO Item"
@@ -2065,7 +2138,16 @@ const App = () => {
                 darkMode={darkMode} txt2={txt2}
               />
             </div>
-            <div className="col-span-12 sm:col-span-4 xl:col-span-2 min-w-0">
+            <div className="flex-shrink-0" style={{minWidth: '140px', maxWidth: '180px'}}>
+              <MultiSelect label="PIC" options={soFilterOptions.pics || []}
+                selected={soFilters.pics} onChange={v=>{
+                  const next = {...soFilters, pics: v};
+                  setSoFilters(next); setSoPage(1);
+                  fetchSOData(next, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+                }}
+                darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="flex-shrink-0" style={{minWidth: '160px', maxWidth: '200px'}}>
               <MultiSelect label="Operation Unit" options={soFilterOptions.op_units}
                 selected={soFilters.op_units} onChange={v=>{
                   const next = {...soFilters, op_units: v};
@@ -2074,7 +2156,7 @@ const App = () => {
                 }}
                 darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="col-span-12 sm:col-span-4 xl:col-span-2 min-w-0">
+            <div className="flex-shrink-0" style={{minWidth: '160px', maxWidth: '200px'}}>
               <MultiSelect label="Vendor Name" options={soFilterOptions.vendors}
                 selected={soFilters.vendors} onChange={v=>{
                   const next = {...soFilters, vendors: v};
@@ -2083,7 +2165,7 @@ const App = () => {
                 }}
                 darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="col-span-12 sm:col-span-4 xl:col-span-2 min-w-0">
+            <div className="flex-shrink-0" style={{minWidth: '140px', maxWidth: '160px'}}>
               <MultiSelect label="SO Status" options={soFilterOptions.statuses}
                 selected={soFilters.statuses} onChange={v=>{
                   const next = {...soFilters, statuses: v};
@@ -2092,7 +2174,7 @@ const App = () => {
                 }}
                 darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="col-span-6 sm:col-span-3 xl:col-span-1 min-w-0">
+            <div className="flex-shrink-0" style={{minWidth: '120px', maxWidth: '140px', marginLeft: '20px'}}>
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Margin</label>
               <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                 value={soMarginFilter} onChange={e=>{
@@ -2105,9 +2187,10 @@ const App = () => {
                 <option value="negative">Below 0</option>
               </select>
             </div>
-            <div className="col-span-6 sm:col-span-3 xl:col-span-1 min-w-0">
+            <div className="flex-shrink-0" style={{minWidth: '96px', maxWidth: '110px'}}>
+              <label className={`block text-xs font-medium mb-0.5 ${txt2} opacity-0`}>.</label>
               <button onClick={()=>{
-                const f={op_units:[],vendors:[],statuses:[],aging:[]};
+                const f={op_units:[],vendors:[],statuses:[],aging:[],pics:[]};
                 setSoFilters(f); setSoSearchNums([]); setSoMarginFilter('all'); setSoPage(1);
                 fetchSOData(f,1,soPerPage,[],'all',soDateFilter);
               }}
@@ -2115,7 +2198,7 @@ const App = () => {
             </div>
           </div>
           {/* Active filter tags */}
-          {(soSearchNums.length + soFilters.op_units.length + soFilters.vendors.length + soFilters.statuses.length) > 0 && (
+          {(soSearchNums.length + soFilters.op_units.length + soFilters.vendors.length + soFilters.statuses.length + (soFilters.pics||[]).length) > 0 && (
             <div className="mt-3 flex flex-wrap gap-1.5">
               {soSearchNums.map(v=>(
                 <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-xs">
@@ -2137,6 +2220,14 @@ const App = () => {
                   {v}<button onClick={()=>{ setSoFilters(f=>({...f,statuses:f.statuses.filter(x=>x!==v)})); setSoPage(1); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                 </span>
               ))}
+              {(soFilters.pics||[]).map(v=>{
+                const c = getPicColor(v);
+                return (
+                  <span key={v} className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${c ? c.bg+' '+c.text : 'bg-gray-100 text-gray-700'}`}>
+                    PIC: {v}<button onClick={()=>{ const next={...soFilters,pics:soFilters.pics.filter(x=>x!==v)}; setSoFilters(next); setSoPage(1); fetchSOData(next,1,soPerPage,soSearchNums,soMarginFilter,soDateFilter); }} className="hover:text-red-600 ml-0.5"><X className="w-3 h-3"/></button>
+                  </span>
+                );
+              })}
             </div>
           )}
         </div>
@@ -2146,7 +2237,7 @@ const App = () => {
           <table className="w-full text-sm">
             <thead className={tblHd}>
               <tr>
-                {['Aging','Day','SO Item','Product ID','Item Name','Status','Op Unit','Vendor','Qty',
+                {['Aging','Day','SO Item','Product ID','Item Name','PIC','Status','Op Unit','Vendor','Qty',
                   'Sales Price','Sales Amount','PO Price','PO Amount','Margin','%Margin',
                   'SO Create Date','Possible Delivery','Plan Date','Remarks'].map(h=>(
                   <th key={h} className={`px-3 py-2.5 text-center font-bold whitespace-nowrap ${txt2} ${h==='Remarks'?'min-w-[560px]':''}`}>{h}</th>
@@ -2156,7 +2247,7 @@ const App = () => {
             <tbody className={`divide-y ${tblDv}`}>
               {(() => {
                 if (sortedSOData.length === 0) return (
-                <tr><td colSpan={19} className={`px-4 py-10 text-center ${txt2}`}>
+                <tr><td colSpan={20} className={`px-4 py-10 text-center ${txt2}`}>
                     <FileText className="w-10 h-10 mx-auto mb-2 opacity-40"/>No data
                   </td></tr>
                 );
@@ -2184,6 +2275,13 @@ const App = () => {
                   <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{so.so_item}</td>
                   <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{so.product_id || '-'}</td>
                   <td className={`px-3 py-2 max-w-[160px] truncate ${txt2}`} title={so.product_name}>{so.product_name}</td>
+                  <td className={`px-3 py-2 whitespace-nowrap`}>
+                    {so.pic_name ? (
+                      (() => { const c = getPicColor(so.pic_name); return (
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${c.bg} ${c.text}`}>{so.pic_name}</span>
+                      ); })()
+                    ) : <span className={`text-xs ${txt2}`}>-</span>}
+                  </td>
                   <td className="px-3 py-2 whitespace-nowrap">
                     <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
                       so.so_status==='Delivery Completed'?'bg-green-100 text-green-700':
@@ -2656,6 +2754,24 @@ const App = () => {
                     <Upload className="w-4 h-4 text-blue-500"/>
                     <span className={`text-sm font-medium ${txt}`}>Upload SMRO - Search Client Odr</span>
                     <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUpload(e,'smro'); setShowUploadDropdown(false);}} className="hidden"/>
+                  </label>
+                  <div className={`${darkMode?'border-t border-gray-700':'border-t border-gray-100'}`}></div>
+                  <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-sky-50'}`}>
+                    <Upload className="w-4 h-4 text-sky-500"/>
+                    <div>
+                      <span className={`text-sm font-medium ${txt}`}>Upload Prod ID (SAP)</span>
+                      <p className={`text-xs ${txt2}`}>Update database Product ID → Kategori</p>
+                    </div>
+                    <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUploadProductID(e); setShowUploadDropdown(false);}} className="hidden"/>
+                  </label>
+                  <div className={`${darkMode?'border-t border-gray-700':'border-t border-gray-100'}`}></div>
+                  <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-indigo-50'}`}>
+                    <Upload className="w-4 h-4 text-indigo-500"/>
+                    <div>
+                      <span className={`text-sm font-medium ${txt}`}>Update PIC</span>
+                      <p className={`text-xs ${txt2}`}>Update nama PIC per kategori</p>
+                    </div>
+                    <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUpdatePIC(e); setShowUploadDropdown(false);}} className="hidden"/>
                   </label>
                 </div>
               )}
