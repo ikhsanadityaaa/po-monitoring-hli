@@ -2841,7 +2841,15 @@ def completed_summary():
         for s in rows:
             po_amt = po_amt_of(s)
             sales = float(s.sales_amount or 0)
-            enriched.append((s, po_amt, sales, sales - po_amt))
+            # Margin is only calculated if purchase price exists and is not 0
+            # If purchase price is 0 or missing, margin should be None (displayed as "-")
+            has_purchase_data = (
+                (s.purchasing_amount is not None and s.purchasing_amount != 0) or
+                (s.purchasing_price is not None and s.purchasing_price != 0)
+            )
+            # Only calculate margin if we have valid purchase data
+            margin = (sales - po_amt) if has_purchase_data else None
+            enriched.append((s, po_amt, sales, margin))
 
         # Monthly trend
         monthly = {}
@@ -2866,7 +2874,8 @@ def completed_summary():
             vendor_map[v]['count'] += 1
             vendor_map[v]['sales_amount'] += sales
             vendor_map[v]['purchase_amount'] += po_amt
-            vendor_map[v]['margin'] += m
+            if m is not None:
+                vendor_map[v]['margin'] += m
 
         top_vendors = sorted(vendor_map.values(), key=lambda x: x['sales_amount'], reverse=True)[:5]
 
@@ -2877,12 +2886,13 @@ def completed_summary():
         for _s, po_amt, sales, m in enriched:
             total_sales += sales
             total_purchase += po_amt
-            if m > 0:
-                pos += 1
-            elif m < 0:
-                neg += 1
-            else:
-                zero += 1
+            if m is not None:
+                if m > 0:
+                    pos += 1
+                elif m < 0:
+                    neg += 1
+                else:
+                    zero += 1
 
         # Top 20 items by sales amount (grouped by product / item label).
         # Also surface Specification + Product ID so the frontend table can
@@ -2906,7 +2916,8 @@ def completed_summary():
             agg['count'] += 1
             agg['sales_amount'] += sales
             agg['purchase_amount'] += po_amt
-            agg['margin'] += m
+            if m is not None:
+                agg['margin'] += m
             # Backfill spec from later rows if the first one was empty.
             if not agg['specification'] and s.specification:
                 agg['specification'] = s.specification
@@ -2956,7 +2967,7 @@ def completed_summary():
             'total_count': len(rows),
             'total_sales': total_sales,
             'total_purchase': total_purchase,
-            'total_margin': total_sales - total_purchase,
+            'total_margin': (total_sales - total_purchase) if (total_sales > 0 and total_purchase > 0) else None,
             'monthly_trend': monthly_trend,
             'top_vendors': top_vendors,
             'top_items': top_items,
@@ -3030,12 +3041,22 @@ def completed_margin_detail():
         result = []
         for s in rows:
             po_amt = get_po_amt(s)
-            m = float(s.sales_amount or 0) - po_amt
-            if category == 'positive' and m <= 0:
+            # Check if purchase data exists (not 0 or None)
+            has_purchase_data = (
+                (s.purchasing_amount is not None and s.purchasing_amount != 0) or
+                (s.purchasing_price is not None and s.purchasing_price != 0)
+            )
+            # Only calculate margin if we have valid purchase data
+            m = (float(s.sales_amount or 0) - po_amt) if has_purchase_data else None
+            
+            # Skip rows without margin data for positive/negative categories
+            if m is None and category in ('positive', 'negative'):
                 continue
-            elif category == 'negative' and m >= 0:
+            if category == 'positive' and (m is None or m <= 0):
                 continue
-            elif category == 'zero' and m != 0:
+            elif category == 'negative' and (m is None or m >= 0):
+                continue
+            elif category == 'zero' and (m is None or m != 0):
                 continue
             result.append({
                 'so_item': s.so_item,
@@ -3083,8 +3104,22 @@ def upload_product_id():
         if not file:
             return jsonify({'error': 'No file provided'}), 400
 
+        # SAP ZMMR3190 kadang generate file BIFF8 (.xls) meski ekstensinya .xlsx.
+        # Deteksi format sebenarnya dari magic bytes, bukan dari nama file.
+        raw = file.read()
+        file.seek(0)
+
+        # Magic bytes: BIFF8/XLS = D0 CF 11 E0 | XLSX (ZIP) = 50 4B 03 04
+        is_xls_format = raw[:4] == b'\xd0\xcf\x11\xe0'
         filename = (file.filename or '').lower()
-        engine = 'xlrd' if filename.endswith('.xls') else 'openpyxl'
+
+        if is_xls_format:
+            engine = 'xlrd'
+        elif filename.endswith('.xls'):
+            engine = 'xlrd'
+        else:
+            engine = 'openpyxl'
+
         df = pd.read_excel(file, sheet_name=0, engine=engine)
         df.columns = [str(c).strip() for c in df.columns]
 
