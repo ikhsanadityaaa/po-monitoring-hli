@@ -526,7 +526,10 @@ def _ensure_so_extra_columns():
                 print(f'DB migration warning (so_data.{col_name}): {exc}')
 
 
-
+with app.app_context():
+    db.create_all()
+    _ensure_extra_columns()
+    print('DB schema ready.')
 
 CLOSED_STATUSES = {
     'Delivery Completed', 'SO Cancel',
