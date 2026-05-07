@@ -13,6 +13,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
 app = Flask(__name__)
+_startup_done = False
 
 # ─── Indonesian Public Holidays (auto-generated, year-flexible) ───────────
 # We use the `holidays` package to generate Indonesian national holidays for
@@ -526,10 +527,14 @@ def _ensure_so_extra_columns():
                 print(f'DB migration warning (so_data.{col_name}): {exc}')
 
 
-with app.app_context():
-    db.create_all()
-    _ensure_extra_columns()
-    print('DB schema ready.')
+@app.before_request
+def _startup():
+    global _startup_done
+    if not _startup_done:
+        db.create_all()
+        _ensure_extra_columns()
+        print('DB schema ready.')
+        _startup_done = True
 
 CLOSED_STATUSES = {
     'Delivery Completed', 'SO Cancel',
