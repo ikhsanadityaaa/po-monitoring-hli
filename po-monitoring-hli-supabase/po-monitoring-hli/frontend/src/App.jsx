@@ -689,6 +689,17 @@ const App = () => {
   const [hliMenuOpen, setHliMenuOpen] = useState(true); // HLI sub-pages submenu
   const [showUploadDropdown, setShowUploadDropdown] = useState(false);
   const uploadDropdownRef = useRef(null);
+  // ── Delivery Monitoring State ──
+  const [dlvSummary, setDlvSummary] = useState(null);
+  const [dlvData, setDlvData] = useState([]);
+  const [dlvTotal, setDlvTotal] = useState(0);
+  const [dlvPage, setDlvPage] = useState(1);
+  const [dlvPerPage] = useState(50);
+  const [dlvSearch, setDlvSearch] = useState('');
+  const [dlvStatusFilter, setDlvStatusFilter] = useState('');
+  const [dlvPendingFilter, setDlvPendingFilter] = useState('');
+  const [dlvLoading, setDlvLoading] = useState(false);
+  const [dlvUploadMsg, setDlvUploadMsg] = useState('');
 
   const [stats, setStats] = useState(null);
   const [poWithoutSO, setPoWithoutSO] = useState([]);
@@ -973,7 +984,11 @@ const App = () => {
     if (activePage === 'all-so') {
       fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter, soSortOrder);
     }
-  }, [activePage, soSortOrder, soPage, soPerPage, soFilters, soSearchNums, soMarginFilter, soDateFilter, fetchSOData]);
+    if (activePage === 'delivery-monitoring') {
+      fetchDlvSummary();
+      fetchDlvData(dlvPage, dlvSearch, dlvStatusFilter, dlvPendingFilter);
+    }
+  }, [activePage, soSortOrder, soPage, soPerPage, soFilters, soSearchNums, soMarginFilter, soDateFilter, fetchSOData, fetchDlvSummary, fetchDlvData, dlvPage, dlvSearch, dlvStatusFilter, dlvPendingFilter]);
 
   // Refetch dashboard whenever the global SO Create Date filter changes
   // (skip the very first run since the mount effect above already fetched).
@@ -1067,6 +1082,48 @@ const App = () => {
     } catch (e) {
       setUploadProgress(null);
       addToast(`❌ Failed to upload ${label}: ${e.response?.data?.error || e.message}`, 'error');
+    }
+  };
+
+  // ── Delivery Monitoring Functions ──
+  const fetchDlvSummary = useCallback(async () => {
+    try {
+      const res = await api.get('/api/delivery-monitoring/summary');
+      setDlvSummary(res.data);
+    } catch {}
+  }, []);
+
+  const fetchDlvData = useCallback(async (page=1, search='', statusFilter='', pendingFilter='') => {
+    setDlvLoading(true);
+    try {
+      const params = new URLSearchParams({ page, per_page: 50 });
+      if (search) params.set('search', search);
+      if (statusFilter) params.set('status', statusFilter);
+      if (pendingFilter) params.set('pending_at', pendingFilter);
+      const res = await api.get(`/api/delivery-monitoring/data?${params}`);
+      setDlvData(res.data.data || []);
+      setDlvTotal(res.data.total || 0);
+    } catch {} finally { setDlvLoading(false); }
+  }, []);
+
+  const handleUploadDelivery = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    e.target.value = '';
+    const fd = new FormData(); fd.append('file', file);
+    setDlvUploadMsg('⏳ Mengupload data Delivery Monitoring...');
+    setUploadProgress({ label: 'Search PO Details', pct: 0 });
+    try {
+      const res = await api.post('/api/delivery-monitoring/upload', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: ev => setUploadProgress({ label: 'Search PO Details', pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
+      });
+      setUploadProgress(null);
+      setDlvUploadMsg(`✅ ${res.data.message}`);
+      fetchDlvSummary();
+      fetchDlvData(1, dlvSearch, dlvStatusFilter, dlvPendingFilter);
+    } catch (err) {
+      setUploadProgress(null);
+      setDlvUploadMsg(`❌ ${err?.response?.data?.error || err.message}`);
     }
   };
 
@@ -1318,6 +1375,342 @@ const App = () => {
   const tblHd = darkMode ? 'bg-gray-700' : 'bg-purple-50';
   const tblDv = darkMode ? 'divide-gray-700' : 'divide-gray-100';
   const trHov = darkMode ? 'hover:bg-gray-700' : 'hover:bg-purple-50';
+
+  // ══════════════════════════════════════════════════════════════
+  // RENDER DELIVERY MONITORING PAGE
+  // ══════════════════════════════════════════════════════════════
+  const renderDeliveryMonitoring = () => {
+    const s = dlvSummary;
+    const STAGE_COLORS = [
+      '#8B5CF6','#3B82F6','#06B6D4','#10B981','#F59E0B','#EF4444','#EC4899','#6366F1'
+    ];
+    // Process flow labels for the pipeline
+    const STAGES = [
+      'PO Created','SO ERP Created','PO Received','Shipping Order',
+      'Ship Completed','HUB Received','HUB Shipped','Delivery Completed'
+    ];
+    const PENDING_STAGES = [
+      'SO ERP Created','PO Received','Shipping Order',
+      'Ship Completed','HUB Received','HUB Shipped','Delivery Completed'
+    ];
+
+    const statusBadge = (status) => {
+      if (!status) return null;
+      const sl = status.toLowerCase();
+      const cls = sl.includes('cancel') ? 'bg-red-100 text-red-700'
+        : sl.includes('complete') ? 'bg-green-100 text-green-700'
+        : sl.includes('ship') ? 'bg-blue-100 text-blue-700'
+        : sl.includes('received') ? 'bg-purple-100 text-purple-700'
+        : 'bg-gray-100 text-gray-600';
+      return <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${cls}`}>{status}</span>;
+    };
+
+    const wdBadge = (wd, pending) => {
+      if (wd === null || wd === undefined) return <span className="text-gray-300">—</span>;
+      const color = pending
+        ? (wd > 5 ? 'bg-red-100 text-red-700' : wd > 2 ? 'bg-yellow-100 text-yellow-700' : 'bg-blue-100 text-blue-700')
+        : (wd > 7 ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700');
+      return <span className={`px-1.5 py-0.5 rounded text-xs font-bold ${color}`}>{wd}h{pending?' ⏳':''}</span>;
+    };
+
+    const pages = Math.max(1, Math.ceil(dlvTotal / dlvPerPage));
+    const fmtDate = (iso) => {
+      if (!iso) return '—';
+      const d = new Date(iso);
+      return d.toLocaleDateString('id-ID', { day:'2-digit', month:'short', year:'2-digit' });
+    };
+
+    return (
+      <div className="space-y-6">
+        {/* Upload message banner */}
+        {dlvUploadMsg && (
+          <div className={`flex items-start gap-3 px-4 py-3 rounded-xl text-sm shadow
+            ${dlvUploadMsg.startsWith('✅') ? (darkMode?'bg-green-900/40 text-green-300':'bg-green-50 text-green-800 border border-green-200')
+            : dlvUploadMsg.startsWith('❌') ? (darkMode?'bg-red-900/40 text-red-300':'bg-red-50 text-red-800 border border-red-200')
+            : (darkMode?'bg-blue-900/40 text-blue-300':'bg-blue-50 text-blue-800 border border-blue-200')}`}>
+            <span className="flex-1">{dlvUploadMsg}</span>
+            <button onClick={()=>setDlvUploadMsg('')} className="opacity-60 hover:opacity-100 font-bold text-lg leading-none">×</button>
+          </div>
+        )}
+
+        {/* Upload CTA when no data */}
+        {!s && (
+          <div className={`flex flex-col items-center justify-center py-20 rounded-2xl border-2 border-dashed ${darkMode?'border-gray-600 text-gray-400':'border-gray-300 text-gray-500'}`}>
+            <Package className="w-12 h-12 mb-4 opacity-40"/>
+            <p className="text-lg font-semibold mb-1">Belum ada data Delivery Monitoring</p>
+            <p className="text-sm mb-4">Upload file <strong>Search PO Details</strong> via tombol <strong>Manual Update</strong> di pojok kanan atas</p>
+            <label className="flex items-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl cursor-pointer text-sm font-medium shadow transition-all">
+              <Upload className="w-4 h-4"/>
+              Upload Search PO Details
+              <input type="file" accept=".xlsx,.xls" onChange={handleUploadDelivery} className="hidden"/>
+            </label>
+          </div>
+        )}
+
+        {s && (<>
+          {/* Summary cards */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {[
+              { label: 'Total PO', value: s.total, color: 'text-purple-600', bg: darkMode?'bg-purple-900/30':'bg-purple-50', icon: '📦' },
+              { label: 'In Progress', value: s.in_progress, color: 'text-blue-600', bg: darkMode?'bg-blue-900/30':'bg-blue-50', icon: '🔄' },
+              { label: 'Completed', value: s.completed, color: 'text-green-600', bg: darkMode?'bg-green-900/30':'bg-green-50', icon: '✅' },
+              { label: 'PO Cancel', value: s.cancelled, color: 'text-red-500', bg: darkMode?'bg-red-900/30':'bg-red-50', icon: '❌' },
+            ].map(c => (
+              <div key={c.label} className={`rounded-xl p-4 shadow-sm ${c.bg} ${darkMode?'border border-white/5':'border border-white'}`}>
+                <div className="flex items-center justify-between">
+                  <span className={`text-xs font-medium ${darkMode?'text-gray-400':'text-gray-500'}`}>{c.label}</span>
+                  <span className="text-lg">{c.icon}</span>
+                </div>
+                <p className={`text-2xl font-bold mt-1 ${c.color}`}>{c.value?.toLocaleString()}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* Pending per stage + stage avg in 2 cols */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* Pending counts per stage */}
+            <div className={`rounded-xl p-5 shadow-sm ${darkMode?'bg-gray-800':'bg-white'}`}>
+              <h3 className={`font-semibold text-sm mb-3 ${txt}`}>🕐 Pending per Stage (hari kerja)</h3>
+              <div className="space-y-2">
+                {PENDING_STAGES.map((stage, i) => {
+                  const cnt = s.pending_counts?.[stage] || 0;
+                  const maxCnt = Math.max(1, ...Object.values(s.pending_counts || {}));
+                  const pct = Math.round((cnt / maxCnt) * 100);
+                  return (
+                    <div key={stage} className="flex items-center gap-2">
+                      <span className={`text-xs w-36 flex-shrink-0 ${txt2}`}>{stage}</span>
+                      <div className={`flex-1 h-5 rounded-full overflow-hidden ${darkMode?'bg-gray-700':'bg-gray-100'}`}>
+                        <div
+                          className="h-full rounded-full flex items-center pl-2 transition-all"
+                          style={{ width: `${Math.max(pct, cnt > 0 ? 8 : 0)}%`, backgroundColor: STAGE_COLORS[i] }}
+                        >
+                          {cnt > 0 && <span className="text-white text-xs font-bold">{cnt}</span>}
+                        </div>
+                      </div>
+                      {cnt === 0 && <span className={`text-xs ${txt2}`}>0</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Stage avg leadtime */}
+            <div className={`rounded-xl p-5 shadow-sm ${darkMode?'bg-gray-800':'bg-white'}`}>
+              <h3 className={`font-semibold text-sm mb-3 ${txt}`}>⏱ Rata-rata Leadtime per Proses (hari kerja)</h3>
+              <div className="space-y-2">
+                {(s.stage_avg || []).map((st, i) => {
+                  const avg = st.avg_workdays;
+                  const maxAvg = Math.max(1, ...(s.stage_avg||[]).map(x=>x.avg_workdays||0));
+                  const pct = avg !== null ? Math.round((avg/maxAvg)*100) : 0;
+                  const color = avg === null ? '#9CA3AF' : avg > 5 ? '#EF4444' : avg > 2 ? '#F59E0B' : '#10B981';
+                  return (
+                    <div key={st.stage} className="flex items-center gap-2">
+                      <span className={`text-xs w-44 flex-shrink-0 truncate ${txt2}`}
+                        title={`${st.label_from} → ${st.label_to}`}>
+                        {st.label_from} →
+                      </span>
+                      <div className={`flex-1 h-5 rounded-full overflow-hidden ${darkMode?'bg-gray-700':'bg-gray-100'}`}>
+                        {avg !== null ? (
+                          <div className="h-full rounded-full flex items-center pl-2 transition-all"
+                            style={{ width: `${Math.max(pct, 8)}%`, backgroundColor: color }}>
+                            <span className="text-white text-xs font-bold">{avg}h</span>
+                          </div>
+                        ) : (
+                          <span className={`text-xs px-2 leading-5 inline-block ${txt2}`}>No data</span>
+                        )}
+                      </div>
+                      <span className={`text-xs ${txt2}`}>{st.count} PO</span>
+                    </div>
+                  );
+                })}
+              </div>
+              <p className={`text-xs mt-2 ${txt2}`}>h = hari kerja (exclude weekend & holiday)</p>
+            </div>
+          </div>
+
+          {/* Top longest pending */}
+          {s.longest_pending?.length > 0 && (
+            <div className={`rounded-xl p-5 shadow-sm ${darkMode?'bg-gray-800':'bg-white'}`}>
+              <h3 className={`font-semibold text-sm mb-3 ${txt}`}>🚨 PO Terlama Pending (Top 10)</h3>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className={`${darkMode?'text-gray-400':'text-gray-500'} border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
+                      <th className="text-left py-2 pr-3 font-medium">PO No.</th>
+                      <th className="text-left py-2 pr-3 font-medium">SO No.</th>
+                      <th className="text-left py-2 pr-3 font-medium">Vendor</th>
+                      <th className="text-left py-2 pr-3 font-medium">Status</th>
+                      <th className="text-left py-2 pr-3 font-medium">Pending di</th>
+                      <th className="text-right py-2 font-medium">Hari Kerja</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {s.longest_pending.slice(0,10).map((r,i) => (
+                      <tr key={r.po_number} className={`border-b ${darkMode?'border-gray-700/50':'border-gray-50'} hover:${darkMode?'bg-gray-700/40':'bg-gray-50'}`}>
+                        <td className={`py-1.5 pr-3 font-mono ${txt}`}>{r.po_number}</td>
+                        <td className={`py-1.5 pr-3 ${txt2}`}>{r.so_number || '—'}</td>
+                        <td className={`py-1.5 pr-3 ${txt2} max-w-[140px] truncate`} title={r.vendor_name}>{r.vendor_name || '—'}</td>
+                        <td className="py-1.5 pr-3">{statusBadge(r.po_status)}</td>
+                        <td className={`py-1.5 pr-3 ${txt2}`}>{r.pending_at}</td>
+                        <td className="py-1.5 text-right">
+                          <span className={`px-2 py-0.5 rounded font-bold text-xs ${
+                            r.workdays > 10 ? 'bg-red-100 text-red-700' :
+                            r.workdays > 5  ? 'bg-orange-100 text-orange-700' :
+                            'bg-yellow-100 text-yellow-700'}`}>
+                            {r.workdays}h
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Data Table with filters */}
+          <div className={`rounded-xl shadow-sm ${darkMode?'bg-gray-800':'bg-white'}`}>
+            <div className={`flex flex-wrap gap-3 items-center px-5 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
+              <h3 className={`font-semibold text-sm ${txt}`}>Detail Data ({dlvTotal.toLocaleString()} PO)</h3>
+              <div className="flex flex-wrap gap-2 ml-auto">
+                {/* Search */}
+                <input
+                  type="text" placeholder="Cari PO / SO / Vendor..."
+                  value={dlvSearch}
+                  onChange={e=>{setDlvSearch(e.target.value);setDlvPage(1);}}
+                  onKeyDown={e=>e.key==='Enter'&&fetchDlvData(1,dlvSearch,dlvStatusFilter,dlvPendingFilter)}
+                  className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode?'bg-gray-700 border-gray-600 text-white placeholder-gray-400':'bg-white border-gray-200 text-gray-700'} w-52`}
+                />
+                {/* PO Status filter */}
+                <select value={dlvStatusFilter} onChange={e=>{setDlvStatusFilter(e.target.value);setDlvPage(1);fetchDlvData(1,dlvSearch,e.target.value,dlvPendingFilter);}}
+                  className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-200 text-gray-700'}`}>
+                  <option value="">Semua Status</option>
+                  <option value="PO Received Req.">PO Received Req.</option>
+                  <option value="PO Received">PO Received</option>
+                  <option value="Shipping Order">Shipping Order</option>
+                  <option value="Ship. Confirmed">Ship. Confirmed</option>
+                  <option value="Delivery Complete">Delivery Complete</option>
+                  <option value="PO Cancel">PO Cancel</option>
+                </select>
+                {/* Pending filter */}
+                <select value={dlvPendingFilter} onChange={e=>{setDlvPendingFilter(e.target.value);setDlvPage(1);fetchDlvData(1,dlvSearch,dlvStatusFilter,e.target.value);}}
+                  className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-200 text-gray-700'}`}>
+                  <option value="">Semua Pending</option>
+                  {PENDING_STAGES.map(p=><option key={p} value={p}>{p}</option>)}
+                </select>
+                <button onClick={()=>fetchDlvData(dlvPage,dlvSearch,dlvStatusFilter,dlvPendingFilter)}
+                  className="px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-sm">
+                  Refresh
+                </button>
+              </div>
+            </div>
+
+            {dlvLoading ? (
+              <div className="flex items-center justify-center py-16">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-purple-600"></div>
+                <span className={`ml-3 text-sm ${txt2}`}>Memuat data...</span>
+              </div>
+            ) : dlvData.length === 0 ? (
+              <div className={`text-center py-12 ${txt2} text-sm`}>Tidak ada data ditemukan</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className={`${darkMode?'bg-gray-750 text-gray-400':'bg-gray-50 text-gray-500'} border-b ${darkMode?'border-gray-700':'border-gray-200'}`}>
+                      <th className="text-left px-4 py-3 font-medium">PO No.</th>
+                      <th className="text-left px-3 py-3 font-medium">SO No.</th>
+                      <th className="text-left px-3 py-3 font-medium">PO Status</th>
+                      <th className="text-left px-3 py-3 font-medium">Vendor</th>
+                      <th className="text-left px-3 py-3 font-medium">Op. Unit</th>
+                      <th className="text-left px-3 py-3 font-medium">PO Create</th>
+                      <th className="text-left px-3 py-3 font-medium">SO ERP</th>
+                      <th className="text-left px-3 py-3 font-medium">PO Rcvd</th>
+                      <th className="text-left px-3 py-3 font-medium">Ship Odr</th>
+                      <th className="text-left px-3 py-3 font-medium">Ship Compl</th>
+                      <th className="text-left px-3 py-3 font-medium">HUB Rcv</th>
+                      <th className="text-left px-3 py-3 font-medium">HUB Ship</th>
+                      <th className="text-left px-3 py-3 font-medium">Dlv Compl</th>
+                      <th className="text-left px-3 py-3 font-medium">Pending di</th>
+                      <th className="text-right px-4 py-3 font-medium">Total (hk)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dlvData.map(row => {
+                      const isCancel = row.po_status && row.po_status.toLowerCase().includes('cancel');
+                      return (
+                        <tr key={row.po_number}
+                          className={`border-b transition-colors
+                            ${darkMode?'border-gray-700/40 hover:bg-gray-700/30':'border-gray-50 hover:bg-purple-50/30'}
+                            ${isCancel ? (darkMode?'opacity-40':'opacity-50') : ''}`}>
+                          <td className={`px-4 py-2 font-mono font-medium ${txt}`}>{row.po_number}</td>
+                          <td className={`px-3 py-2 ${txt2}`}>{row.so_number || '—'}</td>
+                          <td className="px-3 py-2">{statusBadge(row.po_status)}</td>
+                          <td className={`px-3 py-2 ${txt2} max-w-[120px] truncate`} title={row.vendor_name}>{row.vendor_name || '—'}</td>
+                          <td className={`px-3 py-2 ${txt2} max-w-[120px] truncate`} title={row.op_unit_name}>{row.op_unit_name || '—'}</td>
+                          <td className={`px-3 py-2 ${txt2}`}>{fmtDate(row.po_create_date)}</td>
+                          <td className={`px-3 py-2 ${txt2}`}>{fmtDate(row.so_erp_create_date)}</td>
+                          <td className={`px-3 py-2 ${txt2}`}>{fmtDate(row.po_rcvd_date)}</td>
+                          <td className={`px-3 py-2 ${txt2}`}>{fmtDate(row.ship_odr_date)}</td>
+                          <td className={`px-3 py-2 ${txt2}`}>{fmtDate(row.ship_compl_date)}</td>
+                          <td className={`px-3 py-2 ${txt2}`}>{fmtDate(row.hub_rcv_date)}</td>
+                          <td className={`px-3 py-2 ${txt2}`}>{fmtDate(row.hub_ship_date)}</td>
+                          <td className={`px-3 py-2 ${txt2}`}>{fmtDate(row.dlv_compl_date)}</td>
+                          <td className="px-3 py-2">
+                            {!isCancel && row.pending_at ? (
+                              <span className="px-2 py-0.5 bg-orange-100 text-orange-700 rounded-full text-xs font-medium">{row.pending_at}</span>
+                            ) : isCancel ? (
+                              <span className={`text-xs ${txt2}`}>—</span>
+                            ) : (
+                              <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs font-medium">Selesai</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-2 text-right">
+                            {!isCancel && row.total_workdays !== null && row.total_workdays !== undefined ? (
+                              <span className={`px-2 py-0.5 rounded font-bold text-xs ${
+                                row.total_workdays > 14 ? 'bg-red-100 text-red-700' :
+                                row.total_workdays > 7  ? 'bg-orange-100 text-orange-700' :
+                                'bg-green-100 text-green-700'}`}>
+                                {row.total_workdays}h
+                              </span>
+                            ) : <span className={`text-xs ${txt2}`}>—</span>}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Pagination */}
+            {pages > 1 && (
+              <div className={`flex items-center justify-between px-5 py-3 border-t ${darkMode?'border-gray-700':'border-gray-100'}`}>
+                <span className={`text-xs ${txt2}`}>Halaman {dlvPage} dari {pages} ({dlvTotal.toLocaleString()} records)</span>
+                <div className="flex gap-1">
+                  <button disabled={dlvPage===1} onClick={()=>{setDlvPage(1);fetchDlvData(1,dlvSearch,dlvStatusFilter,dlvPendingFilter);}}
+                    className={`p-1.5 rounded ${dlvPage===1?'opacity-40':'hover:bg-gray-200'}`}><ChevronLeft className="w-4 h-4"/></button>
+                  <button disabled={dlvPage===1} onClick={()=>{const p=dlvPage-1;setDlvPage(p);fetchDlvData(p,dlvSearch,dlvStatusFilter,dlvPendingFilter);}}
+                    className={`p-1.5 rounded ${dlvPage===1?'opacity-40':'hover:bg-gray-200'}`}><ChevronLeft className="w-3 h-3"/></button>
+                  <span className={`px-3 py-1 text-xs ${txt}`}>{dlvPage}</span>
+                  <button disabled={dlvPage===pages} onClick={()=>{const p=dlvPage+1;setDlvPage(p);fetchDlvData(p,dlvSearch,dlvStatusFilter,dlvPendingFilter);}}
+                    className={`p-1.5 rounded ${dlvPage===pages?'opacity-40':'hover:bg-gray-200'}`}><ChevronRight className="w-3 h-3"/></button>
+                  <button disabled={dlvPage===pages} onClick={()=>{setDlvPage(pages);fetchDlvData(pages,dlvSearch,dlvStatusFilter,dlvPendingFilter);}}
+                    className={`p-1.5 rounded ${dlvPage===pages?'opacity-40':'hover:bg-gray-200'}`}><ChevronRight className="w-4 h-4"/></button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Last updated */}
+          {s.last_updated && (
+            <p className={`text-xs text-right ${txt2}`}>
+              Data terakhir diupload: {new Date(s.last_updated).toLocaleString('id-ID')}
+            </p>
+          )}
+        </>)}
+      </div>
+    );
+  };
 
   // ══════════════════════════════════════════════════════════════
   // RENDER COMPLETED TRANSACTIONS PAGE
@@ -2753,7 +3146,7 @@ const App = () => {
             <button
               onClick={()=>setPoMenuOpen(o=>!o)}
               className={`w-full flex items-center gap-2.5 px-2 py-2 rounded-lg transition-all text-left
-                ${['dashboard','all-so','completed'].includes(activePage)
+                ${['dashboard','all-so','completed','delivery-monitoring'].includes(activePage)
                   ? 'bg-white/20 text-white font-semibold'
                   : 'text-purple-100 hover:bg-white/15'}`}
             >
@@ -2830,15 +3223,14 @@ const App = () => {
 
           {/* ── Delivery Monitoring ── */}
           <button
-            disabled
-            title="Delivery Monitoring (coming soon)"
-            className="w-full flex items-center gap-2.5 px-2 py-2 rounded-lg text-purple-200/50 cursor-not-allowed"
+            onClick={()=>{ setActivePage('delivery-monitoring'); fetchDlvSummary(); fetchDlvData(1,'','',''); }}
+            className={`w-full flex items-center gap-2.5 px-2 py-2 rounded-lg transition-colors
+              ${activePage==='delivery-monitoring'
+                ? 'bg-white/30 text-white font-semibold'
+                : 'text-purple-100 hover:bg-white/15'}`}
           >
             <Package className="w-4 h-4 flex-shrink-0"/>
-            {sidebarOpen && <>
-              <span className="text-sm flex-1 truncate">Delivery Monitoring</span>
-              <span className="text-[10px] bg-purple-400/20 text-purple-200/60 px-1.5 py-0.5 rounded-full">soon</span>
-            </>}
+            {sidebarOpen && <span className="text-sm flex-1 truncate">Delivery Monitoring</span>}
           </button>
 
           {/* ── Registration Monitoring ── */}
@@ -2873,11 +3265,12 @@ const App = () => {
         <header className="mb-6 flex flex-wrap justify-between items-center gap-4">
           <div>
             <h1 className={`text-2xl font-bold tracking-tight ${txt}`}>
-              HLI PO Monitoring <span className="text-purple-600">Dashboard</span>
+              {activePage==='delivery-monitoring' ? <>HLI <span className="text-emerald-600">Delivery Monitoring</span></> : <>HLI PO Monitoring <span className="text-purple-600">Dashboard</span></>}
             </h1>
             <p className={`mt-0.5 text-sm ${txt2}`}>
               {activePage==='dashboard'?'Purchase Orders & Sales Orders Overview'
                :activePage==='completed'?'Delivery Completed Analytics'
+               :activePage==='delivery-monitoring'?'Track Leadtime & Pending per Process Stage'
                :'Manage Open SO (Sales Order) & PO Without SO'}
             </p>
           </div>
@@ -2922,6 +3315,15 @@ const App = () => {
                       <p className={`text-xs ${txt2}`}>Update nama PIC per kategori</p>
                     </div>
                     <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUpdatePIC(e); setShowUploadDropdown(false);}} className="hidden"/>
+                  </label>
+                  <div className={`${darkMode?'border-t border-gray-700':'border-t border-gray-100'}`}></div>
+                  <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-emerald-50'}`}>
+                    <Upload className="w-4 h-4 text-emerald-500"/>
+                    <div>
+                      <span className={`text-sm font-medium ${txt}`}>Upload Search PO Details</span>
+                      <p className={`text-xs ${txt2}`}>Update Delivery Monitoring (leadtime & pending)</p>
+                    </div>
+                    <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUploadDelivery(e); setShowUploadDropdown(false);}} className="hidden"/>
                   </label>
                 </div>
               )}
@@ -3009,7 +3411,7 @@ const App = () => {
           </div>
         </header>
 
-        {activePage==='dashboard' ? renderDashboard() : activePage==='completed' ? renderCompleted() : renderAllSO()}
+        {activePage==='dashboard' ? renderDashboard() : activePage==='completed' ? renderCompleted() : activePage==='delivery-monitoring' ? renderDeliveryMonitoring() : renderAllSO()}
       </main>
 
       {modal && <SOModal title={modal.title} data={modal.data} darkMode={darkMode} onClose={()=>setModal(null)}/>}
