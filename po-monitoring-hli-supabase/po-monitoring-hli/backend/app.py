@@ -1,4 +1,5 @@
-from flask import Flask, request, jsonify, send_file
+z*c
+xfrom flask import Flask, request, jsonify, send_file
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 import pandas as pd
@@ -3433,6 +3434,457 @@ def download_master_pic_template():
             as_attachment=True,
             download_name='Template_Master_PIC.xlsx'
         )
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  DELIVERY MONITORING
+# ═══════════════════════════════════════════════════════════════════════════
+
+class DeliveryMonitoring(db.Model):
+    """
+    Stores delivery process tracking data from Search_PO_Details exports.
+    Primary key is po_number (PO No.) — one row per PO item.
+    On re-upload: upsert by po_number, no duplicates allowed.
+    PO Cancel rows are stored but excluded from leadtime calculations.
+    """
+    __tablename__ = 'delivery_monitoring'
+    id              = db.Column(db.Integer, primary_key=True)
+    po_number       = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    so_number       = db.Column(db.String(100))
+    po_status       = db.Column(db.String(100))
+    so_status       = db.Column(db.String(100))
+    vendor_id       = db.Column(db.String(100))
+    vendor_name     = db.Column(db.String(300))
+    prod_id         = db.Column(db.String(100))
+    prod_name       = db.Column(db.Text)
+    op_unit_id      = db.Column(db.String(100))
+    op_unit_name    = db.Column(db.Text)
+    dlv_type        = db.Column(db.String(100))
+    pur_pic         = db.Column(db.String(200))
+    sales_pic       = db.Column(db.String(200))
+    # Process date columns
+    po_create_date      = db.Column(db.DateTime)
+    so_erp_create_date  = db.Column(db.DateTime)
+    po_rcvd_date        = db.Column(db.DateTime)
+    ship_odr_date       = db.Column(db.DateTime)
+    ship_compl_date     = db.Column(db.DateTime)
+    hub_rcv_date        = db.Column(db.DateTime)
+    hub_ship_date       = db.Column(db.DateTime)
+    dlv_compl_date      = db.Column(db.DateTime)
+    # Extra info
+    dlv_due_date        = db.Column(db.DateTime)
+    dlv_possible_date   = db.Column(db.DateTime)
+    reject_date         = db.Column(db.DateTime)
+    uploaded_at     = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+# Process stages in order, with human labels
+DLV_PROCESS_STAGES = [
+    ('po_create_date',     'PO Create Date',      'PO Created'),
+    ('so_erp_create_date', 'SO(ERP) Create Date', 'SO ERP Created'),
+    ('po_rcvd_date',       'PO Rcvd. Date',       'PO Received'),
+    ('ship_odr_date',      'Ship. Odr. Date',     'Shipping Order'),
+    ('ship_compl_date',    'Ship. Compl. Date',   'Ship Completed'),
+    ('hub_rcv_date',       'HUB Rcv. Date',       'HUB Received'),
+    ('hub_ship_date',      'HUB Ship. Date',       'HUB Shipped'),
+    ('dlv_compl_date',     'Dlv. Compl. Date',    'Delivery Completed'),
+]
+
+
+def _parse_dt(val):
+    """Parse a value to date/datetime, return None if not parseable."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    if isinstance(val, (datetime, date)):
+        return val
+    try:
+        import pandas as _pd
+        ts = _pd.to_datetime(val, errors='coerce')
+        if _pd.isna(ts):
+            return None
+        return ts.to_pydatetime()
+    except Exception:
+        return None
+
+
+def _dt_to_date(val):
+    """Convert datetime/date to date object."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, date):
+        return val
+    return None
+
+
+def _calc_stage_leadtimes(row):
+    """
+    Calculate workday leadtime between consecutive process stages.
+    Returns list of dicts: {stage_from, stage_to, label_from, label_to, workdays, pending}
+    pending=True means the 'to' date is still not set (process not completed yet).
+    """
+    if row.po_status and 'cancel' in row.po_status.lower():
+        return []
+
+    results = []
+    stages = DLV_PROCESS_STAGES
+    for i in range(len(stages) - 1):
+        field_from, _, label_from = stages[i]
+        field_to,   _, label_to   = stages[i + 1]
+        dt_from = getattr(row, field_from, None)
+        dt_to   = getattr(row, field_to,   None)
+        d_from  = _dt_to_date(dt_from) if dt_from else None
+        d_to    = _dt_to_date(dt_to)   if dt_to   else None
+
+        if d_from is None:
+            # Can't compute; skip
+            continue
+
+        if d_to is None:
+            # Stage not yet completed — pending, count from d_from to today
+            today = date.today()
+            wdays = count_workdays(d_from, today)
+            results.append({
+                'stage_from': field_from,
+                'stage_to':   field_to,
+                'label_from': label_from,
+                'label_to':   label_to,
+                'workdays':   wdays,
+                'pending':    True,
+            })
+        else:
+            wdays = count_workdays(d_from, d_to)
+            results.append({
+                'stage_from': field_from,
+                'stage_to':   field_to,
+                'label_from': label_from,
+                'label_to':   label_to,
+                'workdays':   wdays,
+                'pending':    False,
+            })
+    return results
+
+
+def _row_to_dict(row):
+    """Convert a DeliveryMonitoring row to a JSON-serialisable dict."""
+    stages = _calc_stage_leadtimes(row)
+    total_wdays = None
+    if row.po_create_date and row.dlv_compl_date:
+        total_wdays = count_workdays(
+            _dt_to_date(row.po_create_date),
+            _dt_to_date(row.dlv_compl_date)
+        )
+
+    # Find where the process is currently pending (first pending stage)
+    pending_stage = None
+    if row.po_status and 'cancel' not in row.po_status.lower():
+        for s in stages:
+            if s['pending']:
+                pending_stage = s['label_to']
+                break
+
+    return {
+        'id':               row.id,
+        'po_number':        row.po_number,
+        'so_number':        row.so_number,
+        'po_status':        row.po_status,
+        'so_status':        row.so_status,
+        'vendor_name':      row.vendor_name,
+        'prod_id':          row.prod_id,
+        'prod_name':        row.prod_name,
+        'op_unit_name':     row.op_unit_name,
+        'dlv_type':         row.dlv_type,
+        'pur_pic':          row.pur_pic,
+        'sales_pic':        row.sales_pic,
+        'po_create_date':   row.po_create_date.isoformat() if row.po_create_date else None,
+        'so_erp_create_date': row.so_erp_create_date.isoformat() if row.so_erp_create_date else None,
+        'po_rcvd_date':     row.po_rcvd_date.isoformat() if row.po_rcvd_date else None,
+        'ship_odr_date':    row.ship_odr_date.isoformat() if row.ship_odr_date else None,
+        'ship_compl_date':  row.ship_compl_date.isoformat() if row.ship_compl_date else None,
+        'hub_rcv_date':     row.hub_rcv_date.isoformat() if row.hub_rcv_date else None,
+        'hub_ship_date':    row.hub_ship_date.isoformat() if row.hub_ship_date else None,
+        'dlv_compl_date':   row.dlv_compl_date.isoformat() if row.dlv_compl_date else None,
+        'dlv_due_date':     row.dlv_due_date.isoformat() if row.dlv_due_date else None,
+        'stage_leadtimes':  stages,
+        'total_workdays':   total_wdays,
+        'pending_at':       pending_stage,
+        'uploaded_at':      row.uploaded_at.isoformat() if row.uploaded_at else None,
+    }
+
+
+@app.route('/api/delivery-monitoring/upload', methods=['POST'])
+def upload_delivery_monitoring():
+    """
+    Upload Search PO Details Excel file.
+    Upsert by po_number — no duplicate PO numbers allowed.
+    PO Cancel rows are stored but excluded from leadtime display.
+    """
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
+        file = request.files['file']
+
+        df = pd.read_excel(file, engine='openpyxl')
+        df.columns = [str(c).strip() for c in df.columns]
+
+        # Column mapping (flexible aliases)
+        def fc(aliases):
+            for a in aliases:
+                for c in df.columns:
+                    if c.strip().lower() == a.lower():
+                        return c
+            return None
+
+        col_po      = fc(['PO No.', 'PO No', 'PO Number'])
+        col_so      = fc(['SO No.', 'SO No', 'SO Number'])
+        col_postatus= fc(['PO Status'])
+        col_sostatus= fc(['SO Status'])
+        col_vid     = fc(['Vendor ID'])
+        col_vnm     = fc(['Vendor Nm.', 'Vendor Name'])
+        col_pid     = fc(['Prod. ID', 'Product ID'])
+        col_pnm     = fc(['Prod. Nm.', 'Product Name', 'Prod. Nm.(Eng.)'])
+        col_opid    = fc(['Op. Unit ID'])
+        col_opnm    = fc(['Op. Unit Nm.', 'Op. Unit Name'])
+        col_dtype   = fc(['Dlv. Type', 'Delivery Type'])
+        col_ppic    = fc(['Pur. PIC', 'Purchase PIC'])
+        col_spic    = fc(['Sales PIC', 'Sales PIC.1'])
+        # Date columns
+        col_pocreate = fc(['PO Create Date'])
+        col_soerp    = fc(['SO(ERP) Create Date', 'SO Create Date'])
+        col_porcvd   = fc(['PO Rcvd. Date', 'PO Received Date'])
+        col_shodr    = fc(['Ship. Odr. Date', 'Shipping Order Date'])
+        col_shcompl  = fc(['Ship. Compl. Date', 'Ship. Completed Date'])
+        col_hubrcv   = fc(['HUB Rcv. Date', 'HUB Receive Date'])
+        col_hubship  = fc(['HUB Ship. Date', 'HUB Ship Date'])
+        col_dlvcompl = fc(['Dlv. Compl. Date', 'Delivery Complete Date'])
+        col_dlvdue   = fc(['Dlv. Due Date', 'Delivery Due Date'])
+        col_dlvposs  = fc(['Dlv. Possible Date', 'Delivery Possible Date'])
+        col_reject   = fc(['Reject Date'])
+
+        if not col_po:
+            return jsonify({'error': f'Kolom "PO No." tidak ditemukan. Kolom tersedia: {df.columns.tolist()}'}), 400
+        if not col_pocreate:
+            return jsonify({'error': f'Kolom "PO Create Date" tidak ditemukan. Pastikan file yang diupload adalah Search PO Details.'}), 400
+
+        # Check for in-file duplicates
+        file_po_counts = df[col_po].dropna().astype(str).value_counts()
+        in_file_dupes = file_po_counts[file_po_counts > 1]
+        if len(in_file_dupes) > 0:
+            return jsonify({
+                'error': f'File mengandung {len(in_file_dupes)} PO duplikat: {", ".join(in_file_dupes.index[:5].tolist())}{"..." if len(in_file_dupes) > 5 else ""}. Harap periksa file dan hapus data duplikat.'
+            }), 400
+
+        # Load existing records
+        existing = {r.po_number: r for r in DeliveryMonitoring.query.all()}
+
+        count = 0
+        skipped = 0
+        for _, row in df.iterrows():
+            po_num = str(row[col_po]).strip() if col_po and pd.notna(row[col_po]) else None
+            if not po_num or po_num.lower() in ('nan', ''):
+                skipped += 1
+                continue
+
+            def gv(col):
+                if col is None: return None
+                v = row[col]
+                if pd.isna(v) if hasattr(pd, 'isna') else v is None: return None
+                return str(v).strip() if not isinstance(v, (int, float)) else v
+
+            new_data = dict(
+                po_number        = po_num,
+                so_number        = gv(col_so),
+                po_status        = gv(col_postatus),
+                so_status        = gv(col_sostatus),
+                vendor_id        = gv(col_vid),
+                vendor_name      = gv(col_vnm),
+                prod_id          = gv(col_pid),
+                prod_name        = gv(col_pnm),
+                op_unit_id       = gv(col_opid),
+                op_unit_name     = gv(col_opnm),
+                dlv_type         = gv(col_dtype),
+                pur_pic          = gv(col_ppic),
+                sales_pic        = gv(col_spic),
+                po_create_date   = _parse_dt(gv(col_pocreate)),
+                so_erp_create_date = _parse_dt(gv(col_soerp)),
+                po_rcvd_date     = _parse_dt(gv(col_porcvd)),
+                ship_odr_date    = _parse_dt(gv(col_shodr)),
+                ship_compl_date  = _parse_dt(gv(col_shcompl)),
+                hub_rcv_date     = _parse_dt(gv(col_hubrcv)),
+                hub_ship_date    = _parse_dt(gv(col_hubship)),
+                dlv_compl_date   = _parse_dt(gv(col_dlvcompl)),
+                dlv_due_date     = _parse_dt(gv(col_dlvdue)),
+                dlv_possible_date= _parse_dt(gv(col_dlvposs)),
+                reject_date      = _parse_dt(gv(col_reject)),
+                uploaded_at      = datetime.utcnow(),
+            )
+
+            if po_num in existing:
+                rec = existing[po_num]
+                for k, v in new_data.items():
+                    setattr(rec, k, v)
+            else:
+                rec = DeliveryMonitoring(**new_data)
+                db.session.add(rec)
+                existing[po_num] = rec
+
+            count += 1
+            if count % 200 == 0:
+                db.session.flush()
+
+        db.session.add(UploadLog(file_type='DELIVERY', filename=file.filename, records_count=count))
+        db.session.commit()
+        return jsonify({'message': f'Berhasil upload {count} data delivery monitoring (skip: {skipped})', 'uploaded': count, 'skipped': skipped})
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/delivery-monitoring/data', methods=['GET'])
+def get_delivery_monitoring():
+    """
+    Return delivery monitoring records with leadtime calculations.
+    Excludes PO Cancel from leadtime.
+    Supports filters: status, pending_at, search (po/so number).
+    """
+    try:
+        status_filter  = request.args.get('status', '')
+        pending_filter = request.args.get('pending_at', '')
+        search         = request.args.get('search', '').strip()
+        page           = int(request.args.get('page', 1))
+        per_page       = int(request.args.get('per_page', 50))
+
+        q = DeliveryMonitoring.query
+
+        if status_filter:
+            q = q.filter(DeliveryMonitoring.po_status.ilike(f'%{status_filter}%'))
+        if search:
+            q = q.filter(
+                db.or_(
+                    DeliveryMonitoring.po_number.ilike(f'%{search}%'),
+                    DeliveryMonitoring.so_number.ilike(f'%{search}%'),
+                    DeliveryMonitoring.vendor_name.ilike(f'%{search}%'),
+                )
+            )
+
+        total = q.count()
+        rows  = q.order_by(DeliveryMonitoring.po_create_date.desc()).offset((page-1)*per_page).limit(per_page).all()
+
+        data = [_row_to_dict(r) for r in rows]
+
+        # Apply pending_at filter client-side (after calculation)
+        if pending_filter:
+            data = [d for d in data if d.get('pending_at') == pending_filter]
+
+        # Summary stats for cards
+        all_rows = DeliveryMonitoring.query.all()
+        non_cancel = [r for r in all_rows if not (r.po_status and 'cancel' in r.po_status.lower())]
+        pending_counts = {}
+        for r in non_cancel:
+            stages = _calc_stage_leadtimes(r)
+            for s in stages:
+                if s['pending']:
+                    pending_counts[s['label_to']] = pending_counts.get(s['label_to'], 0) + 1
+                    break  # only count the first pending stage
+
+        # Average leadtime per stage (across completed stages)
+        stage_avg = {}
+        for _, _, label_from in DLV_PROCESS_STAGES[:-1]:
+            pass
+        stage_pairs = [(DLV_PROCESS_STAGES[i][0], DLV_PROCESS_STAGES[i+1][0],
+                        DLV_PROCESS_STAGES[i][2], DLV_PROCESS_STAGES[i+1][2])
+                       for i in range(len(DLV_PROCESS_STAGES)-1)]
+        for f_from, f_to, lbl_from, lbl_to in stage_pairs:
+            vals = []
+            for r in non_cancel:
+                d_from = _dt_to_date(getattr(r, f_from))
+                d_to   = _dt_to_date(getattr(r, f_to))
+                if d_from and d_to:
+                    vals.append(count_workdays(d_from, d_to))
+            key = f'{lbl_from} → {lbl_to}'
+            stage_avg[key] = round(sum(vals)/len(vals), 1) if vals else None
+
+        return jsonify({
+            'data':          data,
+            'total':         total,
+            'page':          page,
+            'per_page':      per_page,
+            'pending_counts': pending_counts,
+            'stage_avg':     stage_avg,
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/delivery-monitoring/summary', methods=['GET'])
+def get_delivery_monitoring_summary():
+    """Summary cards for Delivery Monitoring dashboard."""
+    try:
+        all_rows    = DeliveryMonitoring.query.all()
+        total       = len(all_rows)
+        cancelled   = sum(1 for r in all_rows if r.po_status and 'cancel' in r.po_status.lower())
+        completed   = sum(1 for r in all_rows if r.dlv_compl_date is not None)
+        non_cancel  = [r for r in all_rows if not (r.po_status and 'cancel' in r.po_status.lower())]
+
+        pending_counts = {}
+        longest_pending = []  # top 10 longest pending per stage
+
+        for r in non_cancel:
+            stages = _calc_stage_leadtimes(r)
+            for s in stages:
+                if s['pending']:
+                    lbl = s['label_to']
+                    pending_counts[lbl] = pending_counts.get(lbl, 0) + 1
+                    longest_pending.append({
+                        'po_number':  r.po_number,
+                        'so_number':  r.so_number,
+                        'po_status':  r.po_status,
+                        'vendor_name': r.vendor_name,
+                        'pending_at': lbl,
+                        'workdays':   s['workdays'],
+                    })
+                    break
+
+        longest_pending.sort(key=lambda x: x['workdays'] if x['workdays'] else 0, reverse=True)
+
+        # Stage avg leadtimes
+        stage_pairs = [(DLV_PROCESS_STAGES[i][0], DLV_PROCESS_STAGES[i+1][0],
+                        DLV_PROCESS_STAGES[i][2], DLV_PROCESS_STAGES[i+1][2])
+                       for i in range(len(DLV_PROCESS_STAGES)-1)]
+        stage_avg = []
+        for f_from, f_to, lbl_from, lbl_to in stage_pairs:
+            vals = []
+            for r in non_cancel:
+                d_from = _dt_to_date(getattr(r, f_from))
+                d_to   = _dt_to_date(getattr(r, f_to))
+                if d_from and d_to:
+                    vals.append(count_workdays(d_from, d_to))
+            stage_avg.append({
+                'stage': f'{lbl_from} → {lbl_to}',
+                'label_from': lbl_from,
+                'label_to': lbl_to,
+                'avg_workdays': round(sum(vals)/len(vals), 1) if vals else None,
+                'count': len(vals),
+            })
+
+        last_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'DELIVERY').scalar()
+
+        return jsonify({
+            'total':           total,
+            'cancelled':       cancelled,
+            'completed':       completed,
+            'in_progress':     total - cancelled - completed,
+            'pending_counts':  pending_counts,
+            'longest_pending': longest_pending[:20],
+            'stage_avg':       stage_avg,
+            'last_updated':    utc_isoformat(last_upload),
+        })
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
