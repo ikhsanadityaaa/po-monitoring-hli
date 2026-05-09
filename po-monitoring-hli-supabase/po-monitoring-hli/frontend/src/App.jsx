@@ -984,11 +984,17 @@ const App = () => {
     if (activePage === 'all-so') {
       fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter, soSortOrder);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePage, soSortOrder, soPage, soPerPage, soFilters, soSearchNums, soMarginFilter, soDateFilter, fetchSOData]);
+
+  // Load delivery monitoring data when page becomes active
+  useEffect(() => {
     if (activePage === 'delivery-monitoring') {
       fetchDlvSummary();
-      fetchDlvData(dlvPage, dlvSearch, dlvStatusFilter, dlvPendingFilter);
+      fetchDlvData(1, '', '', '');
     }
-  }, [activePage, soSortOrder, soPage, soPerPage, soFilters, soSearchNums, soMarginFilter, soDateFilter, fetchSOData, fetchDlvSummary, fetchDlvData, dlvPage, dlvSearch, dlvStatusFilter, dlvPendingFilter]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePage]);
 
   // Refetch dashboard whenever the global SO Create Date filter changes
   // (skip the very first run since the mount effect above already fetched).
@@ -1385,10 +1391,6 @@ const App = () => {
       '#8B5CF6','#3B82F6','#06B6D4','#10B981','#F59E0B','#EF4444','#EC4899','#6366F1'
     ];
     // Process flow labels for the pipeline
-    const STAGES = [
-      'PO Created','SO ERP Created','PO Received','Shipping Order',
-      'Ship Completed','HUB Received','HUB Shipped','Delivery Completed'
-    ];
     const PENDING_STAGES = [
       'SO ERP Created','PO Received','Shipping Order',
       'Ship Completed','HUB Received','HUB Shipped','Delivery Completed'
