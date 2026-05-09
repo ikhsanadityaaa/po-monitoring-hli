@@ -3595,6 +3595,9 @@ def _row_to_dict(row):
         'vendor_name':      row.vendor_name,
         'prod_id':          row.prod_id,
         'prod_name':        row.prod_name,
+        'specification':    row.prod_name,  # reuse prod_name as spec placeholder; update if separate col exists
+        'po_qty':           None,           # placeholder — add column if available in source data
+        'unit':             None,           # placeholder — add column if available in source data
         'op_unit_name':     row.op_unit_name,
         'dlv_type':         row.dlv_type,
         'pur_pic':          row.pur_pic,
@@ -3845,6 +3848,7 @@ def get_delivery_monitoring_summary():
                         'so_number':  r.so_number,
                         'po_status':  r.po_status,
                         'vendor_name': r.vendor_name,
+                        'prod_name':  r.prod_name,
                         'pending_at': lbl,
                         'workdays':   s['workdays'],
                     })
