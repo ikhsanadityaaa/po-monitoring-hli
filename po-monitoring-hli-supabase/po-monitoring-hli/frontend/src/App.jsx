@@ -686,6 +686,7 @@ const App = () => {
   const [activeClient, setActiveClient] = useState('hli'); // 'all' | 'hli'
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [poMenuOpen, setPoMenuOpen] = useState(true); // PO Monitoring submenu
+  const [hliMenuOpen, setHliMenuOpen] = useState(true); // HLI sub-pages submenu
   const [showUploadDropdown, setShowUploadDropdown] = useState(false);
   const uploadDropdownRef = useRef(null);
 
@@ -2741,7 +2742,7 @@ const App = () => {
           <button onClick={()=>setSidebarOpen(o=>!o)} className="flex-shrink-0 p-1.5 rounded-lg text-white hover:bg-white/20 transition-all">
             {sidebarOpen ? <ChevronLeft className="w-4 h-4"/> : <ChevronRight className="w-4 h-4"/>}
           </button>
-          {sidebarOpen && <span className="text-white font-bold text-sm truncate">HLI Dashboard</span>}
+          {sidebarOpen && <span className="text-white font-bold text-sm truncate">Serveone Dashboard</span>}
         </div>
 
         {/* Nav */}
@@ -2781,16 +2782,17 @@ const App = () => {
                 {/* HLI — active client */}
                 <div>
                   <button
-                    onClick={()=>{ setActiveClient('hli'); setActivePage('dashboard'); window.scrollTo({top:0,behavior:'smooth'}); }}
+                    onClick={()=>{ setActiveClient('hli'); setHliMenuOpen(o=>!o); }}
                     className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm transition-all
                       ${activeClient==='hli' ? 'bg-white/25 text-white font-semibold' : 'text-purple-100 hover:bg-white/15'}`}
                   >
                     <Building2 className="w-3.5 h-3.5 flex-shrink-0"/>
-                    <span className="truncate">HLI</span>
+                    <span className="truncate flex-1">HLI</span>
+                    {hliMenuOpen ? <ChevronUp className="w-3 h-3 opacity-70"/> : <ChevronDown className="w-3 h-3 opacity-70"/>}
                   </button>
 
                   {/* HLI sub-pages */}
-                  {activeClient==='hli' && (
+                  {hliMenuOpen && (
                     <div className="mt-0.5 ml-3 pl-3 border-l border-white/20 flex flex-col gap-0.5">
                       <button
                         onClick={()=>{ setActivePage('dashboard'); window.scrollTo({top:0,behavior:'smooth'}); }}
