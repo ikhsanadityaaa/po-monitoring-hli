@@ -24,8 +24,8 @@ const PIE_COLORS = ['#8B5CF6','#F97316','#10B981','#EF4444','#3B82F6',
 const AGING_LABELS = ['0-30','30-90','90-180','180+'];
 const AGING_COLORS = { '0-30':'#10B981','30-90':'#F59E0B','90-180':'#F97316','180+':'#EF4444' };
 
-// ─── Excluded from PO ACM without SO calculation ──────────────────────────
-const EXCLUDED_OP_UNITS = new Set(['ACM ENERGY SOLUTIONS (CONSUMABLE)']);
+// ─── Excluded from PO HLI without SO calculation ──────────────────────────
+const EXCLUDED_OP_UNITS = new Set(['HLI GREEN POWER (CONSUMABLE)']);
 
 const renderPctLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent }) => {
   if (percent < 0.04) return null;
@@ -496,14 +496,14 @@ const DeleteRequestModal = ({ darkMode, onClose, deleteForm, setDeleteForm, dele
                 <label key={t} className="flex items-center gap-2 cursor-pointer">
                   <input type="radio" name="ref_type" value={t} checked={deleteForm.ref_type===t}
                     onChange={()=>setDeleteForm(f=>({...f,ref_type:t}))} className="accent-purple-600"/>
-                  <span className="text-sm font-medium">{t === 'PO' ? 'PO ACM' : 'SO (Sales Order)'}</span>
+                  <span className="text-sm font-medium">{t === 'PO' ? 'PO HLI' : 'SO (Sales Order)'}</span>
                 </label>
               ))}
             </div>
           </div>
           <div>
             <label className={`block text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>
-              {deleteForm.ref_type === 'PO' ? 'PO ACM Number' : 'SO Number / SO Item'}
+              {deleteForm.ref_type === 'PO' ? 'PO HLI Number' : 'SO Number / SO Item'}
             </label>
             <input
               type="text"
@@ -685,7 +685,7 @@ const App = () => {
   const [activePage, setActivePage] = useState('dashboard');
   const [activeClient, setActiveClient] = useState('hli'); // 'all' | 'hli'
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [poMenuOpen, setPoMenuOpen] = useState(true); // PO Monitoring submenu expanded
+  const [poMenuOpen, setPoMenuOpen] = useState(true); // PO Monitoring submenu
   const [showUploadDropdown, setShowUploadDropdown] = useState(false);
   const uploadDropdownRef = useRef(null);
 
@@ -715,7 +715,7 @@ const App = () => {
   // PO filters
   const [poPage, setPoPage] = useState(1);
   const [poPerPage, setPoPerPage] = useState(10);
-  const [poSearchNums, setPoSearchNums] = useState([]); // search PO ACM Number
+  const [poSearchNums, setPoSearchNums] = useState([]); // search PO HLI Number
   const [poFilterItemType, setPoFilterItemType] = useState([]); // multi-select
   const [poFilterOpUnit, setPoFilterOpUnit] = useState([]);   // multi-select
   const [poSortOrder, setPoSortOrder] = useState('oldest'); // 'oldest' | 'newest'
@@ -985,8 +985,8 @@ const App = () => {
   const handleUpload = async (e, type) => {
     const file = e.target.files[0]; if (!file) return;
     e.target.value = '';
-    const label = type === 'po' ? 'ACM PO List (Item)' : 'SCOR - Search Client Odr';
-    const endpoint = type === 'po' ? '/api/upload/po-list' : '/api/upload/scor';
+    const label = type === 'po' ? 'HLI PO List (Item)' : 'SMRO - Search Client Odr';
+    const endpoint = type === 'po' ? '/api/upload/po-list' : '/api/upload/smro';
 
     // ── Client-side header validation ──────────────────────────────────
     const REQUIRED_HEADERS = {
@@ -1000,7 +1000,7 @@ const App = () => {
         'PO Date':          ['po date','order date','tanggal po'],
         'Request Delivery': ['request delivery date','delivery date','req delivery'],
       },
-      scor: {
+      smro: {
         'SO Number':      ['so number','so no','so no.','so','sales order','sales order number','no so','nomor so'],
         'SO Item':        ['so item no','item no','line','so line','so item'],
         'SO Status':      ['so status','status','order status'],
@@ -1046,13 +1046,13 @@ const App = () => {
         onUploadProgress: (ev) => setUploadProgress({ label, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
       });
       setUploadProgress(null);
-      // Combine success message and SCOR Specification/Product ID diagnostics
+      // Combine success message and SMRO Specification/Product ID diagnostics
       // into a single toast so the success and diagnostic don't get the same
       // Date.now() ID and trample each other.
       const diag = res.data.diagnostics;
       let toastMsg = `✅ ${res.data.message}`;
       let toastKind = 'success';
-      if (type === 'scor' && diag) {
+      if (type === 'smro' && diag) {
         const det = diag.columns_detected || {};
         const detail = `Specification col=${det.specification||'(none)'}; Product ID col=${det.product_id||'(none)'}. ` +
                        `Filled rows: spec=${diag.rows_with_specification||0}, pid=${diag.rows_with_product_id||0}.`;
@@ -1164,7 +1164,7 @@ const App = () => {
 
   const downloadHideTemplate = (type) => {
     setShowHideMenu(false);
-    downloadBlob(`/api/template/hide?type=${type}`, `Template_Hide_${type === 'SO' ? 'SO' : 'PO_ACM'}.xlsx`, `Template Hide ${type}`);
+    downloadBlob(`/api/template/hide?type=${type}`, `Template_Hide_${type === 'SO' ? 'SO' : 'PO_HLI'}.xlsx`, `Template Hide ${type}`);
   };
 
   const handleHideBatchUpload = async (e, type) => {
@@ -1344,7 +1344,7 @@ const App = () => {
       <div className={`flex flex-col items-center justify-center h-64 rounded-2xl ${card}`}>
         <Coins className="w-16 h-16 text-gray-300 mb-4"/>
         <p className={`text-lg font-semibold ${txt}`}>No completed data yet</p>
-        <p className={`text-sm ${txt2} mt-1`}>Upload SCOR data to see completed transactions</p>
+        <p className={`text-sm ${txt2} mt-1`}>Upload SMRO data to see completed transactions</p>
       </div>
     );
 
@@ -1706,7 +1706,7 @@ const App = () => {
           }}>
           <div className="flex justify-between items-start">
             <div>
-              <p className={`text-sm font-medium ${txt2}`}>PO ACM without SO</p>
+              <p className={`text-sm font-medium ${txt2}`}>PO HLI without SO</p>
               {/* Use client-side filtered count which excludes CONSUMABLE */}
               <h3 className="text-3xl font-bold mt-1 text-red-500">{fmtNum(uniquePOCount)}</h3>
               <p className={`text-xs mt-1 ${txt2}`}>unique PO numbers · click for details</p>
@@ -1716,7 +1716,7 @@ const App = () => {
         </div>
 
         <div className={`p-5 rounded-2xl shadow hover:shadow-lg transition-all cursor-pointer ${card}`}
-          onClick={() => openModal('SO without PO ACM', `/api/data/so-without-po${(() => {
+          onClick={() => openModal('SO without PO HLI', `/api/data/so-without-po${(() => {
             const f = globalDateFilter; if (!f || f.mode === 'all') return '';
             const p = new URLSearchParams();
             if (f.mode === 'year') p.append('date_year', f.year);
@@ -1728,7 +1728,7 @@ const App = () => {
           })()}`)}>
           <div className="flex justify-between items-start">
             <div>
-              <p className={`text-sm font-medium ${txt2}`}>SO without PO ACM</p>
+              <p className={`text-sm font-medium ${txt2}`}>SO without PO HLI</p>
               <h3 className="text-3xl font-bold mt-1 text-orange-500">{fmtNum(stats?.so_without_po)}</h3>
               <p className={`text-xs mt-1 ${txt2}`}>Click for details</p>
             </div>
@@ -1739,7 +1739,7 @@ const App = () => {
         <div className={`p-5 rounded-2xl shadow hover:shadow-lg transition-all ${card}`}>
           <div className="flex justify-between items-start">
             <div>
-              <p className={`text-sm font-medium ${txt2}`}>Total PO ACM Amount</p>
+              <p className={`text-sm font-medium ${txt2}`}>Total PO HLI Amount</p>
               <h3 className={`text-xl font-bold mt-1 text-purple-600`}>{fmtCurShort(stats?.total_po_amount)}</h3>
               <p className={`text-xs mt-1 ${txt2}`}>{fmtCur(stats?.total_po_amount)}</p>
             </div>
@@ -2003,7 +2003,7 @@ const App = () => {
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className={tblHd}>
-              <tr>{['Vendor (SCOR)','< 30 Days','30–90 Days','90–180 Days','> 180 Days','Total Open','Sales Amount'].map(h=>(
+              <tr>{['Vendor (SMRO)','< 30 Days','30–90 Days','90–180 Days','> 180 Days','Total Open','Sales Amount'].map(h=>(
                 <th key={h} className={`p-3 text-center font-bold ${darkMode?'text-gray-200':'text-gray-700'}`}>{h}</th>
               ))}</tr>
             </thead>
@@ -2413,12 +2413,12 @@ const App = () => {
         </div>
       </div>
 
-      {/* PO ACM Without SO Table */}
+      {/* PO HLI Without SO Table */}
       <div ref={poTableRef} className={`rounded-2xl shadow overflow-hidden ${card}`}>
         <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
           <div className="flex items-center gap-2">
             <AlertCircle className="w-5 h-5 text-yellow-600"/>
-            <h3 className={`text-base font-bold ${txt}`}>PO ACM Without SO</h3>
+            <h3 className={`text-base font-bold ${txt}`}>PO HLI Without SO</h3>
             <span className={`text-sm ${txt2}`}>
               ({fmtNum(new Set(poFiltered.map(p=>p.po_no)).size)} PO · {fmtNum(poFiltered.length)} line items)
             </span>
@@ -2444,7 +2444,7 @@ const App = () => {
             <div className="col-span-12 sm:col-span-3 xl:col-span-2 min-w-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Search PO Number</label>
               <SearchInput
-                label="PO ACM Number"
+                label="PO HLI Number"
                 placeholder={"e.g.\n4502358819\n4502358819-10"}
                 onSearch={(nums) => { setPoSearchNums(nums); setPoPage(1); }}
                 darkMode={darkMode} txt2={txt2}
@@ -2500,7 +2500,7 @@ const App = () => {
           <table className="w-full text-sm">
             <thead className={tblHd}>
               <tr>
-                {['PO ACM NUMBER','PO ITEM TYPE','ITEM CODE','OPERATION UNIT','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','WORKING DAYS LEFT'].map(h=>(
+                {['PO HLI NUMBER','PO ITEM TYPE','ITEM CODE','OPERATION UNIT','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','WORKING DAYS LEFT'].map(h=>(
                   <th key={h} className={`px-4 py-3 text-center font-bold whitespace-nowrap ${txt2} ${h==='PRICE'||h==='AMOUNT'?'min-w-[140px]':''}`}>{h}</th>
                 ))}
               </tr>
@@ -2729,9 +2729,10 @@ const App = () => {
       {downloadToast && <DownloadToast message={downloadToast.message} />}
 
       {/* Sidebar */}
-      <aside className={`fixed left-0 top-0 h-full flex flex-col shadow-2xl z-40 transition-all duration-300 ease-in-out
-        ${sidebarOpen ? 'w-56' : 'w-14'}
-        ${darkMode ? 'bg-gray-800 border-r border-gray-700' : 'bg-gradient-to-b from-purple-700 to-purple-800'}`}
+      <aside
+        className={`fixed left-0 top-0 h-full flex flex-col shadow-2xl z-40 transition-all duration-300 ease-in-out
+          ${sidebarOpen ? 'w-56' : 'w-14'}
+          ${darkMode ? 'bg-gray-800 border-r border-gray-700' : 'bg-gradient-to-b from-purple-700 to-purple-800'}`}
         onMouseEnter={()=>!sidebarOpen && setSidebarOpen(true)}
         onMouseLeave={()=>setSidebarOpen(false)}
       >
@@ -2740,7 +2741,7 @@ const App = () => {
           <button onClick={()=>setSidebarOpen(o=>!o)} className="flex-shrink-0 p-1.5 rounded-lg text-white hover:bg-white/20 transition-all">
             {sidebarOpen ? <ChevronLeft className="w-4 h-4"/> : <ChevronRight className="w-4 h-4"/>}
           </button>
-          {sidebarOpen && <span className="text-white font-bold text-sm truncate">ACM Dashboard</span>}
+          {sidebarOpen && <span className="text-white font-bold text-sm truncate">HLI Dashboard</span>}
         </div>
 
         {/* Nav */}
@@ -2762,10 +2763,11 @@ const App = () => {
               </>}
             </button>
 
-            {/* Sub-menu: All Client + HLI */}
+            {/* Sub-menu items */}
             {(sidebarOpen && poMenuOpen) && (
               <div className="mt-1 ml-3 pl-3 border-l border-white/25 flex flex-col gap-0.5">
-                {/* All Client — placeholder, disabled for now */}
+
+                {/* All Client — placeholder */}
                 <button
                   disabled
                   title="All Client (coming soon)"
@@ -2776,7 +2778,7 @@ const App = () => {
                   <span className="ml-auto text-[10px] bg-purple-400/20 text-purple-200/60 px-1.5 py-0.5 rounded-full">soon</span>
                 </button>
 
-                {/* HLI — active submenu with its 3 pages */}
+                {/* HLI — active client */}
                 <div>
                   <button
                     onClick={()=>{ setActiveClient('hli'); setActivePage('dashboard'); window.scrollTo({top:0,behavior:'smooth'}); }}
@@ -2790,21 +2792,27 @@ const App = () => {
                   {/* HLI sub-pages */}
                   {activeClient==='hli' && (
                     <div className="mt-0.5 ml-3 pl-3 border-l border-white/20 flex flex-col gap-0.5">
-                      <button onClick={()=>{ setActivePage('dashboard'); window.scrollTo({top:0,behavior:'smooth'}); }}
+                      <button
+                        onClick={()=>{ setActivePage('dashboard'); window.scrollTo({top:0,behavior:'smooth'}); }}
                         className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs transition-all
-                          ${activePage==='dashboard'?'bg-white/30 text-white font-semibold':'text-purple-100 hover:bg-white/15'}`}>
+                          ${activePage==='dashboard'?'bg-white/30 text-white font-semibold':'text-purple-100 hover:bg-white/15'}`}
+                      >
                         <BarChart3 className="w-3 h-3 flex-shrink-0"/>
                         <span className="truncate">Dashboard</span>
                       </button>
-                      <button onClick={()=>{ setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums,soMarginFilter,soDateFilter); window.scrollTo({top:0,behavior:'smooth'}); }}
+                      <button
+                        onClick={()=>{ setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums,soMarginFilter,soDateFilter); window.scrollTo({top:0,behavior:'smooth'}); }}
                         className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs transition-all
-                          ${activePage==='all-so'?'bg-white/30 text-white font-semibold':'text-purple-100 hover:bg-white/15'}`}>
+                          ${activePage==='all-so'?'bg-white/30 text-white font-semibold':'text-purple-100 hover:bg-white/15'}`}
+                      >
                         <FileText className="w-3 h-3 flex-shrink-0"/>
                         <span className="truncate">Need to Follow Up</span>
                       </button>
-                      <button onClick={()=>{ setActivePage('completed'); fetchCompletedData(completedYear, completedDateFilter); window.scrollTo({top:0,behavior:'smooth'}); }}
+                      <button
+                        onClick={()=>{ setActivePage('completed'); fetchCompletedData(completedYear, completedDateFilter); window.scrollTo({top:0,behavior:'smooth'}); }}
                         className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs transition-all
-                          ${activePage==='completed'?'bg-white/30 text-white font-semibold':'text-purple-100 hover:bg-white/15'}`}>
+                          ${activePage==='completed'?'bg-white/30 text-white font-semibold':'text-purple-100 hover:bg-white/15'}`}
+                      >
                         <Coins className="w-3 h-3 flex-shrink-0"/>
                         <span className="truncate">Delivery Completed</span>
                       </button>
@@ -2816,7 +2824,7 @@ const App = () => {
           </div>
 
           {/* Divider */}
-          <div className={`my-1 mx-2 border-t ${darkMode?'border-gray-600':'border-purple-600/40'}`}/>
+          <div className={`my-1 mx-1 border-t ${darkMode?'border-gray-600':'border-purple-600/40'}`}/>
 
           {/* ── Delivery Monitoring ── */}
           <button
@@ -2848,20 +2856,22 @@ const App = () => {
 
         {/* Dark mode toggle at bottom */}
         <div className={`px-2 py-3 border-t ${darkMode?'border-gray-700':'border-purple-600/50'}`}>
-          <button onClick={()=>setDarkMode(d=>!d)}
-            className={`w-full flex items-center gap-2.5 px-2 py-2 rounded-lg text-white hover:bg-white/20 transition-all`}>
+          <button
+            onClick={()=>setDarkMode(d=>!d)}
+            className="w-full flex items-center gap-2.5 px-2 py-2 rounded-lg text-white hover:bg-white/20 transition-all"
+          >
             {darkMode ? <Sun className="w-4 h-4 flex-shrink-0"/> : <Moon className="w-4 h-4 flex-shrink-0"/>}
             {sidebarOpen && <span className="text-sm">{darkMode ? 'Light Mode' : 'Dark Mode'}</span>}
           </button>
         </div>
       </aside>
 
-      {/* Main — margin adjusts to sidebar width */}
+      {/* Main — margin mengikuti lebar sidebar */}
       <main className={`transition-all duration-300 ease-in-out p-6 ${sidebarOpen ? 'ml-56' : 'ml-14'}`}>
         <header className="mb-6 flex flex-wrap justify-between items-center gap-4">
           <div>
             <h1 className={`text-2xl font-bold tracking-tight ${txt}`}>
-              ACM PO Monitoring <span className="text-purple-600">Dashboard</span>
+              HLI PO Monitoring <span className="text-purple-600">Dashboard</span>
             </h1>
             <p className={`mt-0.5 text-sm ${txt2}`}>
               {activePage==='dashboard'?'Purchase Orders & Sales Orders Overview'
@@ -2884,14 +2894,14 @@ const App = () => {
                 <div className={`absolute right-0 mt-2 z-50 rounded-xl shadow-2xl border min-w-[280px] overflow-hidden ${darkMode?'bg-gray-800 border-gray-700 text-white':'bg-white border-gray-200'}`}>
                   <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-purple-50'}`}>
                     <Upload className="w-4 h-4 text-purple-500"/>
-                    <span className={`text-sm font-medium ${txt}`}>Upload ACM PO List (Item)</span>
+                    <span className={`text-sm font-medium ${txt}`}>Upload HLI PO List (Item)</span>
                     <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUpload(e,'po'); setShowUploadDropdown(false);}} className="hidden"/>
                   </label>
                   <div className={`${darkMode?'border-t border-gray-700':'border-t border-gray-100'}`}></div>
                   <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-purple-50'}`}>
                     <Upload className="w-4 h-4 text-blue-500"/>
-                    <span className={`text-sm font-medium ${txt}`}>Upload SCOR - Search Client Odr</span>
-                    <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUpload(e,'scor'); setShowUploadDropdown(false);}} className="hidden"/>
+                    <span className={`text-sm font-medium ${txt}`}>Upload SMRO - Search Client Odr</span>
+                    <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUpload(e,'smro'); setShowUploadDropdown(false);}} className="hidden"/>
                   </label>
                   <div className={`${darkMode?'border-t border-gray-700':'border-t border-gray-100'}`}></div>
                   <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-sky-50'}`}>
@@ -2942,9 +2952,9 @@ const App = () => {
                   <p className={`text-xs font-semibold mb-2 px-1 ${darkMode?'text-gray-300':'text-gray-600'}`}>
                     Hide data from dashboard via Excel template
                   </p>
-                  {/* PO ACM */}
+                  {/* PO HLI */}
                   <div className={`mb-2 p-3 rounded-lg ${darkMode?'bg-gray-700':'bg-orange-50'}`}>
-                    <p className="text-xs font-bold mb-1 text-orange-700">🔵 PO ACM (from PO List)</p>
+                    <p className="text-xs font-bold mb-1 text-orange-700">🔵 PO HLI (from PO List)</p>
                     <p className={`text-xs mb-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>Format: PO Number-Item No (e.g. 4502358819-10)</p>
                     <div className="flex gap-2">
                       <button onClick={()=>downloadHideTemplate('PO')}
@@ -2959,7 +2969,7 @@ const App = () => {
                   </div>
                   {/* SO */}
                   <div className={`p-3 rounded-lg ${darkMode?'bg-gray-700':'bg-blue-50'}`}>
-                    <p className="text-xs font-bold mb-1 text-blue-700">🟠 SO (from SCOR)</p>
+                    <p className="text-xs font-bold mb-1 text-blue-700">🟠 SO (from SMRO)</p>
                     <p className={`text-xs mb-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>Format: SO Number or SO Number-Item No</p>
                     <div className="flex gap-2">
                       <button onClick={()=>downloadHideTemplate('SO')}
@@ -2978,7 +2988,7 @@ const App = () => {
             </div>
             <div className={`text-xs leading-relaxed text-right ${txt2}`}>
               <div>
-                <span>Last Update ACM PO List: </span>
+                <span>Last Update HLI PO List: </span>
                 <span className={`font-semibold ${txt}`}>
                   {stats?.last_updated_po
                     ? (() => { try { return new Date(stats.last_updated_po).toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); } catch { return stats.last_updated_po; } })()
@@ -2986,10 +2996,10 @@ const App = () => {
                 </span>
               </div>
               <div>
-                <span>Last Update SCOR: </span>
+                <span>Last Update SMRO: </span>
                 <span className={`font-semibold ${txt}`}>
-                  {stats?.last_updated_scor
-                    ? (() => { try { return new Date(stats.last_updated_scor).toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); } catch { return stats.last_updated_scor; } })()
+                  {stats?.last_updated_smro
+                    ? (() => { try { return new Date(stats.last_updated_smro).toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); } catch { return stats.last_updated_smro; } })()
                     : '-'}
                 </span>
               </div>
