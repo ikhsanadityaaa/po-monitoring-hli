@@ -245,6 +245,44 @@ class MasterPIC(db.Model):
     updated_at    = db.Column(db.DateTime, default=datetime.utcnow)
 
 
+class DeliveryMonitoring(db.Model):
+    """
+    Stores delivery process tracking data from Search_PO_Details exports.
+    Primary key is po_number (PO No.) — one row per PO item.
+    On re-upload: upsert by po_number, no duplicates allowed.
+    PO Cancel rows are stored but excluded from leadtime calculations.
+    """
+    __tablename__ = 'delivery_monitoring'
+    id              = db.Column(db.Integer, primary_key=True)
+    po_number       = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    so_number       = db.Column(db.String(100))
+    po_status       = db.Column(db.String(100))
+    so_status       = db.Column(db.String(100))
+    vendor_id       = db.Column(db.String(100))
+    vendor_name     = db.Column(db.String(300))
+    prod_id         = db.Column(db.String(100))
+    prod_name       = db.Column(db.Text)
+    op_unit_id      = db.Column(db.String(100))
+    op_unit_name    = db.Column(db.Text)
+    dlv_type        = db.Column(db.String(100))
+    pur_pic         = db.Column(db.String(200))
+    sales_pic       = db.Column(db.String(200))
+    # Process date columns
+    po_create_date      = db.Column(db.DateTime)
+    so_erp_create_date  = db.Column(db.DateTime)
+    po_rcvd_date        = db.Column(db.DateTime)
+    ship_odr_date       = db.Column(db.DateTime)
+    ship_compl_date     = db.Column(db.DateTime)
+    hub_rcv_date        = db.Column(db.DateTime)
+    hub_ship_date       = db.Column(db.DateTime)
+    dlv_compl_date      = db.Column(db.DateTime)
+    # Extra info
+    dlv_due_date        = db.Column(db.DateTime)
+    dlv_possible_date   = db.Column(db.DateTime)
+    reject_date         = db.Column(db.DateTime)
+    uploaded_at     = db.Column(db.DateTime, default=datetime.utcnow)
+
+
 # ─── Exchange rate helpers ─────────────────────────────────────────────────
 _RATE_CACHE = {}   # {date: float} in-process cache
 
@@ -3441,44 +3479,6 @@ def download_master_pic_template():
 # ═══════════════════════════════════════════════════════════════════════════
 #  DELIVERY MONITORING
 # ═══════════════════════════════════════════════════════════════════════════
-
-class DeliveryMonitoring(db.Model):
-    """
-    Stores delivery process tracking data from Search_PO_Details exports.
-    Primary key is po_number (PO No.) — one row per PO item.
-    On re-upload: upsert by po_number, no duplicates allowed.
-    PO Cancel rows are stored but excluded from leadtime calculations.
-    """
-    __tablename__ = 'delivery_monitoring'
-    id              = db.Column(db.Integer, primary_key=True)
-    po_number       = db.Column(db.String(100), unique=True, nullable=False, index=True)
-    so_number       = db.Column(db.String(100))
-    po_status       = db.Column(db.String(100))
-    so_status       = db.Column(db.String(100))
-    vendor_id       = db.Column(db.String(100))
-    vendor_name     = db.Column(db.String(300))
-    prod_id         = db.Column(db.String(100))
-    prod_name       = db.Column(db.Text)
-    op_unit_id      = db.Column(db.String(100))
-    op_unit_name    = db.Column(db.Text)
-    dlv_type        = db.Column(db.String(100))
-    pur_pic         = db.Column(db.String(200))
-    sales_pic       = db.Column(db.String(200))
-    # Process date columns
-    po_create_date      = db.Column(db.DateTime)
-    so_erp_create_date  = db.Column(db.DateTime)
-    po_rcvd_date        = db.Column(db.DateTime)
-    ship_odr_date       = db.Column(db.DateTime)
-    ship_compl_date     = db.Column(db.DateTime)
-    hub_rcv_date        = db.Column(db.DateTime)
-    hub_ship_date       = db.Column(db.DateTime)
-    dlv_compl_date      = db.Column(db.DateTime)
-    # Extra info
-    dlv_due_date        = db.Column(db.DateTime)
-    dlv_possible_date   = db.Column(db.DateTime)
-    reject_date         = db.Column(db.DateTime)
-    uploaded_at     = db.Column(db.DateTime, default=datetime.utcnow)
-
 
 # Process stages in order, with human labels
 DLV_PROCESS_STAGES = [
