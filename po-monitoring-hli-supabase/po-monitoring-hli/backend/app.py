@@ -3610,6 +3610,8 @@ def _row_to_dict(row):
         'sales_pic':        row.sales_pic,
         'pic_name':         row.pic_name,
         'client_name':      row.client_name,
+        'aging_days':       workdays_since(row.po_create_date.date() if row.po_create_date else None),
+        'aging_label':      get_aging_label(workdays_since(row.po_create_date.date() if row.po_create_date else None)),
         'po_create_date':   row.po_create_date.isoformat() if row.po_create_date else None,
         'so_erp_create_date': row.so_erp_create_date.isoformat() if row.so_erp_create_date else None,
         'po_rcvd_date':     row.po_rcvd_date.isoformat() if row.po_rcvd_date else None,
@@ -3662,6 +3664,7 @@ def upload_delivery_monitoring():
         col_dtype   = fc(['Dlv. Type', 'Delivery Type'])
         col_ppic    = fc(['Pur. PIC', 'Purchase PIC'])
         col_spic    = fc(['Sales PIC', 'Sales PIC.1'])
+        col_client  = fc(['Client Nm.', 'Client Name', 'Customer Name'])
         # Date columns
         col_pocreate = fc(['PO Create Date'])
         col_soerp    = fc(['SO(ERP) Create Date', 'SO Create Date'])
@@ -3720,7 +3723,7 @@ def upload_delivery_monitoring():
                 pur_pic          = gv(col_ppic),
                 sales_pic        = gv(col_spic),
                 pic_name         = _lookup_pic(gv(col_pid)) or gv(col_ppic) or gv(col_spic),
-                client_name      = gv(col_opnm),
+                client_name      = gv(col_client) or gv(col_opnm),
                 po_create_date   = _parse_dt(gv(col_pocreate)),
                 so_erp_create_date = _parse_dt(gv(col_soerp)),
                 po_rcvd_date     = _parse_dt(gv(col_porcvd)),
@@ -3775,6 +3778,7 @@ def get_delivery_monitoring():
 
         client_filter  = request.args.get('client', '').strip()
         pic_filter     = request.args.get('pic', '').strip()
+        aging_filter   = request.args.get('aging', '').strip()  # e.g. '0-30', '30-90', '90-180', '180+'
 
         if status_filter:
             q = q.filter(DeliveryMonitoring.po_status.ilike(f'%{status_filter}%'))
@@ -3786,6 +3790,22 @@ def get_delivery_monitoring():
                 q = q.filter(db.or_(DeliveryMonitoring.pic_name.is_(None), DeliveryMonitoring.pic_name == ''))
             else:
                 q = q.filter(DeliveryMonitoring.pic_name == pic_filter)
+        if aging_filter:
+            today = date.today()
+            if aging_filter == '0-30':
+                cutoff = today - timedelta(days=42)   # ~30 workdays ≈ 42 calendar
+                q = q.filter(DeliveryMonitoring.po_create_date >= cutoff)
+            elif aging_filter == '30-90':
+                c1 = today - timedelta(days=126)
+                c2 = today - timedelta(days=42)
+                q = q.filter(DeliveryMonitoring.po_create_date >= c1, DeliveryMonitoring.po_create_date < c2)
+            elif aging_filter == '90-180':
+                c1 = today - timedelta(days=252)
+                c2 = today - timedelta(days=126)
+                q = q.filter(DeliveryMonitoring.po_create_date >= c1, DeliveryMonitoring.po_create_date < c2)
+            elif aging_filter == '180+':
+                cutoff = today - timedelta(days=252)
+                q = q.filter(DeliveryMonitoring.po_create_date < cutoff)
         if search:
             q = q.filter(
                 db.or_(
