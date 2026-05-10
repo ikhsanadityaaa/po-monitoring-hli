@@ -267,6 +267,8 @@ class DeliveryMonitoring(db.Model):
     dlv_type        = db.Column(db.String(100))
     pur_pic         = db.Column(db.String(200))
     sales_pic       = db.Column(db.String(200))
+    pic_name        = db.Column(db.String(200))   # auto-resolved via ProductIDDB → MasterPIC
+    client_name     = db.Column(db.String(300))   # customer / op-unit alias for filtering
     # Process date columns
     po_create_date      = db.Column(db.DateTime)
     so_erp_create_date  = db.Column(db.DateTime)
@@ -500,6 +502,9 @@ def _ensure_extra_columns():
             ('purchasing_amount_idr',              'DOUBLE PRECISION'),
             ('purchasing_amount_idr_cached_at',    'TIMESTAMP'),
             ('pic_name',                           'VARCHAR(100)'),
+        # DeliveryMonitoring extra columns
+        ('delivery_monitoring.pic_name',       'VARCHAR(200)'),
+        ('delivery_monitoring.client_name',    'VARCHAR(300)'),
         ],
         'po_data': [
             ('delivery_plan_date',   'DATE'),
@@ -3602,6 +3607,8 @@ def _row_to_dict(row):
         'dlv_type':         row.dlv_type,
         'pur_pic':          row.pur_pic,
         'sales_pic':        row.sales_pic,
+        'pic_name':         row.pic_name,
+        'client_name':      row.client_name,
         'po_create_date':   row.po_create_date.isoformat() if row.po_create_date else None,
         'so_erp_create_date': row.so_erp_create_date.isoformat() if row.so_erp_create_date else None,
         'po_rcvd_date':     row.po_rcvd_date.isoformat() if row.po_rcvd_date else None,
@@ -3711,6 +3718,8 @@ def upload_delivery_monitoring():
                 dlv_type         = gv(col_dtype),
                 pur_pic          = gv(col_ppic),
                 sales_pic        = gv(col_spic),
+                pic_name         = _lookup_pic(gv(col_pid)) or gv(col_ppic) or gv(col_spic),
+                client_name      = gv(col_opnm),
                 po_create_date   = _parse_dt(gv(col_pocreate)),
                 so_erp_create_date = _parse_dt(gv(col_soerp)),
                 po_rcvd_date     = _parse_dt(gv(col_porcvd)),
@@ -3763,8 +3772,19 @@ def get_delivery_monitoring():
 
         q = DeliveryMonitoring.query
 
+        client_filter  = request.args.get('client', '').strip()
+        pic_filter     = request.args.get('pic', '').strip()
+
         if status_filter:
             q = q.filter(DeliveryMonitoring.po_status.ilike(f'%{status_filter}%'))
+        if client_filter:
+            q = q.filter(DeliveryMonitoring.client_name.ilike(f'%{client_filter}%'))
+        if pic_filter:
+            others_tag = '__others__'
+            if pic_filter == others_tag:
+                q = q.filter(db.or_(DeliveryMonitoring.pic_name.is_(None), DeliveryMonitoring.pic_name == ''))
+            else:
+                q = q.filter(DeliveryMonitoring.pic_name == pic_filter)
         if search:
             q = q.filter(
                 db.or_(
@@ -3878,6 +3898,9 @@ def get_delivery_monitoring_summary():
 
         last_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'DELIVERY').scalar()
 
+        client_opts = sorted({r.client_name for r in all_rows if r.client_name})
+        pic_opts    = sorted({r.pic_name    for r in all_rows if r.pic_name})
+
         return jsonify({
             'total':           total,
             'cancelled':       cancelled,
@@ -3887,6 +3910,8 @@ def get_delivery_monitoring_summary():
             'longest_pending': longest_pending[:20],
             'stage_avg':       stage_avg,
             'last_updated':    utc_isoformat(last_upload),
+            'client_options':  client_opts,
+            'pic_options':     pic_opts,
         })
     except Exception as e:
         import traceback; traceback.print_exc()
