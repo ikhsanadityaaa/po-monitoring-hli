@@ -502,13 +502,14 @@ def _ensure_extra_columns():
             ('purchasing_amount_idr',              'DOUBLE PRECISION'),
             ('purchasing_amount_idr_cached_at',    'TIMESTAMP'),
             ('pic_name',                           'VARCHAR(100)'),
-        # DeliveryMonitoring extra columns
-        ('delivery_monitoring.pic_name',       'VARCHAR(200)'),
-        ('delivery_monitoring.client_name',    'VARCHAR(300)'),
         ],
         'po_data': [
             ('delivery_plan_date',   'DATE'),
             ('remarks',              'TEXT'),
+        ],
+        'delivery_monitoring': [
+            ('pic_name',             'VARCHAR(200)'),
+            ('client_name',          'VARCHAR(300)'),
         ],
     }
 
@@ -3901,6 +3902,15 @@ def get_delivery_monitoring_summary():
         client_opts = sorted({r.client_name for r in all_rows if r.client_name})
         pic_opts    = sorted({r.pic_name    for r in all_rows if r.pic_name})
 
+        # Date range
+        dates_create = [r.po_create_date for r in all_rows if r.po_create_date]
+        dates_compl  = [r.dlv_compl_date for r in all_rows if r.dlv_compl_date]
+        date_range = {
+            'min': utc_isoformat(min(dates_create)) if dates_create else None,
+            'max': utc_isoformat(max(dates_create)) if dates_create else None,
+            'compl_max': utc_isoformat(max(dates_compl)) if dates_compl else None,
+        }
+
         return jsonify({
             'total':           total,
             'cancelled':       cancelled,
@@ -3912,6 +3922,7 @@ def get_delivery_monitoring_summary():
             'last_updated':    utc_isoformat(last_upload),
             'client_options':  client_opts,
             'pic_options':     pic_opts,
+            'date_range':      date_range,
         })
     except Exception as e:
         import traceback; traceback.print_exc()
