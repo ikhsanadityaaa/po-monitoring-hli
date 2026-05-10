@@ -1443,8 +1443,8 @@ const App = () => {
         {!s && (
           <div className={`flex flex-col items-center justify-center py-20 rounded-2xl border-2 border-dashed ${darkMode?'border-gray-600 text-gray-400':'border-gray-300 text-gray-500'}`}>
             <Package className="w-12 h-12 mb-4 opacity-40"/>
-            <p className="text-lg font-semibold mb-1">Belum ada data Delivery Monitoring</p>
-            <p className="text-sm mb-4">Upload file <strong>Search PO Details</strong> via tombol <strong>Manual Update</strong> di pojok kanan atas</p>
+            <p className="text-lg font-semibold mb-1">No Delivery Monitoring data yet</p>
+            <p className="text-sm mb-4">Upload a <strong>Search PO Details</strong> file via the <strong>Manual Update</strong> button in the top right</p>
             <label className="flex items-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl cursor-pointer text-sm font-medium shadow transition-all">
               <Upload className="w-4 h-4"/>
               Upload Search PO Details
@@ -1498,7 +1498,7 @@ const App = () => {
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               {/* Pending counts per stage — clickable bars */}
               <div className={`rounded-xl p-5 shadow-sm ${darkMode?'bg-gray-700/60':'bg-gray-50'}`}>
-                <h3 className={`font-semibold text-sm mb-3 ${txt}`}>🕐 Pending per Stage</h3>
+                <h3 className={`font-semibold text-sm mb-3 ${txt}`}>🕐 Pending by Stage</h3>
                 <div className="space-y-2">
                   {PENDING_STAGES.map((stage, i) => {
                     const cnt = s.pending_counts?.[stage] || 0;
@@ -1532,7 +1532,7 @@ const App = () => {
 
               {/* Stage avg leadtime */}
               <div className={`rounded-xl p-5 shadow-sm ${darkMode?'bg-gray-700/60':'bg-gray-50'}`}>
-                <h3 className={`font-semibold text-sm mb-3 ${txt}`}>⏱ Rata-rata Leadtime per Proses (hari kerja)</h3>
+                <h3 className={`font-semibold text-sm mb-3 ${txt}`}>⏱ Avg. Leadtime per Process (working days)</h3>
                 <div className="space-y-2">
                   {(s.stage_avg || []).map((st) => {
                     const avg = st.avg_workdays;
@@ -1548,7 +1548,7 @@ const App = () => {
                           {avg !== null ? (
                             <div className="h-full rounded-full flex items-center pl-2 transition-all"
                               style={{ width: `${Math.max(pct, 8)}%`, backgroundColor: color }}>
-                              <span className="text-white text-xs font-bold">{avg}h</span>
+                              <span className="text-white text-xs font-bold">{avg} days</span>
                             </div>
                           ) : (
                             <span className={`text-xs px-2 leading-5 inline-block ${txt2}`}>No data</span>
@@ -1559,7 +1559,7 @@ const App = () => {
                     );
                   })}
                 </div>
-                <p className={`text-xs mt-2 ${txt2}`}>h = hari kerja (exclude weekend & holiday)</p>
+                <p className={`text-xs mt-2 ${txt2}`}>working days (excl. weekends & holidays)</p>
               </div>
             </div>
           </div>
@@ -1567,7 +1567,7 @@ const App = () => {
           {/* Top longest pending */}
           {s.longest_pending?.length > 0 && (
             <div className={`rounded-2xl shadow p-5 ${card}`}>
-              <h3 className={`font-semibold text-sm mb-3 ${txt}`}>🚨 PO Terlama Pending (Top 10)</h3>
+              <h3 className={`font-semibold text-sm mb-3 ${txt}`}>🚨 Longest Pending POs (Top 10)</h3>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
@@ -1577,8 +1577,8 @@ const App = () => {
                       <th className="text-left py-2 pr-3 font-medium">Vendor</th>
                       <th className="text-left py-2 pr-3 font-medium">Prod. Name</th>
                       <th className="text-left py-2 pr-3 font-medium">Status</th>
-                      <th className="text-left py-2 pr-3 font-medium">Pending di</th>
-                      <th className="text-right py-2 font-medium">Hari Kerja</th>
+                      <th className="text-left py-2 pr-3 font-medium">Pending At</th>
+                      <th className="text-right py-2 font-medium">Working Days</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1595,7 +1595,7 @@ const App = () => {
                             r.workdays > 10 ? 'bg-red-100 text-red-700' :
                             r.workdays > 5  ? 'bg-orange-100 text-orange-700' :
                             'bg-yellow-100 text-yellow-700'}`}>
-                            {r.workdays}h
+                            {r.workdays} days
                           </span>
                         </td>
                       </tr>
@@ -1656,7 +1656,7 @@ const App = () => {
                     <div className={`flex items-center h-10 px-3 rounded-lg border text-sm ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}>
                       <input
                         type="text"
-                        placeholder="Cari..."
+                        placeholder="Search..."
                         value={dlvSearch}
                         onChange={e => setDlvSearch(e.target.value)}
                         onKeyDown={e => { if (e.key==='Enter') { setDlvPage(1); fetchDlvData(1, dlvSearch, dlvStatusFilter, dlvPendingFilter, dlvPerPage, dlvSortOrder); } }}
@@ -1708,10 +1708,10 @@ const App = () => {
             {dlvLoading ? (
               <div className="flex items-center justify-center py-16">
                 <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-emerald-600"></div>
-                <span className={`ml-3 text-sm ${txt2}`}>Memuat data...</span>
+                <span className={`ml-3 text-sm ${txt2}`}>Loading data...</span>
               </div>
             ) : dlvData.length === 0 ? (
-              <div className={`text-center py-12 ${txt2} text-sm`}>Tidak ada data ditemukan</div>
+              <div className={`text-center py-12 ${txt2} text-sm`}>No data found</div>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
@@ -1734,8 +1734,8 @@ const App = () => {
                       <th className="text-left px-3 py-3 font-medium whitespace-nowrap">HUB Rcv</th>
                       <th className="text-left px-3 py-3 font-medium whitespace-nowrap">HUB Ship</th>
                       <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Dlv Compl</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Pending di</th>
-                      <th className="text-right px-4 py-3 font-medium whitespace-nowrap">Total (hk)</th>
+                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Pending At</th>
+                      <th className="text-right px-4 py-3 font-medium whitespace-nowrap">Total (days)</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1769,7 +1769,7 @@ const App = () => {
                             ) : isCancel ? (
                               <span className={`text-xs ${txt2}`}>—</span>
                             ) : (
-                              <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs font-medium">Selesai</span>
+                              <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs font-medium">Done</span>
                             )}
                           </td>
                           <td className="px-4 py-2 text-right whitespace-nowrap">
@@ -1778,7 +1778,7 @@ const App = () => {
                                 row.total_workdays > 14 ? 'bg-red-100 text-red-700' :
                                 row.total_workdays > 7  ? 'bg-orange-100 text-orange-700' :
                                 'bg-green-100 text-green-700'}`}>
-                                {row.total_workdays}h
+                                {row.total_workdays} days
                               </span>
                             ) : <span className={`text-xs ${txt2}`}>—</span>}
                           </td>
@@ -3391,7 +3391,7 @@ const App = () => {
             <p className={`mt-0.5 text-sm ${txt2}`}>
               {activePage==='dashboard'?'Purchase Orders & Sales Orders Overview'
                :activePage==='completed'?'Delivery Completed Analytics'
-               :activePage==='delivery-monitoring'?'Track Leadtime & Pending per Process Stage'
+               :activePage==='delivery-monitoring'?'Track leadtime & pending status per process stage'
                :'Manage Open SO (Sales Order) & PO Without SO'}
             </p>
           </div>
@@ -3514,7 +3514,7 @@ const App = () => {
             <div className={`text-xs leading-relaxed text-right ${txt2}`}>
               {activePage === 'delivery-monitoring' ? (<>
                 <div>
-                  <span>Last Update Delivery: </span>
+                  <span>Last Update: </span>
                   <span className={`font-semibold ${txt}`}>
                     {dlvSummary?.last_updated
                       ? (() => { try { return new Date(dlvSummary.last_updated).toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); } catch { return dlvSummary.last_updated; } })()
