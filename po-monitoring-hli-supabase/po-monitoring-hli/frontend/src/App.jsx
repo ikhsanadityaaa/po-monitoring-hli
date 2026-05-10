@@ -700,6 +700,8 @@ const App = () => {
   const [dlvPendingFilter, setDlvPendingFilter] = useState('');
   const [dlvSortOrder, setDlvSortOrder] = useState('oldest');
   const [dlvDetailModal, setDlvDetailModal] = useState(null);
+  const [dlvClientFilter, setDlvClientFilter] = useState('');
+  const [dlvPicFilter, setDlvPicFilter] = useState('');
   const [dlvLoading, setDlvLoading] = useState(false);
   const [dlvUploadMsg, setDlvUploadMsg] = useState('');
 
@@ -1098,16 +1100,19 @@ const App = () => {
     try {
       const res = await api.get('/api/delivery-monitoring/summary');
       setDlvSummary(res.data);
+      // Reset client/pic filter options from fresh summary
     } catch {}
   }, []);
 
-  const fetchDlvData = useCallback(async (page=1, search='', statusFilter='', pendingFilter='', perPage=10, sortOrder='oldest') => {
+  const fetchDlvData = useCallback(async (page=1, search='', statusFilter='', pendingFilter='', perPage=10, sortOrder='oldest', clientFilter='', picFilter='') => {
     setDlvLoading(true);
     try {
       const params = new URLSearchParams({ page, per_page: perPage });
       if (search) params.set('search', search);
       if (statusFilter) params.set('status', statusFilter);
       if (pendingFilter) params.set('pending_at', pendingFilter);
+      if (clientFilter) params.set('client', clientFilter);
+      if (picFilter) params.set('pic', picFilter);
       const res = await api.get(`/api/delivery-monitoring/data?${params}`);
       let rows = res.data.data || [];
       // Client-side sort
@@ -1396,13 +1401,10 @@ const App = () => {
   // ══════════════════════════════════════════════════════════════
   const renderDeliveryMonitoring = () => {
     const s = dlvSummary;
-    const STAGE_COLORS = [
-      '#8B5CF6','#3B82F6','#06B6D4','#10B981','#F59E0B','#EF4444','#EC4899','#6366F1'
-    ];
-    const PENDING_STAGES = [
-      'SO ERP Created','PO Received','Shipping Order',
-      'Ship Completed','HUB Received','HUB Shipped','Delivery Completed'
-    ];
+    const STAGE_COLORS = ['#8B5CF6','#3B82F6','#06B6D4','#10B981','#F59E0B','#EF4444','#EC4899','#6366F1'];
+    const PENDING_STAGES = ['SO ERP Created','PO Received','Shipping Order','Ship Completed','HUB Received','HUB Shipped','Delivery Completed'];
+    const clientOptions = s?.client_options || [];
+    const picOptions    = s?.pic_options    || [];
 
     const statusBadge = (status) => {
       if (!status) return null;
@@ -1418,12 +1420,24 @@ const App = () => {
     const dlvPages = Math.max(1, Math.ceil(dlvTotal / dlvPerPage));
     const fmtDate = (iso) => {
       if (!iso) return '—';
-      const d = new Date(iso);
-      return d.toLocaleDateString('id-ID', { day:'2-digit', month:'short', year:'2-digit' });
+      return new Date(iso).toLocaleDateString('id-ID', { day:'2-digit', month:'short', year:'2-digit' });
     };
     const fmtDateFull = (iso) => {
       if (!iso) return '—';
       return new Date(iso).toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+    };
+
+    // helper: call fetch with all current states + overrides
+    const doFetch = (overrides={}) => {
+      const p   = overrides.page   ?? 1;
+      const q   = overrides.search ?? dlvSearch;
+      const st  = overrides.status ?? dlvStatusFilter;
+      const pnd = overrides.pending ?? dlvPendingFilter;
+      const pp  = overrides.perPage ?? dlvPerPage;
+      const so  = overrides.sort   ?? dlvSortOrder;
+      const cl  = overrides.client ?? dlvClientFilter;
+      const pic = overrides.pic    ?? dlvPicFilter;
+      fetchDlvData(p, q, st, pnd, pp, so, cl, pic);
     };
 
     return (
@@ -1454,7 +1468,39 @@ const App = () => {
         )}
 
         {s && (<>
-          {/* Summary KPI cards — clickable with shadow hover */}
+          {/* ── CLIENT FILTER BAR (top, above everything) ── */}
+          <div className={`rounded-2xl shadow px-5 py-4 ${card}`}>
+            <div className="flex flex-wrap gap-3 items-center">
+              <span className={`text-sm font-semibold ${txt} whitespace-nowrap`}>Filter by Client (Op. Unit):</span>
+              {/* All button */}
+              <button
+                onClick={() => { setDlvClientFilter(''); setDlvPage(1); doFetch({ client: '' }); }}
+                className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-all
+                  ${!dlvClientFilter
+                    ? 'bg-emerald-600 text-white border-emerald-600'
+                    : (darkMode?'border-gray-600 text-gray-300 hover:border-emerald-500':'border-gray-300 text-gray-500 hover:border-emerald-400')}`}
+              >All</button>
+              {/* Client buttons */}
+              {clientOptions.map(client => (
+                <button
+                  key={client}
+                  onClick={() => { setDlvClientFilter(client); setDlvPage(1); doFetch({ client }); }}
+                  className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-all whitespace-nowrap
+                    ${dlvClientFilter === client
+                      ? 'bg-emerald-600 text-white border-emerald-600'
+                      : (darkMode?'border-gray-600 text-gray-300 hover:border-emerald-500':'border-gray-300 text-gray-500 hover:border-emerald-400')}`}
+                >{client}</button>
+              ))}
+              {dlvClientFilter && (
+                <span className={`ml-auto text-xs ${txt2}`}>
+                  Showing: <span className="font-semibold text-emerald-600">{dlvClientFilter}</span>
+                  <button onClick={() => { setDlvClientFilter(''); setDlvPage(1); doFetch({ client: '' }); }} className="ml-1.5 text-red-400 hover:text-red-600"><X className="w-3 h-3 inline"/></button>
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Summary KPI + charts card */}
           <div className={`p-4 rounded-2xl shadow mb-1 ${card}`}>
             <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
               <div>
@@ -1471,20 +1517,14 @@ const App = () => {
                 { label: 'Completed', value: s.completed, color: 'text-green-600', bg: darkMode?'bg-green-900/30':'bg-green-50', border: darkMode?'border-green-800/40':'border-green-100', icon: '✅', statusKey: 'Delivery Complete' },
                 { label: 'PO Cancel', value: s.cancelled, color: 'text-red-500', bg: darkMode?'bg-red-900/30':'bg-red-50', border: darkMode?'border-red-800/40':'border-red-100', icon: '❌', statusKey: 'PO Cancel' },
               ].map(c => (
-                <button
-                  key={c.label}
+                <button key={c.label}
                   onClick={() => {
                     const newStatus = c.statusKey === 'in_progress' ? '' : c.statusKey;
-                    const newPending = c.statusKey === 'in_progress' ? 'in_progress_any' : '';
-                    setDlvStatusFilter(newStatus);
-                    setDlvPendingFilter('');
-                    setDlvPage(1);
-                    fetchDlvData(1, dlvSearch, newStatus, '', dlvPerPage, dlvSortOrder);
+                    setDlvStatusFilter(newStatus); setDlvPendingFilter(''); setDlvPage(1);
+                    doFetch({ status: newStatus, pending: '' });
                     document.getElementById('dlv-detail-table')?.scrollIntoView({ behavior: 'smooth' });
                   }}
-                  className={`rounded-xl p-4 border transition-all duration-200 text-left cursor-pointer
-                    hover:shadow-lg hover:-translate-y-0.5 group ${c.bg} ${c.border}`}
-                >
+                  className={`rounded-xl p-4 border transition-all duration-200 text-left cursor-pointer hover:shadow-lg hover:-translate-y-0.5 group ${c.bg} ${c.border}`}>
                   <div className="flex items-center justify-between">
                     <span className={`text-xs font-medium ${darkMode?'text-gray-400':'text-gray-500'}`}>{c.label}</span>
                     <span className="text-lg">{c.icon}</span>
@@ -1494,9 +1534,8 @@ const App = () => {
               ))}
             </div>
 
-            {/* Pending per stage + stage avg in 2 cols */}
+            {/* Pending per stage + stage avg */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {/* Pending counts per stage — clickable bars */}
               <div className={`rounded-xl p-5 shadow-sm ${darkMode?'bg-gray-700/60':'bg-gray-50'}`}>
                 <h3 className={`font-semibold text-sm mb-3 ${txt}`}>🕐 Pending by Stage</h3>
                 <div className="space-y-2">
@@ -1505,21 +1544,13 @@ const App = () => {
                     const maxCnt = Math.max(1, ...Object.values(s.pending_counts || {}));
                     const pct = Math.round((cnt / maxCnt) * 100);
                     return (
-                      <button
-                        key={stage}
-                        onClick={() => {
-                          setDlvPendingFilter(stage); setDlvStatusFilter(''); setDlvPage(1);
-                          fetchDlvData(1, dlvSearch, '', stage, dlvPerPage, dlvSortOrder);
-                          document.getElementById('dlv-detail-table')?.scrollIntoView({ behavior: 'smooth' });
-                        }}
-                        className="flex items-center gap-2 w-full hover:opacity-75 transition-opacity text-left"
-                      >
+                      <button key={stage}
+                        onClick={() => { setDlvPendingFilter(stage); setDlvStatusFilter(''); setDlvPage(1); doFetch({ pending: stage, status: '' }); document.getElementById('dlv-detail-table')?.scrollIntoView({ behavior: 'smooth' }); }}
+                        className="flex items-center gap-2 w-full hover:opacity-75 transition-opacity text-left">
                         <span className={`text-xs w-36 flex-shrink-0 ${txt2}`}>{stage}</span>
                         <div className={`flex-1 h-5 rounded-full overflow-hidden ${darkMode?'bg-gray-600':'bg-gray-200'}`}>
-                          <div
-                            className="h-full rounded-full flex items-center pl-2 transition-all"
-                            style={{ width: `${Math.max(pct, cnt > 0 ? 8 : 0)}%`, backgroundColor: STAGE_COLORS[i] }}
-                          >
+                          <div className="h-full rounded-full flex items-center pl-2 transition-all"
+                            style={{ width: `${Math.max(pct, cnt > 0 ? 8 : 0)}%`, backgroundColor: STAGE_COLORS[i] }}>
                             {cnt > 0 && <span className="text-white text-xs font-bold">{cnt}</span>}
                           </div>
                         </div>
@@ -1529,8 +1560,6 @@ const App = () => {
                   })}
                 </div>
               </div>
-
-              {/* Stage avg leadtime */}
               <div className={`rounded-xl p-5 shadow-sm ${darkMode?'bg-gray-700/60':'bg-gray-50'}`}>
                 <h3 className={`font-semibold text-sm mb-3 ${txt}`}>⏱ Avg. Leadtime per Process (working days)</h3>
                 <div className="space-y-2">
@@ -1541,18 +1570,13 @@ const App = () => {
                     const color = avg === null ? '#9CA3AF' : avg > 5 ? '#EF4444' : avg > 2 ? '#F59E0B' : '#10B981';
                     return (
                       <div key={st.stage} className="flex items-center gap-2">
-                        <span className={`text-xs w-44 flex-shrink-0 truncate ${txt2}`} title={`${st.label_from} → ${st.label_to}`}>
-                          {st.label_from} →
-                        </span>
+                        <span className={`text-xs w-44 flex-shrink-0 truncate ${txt2}`} title={`${st.label_from} → ${st.label_to}`}>{st.label_from} →</span>
                         <div className={`flex-1 h-5 rounded-full overflow-hidden ${darkMode?'bg-gray-600':'bg-gray-200'}`}>
                           {avg !== null ? (
-                            <div className="h-full rounded-full flex items-center pl-2 transition-all"
-                              style={{ width: `${Math.max(pct, 8)}%`, backgroundColor: color }}>
+                            <div className="h-full rounded-full flex items-center pl-2 transition-all" style={{ width: `${Math.max(pct, 8)}%`, backgroundColor: color }}>
                               <span className="text-white text-xs font-bold">{avg} days</span>
                             </div>
-                          ) : (
-                            <span className={`text-xs px-2 leading-5 inline-block ${txt2}`}>No data</span>
-                          )}
+                          ) : <span className={`text-xs px-2 leading-5 inline-block ${txt2}`}>No data</span>}
                         </div>
                         <span className={`text-xs ${txt2}`}>{st.count} PO</span>
                       </div>
@@ -1576,6 +1600,7 @@ const App = () => {
                       <th className="text-left py-2 pr-3 font-medium">SO No.</th>
                       <th className="text-left py-2 pr-3 font-medium">Vendor</th>
                       <th className="text-left py-2 pr-3 font-medium">Prod. Name</th>
+                      <th className="text-left py-2 pr-3 font-medium">PIC</th>
                       <th className="text-left py-2 pr-3 font-medium">Status</th>
                       <th className="text-left py-2 pr-3 font-medium">Pending At</th>
                       <th className="text-right py-2 font-medium">Working Days</th>
@@ -1583,18 +1608,16 @@ const App = () => {
                   </thead>
                   <tbody>
                     {s.longest_pending.slice(0,10).map((r) => (
-                      <tr key={r.po_number} className={`border-b ${darkMode?'border-gray-700/50':'border-gray-50'} hover:${darkMode?'bg-gray-700/40':'bg-gray-50'}`}>
+                      <tr key={r.po_number} className={`border-b ${darkMode?'border-gray-700/50 hover:bg-gray-700/40':'border-gray-50 hover:bg-gray-50'}`}>
                         <td className={`py-1.5 pr-3 font-mono ${txt}`}>{r.po_number}</td>
                         <td className={`py-1.5 pr-3 font-mono ${txt2}`}>{r.so_number || '—'}</td>
                         <td className={`py-1.5 pr-3 ${txt2} max-w-[120px] truncate`} title={r.vendor_name}>{r.vendor_name || '—'}</td>
                         <td className={`py-1.5 pr-3 ${txt2} max-w-[150px] truncate`} title={r.prod_name}>{r.prod_name || '—'}</td>
+                        <td className={`py-1.5 pr-3 ${txt2}`}>{r.pic_name || '—'}</td>
                         <td className="py-1.5 pr-3">{statusBadge(r.po_status)}</td>
                         <td className={`py-1.5 pr-3 ${txt2}`}>{r.pending_at}</td>
                         <td className="py-1.5 text-right">
-                          <span className={`px-2 py-0.5 rounded font-bold text-xs ${
-                            r.workdays > 10 ? 'bg-red-100 text-red-700' :
-                            r.workdays > 5  ? 'bg-orange-100 text-orange-700' :
-                            'bg-yellow-100 text-yellow-700'}`}>
+                          <span className={`px-2 py-0.5 rounded font-bold text-xs ${r.workdays > 10 ? 'bg-red-100 text-red-700' : r.workdays > 5 ? 'bg-orange-100 text-orange-700' : 'bg-yellow-100 text-yellow-700'}`}>
                             {r.workdays} days
                           </span>
                         </td>
@@ -1615,21 +1638,33 @@ const App = () => {
               </div>
             </div>
 
-            {/* Filter row — sama persis dengan Open SO */}
+            {/* Filter row */}
             <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
               {/* Active filter chips */}
-              {(dlvStatusFilter || dlvPendingFilter) && (
+              {(dlvStatusFilter || dlvPendingFilter || dlvClientFilter || dlvPicFilter) && (
                 <div className="mb-2 flex flex-wrap gap-1.5">
+                  {dlvClientFilter && (
+                    <span className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${darkMode?'bg-teal-900/40 text-teal-300':'bg-teal-100 text-teal-700'}`}>
+                      Client: {dlvClientFilter}
+                      <button onClick={() => { setDlvClientFilter(''); setDlvPage(1); doFetch({ client: '' }); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                    </span>
+                  )}
+                  {dlvPicFilter && (
+                    <span className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${darkMode?'bg-indigo-900/40 text-indigo-300':'bg-indigo-100 text-indigo-700'}`}>
+                      PIC: {dlvPicFilter}
+                      <button onClick={() => { setDlvPicFilter(''); setDlvPage(1); doFetch({ pic: '' }); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                    </span>
+                  )}
                   {dlvStatusFilter && (
                     <span className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${darkMode?'bg-emerald-900/40 text-emerald-300':'bg-emerald-100 text-emerald-700'}`}>
                       Status: {dlvStatusFilter}
-                      <button onClick={() => { setDlvStatusFilter(''); setDlvPage(1); fetchDlvData(1, dlvSearch, '', dlvPendingFilter, dlvPerPage, dlvSortOrder); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                      <button onClick={() => { setDlvStatusFilter(''); setDlvPage(1); doFetch({ status: '' }); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                     </span>
                   )}
                   {dlvPendingFilter && (
                     <span className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${darkMode?'bg-orange-900/40 text-orange-300':'bg-orange-100 text-orange-700'}`}>
                       Pending: {dlvPendingFilter}
-                      <button onClick={() => { setDlvPendingFilter(''); setDlvPage(1); fetchDlvData(1, dlvSearch, dlvStatusFilter, '', dlvPerPage, dlvSortOrder); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                      <button onClick={() => { setDlvPendingFilter(''); setDlvPage(1); doFetch({ pending: '' }); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                     </span>
                   )}
                 </div>
@@ -1641,11 +1676,9 @@ const App = () => {
                   {/* Sort */}
                   <div className="flex-shrink-0" style={{width:'118px'}}>
                     <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ PO Create Date</label>
-                    <select
-                      className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                    <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                       value={dlvSortOrder}
-                      onChange={e => { setDlvSortOrder(e.target.value); setDlvPage(1); fetchDlvData(1, dlvSearch, dlvStatusFilter, dlvPendingFilter, dlvPerPage, e.target.value); }}
-                    >
+                      onChange={e => { setDlvSortOrder(e.target.value); setDlvPage(1); doFetch({ sort: e.target.value }); }}>
                       <option value="oldest">Oldest ↑</option>
                       <option value="newest">Newest ↓</option>
                     </select>
@@ -1653,25 +1686,30 @@ const App = () => {
                   {/* Search */}
                   <div className="flex-shrink-0" style={{width:'185px'}}>
                     <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Search PO / SO / Vendor</label>
-                    <div className={`flex items-center h-10 px-3 rounded-lg border text-sm ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}>
-                      <input
-                        type="text"
-                        placeholder="Search..."
-                        value={dlvSearch}
+                    <div className={`flex items-center h-10 px-3 rounded-lg border text-sm ${darkMode?'bg-gray-600 border-gray-500':'bg-white border-gray-300'}`}>
+                      <input type="text" placeholder="Search..." value={dlvSearch}
                         onChange={e => setDlvSearch(e.target.value)}
-                        onKeyDown={e => { if (e.key==='Enter') { setDlvPage(1); fetchDlvData(1, dlvSearch, dlvStatusFilter, dlvPendingFilter, dlvPerPage, dlvSortOrder); } }}
-                        className={`flex-1 bg-transparent outline-none text-sm ${darkMode?'text-white placeholder-gray-400':'text-gray-700 placeholder-gray-400'}`}
-                      />
+                        onKeyDown={e => { if (e.key==='Enter') { setDlvPage(1); doFetch({ search: dlvSearch }); } }}
+                        className={`flex-1 bg-transparent outline-none text-sm ${darkMode?'text-white placeholder-gray-400':'text-gray-700 placeholder-gray-400'}`}/>
                     </div>
+                  </div>
+                  {/* PIC — same as Open SO */}
+                  <div className="flex-shrink-0" style={{width:'155px'}}>
+                    <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>PIC</label>
+                    <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                      value={dlvPicFilter}
+                      onChange={e => { setDlvPicFilter(e.target.value); setDlvPage(1); doFetch({ pic: e.target.value }); }}>
+                      <option value="">All PIC</option>
+                      {picOptions.map(p => <option key={p} value={p}>{p}</option>)}
+                      <option value="__others__">Others / Unassigned</option>
+                    </select>
                   </div>
                   {/* PO Status */}
                   <div className="flex-shrink-0" style={{width:'175px'}}>
                     <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>PO Status</label>
-                    <select
-                      className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                    <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                       value={dlvStatusFilter}
-                      onChange={e => { setDlvStatusFilter(e.target.value); setDlvPage(1); fetchDlvData(1, dlvSearch, e.target.value, dlvPendingFilter, dlvPerPage, dlvSortOrder); }}
-                    >
+                      onChange={e => { setDlvStatusFilter(e.target.value); setDlvPage(1); doFetch({ status: e.target.value }); }}>
                       <option value="">All PO Status</option>
                       <option value="PO Received Req.">PO Received Req.</option>
                       <option value="PO Received">PO Received</option>
@@ -1684,11 +1722,9 @@ const App = () => {
                   {/* Pending Stage */}
                   <div className="flex-shrink-0" style={{width:'175px'}}>
                     <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Pending Stage</label>
-                    <select
-                      className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                    <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                       value={dlvPendingFilter}
-                      onChange={e => { setDlvPendingFilter(e.target.value); setDlvPage(1); fetchDlvData(1, dlvSearch, dlvStatusFilter, e.target.value, dlvPerPage, dlvSortOrder); }}
-                    >
+                      onChange={e => { setDlvPendingFilter(e.target.value); setDlvPage(1); doFetch({ pending: e.target.value }); }}>
                       <option value="">All Pending Stage</option>
                       {PENDING_STAGES.map(p => <option key={p} value={p}>{p}</option>)}
                     </select>
@@ -1697,9 +1733,10 @@ const App = () => {
                   <div className="flex-shrink-0" style={{width:'118px'}}>
                     <label className={`block text-xs font-medium mb-0.5 ${txt2} opacity-0`}>.</label>
                     <button
-                      onClick={() => { setDlvStatusFilter(''); setDlvPendingFilter(''); setDlvSearch(''); setDlvPage(1); fetchDlvData(1,'','','', dlvPerPage, dlvSortOrder); }}
-                      className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}
-                    >Clear Filter</button>
+                      onClick={() => { setDlvStatusFilter(''); setDlvPendingFilter(''); setDlvSearch(''); setDlvPicFilter(''); setDlvClientFilter(''); setDlvPage(1); fetchDlvData(1,'','','', dlvPerPage, dlvSortOrder, '', ''); }}
+                      className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>
+                      Clear Filter
+                    </button>
                   </div>
                 </div>
               </div>
@@ -1716,11 +1753,12 @@ const App = () => {
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
-                    <tr className={`${darkMode?'bg-gray-750 text-gray-400':'bg-gray-50 text-gray-500'} border-b ${darkMode?'border-gray-700':'border-gray-200'}`}>
+                    <tr className={`${darkMode?'text-gray-400':'text-gray-500'} border-b ${darkMode?'border-gray-700':'border-gray-200'} ${darkMode?'bg-gray-800':'bg-gray-50'}`}>
                       <th className="text-left px-4 py-3 font-medium whitespace-nowrap" style={{minWidth:'160px'}}>PO No.</th>
                       <th className="text-left px-3 py-3 font-medium whitespace-nowrap" style={{minWidth:'150px'}}>SO No.</th>
                       <th className="text-left px-3 py-3 font-medium whitespace-nowrap">PO Status</th>
                       <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Vendor</th>
+                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">PIC</th>
                       <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Prod. Name</th>
                       <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Spec.</th>
                       <th className="text-right px-3 py-3 font-medium whitespace-nowrap">PO Qty</th>
@@ -1743,13 +1781,16 @@ const App = () => {
                       const isCancel = row.po_status && row.po_status.toLowerCase().includes('cancel');
                       return (
                         <tr key={row.id || row.po_number}
-                          className={`border-b transition-colors
-                            ${darkMode?'border-gray-700/40 hover:bg-gray-700/30':'border-gray-50 hover:bg-purple-50/30'}
-                            ${isCancel ? (darkMode?'opacity-40':'opacity-50') : ''}`}>
+                          className={`border-b transition-colors ${darkMode?'border-gray-700/40 hover:bg-gray-700/30':'border-gray-50 hover:bg-purple-50/30'} ${isCancel ? (darkMode?'opacity-40':'opacity-50') : ''}`}>
                           <td className={`px-4 py-2 font-mono font-medium ${txt} whitespace-nowrap`}>{row.po_number}</td>
                           <td className={`px-3 py-2 font-mono ${txt2} whitespace-nowrap`}>{row.so_number || '—'}</td>
                           <td className="px-3 py-2 whitespace-nowrap">{statusBadge(row.po_status)}</td>
                           <td className={`px-3 py-2 ${txt2} max-w-[130px] truncate`} title={row.vendor_name}>{row.vendor_name || '—'}</td>
+                          <td className={`px-3 py-2 whitespace-nowrap`}>
+                            {row.pic_name
+                              ? <span className={`px-2 py-0.5 rounded text-xs font-semibold ${darkMode?'bg-indigo-900/50 text-indigo-300':'bg-indigo-100 text-indigo-700'}`}>{row.pic_name}</span>
+                              : <span className={`text-xs ${txt2}`}>—</span>}
+                          </td>
                           <td className={`px-3 py-2 ${txt2} max-w-[160px] truncate`} title={row.prod_name}>{row.prod_name || '—'}</td>
                           <td className={`px-3 py-2 ${txt2} max-w-[140px] truncate`} title={row.specification}>{row.specification || '—'}</td>
                           <td className={`px-3 py-2 text-right ${txt}`}>{row.po_qty != null ? row.po_qty.toLocaleString() : '—'}</td>
@@ -1764,23 +1805,15 @@ const App = () => {
                           <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{fmtDate(row.hub_ship_date)}</td>
                           <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{fmtDate(row.dlv_compl_date)}</td>
                           <td className="px-3 py-2 whitespace-nowrap">
-                            {!isCancel && row.pending_at ? (
-                              <span className="px-2 py-0.5 bg-orange-100 text-orange-700 rounded-full text-xs font-medium">{row.pending_at}</span>
-                            ) : isCancel ? (
-                              <span className={`text-xs ${txt2}`}>—</span>
-                            ) : (
-                              <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs font-medium">Done</span>
-                            )}
+                            {!isCancel && row.pending_at
+                              ? <span className="px-2 py-0.5 bg-orange-100 text-orange-700 rounded-full text-xs font-medium">{row.pending_at}</span>
+                              : isCancel ? <span className={`text-xs ${txt2}`}>—</span>
+                              : <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs font-medium">Done</span>}
                           </td>
                           <td className="px-4 py-2 text-right whitespace-nowrap">
-                            {!isCancel && row.total_workdays !== null && row.total_workdays !== undefined ? (
-                              <span className={`px-2 py-0.5 rounded font-bold text-xs ${
-                                row.total_workdays > 14 ? 'bg-red-100 text-red-700' :
-                                row.total_workdays > 7  ? 'bg-orange-100 text-orange-700' :
-                                'bg-green-100 text-green-700'}`}>
-                                {row.total_workdays} days
-                              </span>
-                            ) : <span className={`text-xs ${txt2}`}>—</span>}
+                            {!isCancel && row.total_workdays !== null && row.total_workdays !== undefined
+                              ? <span className={`px-2 py-0.5 rounded font-bold text-xs ${row.total_workdays > 14 ? 'bg-red-100 text-red-700' : row.total_workdays > 7 ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'}`}>{row.total_workdays} days</span>
+                              : <span className={`text-xs ${txt2}`}>—</span>}
                           </td>
                         </tr>
                       );
@@ -1790,21 +1823,17 @@ const App = () => {
               </div>
             )}
 
-            {/* Pagination — sama persis dengan Open SO */}
+            {/* Pagination — same as Open SO */}
             <div className={`mt-3 pt-2 border-t ${darkMode?'border-gray-700':'border-gray-200'} flex flex-wrap justify-between items-center gap-3 px-5 pb-3`}>
               <div className="flex items-center gap-3">
                 <span className={`text-sm ${txt2}`}>
-                  {dlvTotal === 0
-                    ? 'No records'
-                    : `Showing ${((dlvPage-1)*dlvPerPage)+1}–${Math.min(dlvPage*dlvPerPage,dlvTotal)} of ${dlvTotal.toLocaleString()}`}
+                  {dlvTotal === 0 ? 'No records' : `Showing ${((dlvPage-1)*dlvPerPage)+1}–${Math.min(dlvPage*dlvPerPage,dlvTotal)} of ${dlvTotal.toLocaleString()}`}
                 </span>
                 <label className={`flex items-center gap-1 text-xs ${txt2}`}>
                   Rows
-                  <select
-                    className={`px-2 py-1 rounded-lg text-xs border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-300'}`}
+                  <select className={`px-2 py-1 rounded-lg text-xs border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-300'}`}
                     value={dlvPerPage}
-                    onChange={e => { const pp=Number(e.target.value); setDlvPerPage(pp); setDlvPage(1); fetchDlvData(1, dlvSearch, dlvStatusFilter, dlvPendingFilter, pp, dlvSortOrder); }}
-                  >
+                    onChange={e => { const pp=Number(e.target.value); setDlvPerPage(pp); setDlvPage(1); doFetch({ perPage: pp }); }}>
                     <option value={10}>10</option>
                     <option value={20}>20</option>
                     <option value={50}>50</option>
@@ -1814,17 +1843,17 @@ const App = () => {
                 </label>
               </div>
               <div className="flex gap-1 items-center">
-                <button
-                  disabled={dlvPage===1}
-                  onClick={() => { const p=dlvPage-1; setDlvPage(p); fetchDlvData(p, dlvSearch, dlvStatusFilter, dlvPendingFilter, dlvPerPage, dlvSortOrder); }}
-                  className={`p-1.5 rounded ${dlvPage===1?'opacity-40':'hover:bg-purple-100'}`}
-                ><ChevronLeft className="w-4 h-4"/></button>
+                <button disabled={dlvPage===1}
+                  onClick={() => { const p=dlvPage-1; setDlvPage(p); doFetch({ page: p }); }}
+                  className={`p-1.5 rounded ${dlvPage===1?'opacity-40':'hover:bg-purple-100'}`}>
+                  <ChevronLeft className="w-4 h-4"/>
+                </button>
                 <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-purple-100 text-purple-700'}`}>{dlvPage}/{dlvPages}</span>
-                <button
-                  disabled={dlvPage===dlvPages}
-                  onClick={() => { const p=dlvPage+1; setDlvPage(p); fetchDlvData(p, dlvSearch, dlvStatusFilter, dlvPendingFilter, dlvPerPage, dlvSortOrder); }}
-                  className={`p-1.5 rounded ${dlvPage===dlvPages?'opacity-40':'hover:bg-purple-100'}`}
-                ><ChevronRight className="w-4 h-4"/></button>
+                <button disabled={dlvPage===dlvPages}
+                  onClick={() => { const p=dlvPage+1; setDlvPage(p); doFetch({ page: p }); }}
+                  className={`p-1.5 rounded ${dlvPage===dlvPages?'opacity-40':'hover:bg-purple-100'}`}>
+                  <ChevronRight className="w-4 h-4"/>
+                </button>
               </div>
             </div>
           </div>
