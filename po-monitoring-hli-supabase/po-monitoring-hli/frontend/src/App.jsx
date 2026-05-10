@@ -1502,12 +1502,24 @@ const App = () => {
 
           {/* Summary KPI + charts card */}
           <div className={`p-4 rounded-2xl shadow mb-1 ${card}`}>
-            <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
-              <div>
-                <h2 className={`text-xl font-bold ${txt}`}>Delivery Monitoring</h2>
-                <p className={`text-sm ${txt2}`}>{s.total?.toLocaleString()} total PO — Last Update: {s.last_updated ? fmtDateFull(s.last_updated) : '-'}</p>
+            {/* Date range info bar — like HLI dashboard */}
+            {s.date_range?.min && (
+              <div className={`flex flex-wrap gap-4 items-center px-3 py-2 mb-4 rounded-xl text-xs ${darkMode?'bg-gray-700/60 text-gray-400':'bg-gray-50 text-gray-500 border border-gray-100'}`}>
+                <span>
+                  <span className="mr-1">📅</span>
+                  PO Create Range: <span className={`font-semibold ${txt}`}>{fmtDate(s.date_range.min)} — {fmtDate(s.date_range.max)}</span>
+                </span>
+                {s.date_range.compl_max && (
+                  <span>
+                    <span className="mr-1">✅</span>
+                    Latest Delivery: <span className={`font-semibold ${txt}`}>{fmtDate(s.date_range.compl_max)}</span>
+                  </span>
+                )}
+                <span className="ml-auto">
+                  Last Update: <span className={`font-semibold ${txt}`}>{s.last_updated ? fmtDateFull(s.last_updated) : '-'}</span>
+                </span>
               </div>
-            </div>
+            )}
 
             {/* KPI Cards */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5">
@@ -1573,12 +1585,13 @@ const App = () => {
                         <span className={`text-xs w-44 flex-shrink-0 truncate ${txt2}`} title={`${st.label_from} → ${st.label_to}`}>{st.label_from} →</span>
                         <div className={`flex-1 h-5 rounded-full overflow-hidden ${darkMode?'bg-gray-600':'bg-gray-200'}`}>
                           {avg !== null ? (
-                            <div className="h-full rounded-full flex items-center pl-2 transition-all" style={{ width: `${Math.max(pct, 8)}%`, backgroundColor: color }}>
-                              <span className="text-white text-xs font-bold">{avg} days</span>
-                            </div>
-                          ) : <span className={`text-xs px-2 leading-5 inline-block ${txt2}`}>No data</span>}
+                            <div className="h-full rounded-full transition-all" style={{ width: `${Math.max(pct, 6)}%`, backgroundColor: color }}/>
+                          ) : null}
                         </div>
-                        <span className={`text-xs ${txt2}`}>{st.count} PO</span>
+                        {avg !== null
+                          ? <span className="text-xs font-bold w-16 flex-shrink-0 whitespace-nowrap" style={{color}}>{avg} days</span>
+                          : <span className={`text-xs w-16 flex-shrink-0 ${txt2}`}>No data</span>}
+                        <span className={`text-xs ${txt2} whitespace-nowrap`}>{st.count} PO</span>
                       </div>
                     );
                   })}
