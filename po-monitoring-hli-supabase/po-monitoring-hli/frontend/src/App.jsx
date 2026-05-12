@@ -8,7 +8,7 @@ import {
   Package, TrendingUp, TrendingDown, Award, Calendar, ChevronLeft,
   ChevronRight, Moon, Sun, FileText, BarChart3, FileSpreadsheet,
   Filter, X, ChevronDown, ChevronUp, Building2, Search, Loader2,
-  EyeOff, Eye, Trash2, RotateCcw, Plus, Coins, Wallet
+  EyeOff, Eye, Trash2, RotateCcw, Plus, Coins, Wallet, Clock
 } from 'lucide-react';
 import axios from 'axios';
 import { format, parseISO } from 'date-fns';
@@ -194,7 +194,7 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
 };
 
 // ─── MultiSelect dropdown — Excel-style (all checked by default) ─────────
-const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => {
+const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, noDropdownScroll = false, hideLabel = false }) => {
   const [open, setOpen] = useState(false);
   const [draftSelected, setDraftSelected] = useState([]);
   const [draftNone, setDraftNone] = useState(false);
@@ -292,7 +292,7 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
 
   return (
     <div className="relative w-full min-w-0" ref={ref}>
-      <label className={`block text-xs font-medium mb-1 ${txt2}`}>{label}</label>
+      {!hideLabel && <label className={`block text-xs font-medium mb-1 ${txt2}`}>{label}</label>}
       <button onClick={()=>setOpen(o=>!o)} style={{cursor:'pointer'}}
         className={`w-full h-10 px-3 py-2 rounded-lg text-sm border text-left flex justify-between items-center transition-colors
           ${darkMode
@@ -306,8 +306,8 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2 }) => 
         <ChevronDown className="w-4 h-4 flex-shrink-0 ml-1"/>
       </button>
       {open && (
-        <div className={`absolute z-50 mt-1 w-full rounded-lg shadow-xl border overflow-hidden ${darkMode?'bg-gray-700 border-gray-600':'bg-white border-gray-200'}`}>
-          <div className="max-h-48 overflow-auto">
+        <div className={`absolute z-[9999] mt-1 w-full rounded-lg shadow-xl border ${noDropdownScroll ? 'overflow-visible' : 'overflow-hidden'} ${darkMode?'bg-gray-700 border-gray-600':'bg-white border-gray-200'}`}>
+          <div className={noDropdownScroll ? "overflow-visible" : "max-h-48 overflow-auto"}>
             {/* Select All row — like Excel */}
             <label style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold border-b
               ${darkMode?'border-gray-600 hover:bg-gray-600 text-white':'border-gray-100 hover:bg-purple-50 text-gray-700'}`}>
@@ -590,7 +590,7 @@ const HiddenItemsPanel = ({ darkMode, requests, onRestore, onClose }) => {
 };
 
 // ─── Date Range Filter ────────────────────────────────────────────────────
-const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = 'Filter SO Create Date' }) => {
+const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = 'Filter SO Create Date', className = 'mb-4' }) => {
   const currentYear = new Date().getFullYear();
   const years = Array.from({ length: 6 }, (_, i) => currentYear - i);
   const [mode, setMode] = useState(value?.mode || 'all'); // 'all' | 'year' | 'range'
@@ -640,7 +640,7 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
   };
 
   return (
-    <div className={`flex flex-wrap items-center gap-3 px-5 py-3 rounded-xl ${card} shadow mb-4`}>
+    <div className={`flex flex-wrap items-center gap-3 px-5 py-3 rounded-xl ${card} shadow ${className}`}>
       <Calendar className="w-4 h-4 text-purple-500 flex-shrink-0"/>
       <span className={`text-sm font-semibold ${txt} flex-shrink-0`}>{label}:</span>
       {/* Mode selector */}
@@ -696,13 +696,14 @@ const App = () => {
   const [dlvPage, setDlvPage] = useState(1);
   const [dlvPerPage, setDlvPerPage] = useState(10);
   const [dlvSearch, setDlvSearch] = useState('');
-  const [dlvStatusFilter, setDlvStatusFilter] = useState('');
-  const [dlvPendingFilter, setDlvPendingFilter] = useState('');
+  const [dlvStatusFilter, setDlvStatusFilter] = useState([]);
+  const [dlvPendingFilter, setDlvPendingFilter] = useState([]);
   const [dlvSortOrder, setDlvSortOrder] = useState('oldest');
   const [dlvDetailModal, setDlvDetailModal] = useState(null);
-  const [dlvClientFilter, setDlvClientFilter] = useState('');
-  const [dlvPicFilter, setDlvPicFilter] = useState('');
+  const [dlvClientFilter, setDlvClientFilter] = useState([]);
+  const [dlvPicFilter, setDlvPicFilter] = useState([]);
   const [dlvAgingFilter, setDlvAgingFilter] = useState([]);
+  const [dlvDateFilter, setDlvDateFilter] = useState({ mode: 'all' });
   const [dlvLoading, setDlvLoading] = useState(false);
   const [dlvUploadMsg, setDlvUploadMsg] = useState('');
 
@@ -1097,23 +1098,41 @@ const App = () => {
   };
 
   // ── Delivery Monitoring Functions ──
-  const fetchDlvSummary = useCallback(async () => {
+  const appendDlvDateParams = (params, dateFilter) => {
+    const f = dateFilter || { mode: 'all' };
+    if (f.mode === 'year') params.append('date_year', f.year);
+    else if (f.mode === 'range') {
+      if (f.start) params.append('date_from', f.start);
+      if (f.end) params.append('date_to', f.end);
+    }
+  };
+
+  const fetchDlvSummary = useCallback(async (clientFilter=[], dateFilter={ mode: 'all' }) => {
     try {
-      const res = await api.get('/api/delivery-monitoring/summary');
+      const params = new URLSearchParams();
+      const clientValues = Array.isArray(clientFilter) ? clientFilter : (clientFilter ? [clientFilter] : []);
+      clientValues.forEach(client => params.append('client', client));
+      appendDlvDateParams(params, dateFilter);
+      const res = await api.get(`/api/delivery-monitoring/summary${params.toString() ? `?${params}` : ''}`);
       setDlvSummary(res.data);
       // Reset client/pic filter options from fresh summary
     } catch {}
   }, []);
 
-  const fetchDlvData = useCallback(async (page=1, search='', statusFilter='', pendingFilter='', perPage=10, sortOrder='oldest', clientFilter='', picFilter='', agingFilter=[]) => {
+  const fetchDlvData = useCallback(async (page=1, search='', statusFilter='', pendingFilter='', perPage=10, sortOrder='oldest', clientFilter='', picFilter='', agingFilter=[], dateFilter={ mode: 'all' }) => {
     setDlvLoading(true);
     try {
       const params = new URLSearchParams({ page, per_page: perPage });
+      appendDlvDateParams(params, dateFilter);
       if (search) params.set('search', search);
-      if (statusFilter) params.set('status', statusFilter);
-      if (pendingFilter) params.set('pending_at', pendingFilter);
-      if (clientFilter) params.set('client', clientFilter);
-      if (picFilter) params.set('pic', picFilter);
+      const statusValues = Array.isArray(statusFilter) ? statusFilter : (statusFilter ? [statusFilter] : []);
+      statusValues.forEach(status => params.append('status', status));
+      const pendingValues = Array.isArray(pendingFilter) ? pendingFilter : (pendingFilter ? [pendingFilter] : []);
+      pendingValues.forEach(pending => params.append('pending_at', pending));
+      const clientValues = Array.isArray(clientFilter) ? clientFilter : (clientFilter ? [clientFilter] : []);
+      clientValues.forEach(client => params.append('client', client));
+      const picValues = Array.isArray(picFilter) ? picFilter : (picFilter ? [picFilter] : []);
+      picValues.forEach(pic => params.append('pic', pic));
       if (agingFilter && agingFilter.length === 1) params.set('aging', agingFilter[0]);
       const res = await api.get(`/api/delivery-monitoring/data?${params}`);
       let rows = res.data.data || [];
@@ -1141,8 +1160,8 @@ const App = () => {
       });
       setUploadProgress(null);
       setDlvUploadMsg(`✅ ${res.data.message}`);
-      fetchDlvSummary();
-      fetchDlvData(1, dlvSearch, dlvStatusFilter, dlvPendingFilter);
+      fetchDlvSummary(dlvClientFilter, dlvDateFilter);
+      fetchDlvData(1, dlvSearch, dlvStatusFilter, dlvPendingFilter, dlvPerPage, dlvSortOrder, dlvClientFilter, dlvPicFilter, dlvAgingFilter, dlvDateFilter);
     } catch (err) {
       setUploadProgress(null);
       setDlvUploadMsg(`❌ ${err?.response?.data?.error || err.message}`);
@@ -1405,6 +1424,14 @@ const App = () => {
     const s = dlvSummary;
     const STAGE_COLORS   = ['#8B5CF6','#3B82F6','#06B6D4','#10B981','#F59E0B','#EF4444','#EC4899','#6366F1'];
     const PENDING_STAGES = ['SO ERP Created','PO Received','Shipping Order','Ship Completed','HUB Received','HUB Shipped','Delivery Completed'];
+    const stageAvgCards = (s?.stage_avg || []).filter((st, idx, arr) => (
+      st.label_to !== 'Delivery Completed' || idx === arr.findLastIndex(item => item.label_to === 'Delivery Completed')
+    )).map((st) => st.label_to === 'Delivery Completed'
+      ? { ...st, label_from: 'PO Created', stage: 'PO Created → Delivery Completed' }
+      : st
+    );
+    const avgVendorLeadtime = s?.avg_vendor_leadtime || [];
+    const maxVendorLeadtime = Math.max(1, ...avgVendorLeadtime.map(v => v.avg_workdays || 0));
     const clientOptions  = s?.client_options || [];
     const picOptions     = s?.pic_options    || [];
     const AGING_LABELS   = ['0-30','30-90','90-180','180+'];
@@ -1451,7 +1478,9 @@ const App = () => {
       const cl  = overrides.client  !== undefined ? overrides.client  : dlvClientFilter;
       const pic = overrides.pic     !== undefined ? overrides.pic     : dlvPicFilter;
       const ag  = overrides.aging   !== undefined ? overrides.aging   : dlvAgingFilter;
-      fetchDlvData(p, q, st, pnd, pp, so, cl, pic, ag);
+      const df  = overrides.date    !== undefined ? overrides.date    : dlvDateFilter;
+      if (overrides.client !== undefined || overrides.date !== undefined) fetchDlvSummary(cl, df);
+      fetchDlvData(p, q, st, pnd, pp, so, cl, pic, ag, df);
     };
 
     const toggleAging = (label) => {
@@ -1486,26 +1515,6 @@ const App = () => {
         )}
 
         {s && (<>
-          {/* Client filter bar */}
-          <div className={`rounded-2xl shadow px-5 py-4 ${card}`}>
-            <div className="flex flex-wrap gap-3 items-center">
-              <span className={`text-sm font-semibold ${txt} whitespace-nowrap`}>Filter by Client:</span>
-              <button onClick={() => { setDlvClientFilter(''); setDlvPage(1); doFetch({ client: '' }); }}
-                className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-all
-                  ${!dlvClientFilter ? 'bg-emerald-600 text-white border-emerald-600' : (darkMode?'border-gray-600 text-gray-300 hover:border-emerald-500':'border-gray-300 text-gray-500 hover:border-emerald-400')}`}>
-                All
-              </button>
-              {clientOptions.map(client => (
-                <button key={client}
-                  onClick={() => { setDlvClientFilter(client); setDlvPage(1); doFetch({ client }); }}
-                  className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-all whitespace-nowrap
-                    ${dlvClientFilter === client ? 'bg-emerald-600 text-white border-emerald-600' : (darkMode?'border-gray-600 text-gray-300 hover:border-emerald-500':'border-gray-300 text-gray-500 hover:border-emerald-400')}`}>
-                  {client}
-                </button>
-              ))}
-            </div>
-          </div>
-
           {/* KPI + charts card */}
           <div className={`p-4 rounded-2xl shadow ${card}`}>
             {s.date_range?.min && (
@@ -1516,35 +1525,124 @@ const App = () => {
               </div>
             )}
 
+            {/* Global filters — filters KPI, charts, longest pending, and Detail Data */}
+            <div className={`mb-4 px-3 py-3 rounded-xl ${darkMode?'bg-gray-700/60':'bg-gray-50 border border-gray-100'}`}>
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="w-full lg:flex-1">
+                  <DateRangeFilter
+                    darkMode={darkMode} txt={txt} txt2={txt2} card={card}
+                    value={dlvDateFilter}
+                    label="Filter PO Create Date"
+                    className="mb-0"
+                    onFilter={(value) => {
+                      setDlvDateFilter(value);
+                      setDlvPage(1);
+                      doFetch({ page: 1, date: value });
+                    }}
+                  />
+                </div>
+                <div className="w-full sm:w-72">
+                  <MultiSelect
+                    label="Client"
+                    options={clientOptions}
+                    selected={dlvClientFilter}
+                    onChange={(value) => {
+                      setDlvClientFilter(value);
+                      setDlvPage(1);
+                      doFetch({ client: value });
+                    }}
+                    darkMode={darkMode}
+                    txt2={txt2}
+                    hideLabel
+                  />
+                </div>
+                {(dlvClientFilter.length > 0 || dlvDateFilter.mode !== 'all') && (
+                  <button
+                    onClick={() => { setDlvClientFilter([]); setDlvDateFilter({ mode: 'all' }); setDlvStatusFilter([]); setDlvPendingFilter([]); setDlvSearch(''); setDlvPicFilter([]); setDlvAgingFilter([]); setDlvPage(1); fetchDlvSummary([], { mode: 'all' }); fetchDlvData(1,'',[],[], dlvPerPage, dlvSortOrder,[],[],[], { mode: 'all' }); }}
+                    className={`h-10 px-3 py-2 rounded-lg text-sm font-medium ${darkMode?'bg-gray-600 text-gray-100 hover:bg-gray-500':'bg-white border border-gray-300 text-gray-700 hover:bg-gray-100'}`}
+                  >
+                    Reset Filter
+                  </button>
+                )}
+              </div>
+            </div>
+
             {/* KPI Cards */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5">
               {[
-                { label:'Total PO', value:s.total, color:'text-purple-600', bg:darkMode?'bg-purple-900/30':'bg-purple-50', border:darkMode?'border-purple-800/40':'border-purple-100', icon:'📦', statusKey:'' },
-                { label:'In Progress', value:s.in_progress, color:'text-blue-600', bg:darkMode?'bg-blue-900/30':'bg-blue-50', border:darkMode?'border-blue-800/40':'border-blue-100', icon:'🔄', statusKey:'in_progress' },
-                { label:'Completed', value:s.completed, color:'text-green-600', bg:darkMode?'bg-green-900/30':'bg-green-50', border:darkMode?'border-green-800/40':'border-green-100', icon:'✅', statusKey:'Delivery Complete' },
-                { label:'PO Cancel', value:s.cancelled, color:'text-red-500', bg:darkMode?'bg-red-900/30':'bg-red-50', border:darkMode?'border-red-800/40':'border-red-100', icon:'❌', statusKey:'PO Cancel' },
+                { label:'Total PO', value:s.total, color:'text-purple-600', bg:darkMode?'bg-purple-900/30':'bg-purple-50', border:darkMode?'border-purple-800/40':'border-purple-100', icon:<Package className="w-5 h-5 text-purple-600"/>, statusKey:'' },
+                { label:'In Progress', value:s.in_progress, color:'text-blue-600', bg:darkMode?'bg-blue-900/30':'bg-blue-50', border:darkMode?'border-blue-800/40':'border-blue-100', icon:<Loader2 className="w-5 h-5 text-blue-600"/>, statusKey:'in_progress' },
+                { label:'Completed', value:s.completed, color:'text-green-600', bg:darkMode?'bg-green-900/30':'bg-green-50', border:darkMode?'border-green-800/40':'border-green-100', icon:<CheckCircle className="w-5 h-5 text-green-600"/>, statusKey:'Delivery Complete' },
+                { label:'PO Cancel', value:s.cancelled, color:'text-red-500', bg:darkMode?'bg-red-900/30':'bg-red-50', border:darkMode?'border-red-800/40':'border-red-100', icon:<XCircle className="w-5 h-5 text-red-500"/>, statusKey:'PO Cancel' },
               ].map(c => (
                 <button key={c.label}
                   onClick={() => {
-                    const ns = c.statusKey === 'in_progress' ? '' : c.statusKey;
-                    setDlvStatusFilter(ns); setDlvPendingFilter(''); setDlvPage(1);
-                    doFetch({ status: ns, pending: '' });
+                    const ns = c.statusKey === 'in_progress' ? [] : [c.statusKey];
+                    setDlvStatusFilter(ns); setDlvPendingFilter([]); setDlvPage(1);
+                    doFetch({ status: ns, pending: [] });
                     document.getElementById('dlv-detail-table')?.scrollIntoView({ behavior:'smooth' });
                   }}
                   className={`rounded-xl p-4 border transition-all duration-200 text-left cursor-pointer hover:shadow-lg hover:-translate-y-0.5 group ${c.bg} ${c.border}`}>
                   <div className="flex items-center justify-between">
                     <span className={`text-xs font-medium ${darkMode?'text-gray-400':'text-gray-500'}`}>{c.label}</span>
-                    <span className="text-lg">{c.icon}</span>
+                    <span className={`p-2 rounded-lg ${darkMode?'bg-gray-800/40':'bg-white/70'} shadow-sm`}>{c.icon}</span>
                   </div>
                   <p className={`text-2xl font-bold mt-1 ${c.color} group-hover:underline`}>{c.value?.toLocaleString()}</p>
                 </button>
               ))}
             </div>
 
-            {/* Pending by stage + Avg leadtime */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* Avg leadtime KPI cards - compact single row */}
+            <div className={`rounded-xl p-3 shadow-sm mb-4 ${darkMode?'bg-gray-700/60':'bg-gray-50'}`}>
+              <div className="grid grid-cols-7 gap-2">
+                {stageAvgCards.map((st) => {
+                  const avg = st.avg_workdays;
+                  const colorClass = avg === null
+                    ? darkMode ? 'text-gray-400' : 'text-gray-500'
+                    : avg < 0
+                      ? 'text-emerald-600'
+                      : avg > 5
+                        ? 'text-red-600'
+                        : avg > 2
+                          ? 'text-amber-600'
+                          : 'text-emerald-600';
+                  const cardClass = avg === null
+                    ? darkMode ? 'bg-gray-800/50 border-gray-600' : 'bg-white border-gray-200'
+                    : avg < 0
+                      ? darkMode ? 'bg-emerald-900/20 border-emerald-800/50' : 'bg-emerald-50 border-emerald-100'
+                      : avg > 5
+                        ? darkMode ? 'bg-red-900/20 border-red-800/50' : 'bg-red-50 border-red-100'
+                        : avg > 2
+                          ? darkMode ? 'bg-amber-900/20 border-amber-800/50' : 'bg-amber-50 border-amber-100'
+                          : darkMode ? 'bg-emerald-900/20 border-emerald-800/50' : 'bg-emerald-50 border-emerald-100';
+                  return (
+                    <div
+                      key={st.stage}
+                      className={`min-w-0 rounded-xl border px-2.5 py-2.5 shadow-sm ${cardClass}`}
+                      title={avg < 0 ? 'Leadtime minus terjadi karena tanggal proses berikutnya lebih awal dari tanggal proses sebelumnya pada data upload. Biasanya disebabkan urutan tanggal di file tidak konsisten, tanggal koreksi/backdate, atau input tanggal yang perlu dicek ulang.' : `${st.label_from} → ${st.label_to}`}
+                    >
+                      <p className={`truncate text-center text-xs font-bold ${txt}`} title={st.label_to}>
+                        {st.label_to}
+                      </p>
+                      <div className="mt-2 flex items-baseline justify-center gap-1">
+                        <span className={`text-2xl font-bold leading-none ${colorClass}`}>
+                          {avg !== null ? avg : '—'}
+                        </span>
+                        {avg !== null && <span className={`text-[10px] font-semibold ${colorClass}`}>days</span>}
+                      </div>
+                      <p className={`mt-2 text-center text-xs font-semibold ${txt2}`}>
+                        {st.count} PO
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              {/* Pending by stage */}
               <div className={`rounded-xl p-5 shadow-sm ${darkMode?'bg-gray-700/60':'bg-gray-50'}`}>
-                <h3 className={`font-semibold text-sm mb-3 ${txt}`}>🕐 Pending by Stage</h3>
+                <h3 className={`font-semibold text-sm mb-3 ${txt} flex items-center gap-2`}><Clock className="w-4 h-4 text-purple-500"/>Pending by Stage</h3>
                 <div className="space-y-2">
                   {PENDING_STAGES.map((stage, i) => {
                     const cnt = s.pending_counts?.[stage] || 0;
@@ -1552,7 +1650,7 @@ const App = () => {
                     const pct = Math.round((cnt / maxCnt) * 100);
                     return (
                       <button key={stage}
-                        onClick={() => { setDlvPendingFilter(stage); setDlvStatusFilter(''); setDlvPage(1); doFetch({ pending: stage, status: '' }); document.getElementById('dlv-detail-table')?.scrollIntoView({ behavior:'smooth' }); }}
+                        onClick={() => { setDlvPendingFilter([stage]); setDlvStatusFilter([]); setDlvPage(1); doFetch({ pending: [stage], status: [] }); document.getElementById('dlv-detail-table')?.scrollIntoView({ behavior:'smooth' }); }}
                         className="flex items-center gap-2 w-full hover:opacity-75 transition-opacity text-left">
                         <span className={`text-xs w-36 flex-shrink-0 ${txt2}`}>{stage}</span>
                         <div className={`flex-1 h-5 rounded-full overflow-hidden ${darkMode?'bg-gray-600':'bg-gray-200'}`}>
@@ -1568,32 +1666,33 @@ const App = () => {
                 </div>
               </div>
 
-              {/* Avg leadtime — label inside bar, white text */}
+              {/* Avg leadtime by vendor */}
               <div className={`rounded-xl p-5 shadow-sm ${darkMode?'bg-gray-700/60':'bg-gray-50'}`}>
-                <h3 className={`font-semibold text-sm mb-3 ${txt}`}>⏱ Avg. Leadtime per Process (working days)</h3>
-                <div className="space-y-2">
-                  {(s.stage_avg || []).map((st) => {
-                    const avg = st.avg_workdays;
-                    const maxAvg = Math.max(1, ...(s.stage_avg||[]).map(x=>x.avg_workdays||0));
-                    const pct = avg !== null ? Math.round((Math.abs(avg)/Math.max(1,maxAvg))*100) : 0;
-                    const color = avg === null ? '#9CA3AF' : avg < 0 ? '#10B981' : avg > 5 ? '#EF4444' : avg > 2 ? '#F59E0B' : '#10B981';
-                    return (
-                      <div key={st.stage} className="flex items-center gap-2">
-                        <span className={`text-xs w-40 flex-shrink-0 truncate ${txt2}`} title={`${st.label_from} → ${st.label_to}`}>{st.label_from} →</span>
-                        <div className={`flex-1 h-6 rounded-full overflow-hidden ${darkMode?'bg-gray-600':'bg-gray-200'} relative`}>
-                          {avg !== null ? (
-                            <div className="h-full rounded-full flex items-center justify-end pr-2 transition-all min-w-[3rem]"
-                              style={{ width:`${Math.max(pct, 18)}%`, backgroundColor:color }}>
-                              <span className="text-white text-xs font-bold whitespace-nowrap">{avg} days</span>
+                <h3 className={`font-semibold text-sm mb-1 ${txt} flex items-center gap-2`}><BarChart3 className="w-4 h-4 text-emerald-500"/>Avg Lead Time Vendor</h3>
+                <p className={`text-xs mb-3 ${txt2}`}>PO Created → Delivery Completed, hanya status yang sudah completed</p>
+                {avgVendorLeadtime.length === 0 ? (
+                  <div className={`py-10 text-center text-sm ${txt2}`}>No completed delivery data</div>
+                ) : (
+                  <div className="max-h-80 overflow-y-auto pr-1 space-y-2">
+                    {avgVendorLeadtime.map((v, i) => {
+                      const pct = Math.round(((v.avg_workdays || 0) / maxVendorLeadtime) * 100);
+                      return (
+                        <div key={v.vendor_name} className="flex items-center gap-2">
+                          <span className={`text-xs w-40 flex-shrink-0 truncate ${txt2}`} title={v.vendor_name}>{v.vendor_name}</span>
+                          <div className={`flex-1 h-6 rounded-full overflow-hidden ${darkMode?'bg-gray-600':'bg-gray-200'}`}>
+                            <div
+                              className="h-full rounded-full flex items-center justify-end pr-2 transition-all"
+                              style={{ width:`${Math.max(pct, 8)}%`, backgroundColor:STAGE_COLORS[(i + 3) % STAGE_COLORS.length] }}
+                            >
+                              <span className="text-white text-xs font-bold">{v.avg_workdays}d</span>
                             </div>
-                          ) : <span className={`text-xs px-2 leading-6 inline-block ${txt2}`}>No data</span>}
+                          </div>
+                          <span className={`text-xs w-12 text-right ${txt2}`}>{v.count} PO</span>
                         </div>
-                        <span className={`text-xs w-12 text-right flex-shrink-0 ${txt2}`}>{st.count} PO</span>
-                      </div>
-                    );
-                  })}
-                </div>
-                <p className={`text-xs mt-2 ${txt2}`}>working days (excl. weekends & holidays)</p>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -1609,6 +1708,8 @@ const App = () => {
                       <th className="text-left py-2 pr-3 font-medium">PO No.</th>
                       <th className="text-left py-2 pr-3 font-medium">SO No.</th>
                       <th className="text-left py-2 pr-3 font-medium">Vendor</th>
+                      <th className="text-left py-2 pr-3 font-medium">Category</th>
+                      <th className="text-left py-2 pr-3 font-medium">Product ID</th>
                       <th className="text-left py-2 pr-3 font-medium">Prod. Name</th>
                       <th className="text-left py-2 pr-3 font-medium">PIC</th>
                       <th className="text-left py-2 pr-3 font-medium">Status</th>
@@ -1622,8 +1723,21 @@ const App = () => {
                         <td className={`py-1.5 pr-3 font-mono ${txt}`}>{r.po_number}</td>
                         <td className={`py-1.5 pr-3 font-mono ${txt2}`}>{r.so_number||'—'}</td>
                         <td className={`py-1.5 pr-3 ${txt2} max-w-[120px] truncate`} title={r.vendor_name}>{r.vendor_name||'—'}</td>
+                        <td className={`py-1.5 pr-3 ${txt2} max-w-[130px] truncate`} title={r.category_name}>{r.category_name||'—'}</td>
+                        <td className={`py-1.5 pr-3 font-mono ${txt2} max-w-[110px] truncate`} title={r.prod_id}>{r.prod_id||'—'}</td>
                         <td className={`py-1.5 pr-3 ${txt2} max-w-[150px] truncate`} title={r.prod_name}>{r.prod_name||'—'}</td>
-                        <td className={`py-1.5 pr-3 ${txt2}`}>{r.pic_name||'—'}</td>
+                        <td className="py-1.5 pr-3">
+                          {r.pic_name
+                            ? (() => {
+                                const c = getPicColor(r.pic_name);
+                                return (
+                                  <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${darkMode ? 'bg-gray-700 text-gray-100' : `${c.bg} ${c.text}`}`}>
+                                    {r.pic_name}
+                                  </span>
+                                );
+                              })()
+                            : <span className={txt2}>—</span>}
+                        </td>
                         <td className="py-1.5 pr-3">{statusBadge(r.po_status)}</td>
                         <td className={`py-1.5 pr-3 ${txt2}`}>{r.pending_at}</td>
                         <td className="py-1.5 text-right">
@@ -1638,7 +1752,7 @@ const App = () => {
           )}
 
           {/* ── Detail Data Table ── */}
-          <div id="dlv-detail-table" className={`rounded-2xl shadow overflow-hidden ${card}`}>
+          <div id="dlv-detail-table" className={`relative z-20 rounded-2xl shadow overflow-visible ${card}`}>
             <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
               <div>
                 <h2 className={`text-xl font-bold ${txt}`}>Detail Data</h2>
@@ -1668,99 +1782,114 @@ const App = () => {
             </div>
 
             {/* Filter controls */}
-            <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
-              {/* Active chips */}
-              {(dlvStatusFilter || dlvPendingFilter || dlvClientFilter || dlvPicFilter) && (
-                <div className="mb-2 flex flex-wrap gap-1.5">
-                  {dlvClientFilter && <span className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${darkMode?'bg-teal-900/40 text-teal-300':'bg-teal-100 text-teal-700'}`}>Client: {dlvClientFilter}<button onClick={() => { setDlvClientFilter(''); setDlvPage(1); doFetch({ client: '' }); }} className="hover:text-red-600"><X className="w-3 h-3"/></button></span>}
-                  {dlvPicFilter && <span className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${darkMode?'bg-indigo-900/40 text-indigo-300':'bg-indigo-100 text-indigo-700'}`}>PIC: {dlvPicFilter}<button onClick={() => { setDlvPicFilter(''); setDlvPage(1); doFetch({ pic: '' }); }} className="hover:text-red-600"><X className="w-3 h-3"/></button></span>}
-                  {dlvStatusFilter && <span className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${darkMode?'bg-emerald-900/40 text-emerald-300':'bg-emerald-100 text-emerald-700'}`}>Status: {dlvStatusFilter}<button onClick={() => { setDlvStatusFilter(''); setDlvPage(1); doFetch({ status: '' }); }} className="hover:text-red-600"><X className="w-3 h-3"/></button></span>}
-                  {dlvPendingFilter && <span className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${darkMode?'bg-orange-900/40 text-orange-300':'bg-orange-100 text-orange-700'}`}>Pending: {dlvPendingFilter}<button onClick={() => { setDlvPendingFilter(''); setDlvPage(1); doFetch({ pending: '' }); }} className="hover:text-red-600"><X className="w-3 h-3"/></button></span>}
-                </div>
-              )}
-
-              <div className={`px-4 py-3 rounded-xl ${darkMode?'bg-gray-700':'bg-gray-50'}`}>
-                <div className="flex flex-nowrap gap-2 items-end overflow-x-auto">
+            <div className={`relative z-30 px-5 py-3 border-b overflow-visible ${darkMode?'border-gray-700':'border-gray-100'}`}>
+              <div className={`px-4 py-3 rounded-xl overflow-visible ${darkMode?'bg-gray-700':'bg-gray-50'}`}>
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[150px_minmax(240px,1fr)_220px_240px_240px_110px_130px_130px] gap-3 items-end overflow-visible">
                   {/* Sort */}
-                  <div className="flex-shrink-0" style={{width:'118px'}}>
-                    <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ PO Create Date</label>
-                    <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
-                      value={dlvSortOrder} onChange={e => { setDlvSortOrder(e.target.value); setDlvPage(1); doFetch({ sort: e.target.value }); }}>
+                  <div className="min-w-0">
+                    <label className={`block text-xs font-medium mb-1 ${txt2}`}>↕ PO Create Date</label>
+                    <select className={`w-full h-10 px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                      value={dlvSortOrder} onChange={e => setDlvSortOrder(e.target.value)}>
                       <option value="oldest">Oldest ↑</option>
                       <option value="newest">Newest ↓</option>
                     </select>
                   </div>
                   {/* Search */}
-                  <div className="flex-shrink-0" style={{width:'185px'}}>
-                    <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Search PO / SO / Vendor</label>
+                  <div className="min-w-0">
+                    <label className={`block text-xs font-medium mb-1 ${txt2}`}>Search PO / SO / Vendor</label>
                     <div className={`flex items-center h-10 px-3 rounded-lg border ${darkMode?'bg-gray-600 border-gray-500':'bg-white border-gray-300'}`}>
                       <input type="text" placeholder="Search..." value={dlvSearch}
                         onChange={e => setDlvSearch(e.target.value)}
-                        onKeyDown={e => { if (e.key==='Enter') { setDlvPage(1); doFetch({ search: dlvSearch }); } }}
-                        className={`flex-1 bg-transparent outline-none text-sm ${darkMode?'text-white placeholder-gray-400':'text-gray-700 placeholder-gray-400'}`}/>
+                        onKeyDown={e => { if (e.key==='Enter') { setDlvPage(1); doFetch({ search: dlvSearch, sort: dlvSortOrder }); } }}
+                        className={`flex-1 min-w-0 bg-transparent outline-none text-sm ${darkMode?'text-white placeholder-gray-400':'text-gray-700 placeholder-gray-400'}`}/>
                     </div>
                   </div>
                   {/* PIC */}
-                  <div className="flex-shrink-0" style={{width:'155px'}}>
-                    <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>PIC</label>
-                    <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
-                      value={dlvPicFilter} onChange={e => { setDlvPicFilter(e.target.value); setDlvPage(1); doFetch({ pic: e.target.value }); }}>
-                      <option value="">All PIC</option>
-                      {picOptions.map(p => <option key={p} value={p}>{p}</option>)}
-                      <option value="__others__">Others / Unassigned</option>
-                    </select>
+                  <div className="min-w-0">
+                    <MultiSelect
+                      label="PIC"
+                      options={[...picOptions, '__others__']}
+                      selected={dlvPicFilter}
+                      onChange={(value) => {
+                        setDlvPicFilter(value);
+                      }}
+                      darkMode={darkMode}
+                      txt2={txt2}
+                      noDropdownScroll
+                    />
                   </div>
                   {/* PO Status */}
-                  <div className="flex-shrink-0" style={{width:'175px'}}>
-                    <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>PO Status</label>
-                    <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
-                      value={dlvStatusFilter} onChange={e => { setDlvStatusFilter(e.target.value); setDlvPage(1); doFetch({ status: e.target.value }); }}>
-                      <option value="">All PO Status</option>
-                      <option value="PO Received Req.">PO Received Req.</option>
-                      <option value="PO Received">PO Received</option>
-                      <option value="Shipping Order">Shipping Order</option>
-                      <option value="Ship. Confirmed">Ship. Confirmed</option>
-                      <option value="Delivery Complete">Delivery Complete</option>
-                      <option value="PO Cancel">PO Cancel</option>
-                    </select>
+                  <div className="min-w-0">
+                    <MultiSelect
+                      label="PO Status"
+                      options={['PO Received Req.','PO Received','Shipping Order','Ship. Confirmed','Delivery Complete','PO Cancel']}
+                      selected={dlvStatusFilter}
+                      onChange={(value) => {
+                        setDlvStatusFilter(value);
+                      }}
+                      darkMode={darkMode}
+                      txt2={txt2}
+                      noDropdownScroll
+                    />
                   </div>
                   {/* Pending Stage */}
-                  <div className="flex-shrink-0" style={{width:'175px'}}>
-                    <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Pending Stage</label>
-                    <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
-                      value={dlvPendingFilter} onChange={e => { setDlvPendingFilter(e.target.value); setDlvPage(1); doFetch({ pending: e.target.value }); }}>
-                      <option value="">All Pending Stage</option>
-                      {PENDING_STAGES.map(p => <option key={p} value={p}>{p}</option>)}
-                    </select>
+                  <div className="min-w-0">
+                    <MultiSelect
+                      label="Pending Stage"
+                      options={PENDING_STAGES}
+                      selected={dlvPendingFilter}
+                      onChange={(value) => {
+                        setDlvPendingFilter(value);
+                      }}
+                      darkMode={darkMode}
+                      txt2={txt2}
+                      noDropdownScroll
+                    />
+                  </div>
+                  {/* Apply */}
+                  <div className="min-w-0">
+                    <label className={`block text-xs font-medium mb-1 opacity-0 ${txt2}`}>.</label>
+                    <button onClick={() => { setDlvPage(1); doFetch({ page: 1, search: dlvSearch, status: dlvStatusFilter, pending: dlvPendingFilter, sort: dlvSortOrder, pic: dlvPicFilter, aging: dlvAgingFilter }); }}
+                      className="w-full h-10 px-3 py-2 rounded-lg text-sm font-bold shadow-sm flex items-center justify-center whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700">
+                      Apply
+                    </button>
                   </div>
                   {/* Clear */}
-                  <div className="flex-shrink-0" style={{width:'118px'}}>
-                    <label className={`block text-xs font-medium mb-0.5 opacity-0 ${txt2}`}>.</label>
-                    <button onClick={() => { setDlvStatusFilter(''); setDlvPendingFilter(''); setDlvSearch(''); setDlvPicFilter(''); setDlvClientFilter(''); setDlvAgingFilter([]); setDlvPage(1); fetchDlvData(1,'','','', dlvPerPage, dlvSortOrder,'','',[]); }}
+                  <div className="min-w-0">
+                    <label className={`block text-xs font-medium mb-1 opacity-0 ${txt2}`}>.</label>
+                    <button onClick={() => { setDlvStatusFilter([]); setDlvPendingFilter([]); setDlvSearch(''); setDlvPicFilter([]); setDlvClientFilter([]); setDlvAgingFilter([]); setDlvDateFilter({ mode: 'all' }); setDlvSortOrder('oldest'); setDlvPage(1); fetchDlvSummary([], { mode: 'all' }); fetchDlvData(1,'',[],[], dlvPerPage, 'oldest',[],[],[], { mode: 'all' }); }}
                       className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>
-                      Clear Filter
+                      Clear
                     </button>
                   </div>
                 </div>
               </div>
+
+              {/* Active chips */}
+              {(dlvStatusFilter.length > 0 || dlvPendingFilter.length > 0 || dlvClientFilter.length > 0 || dlvPicFilter.length > 0 || dlvDateFilter.mode !== 'all') && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {dlvDateFilter.mode !== 'all' && <span className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${darkMode?'bg-purple-900/40 text-purple-300':'bg-purple-100 text-purple-700'}`}>PO Create: {dlvDateFilter.mode === 'year' ? dlvDateFilter.year : `${dlvDateFilter.start || '...'} → ${dlvDateFilter.end || '...'}`}</span>}
+                  {dlvClientFilter.map(v => <span key={`client-${v}`} className={`px-2 py-0.5 rounded-full text-xs font-medium ${darkMode?'bg-indigo-900/40 text-indigo-300':'bg-indigo-100 text-indigo-700'}`}>Client: {v}</span>)}
+                  {dlvPicFilter.map(v => <span key={`pic-${v}`} className={`px-2 py-0.5 rounded-full text-xs font-medium ${darkMode?'bg-blue-900/40 text-blue-300':'bg-blue-100 text-blue-700'}`}>PIC: {v === '__others__' ? 'Others' : v}</span>)}
+                  {dlvStatusFilter.map(v => <span key={`status-${v}`} className={`px-2 py-0.5 rounded-full text-xs font-medium ${darkMode?'bg-emerald-900/40 text-emerald-300':'bg-emerald-100 text-emerald-700'}`}>Status: {v}</span>)}
+                  {dlvPendingFilter.map(v => <span key={`pending-${v}`} className={`px-2 py-0.5 rounded-full text-xs font-medium ${darkMode?'bg-orange-900/40 text-orange-300':'bg-orange-100 text-orange-700'}`}>Pending: {v}</span>)}
+                </div>
+              )}
             </div>
 
             {dlvLoading ? (
-              <div className="flex items-center justify-center py-16">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-emerald-600"></div>
-                <span className={`ml-3 text-sm ${txt2}`}>Loading data...</span>
-              </div>
-            ) : dlvData.length === 0 ? (
-              <div className={`text-center py-12 ${txt2} text-sm`}>No data found</div>
+              <div className={`p-8 text-center ${txt2}`}>Loading delivery monitoring...</div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className={`${darkMode?'text-gray-400 bg-gray-800':'text-gray-500 bg-gray-50'} border-b ${darkMode?'border-gray-700':'border-gray-200'}`}>
+                <table className="min-w-full text-xs">
+                  <thead className={`${darkMode?'bg-gray-700 text-gray-300':'bg-gray-50 text-gray-600'}`}>
+                    <tr>
                       <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Aging</th>
-                      <th className="text-right px-3 py-3 font-medium whitespace-nowrap">Day</th>
-                      <th className="text-left px-4 py-3 font-medium whitespace-nowrap" style={{minWidth:'160px'}}>PO No.</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap" style={{minWidth:'150px'}}>SO No.</th>
+                      <th className="text-right px-3 py-3 font-medium whitespace-nowrap">Age</th>
+                      <th className="text-left px-4 py-3 font-medium whitespace-nowrap">PO No.</th>
+                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">SO No.</th>
+                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Category</th>
+                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Prod. ID</th>
                       <th className="text-left px-3 py-3 font-medium whitespace-nowrap">PO Status</th>
                       <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Vendor</th>
                       <th className="text-left px-3 py-3 font-medium whitespace-nowrap">PIC</th>
@@ -1797,11 +1926,15 @@ const App = () => {
                           </td>
                           <td className={`px-4 py-2 font-mono font-medium ${txt} whitespace-nowrap`}>{row.po_number}</td>
                           <td className={`px-3 py-2 font-mono ${txt2} whitespace-nowrap`}>{row.so_number||'—'}</td>
+                          <td className={`px-3 py-2 ${txt2} max-w-[150px] truncate`} title={row.category_name}>{row.category_name||'—'}</td>
+                          <td className={`px-3 py-2 font-mono ${txt2} max-w-[120px] truncate`} title={row.prod_id}>{row.prod_id||'—'}</td>
                           <td className="px-3 py-2 whitespace-nowrap">{statusBadge(row.po_status)}</td>
                           <td className={`px-3 py-2 ${txt2} max-w-[130px] truncate`} title={row.vendor_name}>{row.vendor_name||'—'}</td>
                           <td className="px-3 py-2 whitespace-nowrap">
                             {row.pic_name
-                              ? <span className={`px-2 py-0.5 rounded text-xs font-semibold ${darkMode?'bg-indigo-900/50 text-indigo-300':'bg-indigo-100 text-indigo-700'}`}>{row.pic_name}</span>
+                              ? (() => { const c = getPicColor(row.pic_name); return (
+                                <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${darkMode?'bg-gray-700 text-gray-100':`${c.bg} ${c.text}`}`}>{row.pic_name}</span>
+                              ); })()
                               : <span className={`text-xs ${txt2}`}>—</span>}
                           </td>
                           <td className={`px-3 py-2 ${txt2} max-w-[160px] truncate`} title={row.prod_name}>{row.prod_name||'—'}</td>
@@ -3299,14 +3432,11 @@ const App = () => {
           <div>
             <button
               onClick={()=>setPoMenuOpen(o=>!o)}
-              className={`w-full flex items-center gap-2.5 px-2 py-2 rounded-lg transition-all text-left
-                ${['dashboard','all-so','completed','delivery-monitoring'].includes(activePage)
-                  ? 'bg-white/20 text-white font-semibold'
-                  : 'text-purple-100 hover:bg-white/15'}`}
+              className="w-full flex items-center gap-2.5 px-2 py-2 rounded-lg transition-all text-left text-purple-100 hover:bg-white/10"
             >
               <BarChart3 className="w-4 h-4 flex-shrink-0"/>
               {sidebarOpen && <>
-                <span className="text-sm flex-1 truncate">PO Monitoring</span>
+                <span className="text-sm flex-1 truncate text-left">PO Monitoring</span>
                 {poMenuOpen ? <ChevronUp className="w-3.5 h-3.5 opacity-70"/> : <ChevronDown className="w-3.5 h-3.5 opacity-70"/>}
               </>}
             </button>
@@ -3319,10 +3449,10 @@ const App = () => {
                 <button
                   disabled
                   title="All Client (coming soon)"
-                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm text-purple-200/50 cursor-not-allowed"
+                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm text-left text-purple-200/50 cursor-not-allowed"
                 >
                   <Building2 className="w-3.5 h-3.5 flex-shrink-0"/>
-                  <span className="truncate">All Client</span>
+                  <span className="truncate flex-1 text-left">All Client</span>
                   <span className="ml-auto text-[10px] bg-purple-400/20 text-purple-200/60 px-1.5 py-0.5 rounded-full">soon</span>
                 </button>
 
@@ -3330,11 +3460,10 @@ const App = () => {
                 <div>
                   <button
                     onClick={()=>{ setActiveClient('hli'); setHliMenuOpen(o=>!o); }}
-                    className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm transition-all
-                      ${activeClient==='hli' ? 'bg-white/25 text-white font-semibold' : 'text-purple-100 hover:bg-white/15'}`}
+                    className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm text-left transition-all text-purple-100 hover:bg-white/10"
                   >
                     <Building2 className="w-3.5 h-3.5 flex-shrink-0"/>
-                    <span className="truncate flex-1">HLI</span>
+                    <span className="truncate flex-1 text-left">HLI</span>
                     {hliMenuOpen ? <ChevronUp className="w-3 h-3 opacity-70"/> : <ChevronDown className="w-3 h-3 opacity-70"/>}
                   </button>
 
@@ -3343,27 +3472,27 @@ const App = () => {
                     <div className="mt-0.5 ml-3 pl-3 border-l border-white/20 flex flex-col gap-0.5">
                       <button
                         onClick={()=>{ setActivePage('dashboard'); window.scrollTo({top:0,behavior:'smooth'}); }}
-                        className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs transition-all
-                          ${activePage==='dashboard'?'bg-white/30 text-white font-semibold':'text-purple-100 hover:bg-white/15'}`}
+                        className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-left transition-all
+                          ${activePage==='dashboard'?'bg-white/35 text-white font-semibold shadow-sm':'text-purple-100 hover:bg-white/10'}`}
                       >
                         <BarChart3 className="w-3 h-3 flex-shrink-0"/>
-                        <span className="truncate">Dashboard</span>
+                        <span className="truncate flex-1 text-left">Dashboard</span>
                       </button>
                       <button
                         onClick={()=>{ setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums,soMarginFilter,soDateFilter); window.scrollTo({top:0,behavior:'smooth'}); }}
-                        className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs transition-all
-                          ${activePage==='all-so'?'bg-white/30 text-white font-semibold':'text-purple-100 hover:bg-white/15'}`}
+                        className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-left transition-all
+                          ${activePage==='all-so'?'bg-white/35 text-white font-semibold shadow-sm':'text-purple-100 hover:bg-white/10'}`}
                       >
                         <FileText className="w-3 h-3 flex-shrink-0"/>
-                        <span className="truncate">Need to Follow Up</span>
+                        <span className="truncate flex-1 text-left">Need to Follow Up</span>
                       </button>
                       <button
                         onClick={()=>{ setActivePage('completed'); fetchCompletedData(completedYear, completedDateFilter); window.scrollTo({top:0,behavior:'smooth'}); }}
-                        className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs transition-all
-                          ${activePage==='completed'?'bg-white/30 text-white font-semibold':'text-purple-100 hover:bg-white/15'}`}
+                        className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-left transition-all
+                          ${activePage==='completed'?'bg-white/35 text-white font-semibold shadow-sm':'text-purple-100 hover:bg-white/10'}`}
                       >
                         <Coins className="w-3 h-3 flex-shrink-0"/>
-                        <span className="truncate">Delivery Completed</span>
+                        <span className="truncate flex-1 text-left">Delivery Completed</span>
                       </button>
                     </div>
                   )}
@@ -3378,24 +3507,24 @@ const App = () => {
           {/* ── Delivery Monitoring ── */}
           <button
             onClick={()=>{ setActivePage('delivery-monitoring'); fetchDlvSummary(); fetchDlvData(1,'','',''); }}
-            className={`w-full flex items-center gap-2.5 px-2 py-2 rounded-lg transition-colors
+            className={`w-full flex items-center gap-2.5 px-2 py-2 rounded-lg text-left transition-colors
               ${activePage==='delivery-monitoring'
-                ? 'bg-white/30 text-white font-semibold'
-                : 'text-purple-100 hover:bg-white/15'}`}
+                ? 'bg-white/35 text-white font-semibold shadow-sm'
+                : 'text-purple-100 hover:bg-white/10'}`}
           >
             <Package className="w-4 h-4 flex-shrink-0"/>
-            {sidebarOpen && <span className="text-sm flex-1 truncate">Delivery Monitoring</span>}
+            {sidebarOpen && <span className="text-sm flex-1 truncate text-left">Delivery Monitoring</span>}
           </button>
 
           {/* ── Registration Monitoring ── */}
           <button
             disabled
             title="Registration Monitoring (coming soon)"
-            className="w-full flex items-center gap-2.5 px-2 py-2 rounded-lg text-purple-200/50 cursor-not-allowed"
+            className="w-full flex items-center gap-2.5 px-2 py-2 rounded-lg text-left text-purple-200/50 cursor-not-allowed"
           >
             <Award className="w-4 h-4 flex-shrink-0"/>
             {sidebarOpen && <>
-              <span className="text-sm flex-1 truncate">Registration Monitoring</span>
+              <span className="text-sm flex-1 truncate text-left">Registration Monitoring</span>
               <span className="text-[10px] bg-purple-400/20 text-purple-200/60 px-1.5 py-0.5 rounded-full">soon</span>
             </>}
           </button>
@@ -3544,24 +3673,9 @@ const App = () => {
               )}
               </div>
             </div>
-            <div className={`text-xs leading-relaxed text-right ${txt2}`}>
-              {activePage === 'delivery-monitoring' ? (<>
-                <div>
-                  <span>Last Update: </span>
-                  <span className={`font-semibold ${txt}`}>
-                    {dlvSummary?.last_updated
-                      ? (() => { try { return new Date(dlvSummary.last_updated).toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); } catch { return dlvSummary.last_updated; } })()
-                      : '-'}
-                  </span>
-                </div>
-                <div>
-                  <span>Total PO: </span>
-                  <span className={`font-semibold ${txt}`}>{dlvSummary?.total?.toLocaleString() ?? '-'}</span>
-                  <span className="mx-1.5 text-gray-300">|</span>
-                  <span>In Progress: </span>
-                  <span className="font-semibold text-blue-600">{dlvSummary?.in_progress?.toLocaleString() ?? '-'}</span>
-                </div>
-              </>) : (<>
+            {activePage !== 'delivery-monitoring' && (
+              <div className={`text-xs leading-relaxed text-right ${txt2}`}>
+                <>
                 <div>
                   <span>Last Update HLI PO List: </span>
                   <span className={`font-semibold ${txt}`}>
@@ -3578,8 +3692,9 @@ const App = () => {
                       : '-'}
                   </span>
                 </div>
-              </>)}
-            </div>
+                </>
+              </div>
+            )}
           </div>
         </header>
 
