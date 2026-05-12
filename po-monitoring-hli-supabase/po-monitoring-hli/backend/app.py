@@ -266,6 +266,7 @@ class DeliveryMonitoring(db.Model):
     op_unit_name    = db.Column(db.Text)
     dlv_type        = db.Column(db.String(100))
     pur_pic         = db.Column(db.String(200))
+    pur_curr        = db.Column(db.String(10))    # Pur. Curr.; non-IDR means import
     sales_pic       = db.Column(db.String(200))
     pic_name        = db.Column(db.String(200))   # auto-resolved via ProductIDDB → MasterPIC
     client_name     = db.Column(db.String(300))   # customer / op-unit alias for filtering
@@ -510,6 +511,7 @@ def _ensure_extra_columns():
         'delivery_monitoring': [
             ('pic_name',             'VARCHAR(200)'),
             ('client_name',          'VARCHAR(300)'),
+            ('pur_curr',             'VARCHAR(10)'),
         ],
     }
 
@@ -3486,17 +3488,63 @@ def download_master_pic_template():
 #  DELIVERY MONITORING
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Process stages in order, with human labels
+# Process stages in business order.
+# Important:
+# - SO Create is the first process, then PO Create.
+# - HUB stages only apply to import items.
+# - Import is determined from Pur. Curr.; anything other than IDR is import.
 DLV_PROCESS_STAGES = [
-    ('po_create_date',     'PO Create Date',      'PO Created'),
     ('so_erp_create_date', 'SO(ERP) Create Date', 'SO ERP Created'),
+    ('po_create_date',     'PO Create Date',      'PO Created'),
     ('po_rcvd_date',       'PO Rcvd. Date',       'PO Received'),
     ('ship_odr_date',      'Ship. Odr. Date',     'Shipping Order'),
-    ('ship_compl_date',    'Ship. Compl. Date',   'Ship Completed'),
+    ('ship_compl_date',    'Ship. Compl. Date',   'Shipping Confirmed'),
     ('hub_rcv_date',       'HUB Rcv. Date',       'HUB Received'),
-    ('hub_ship_date',      'HUB Ship. Date',       'HUB Shipped'),
+    ('hub_ship_date',      'HUB Ship. Date',      'HUB Shipped'),
     ('dlv_compl_date',     'Dlv. Compl. Date',    'Delivery Completed'),
 ]
+
+DLV_LOCAL_PROCESS_STAGES = [
+    ('so_erp_create_date', 'SO(ERP) Create Date', 'SO ERP Created'),
+    ('po_create_date',     'PO Create Date',      'PO Created'),
+    ('po_rcvd_date',       'PO Rcvd. Date',       'PO Received'),
+    ('ship_odr_date',      'Ship. Odr. Date',     'Shipping Order'),
+    ('ship_compl_date',    'Ship. Compl. Date',   'Shipping Confirmed'),
+    ('dlv_compl_date',     'Dlv. Compl. Date',    'Delivery Completed'),
+]
+
+
+def _is_import_delivery(row):
+    """Return True when Pur. Curr. indicates an import item."""
+    pur_curr = (getattr(row, 'pur_curr', None) or 'IDR').strip().upper()
+    return bool(pur_curr and pur_curr != 'IDR')
+
+
+def _delivery_stage_flow(row):
+    """Return the applicable delivery process flow for a row."""
+    return DLV_PROCESS_STAGES if _is_import_delivery(row) else DLV_LOCAL_PROCESS_STAGES
+
+
+def _delivery_stage_pairs_for_row(row):
+    stages = _delivery_stage_flow(row)
+    return [
+        (stages[i][0], stages[i + 1][0], stages[i][2], stages[i + 1][2])
+        for i in range(len(stages) - 1)
+    ]
+
+
+def _delivery_stage_pairs_all():
+    """Canonical output order for Avg. Leadtime, including local and import paths."""
+    return [
+        ('so_erp_create_date', 'po_create_date', 'SO ERP Created', 'PO Created'),
+        ('po_create_date', 'po_rcvd_date', 'PO Created', 'PO Received'),
+        ('po_rcvd_date', 'ship_odr_date', 'PO Received', 'Shipping Order'),
+        ('ship_odr_date', 'ship_compl_date', 'Shipping Order', 'Shipping Confirmed'),
+        ('ship_compl_date', 'dlv_compl_date', 'Shipping Confirmed', 'Delivery Completed'),
+        ('ship_compl_date', 'hub_rcv_date', 'Shipping Confirmed', 'HUB Received'),
+        ('hub_rcv_date', 'hub_ship_date', 'HUB Received', 'HUB Shipped'),
+        ('hub_ship_date', 'dlv_compl_date', 'HUB Shipped', 'Delivery Completed'),
+    ]
 
 
 def _parse_dt(val):
@@ -3536,10 +3584,7 @@ def _calc_stage_leadtimes(row):
         return []
 
     results = []
-    stages = DLV_PROCESS_STAGES
-    for i in range(len(stages) - 1):
-        field_from, _, label_from = stages[i]
-        field_to,   _, label_to   = stages[i + 1]
+    for field_from, field_to, label_from, label_to in _delivery_stage_pairs_for_row(row):
         dt_from = getattr(row, field_from, None)
         dt_to   = getattr(row, field_to,   None)
         d_from  = _dt_to_date(dt_from) if dt_from else None
@@ -3574,6 +3619,17 @@ def _calc_stage_leadtimes(row):
     return results
 
 
+def _delivery_product_category(prod_id):
+    """Return level-1 category name for a DeliveryMonitoring product id."""
+    if not prod_id:
+        return ''
+    prod = db.session.query(ProductIDDB).filter_by(product_id=str(prod_id).strip()).first()
+    if not prod or not prod.category_name:
+        return ''
+    full_category = prod.category_name.strip()
+    return full_category.split('>')[0].strip() if '>' in full_category else full_category
+
+
 def _row_to_dict(row):
     """Convert a DeliveryMonitoring row to a JSON-serialisable dict."""
     stages = _calc_stage_leadtimes(row)
@@ -3600,6 +3656,7 @@ def _row_to_dict(row):
         'so_status':        row.so_status,
         'vendor_name':      row.vendor_name,
         'prod_id':          row.prod_id,
+        'category_name':    _delivery_product_category(row.prod_id),
         'prod_name':        row.prod_name,
         'specification':    row.prod_name,  # reuse prod_name as spec placeholder; update if separate col exists
         'po_qty':           None,           # placeholder — add column if available in source data
@@ -3607,6 +3664,8 @@ def _row_to_dict(row):
         'op_unit_name':     row.op_unit_name,
         'dlv_type':         row.dlv_type,
         'pur_pic':          row.pur_pic,
+        'pur_curr':         row.pur_curr,
+        'is_import':        _is_import_delivery(row),
         'sales_pic':        row.sales_pic,
         'pic_name':         row.pic_name,
         'client_name':      row.client_name,
@@ -3663,6 +3722,7 @@ def upload_delivery_monitoring():
         col_opnm    = fc(['Op. Unit Nm.', 'Op. Unit Name'])
         col_dtype   = fc(['Dlv. Type', 'Delivery Type'])
         col_ppic    = fc(['Pur. PIC', 'Purchase PIC'])
+        col_pcurr   = fc(['Pur. Curr.', 'Pur. Curr', 'Purchase Currency', 'Purchasing Currency'])
         col_spic    = fc(['Sales PIC', 'Sales PIC.1'])
         col_client  = fc(['Client Nm.', 'Client Name', 'Customer Name'])
         # Date columns
@@ -3721,6 +3781,7 @@ def upload_delivery_monitoring():
                 op_unit_name     = gv(col_opnm),
                 dlv_type         = gv(col_dtype),
                 pur_pic          = gv(col_ppic),
+                pur_curr         = (gv(col_pcurr) or 'IDR'),
                 sales_pic        = gv(col_spic),
                 pic_name         = _lookup_pic(gv(col_pid)) or gv(col_ppic) or gv(col_spic),
                 client_name      = gv(col_client) or gv(col_opnm),
@@ -3765,31 +3826,44 @@ def get_delivery_monitoring():
     """
     Return delivery monitoring records with leadtime calculations.
     Excludes PO Cancel from leadtime.
-    Supports filters: status, pending_at, search (po/so number).
+    Supports filters: status, pending_at, search (po/so number), client, pic, aging, PO create date.
     """
     try:
-        status_filter  = request.args.get('status', '')
-        pending_filter = request.args.get('pending_at', '')
-        search         = request.args.get('search', '').strip()
-        page           = int(request.args.get('page', 1))
-        per_page       = int(request.args.get('per_page', 50))
+        status_filters  = [s.strip() for s in request.args.getlist('status') if s.strip()]
+        pending_filters = [p.strip() for p in request.args.getlist('pending_at') if p.strip()]
+        search          = request.args.get('search', '').strip()
+        page            = int(request.args.get('page', 1))
+        per_page        = int(request.args.get('per_page', 50))
 
         q = DeliveryMonitoring.query
 
-        client_filter  = request.args.get('client', '').strip()
-        pic_filter     = request.args.get('pic', '').strip()
+        client_filters = [c.strip() for c in request.args.getlist('client') if c.strip()]
+        pic_filters    = [p.strip() for p in request.args.getlist('pic') if p.strip()]
         aging_filter   = request.args.get('aging', '').strip()  # e.g. '0-30', '30-90', '90-180', '180+'
+        date_year      = request.args.get('date_year', '').strip()
+        date_from      = request.args.get('date_from', '').strip()
+        date_to        = request.args.get('date_to', '').strip()
 
-        if status_filter:
-            q = q.filter(DeliveryMonitoring.po_status.ilike(f'%{status_filter}%'))
-        if client_filter:
-            q = q.filter(DeliveryMonitoring.client_name.ilike(f'%{client_filter}%'))
-        if pic_filter:
+        if status_filters:
+            q = q.filter(db.or_(*[
+                DeliveryMonitoring.po_status.ilike(f'%{status}%')
+                for status in status_filters
+            ]))
+        if client_filters:
+            q = q.filter(db.or_(*[
+                DeliveryMonitoring.client_name.ilike(f'%{client}%')
+                for client in client_filters
+            ]))
+        if pic_filters:
             others_tag = '__others__'
-            if pic_filter == others_tag:
-                q = q.filter(db.or_(DeliveryMonitoring.pic_name.is_(None), DeliveryMonitoring.pic_name == ''))
-            else:
-                q = q.filter(DeliveryMonitoring.pic_name == pic_filter)
+            pic_conditions = []
+            normal_pics = [pic for pic in pic_filters if pic != others_tag]
+            if normal_pics:
+                pic_conditions.append(DeliveryMonitoring.pic_name.in_(normal_pics))
+            if others_tag in pic_filters:
+                pic_conditions.append(db.or_(DeliveryMonitoring.pic_name.is_(None), DeliveryMonitoring.pic_name == ''))
+            if pic_conditions:
+                q = q.filter(db.or_(*pic_conditions))
         if aging_filter:
             today = date.today()
             if aging_filter == '0-30':
@@ -3814,6 +3888,19 @@ def get_delivery_monitoring():
                     DeliveryMonitoring.vendor_name.ilike(f'%{search}%'),
                 )
             )
+        if date_year:
+            try:
+                y = int(date_year)
+                q = q.filter(DeliveryMonitoring.po_create_date >= date(y, 1, 1), DeliveryMonitoring.po_create_date <= date(y, 12, 31))
+            except ValueError:
+                pass
+        else:
+            df = parse_date(date_from) if date_from else None
+            dt = parse_date(date_to) if date_to else None
+            if df:
+                q = q.filter(DeliveryMonitoring.po_create_date >= df)
+            if dt:
+                q = q.filter(DeliveryMonitoring.po_create_date <= dt)
 
         total = q.count()
         rows  = q.order_by(DeliveryMonitoring.po_create_date.desc()).offset((page-1)*per_page).limit(per_page).all()
@@ -3821,11 +3908,11 @@ def get_delivery_monitoring():
         data = [_row_to_dict(r) for r in rows]
 
         # Apply pending_at filter client-side (after calculation)
-        if pending_filter:
-            data = [d for d in data if d.get('pending_at') == pending_filter]
+        if pending_filters:
+            data = [d for d in data if d.get('pending_at') in pending_filters]
 
         # Summary stats for cards
-        all_rows = DeliveryMonitoring.query.all()
+        all_rows = q.all()
         non_cancel = [r for r in all_rows if not (r.po_status and 'cancel' in r.po_status.lower())]
         pending_counts = {}
         for r in non_cancel:
@@ -3837,14 +3924,11 @@ def get_delivery_monitoring():
 
         # Average leadtime per stage (across completed stages)
         stage_avg = {}
-        for _, _, label_from in DLV_PROCESS_STAGES[:-1]:
-            pass
-        stage_pairs = [(DLV_PROCESS_STAGES[i][0], DLV_PROCESS_STAGES[i+1][0],
-                        DLV_PROCESS_STAGES[i][2], DLV_PROCESS_STAGES[i+1][2])
-                       for i in range(len(DLV_PROCESS_STAGES)-1)]
-        for f_from, f_to, lbl_from, lbl_to in stage_pairs:
+        for f_from, f_to, lbl_from, lbl_to in _delivery_stage_pairs_all():
             vals = []
             for r in non_cancel:
+                if (f_from, f_to, lbl_from, lbl_to) not in _delivery_stage_pairs_for_row(r):
+                    continue
                 d_from = _dt_to_date(getattr(r, f_from))
                 d_to   = _dt_to_date(getattr(r, f_to))
                 if d_from and d_to:
@@ -3869,10 +3953,41 @@ def get_delivery_monitoring():
 def get_delivery_monitoring_summary():
     """Summary cards for Delivery Monitoring dashboard."""
     try:
-        all_rows    = DeliveryMonitoring.query.all()
+        client_filters = [c.strip() for c in request.args.getlist('client') if c.strip()]
+        date_year      = request.args.get('date_year', '').strip()
+        date_from      = request.args.get('date_from', '').strip()
+        date_to        = request.args.get('date_to', '').strip()
+
+        q = DeliveryMonitoring.query
+        if date_year:
+            try:
+                y = int(date_year)
+                q = q.filter(DeliveryMonitoring.po_create_date >= date(y, 1, 1), DeliveryMonitoring.po_create_date <= date(y, 12, 31))
+            except ValueError:
+                pass
+        else:
+            df = parse_date(date_from) if date_from else None
+            dt = parse_date(date_to) if date_to else None
+            if df:
+                q = q.filter(DeliveryMonitoring.po_create_date >= df)
+            if dt:
+                q = q.filter(DeliveryMonitoring.po_create_date <= dt)
+
+        all_unfiltered_rows = DeliveryMonitoring.query.all()
+        base_rows = q.all()
+        if client_filters:
+            all_rows = [
+                r for r in base_rows
+                if r.client_name and any(client.lower() in r.client_name.lower() for client in client_filters)
+            ]
+        else:
+            all_rows = base_rows
         total       = len(all_rows)
         cancelled   = sum(1 for r in all_rows if r.po_status and 'cancel' in r.po_status.lower())
-        completed   = sum(1 for r in all_rows if r.dlv_compl_date is not None)
+        completed   = sum(
+            1 for r in all_rows
+            if r.so_status == 'Delivery Completed' and r.dlv_compl_date is not None
+        )
         non_cancel  = [r for r in all_rows if not (r.po_status and 'cancel' in r.po_status.lower())]
 
         pending_counts = {}
@@ -3889,7 +4004,10 @@ def get_delivery_monitoring_summary():
                         'so_number':  r.so_number,
                         'po_status':  r.po_status,
                         'vendor_name': r.vendor_name,
+                        'prod_id':    r.prod_id,
+                        'category_name': _delivery_product_category(r.prod_id),
                         'prod_name':  r.prod_name,
+                        'pic_name':   r.pic_name,
                         'pending_at': lbl,
                         'workdays':   s['workdays'],
                     })
@@ -3897,16 +4015,23 @@ def get_delivery_monitoring_summary():
 
         longest_pending.sort(key=lambda x: x['workdays'] if x['workdays'] else 0, reverse=True)
 
-        # Stage avg leadtimes
-        stage_pairs = [(DLV_PROCESS_STAGES[i][0], DLV_PROCESS_STAGES[i+1][0],
-                        DLV_PROCESS_STAGES[i][2], DLV_PROCESS_STAGES[i+1][2])
-                       for i in range(len(DLV_PROCESS_STAGES)-1)]
+        # Stage avg leadtimes.
+        # Delivery Completed card uses PO Created → Delivery Completed, aligned with
+        # completed status logic, because HUB dates can be empty for completed rows.
         stage_avg = []
-        for f_from, f_to, lbl_from, lbl_to in stage_pairs:
+        for f_from, f_to, lbl_from, lbl_to in _delivery_stage_pairs_all():
             vals = []
             for r in non_cancel:
-                d_from = _dt_to_date(getattr(r, f_from))
-                d_to   = _dt_to_date(getattr(r, f_to))
+                if lbl_to == 'Delivery Completed':
+                    if r.so_status != 'Delivery Completed':
+                        continue
+                    d_from = _dt_to_date(r.po_create_date)
+                    d_to = _dt_to_date(r.dlv_compl_date)
+                else:
+                    if (f_from, f_to, lbl_from, lbl_to) not in _delivery_stage_pairs_for_row(r):
+                        continue
+                    d_from = _dt_to_date(getattr(r, f_from))
+                    d_to = _dt_to_date(getattr(r, f_to))
                 if d_from and d_to:
                     vals.append(count_workdays(d_from, d_to))
             stage_avg.append({
@@ -3917,9 +4042,33 @@ def get_delivery_monitoring_summary():
                 'count': len(vals),
             })
 
+        # Average leadtime by vendor: PO Created → Delivery Completed.
+        # Only include rows that are actually delivery completed and have both dates.
+        vendor_leadtime = {}
+        for r in non_cancel:
+            if r.so_status != 'Delivery Completed':
+                continue
+            d_from = _dt_to_date(r.po_create_date)
+            d_to = _dt_to_date(r.dlv_compl_date)
+            if not d_from or not d_to:
+                continue
+            vendor = (r.vendor_name or 'Unknown Vendor').strip() or 'Unknown Vendor'
+            vendor_leadtime.setdefault(vendor, []).append(count_workdays(d_from, d_to))
+
+        avg_vendor_leadtime = [
+            {
+                'vendor_name': vendor,
+                'avg_workdays': round(sum(vals) / len(vals), 1),
+                'count': len(vals),
+            }
+            for vendor, vals in vendor_leadtime.items()
+            if vals
+        ]
+        avg_vendor_leadtime.sort(key=lambda x: x['avg_workdays'], reverse=True)
+
         last_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'DELIVERY').scalar()
 
-        client_opts = sorted({r.client_name for r in all_rows if r.client_name})
+        client_opts = sorted({r.client_name for r in all_unfiltered_rows if r.client_name})
         pic_opts    = sorted({r.pic_name    for r in all_rows if r.pic_name})
 
         # Date range
@@ -3939,6 +4088,7 @@ def get_delivery_monitoring_summary():
             'pending_counts':  pending_counts,
             'longest_pending': longest_pending[:20],
             'stage_avg':       stage_avg,
+            'avg_vendor_leadtime': avg_vendor_leadtime,
             'last_updated':    utc_isoformat(last_upload),
             'client_options':  client_opts,
             'pic_options':     pic_opts,
