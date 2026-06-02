@@ -998,7 +998,9 @@ def refresh_item_registration_mappings():
             pic = pic_map.get(normalized_cat_id) or ''
             if not pic and re.match(r'^\d+$', normalized_cat_id):
                 pic = pic_map.get(f'{normalized_cat_id}.0') or ''
-            if row.pic != pic:
+            # Only overwrite row.pic when we actually found a mapping — never wipe
+            # an existing PIC name (e.g. ADIT) just because category_id has no entry yet
+            if pic and row.pic != pic:
                 row.pic = pic
                 changed = True
     if changed:
@@ -3720,99 +3722,94 @@ def calculate_similarity(str1, str2):
 
 
 def find_similar_registered_items(item):
-    """Find similar items from ProductIDDB based on product name, specification, manufacturer, and order unit.
-    Returns formatted similar items with >80% similarity. Uses cache to avoid recalculation.
+    """Find similar items from ProductIDDB based on product name, specification,
+    manufacturer name, and order unit.
     
-    Format:
-    - If multiple matches: product_ids joined by comma, other fields shown once
-    - If single match: all fields shown
-    - If no match: None
+    Scoring logic:
+    - Product Name carries the most weight (50%)
+    - Specification is next (30%)
+    - Manufacturer Name (15%) and Order Unit (5%) are supporting signals
+    - Fields that are both empty on both sides count as 0 (not a bonus)
+    - Total score must exceed 80% to be included
+    
+    Result format:
+    - product_ids: comma-separated list of matching product IDs (sorted by similarity desc)
+    - product_name, specification, manufacturer_name, order_unit: from the best match
+    - similarity: highest similarity score among all matches
+    - count: total number of matches
     """
-    
-    if not item.prod_id:  # Only check if no product ID yet
-        try:
-            # Create cache key based on req_no (unique identifier)
-            req_no = clean(item.req_no)
-            if not req_no:
-                return None
-            cache_key = f"req_{req_no}"
-            
-            # Check if result is in cache
-            if cache_key in _SIMILARITY_CACHE:
-                return _SIMILARITY_CACHE[cache_key]
-            
-            # Get all registered items from ProductIDDB
-            registered = ProductIDDB.query.filter(
-                ProductIDDB.product_id.isnot(None),
-                ProductIDDB.product_id != ''
-            ).all()
-            
-            similar_items = []
-            
-            for reg in registered:
-                # Calculate similarity for each field
-                name_sim = calculate_similarity(item.prod_name, reg.product_name)
-                spec_sim = calculate_similarity(item.spec, reg.specification)
-                mfr_sim = calculate_similarity(item.mfr_name, reg.manufacturer_name)
-                unit_sim = calculate_similarity(item.odr_unit, reg.order_unit)
-                
-                # Average similarity
-                total_sim = (name_sim + spec_sim + mfr_sim + unit_sim) / 4.0
-                
-                # Only include if >80% similar
-                if total_sim > 80.0:
-                    similar_items.append({
-                        'product_id': reg.product_id,
-                        'product_name': reg.product_name,
-                        'specification': reg.specification,
-                        'manufacturer_name': reg.manufacturer_name,
-                        'order_unit': reg.order_unit,
-                        'similarity': round(total_sim, 1)
-                    })
-            
-            # Sort by similarity descending
-            similar_items.sort(key=lambda x: x['similarity'], reverse=True)
-            
-            # Format result according to requirement
-            if not similar_items:
-                result = None
-            elif len(similar_items) == 1:
-                # Single match: return all fields
-                result = {
-                    'product_ids': similar_items[0]['product_id'],
-                    'product_name': similar_items[0]['product_name'],
-                    'specification': similar_items[0]['specification'],
-                    'manufacturer_name': similar_items[0]['manufacturer_name'],
-                    'order_unit': similar_items[0]['order_unit'],
-                    'similarity': similar_items[0]['similarity'],
-                    'count': 1
-                }
-            else:
-                # Multiple matches: join product_ids with comma, show other fields once from first match
-                product_ids = ', '.join([item['product_id'] for item in similar_items])
-                result = {
-                    'product_ids': product_ids,
-                    'product_name': similar_items[0]['product_name'],
-                    'specification': similar_items[0]['specification'],
-                    'manufacturer_name': similar_items[0]['manufacturer_name'],
-                    'order_unit': similar_items[0]['order_unit'],
-                    'similarity': similar_items[0]['similarity'],  # Show highest similarity
-                    'count': len(similar_items)
-                }
-            
-            # Store in cache
-            _SIMILARITY_CACHE[cache_key] = result
-            save_similarity_cache()
-            
-            return result
-            
-        except Exception as e:
-            print(f"Error finding similar items: {e}")
-            import traceback
-            traceback.print_exc()
+    if item.prod_id:   # Already registered — skip
+        return None
+    try:
+        req_no = clean(item.req_no)
+        if not req_no:
             return None
-    
-    return None
+        cache_key = f"req_{req_no}"
+        if cache_key in _SIMILARITY_CACHE:
+            return _SIMILARITY_CACHE[cache_key]
+
+        # Pre-load all registered items once
+        registered = ProductIDDB.query.filter(
+            ProductIDDB.product_id.isnot(None),
+            ProductIDDB.product_id != ''
+        ).all()
+
+        similar_items = []
+        item_name = clean(item.prod_name or '')
+        item_spec = clean(item.spec or '')
+        item_mfr  = clean(item.mfr_name or '')
+        item_unit = clean(item.odr_unit or '')
+
+        for reg in registered:
+            reg_name = clean(reg.product_name or '')
+            reg_spec = clean(reg.specification or '')
+            reg_mfr  = clean(reg.manufacturer_name or '')
+            reg_unit = clean(reg.order_unit or '')
+
+            # Weighted similarity — name is the primary signal
+            name_sim = calculate_similarity(item_name, reg_name) if (item_name or reg_name) else 0.0
+            spec_sim = calculate_similarity(item_spec, reg_spec) if (item_spec or reg_spec) else 0.0
+            mfr_sim  = calculate_similarity(item_mfr,  reg_mfr)  if (item_mfr  or reg_mfr)  else 0.0
+            unit_sim = calculate_similarity(item_unit, reg_unit) if (item_unit or reg_unit) else 0.0
+
+            total_sim = (name_sim * 0.50) + (spec_sim * 0.30) + (mfr_sim * 0.15) + (unit_sim * 0.05)
+
+            if total_sim > 80.0:
+                similar_items.append({
+                    'product_id':        reg.product_id,
+                    'product_name':      reg.product_name or '',
+                    'specification':     reg.specification or '',
+                    'manufacturer_name': reg.manufacturer_name or '',
+                    'order_unit':        reg.order_unit or '',
+                    'similarity':        round(total_sim, 1),
+                })
+
+        similar_items.sort(key=lambda x: x['similarity'], reverse=True)
+
+        if not similar_items:
+            result = None
+        else:
+            best = similar_items[0]
+            result = {
+                # All matching product IDs, comma-separated, ordered by similarity desc
+                'product_ids':       ', '.join(s['product_id'] for s in similar_items),
+                # Fields from the best match (shown once)
+                'product_name':      best['product_name'],
+                'specification':     best['specification'],
+                'manufacturer_name': best['manufacturer_name'],
+                'order_unit':        best['order_unit'],
+                'similarity':        best['similarity'],
+                'count':             len(similar_items),
+            }
+
+        _SIMILARITY_CACHE[cache_key] = result
+        save_similarity_cache()
+        return result
+
+    except Exception as e:
+        print(f"Error finding similar items: {e}")
+        import traceback; traceback.print_exc()
+        return None
 
 
 @app.route('/api/item-registration/data', methods=['GET'])
@@ -3856,20 +3853,27 @@ def get_item_registration_data():
 
         total = q.count()
         missing_prod_rows = q.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-')).all()
+        # Pre-load MasterPIC map once for all row resolutions below
+        _kpi_pic_map = {p.category_id: p.pic_name for p in db.session.query(MasterPIC).all()}
+        def _resolve_pic_for_kpi(cat_id, raw_pic, client_name):
+            cid = normalize_category_id(cat_id) if cat_id else ''
+            pic = _kpi_pic_map.get(cid) or ''
+            if not pic and cid and re.match(r'^\d+$', cid):
+                pic = _kpi_pic_map.get(f'{cid}.0') or ''
+            # Fall back to raw_pic stored in DB (never discard e.g. ADIT)
+            final = pic or raw_pic or ''
+            if 'YUPI' in (client_name or '').upper():
+                final = 'ANDRE'
+            return final or 'Unassigned'
         missing_by_pic = {}
         for r in missing_prod_rows:
-            # Use same PIC resolution logic as item_registration_dict:
-            # 1. lookup from MasterPIC by category_id
-            # 2. YUPI client_name -> override to ANDRE
-            # 3. fallback to r.pic, then Unassigned
-            resolved_pic = _lookup_pic_by_category_id(r.category_id) or r.pic or ''
-            if 'YUPI' in (r.client_name or '').upper():
-                resolved_pic = 'ANDRE'
-            pic = resolved_pic or 'Unassigned'
+            pic = _resolve_pic_for_kpi(r.category_id, r.pic, r.client_name)
             missing_by_pic[pic] = missing_by_pic.get(pic, 0) + 1
+        # Exclude 'Unassigned' from KPI cards — only show named PICs
         missing_prod_id_by_pic = [
             {'pic': pic, 'count': count}
             for pic, count in sorted(missing_by_pic.items(), key=lambda x: x[1], reverse=True)
+            if pic != 'Unassigned'
         ]
         rows = q.order_by(ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()).offset((page-1)*per_page).limit(per_page).all()
 
@@ -3886,14 +3890,14 @@ def get_item_registration_data():
         all_proc_statuses = sorted(
             v for (v,) in option_q_base.with_entities(ItemRegistration.proc_status).distinct().all() if v
         )
-        # pic_options: use resolved PIC names (from missing_by_pic which already has full resolved set)
-        # Collect all unique resolved PICs across all records (not just missing ones) using same resolution
+        # pic_options: use resolved PIC names — preserve raw DB pic when no MasterPIC match
         _pic_map = {p.category_id: p.pic_name for p in db.session.query(MasterPIC).all()}
         def _resolve_pic_fast(cat_id, raw_pic, client_name):
-            cid = cat_id or ''
+            cid = normalize_category_id(cat_id) if cat_id else ''
             pic = _pic_map.get(cid) or ''
-            if not pic and re.match(r'^\d+$', cid):
+            if not pic and cid and re.match(r'^\d+$', cid):
                 pic = _pic_map.get(f'{cid}.0') or ''
+            # Fall back to raw_pic (preserves e.g. ADIT when no MasterPIC entry)
             final = pic or raw_pic or ''
             if 'YUPI' in (client_name or '').upper():
                 final = 'ANDRE'
@@ -3944,6 +3948,14 @@ def upload_item_registration():
         df = pd.read_excel(file, engine='openpyxl')
         count = import_item_registration_dataframe(df, file.filename)
         db.session.commit()
+        # Invalidate similarity cache so fresh checks run on next page load
+        global _SIMILARITY_CACHE
+        _SIMILARITY_CACHE = {}
+        try:
+            if os.path.exists(_SIMILARITY_CACHE_FILE):
+                os.remove(_SIMILARITY_CACHE_FILE)
+        except Exception:
+            pass
         return jsonify({'message': f'Berhasil upload {count} data Item Registration', 'uploaded': count})
     except Exception as e:
         db.session.rollback()
