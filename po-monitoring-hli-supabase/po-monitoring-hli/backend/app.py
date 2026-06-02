@@ -880,6 +880,62 @@ def find_column(df, names):
         if n.lower().strip() in low: return low[n.lower().strip()]
     return None
 
+def uploaded_files():
+    files = []
+    for key in ('file', 'files'):
+        files.extend(request.files.getlist(key))
+    return [f for f in files if f and f.filename]
+
+def read_upload_excel(file):
+    raw = file.read()
+    file.seek(0)
+    filename = (file.filename or '').lower()
+    is_xls_format = raw[:4] == b'\xd0\xcf\x11\xe0'
+    engine = 'xlrd' if is_xls_format or filename.endswith('.xls') else 'openpyxl'
+    return pd.read_excel(file, sheet_name=0, engine=engine)
+
+def validate_upload_columns(filename, label, col_map, expected, required, max_missing=3):
+    missing_expected = [display for key, display in expected if not col_map.get(key)]
+    if len(missing_expected) > max_missing:
+        raise ValueError(
+            f'File "{filename}" salah untuk {label}: lebih dari {max_missing} kolom penting tidak ditemukan '
+            f'({", ".join(missing_expected)}). Pastikan file yang diupload benar.'
+        )
+    missing_required = [display for key, display in required if not col_map.get(key)]
+    if missing_required:
+        raise ValueError(
+            f'File "{filename}" salah untuk {label}: kolom wajib tidak ditemukan: '
+            f'{", ".join(missing_required)}.'
+        )
+
+def _product_id_columns(df):
+    return {
+        'product_id': find_column(df, ['Product ID', 'Prod. ID', 'Prod ID']),
+        'category_id': find_column(df, ['Category ID', 'Category Id', 'CategoryID', 'Cat. ID', 'Cat. ID.']),
+        'category_name': find_column(df, ['Category Name', 'Category Nm.', 'Cat. Nm.', 'Cat. Nm']),
+        'product_name': find_column(df, ['Product Name', 'Prod. Nm.', 'Prod. Nm', 'Product Name(EN)']),
+        'product_status': find_column(df, ['Product Status', 'Prod. Status', 'Prod Status']),
+        'specification': find_column(df, ['Specification', 'Spec.', 'Spec']),
+        'manufacturer_name': find_column(df, ['Manufacturer Name', 'Mfr. Nm.', 'Mfr. Nm', 'Maker Nm.']),
+        'order_unit': find_column(df, ['Order Unit', 'Odr. Unit', 'Odr. Unit.']),
+        'hub_handling_check': find_column(df, ['HUB Handling Check', 'HUB Handling Chk.', 'HUB Handling Chk']),
+        'tax_type': find_column(df, ['Purchasing Price Tax Type', 'Tax Type', 'Tax Type.', 'Tax']),
+        'registration_date': find_column(df, ['Registration Date', 'Prod. Reg. Date', 'Product Registration Date', 'Product Reg. Date', 'Reg. Date']),
+        'product_registry_pic': find_column(df, [
+            'Product Registy PIC(Name)', 'Product Registry PIC(Name)',
+            'Product Registy PIC', 'Product Registry PIC',
+            'Product Registered by(Name)', 'Prod. Reg. PIC Nm.', 'Prod. Reg. PIC Nm',
+            'Prod. Reg. PIC', 'Product Registry PIC Name'
+        ]),
+    }
+
+def _master_pic_columns(df):
+    return {
+        'category_id': find_column(df, ['Category ID', 'Category Id', 'CategoryID', 'Cat. ID', 'Cat. ID.']),
+        'category_name': find_column(df, ['Category Name', 'Category Nm.', 'Cat. Nm.', 'Cat. Nm']),
+        'pic': find_column(df, ['PIC', 'PIC Name', 'Pur. PIC', 'Purchase PIC']),
+    }
+
 def selected_clients(args=None):
     args = args if args is not None else request.args
     return [c.strip() for c in args.getlist('client') if c and c.strip()]
@@ -904,6 +960,12 @@ def apply_so_pic_filter(query, pics):
         return query
     if '__NONE_PLACEHOLDER__' in pics:
         return query.filter(SOData.id.is_(None))
+    if 'ANDRE' in pics:
+        others = [p for p in pics if p != 'ANDRE']
+        andre_filter = db.or_(SOData.pic_name == 'ANDRE', SOData.operation_unit_name.ilike('%YUPI%'))
+        if others:
+            return query.filter(db.or_(SOData.pic_name.in_(others), andre_filter))
+        return query.filter(andre_filter)
     if '(Kosong)' in pics:
         others = [p for p in pics if p != '(Kosong)']
         empty_pic = db.or_(SOData.pic_name.is_(None), SOData.pic_name == '')
@@ -912,19 +974,34 @@ def apply_so_pic_filter(query, pics):
         return query.filter(empty_pic)
     return query.filter(SOData.pic_name.in_(pics))
 
-def item_registration_dict(row, include_similarity=False):
+def canonical_pending_pic(pic, client_or_op_unit=None):
+    if client_or_op_unit and 'YUPI' in str(client_or_op_unit).upper():
+        return 'ANDRE'
+    return pic or 'Unassigned'
+
+def sort_pic_kpis(rows):
+    return sorted(rows, key=lambda x: (0 if x.get('pic') == 'ANDRE' else 1, -x.get('count', 0), x.get('pic') or ''))
+
+def apply_item_registration_pic_filter(query, pics):
+    if not pics:
+        return query
+    if 'ANDRE' in pics:
+        others = [p for p in pics if p != 'ANDRE']
+        andre_filter = db.or_(ItemRegistration.pic == 'ANDRE', ItemRegistration.client_name.ilike('%YUPI%'))
+        if others:
+            return query.filter(db.or_(ItemRegistration.pic.in_(others), andre_filter))
+        return query.filter(andre_filter)
+    return query.filter(ItemRegistration.pic.in_(pics))
+
+def item_registration_dict(row, registered_items=None):
     pic = _lookup_pic_by_category_id(row.category_id)
-    final_pic = pic or row.pic or ''
-    # If client name contains YUPI, override PIC to ANDRE
-    if 'YUPI' in (row.client_name or '').upper():
-        final_pic = 'ANDRE'
-    similar_items = find_similar_registered_items(row) if include_similarity else None
+    similar_items = find_similar_registered_items(row, registered_items)
     return {
         'id': row.id,
         'proc_status': row.proc_status or '',
         'client_name': row.client_name or '',
         'category': source_category_level1(row.category),
-        'pic': final_pic,
+        'pic': pic or row.pic or '',
         'req_no': row.req_no or '',
         'prod_id': row.prod_id or '',
         'batch_grp_no': row.batch_grp_no or '',
@@ -938,6 +1015,13 @@ def item_registration_dict(row, include_similarity=False):
         'remarks': row.remarks or '',
         'uploaded_at': utc_isoformat(row.uploaded_at),
         'similar_items': similar_items,
+        'similar_prod_ids': (similar_items or {}).get('product_ids', ''),
+        'similar_prod_name': (similar_items or {}).get('product_name', ''),
+        'similar_spec': (similar_items or {}).get('specification', ''),
+        'similar_mfr_name': (similar_items or {}).get('manufacturer_name', ''),
+        'similar_odr_unit': (similar_items or {}).get('order_unit', ''),
+        'similar_score': (similar_items or {}).get('similarity', None),
+        'similar_count': (similar_items or {}).get('count', 0),
     }
 
 def product_category_level1(product_id):
@@ -966,22 +1050,7 @@ def normalize_category_id(value):
         return cat_id[:-2]
     return cat_id.strip()
 
-_REFRESH_MAPPINGS_LAST_RUN = 0
-_REFRESH_MAPPINGS_TTL = 60  # seconds
-
 def refresh_item_registration_mappings():
-    """Sync category/PIC values for all ItemRegistration rows.
-    Throttled to at most once per 60 seconds to avoid hammering the DB on every page load."""
-    import time
-    global _REFRESH_MAPPINGS_LAST_RUN
-    now = time.time()
-    if now - _REFRESH_MAPPINGS_LAST_RUN < _REFRESH_MAPPINGS_TTL:
-        return
-    _REFRESH_MAPPINGS_LAST_RUN = now
-
-    # Pre-load all MasterPIC rows into a dict to avoid N+1 queries
-    pic_map = {p.category_id: p.pic_name for p in db.session.query(MasterPIC).all()}
-
     rows = ItemRegistration.query.all()
     changed = False
     for row in rows:
@@ -994,13 +1063,8 @@ def refresh_item_registration_mappings():
             row.category = category
             changed = True
         if normalized_cat_id:
-            # Try exact match, then with .0 suffix (same logic as _lookup_pic_by_category_id)
-            pic = pic_map.get(normalized_cat_id) or ''
-            if not pic and re.match(r'^\d+$', normalized_cat_id):
-                pic = pic_map.get(f'{normalized_cat_id}.0') or ''
-            # Only overwrite row.pic when we actually found a mapping — never wipe
-            # an existing PIC name (e.g. ADIT) just because category_id has no entry yet
-            if pic and row.pic != pic:
+            pic = _lookup_pic_by_category_id(normalized_cat_id) or ''
+            if row.pic != pic:
                 row.pic = pic
                 changed = True
     if changed:
@@ -1042,86 +1106,86 @@ def _item_registration_columns(df):
 def import_item_registration_dataframe(df, filename='Item Registration'):
     df.columns = [str(c).strip() for c in df.columns]
     col = _item_registration_columns(df)
-    required = ['proc_status', 'client_name', 'category', 'category_id', 'req_no', 'prod_name']
-    missing = [name for name in required if not col[name]]
-    if missing:
-        raise ValueError(f'Kolom wajib tidak ditemukan: {", ".join(missing)}. Kolom tersedia: {df.columns.tolist()}')
+    expected = [
+        ('proc_status', 'Proc. Status'), ('client_name', 'Client Nm.'),
+        ('category', 'Cat. Nm.'), ('category_id', 'Category ID'),
+        ('req_no', 'Req. No'), ('prod_name', 'Product Name'),
+        ('spec', 'Specification'), ('mfr_name', 'Manufacturer Name'),
+        ('odr_unit', 'Order Unit'), ('vendor_name', 'Vendor Name'),
+        ('prod_price', 'Prod. Price'), ('curr', 'Curr.')
+    ]
+    required = [
+        ('proc_status', 'Proc. Status'), ('client_name', 'Client Nm.'),
+        ('category', 'Cat. Nm.'), ('category_id', 'Category ID'),
+        ('req_no', 'Req. No'), ('prod_name', 'Product Name')
+    ]
+    validate_upload_columns(filename, 'Item Registration', col, expected, required)
 
-    # Upsert by Req. No (unique key): update existing, insert new, no delete
-    added = updated = 0
-    # Build a lookup of existing records by req_no for fast access
-    existing_map = {}
-    for item in ItemRegistration.query.all():
-        key = clean(item.req_no)
-        if key:
-            existing_map[key] = item
-
+    incoming = {}
     for _, row in df.iterrows():
         req_no = clean(df_val(row, col['req_no']))
         prod_id = clean_product_id(df_val(row, col['prod_id']))
         prod_name = clean(df_val(row, col['prod_name']))
-        if not req_no and not prod_id and not prod_name:
+        if not req_no:
             continue
+        category_id = normalize_category_id(df_val(row, col['category_id']))
+        incoming[req_no] = {
+            'proc_status': clean(df_val(row, col['proc_status'])),
+            'client_name': clean(df_val(row, col['client_name'])),
+            'category': source_category_level1(df_val(row, col['category'])),
+            'category_id': category_id,
+            'pic': _lookup_pic_by_category_id(category_id) or '',
+            'req_no': req_no,
+            'prod_id': prod_id,
+            'product_status': clean(df_val(row, col['product_status'])),
+            'batch_grp_no': clean(df_val(row, col['batch_grp_no'])),
+            'prod_name': prod_name,
+            'spec': clean(df_val(row, col['spec'])),
+            'mfr_name': clean(df_val(row, col['mfr_name'])),
+            'odr_unit': clean(df_val(row, col['odr_unit'])),
+            'vendor_name': clean(df_val(row, col['vendor_name'])),
+            'prod_price': safe_float(df_val(row, col['prod_price'])),
+            'curr': clean(df_val(row, col['curr'])),
+            'hub_handling_check': clean(df_val(row, col['hub_handling_check'])),
+            'tax_type': clean(df_val(row, col['tax_type'])),
+            'registration_date': parse_date(df_val(row, col['registration_date'])),
+            'product_registry_pic': clean(df_val(row, col['product_registry_pic'])),
+            'uploaded_at': datetime.utcnow(),
+        }
 
-        cat_id = normalize_category_id(df_val(row, col['category_id']))
-        pic = _lookup_pic_by_category_id(cat_id) or ''
+    req_numbers = list(incoming.keys())
+    existing_map = {}
+    duplicate_rows = []
+    if req_numbers:
+        existing_rows = ItemRegistration.query.filter(ItemRegistration.req_no.in_(req_numbers)).order_by(ItemRegistration.id.asc()).all()
+        for existing in existing_rows:
+            if existing.req_no in existing_map:
+                duplicate_rows.append(existing)
+            else:
+                existing_map[existing.req_no] = existing
 
-        if req_no and req_no in existing_map:
-            # Update existing record
-            item = existing_map[req_no]
-            item.proc_status = clean(df_val(row, col['proc_status']))
-            item.client_name = clean(df_val(row, col['client_name']))
-            item.category = source_category_level1(df_val(row, col['category']))
-            item.category_id = cat_id
-            item.pic = pic
-            item.prod_id = prod_id
-            item.product_status = clean(df_val(row, col['product_status']))
-            item.batch_grp_no = clean(df_val(row, col['batch_grp_no']))
-            item.prod_name = prod_name
-            item.spec = clean(df_val(row, col['spec']))
-            item.mfr_name = clean(df_val(row, col['mfr_name']))
-            item.odr_unit = clean(df_val(row, col['odr_unit']))
-            item.vendor_name = clean(df_val(row, col['vendor_name']))
-            item.prod_price = safe_float(df_val(row, col['prod_price']))
-            item.curr = clean(df_val(row, col['curr']))
-            item.hub_handling_check = clean(df_val(row, col['hub_handling_check']))
-            item.tax_type = clean(df_val(row, col['tax_type']))
-            item.registration_date = parse_date(df_val(row, col['registration_date']))
-            item.product_registry_pic = clean(df_val(row, col['product_registry_pic']))
-            item.uploaded_at = datetime.utcnow()
+    added = updated = removed_duplicates = 0
+    for dup in duplicate_rows:
+        db.session.delete(dup)
+        removed_duplicates += 1
+
+    for req_no, payload in incoming.items():
+        existing = existing_map.get(req_no)
+        if existing:
+            for key, value in payload.items():
+                setattr(existing, key, value)
             updated += 1
         else:
-            # Insert new record
-            new_item = ItemRegistration(
-                proc_status=clean(df_val(row, col['proc_status'])),
-                client_name=clean(df_val(row, col['client_name'])),
-                category=source_category_level1(df_val(row, col['category'])),
-                category_id=cat_id,
-                pic=pic,
-                req_no=req_no,
-                prod_id=prod_id,
-                product_status=clean(df_val(row, col['product_status'])),
-                batch_grp_no=clean(df_val(row, col['batch_grp_no'])),
-                prod_name=prod_name,
-                spec=clean(df_val(row, col['spec'])),
-                mfr_name=clean(df_val(row, col['mfr_name'])),
-                odr_unit=clean(df_val(row, col['odr_unit'])),
-                vendor_name=clean(df_val(row, col['vendor_name'])),
-                prod_price=safe_float(df_val(row, col['prod_price'])),
-                curr=clean(df_val(row, col['curr'])),
-                hub_handling_check=clean(df_val(row, col['hub_handling_check'])),
-                tax_type=clean(df_val(row, col['tax_type'])),
-                registration_date=parse_date(df_val(row, col['registration_date'])),
-                product_registry_pic=clean(df_val(row, col['product_registry_pic'])),
-                uploaded_at=datetime.utcnow(),
-            )
-            db.session.add(new_item)
-            if req_no:
-                existing_map[req_no] = new_item
+            db.session.add(ItemRegistration(**payload))
             added += 1
 
-    db.session.add(UploadLog(file_type='ITEM_REG', filename=filename, records_count=added + updated))
-    return added + updated
+    db.session.add(UploadLog(file_type='ITEM_REG', filename=filename, records_count=len(incoming)))
+    return {
+        'processed': len(incoming),
+        'added': added,
+        'updated': updated,
+        'removed_duplicates': removed_duplicates,
+    }
 
 def ensure_default_item_registration_loaded():
     if db.session.query(func.count(ItemRegistration.id)).scalar():
@@ -2017,19 +2081,19 @@ def get_all_so():
         op_units_opts = sorted({s.operation_unit_name for s in all_sos if s.operation_unit_name})
         vendors_opts  = sorted({s.vendor_name for s in all_sos if s.vendor_name})
         statuses_opts = sorted({s.so_status for s in all_sos if s.so_status})
-        pics_opts     = sorted({s.pic_name for s in all_sos if s.pic_name})
+        pics_opts     = sorted({canonical_pending_pic(s.pic_name, s.operation_unit_name) for s in all_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) != 'Unassigned'})
 
         # Calculate PIC aggregations from ALL filtered records (not just current page)
         pic_aggregations = {}
         for s in all_sos:
-            pic = s.pic_name if s.pic_name else 'Unassigned'
+            pic = canonical_pending_pic(s.pic_name, s.operation_unit_name)
             if pic not in pic_aggregations:
                 pic_aggregations[pic] = {'pic': pic, 'count': 0, 'amount': 0}
             pic_aggregations[pic]['count'] += 1
             pic_aggregations[pic]['amount'] += float(s.sales_amount or 0)
         
-        # Sort by count descending, then by name
-        pic_aggs_list = sorted(pic_aggregations.values(), key=lambda x: (-x['count'], x['pic']))
+        # Sort with ANDRE first, then by count descending and name.
+        pic_aggs_list = sort_pic_kpis(list(pic_aggregations.values()))
 
         return jsonify({
             'data': [so_dict(s) for s in paged],
@@ -3721,94 +3785,81 @@ def calculate_similarity(str1, str2):
     return min(100.0, jaccard + substring_bonus)
 
 
-def find_similar_registered_items(item):
-    """Find similar items from ProductIDDB based on product name, specification,
-    manufacturer name, and order unit.
-    
-    Scoring logic:
-    - Product Name carries the most weight (50%)
-    - Specification is next (30%)
-    - Manufacturer Name (15%) and Order Unit (5%) are supporting signals
-    - Fields that are both empty on both sides count as 0 (not a bonus)
-    - Total score must exceed 80% to be included
-    
-    Result format:
-    - product_ids: comma-separated list of matching product IDs (sorted by similarity desc)
-    - product_name, specification, manufacturer_name, order_unit: from the best match
-    - similarity: highest similarity score among all matches
-    - count: total number of matches
+def find_similar_registered_items(item, registered_items=None):
+    """Find Product ID master rows similar to an Item Registration row.
+
+    Similarity uses Product Name, Specification, Manufacturer Name, and Order
+    Unit. Rows with an overall score above 80% are returned. If more than one
+    registered product matches, Product IDs are joined with commas while the
+    descriptive fields are shown once from the best match.
     """
-    if item.prod_id:   # Already registered — skip
-        return None
     try:
-        req_no = clean(item.req_no)
-        if not req_no:
+        key_fields = [item.prod_name, item.spec, item.mfr_name, item.odr_unit]
+        if not any(clean(v) for v in key_fields):
             return None
-        cache_key = f"req_{req_no}"
+
+        current_prod_id = clean_product_id(item.prod_id)
+        cache_key = '|'.join([
+            'similar_v3',
+            clean(item.req_no),
+            current_prod_id,
+            clean(item.prod_name).lower(),
+            clean(item.spec).lower(),
+            clean(item.mfr_name).lower(),
+            clean(item.odr_unit).lower(),
+        ])
         if cache_key in _SIMILARITY_CACHE:
             return _SIMILARITY_CACHE[cache_key]
 
-        # Pre-load all registered items once
-        registered = ProductIDDB.query.filter(
-            ProductIDDB.product_id.isnot(None),
-            ProductIDDB.product_id != ''
-        ).all()
+        if registered_items is None:
+            registered_items = ProductIDDB.query.filter(
+                ProductIDDB.product_id.isnot(None),
+                ProductIDDB.product_id != ''
+            ).all()
 
         similar_items = []
-        item_name = clean(item.prod_name or '')
-        item_spec = clean(item.spec or '')
-        item_mfr  = clean(item.mfr_name or '')
-        item_unit = clean(item.odr_unit or '')
+        for reg in registered_items:
+            reg_prod_id = clean_product_id(reg.product_id)
+            if not reg_prod_id or (current_prod_id and reg_prod_id == current_prod_id):
+                continue
 
-        for reg in registered:
-            reg_name = clean(reg.product_name or '')
-            reg_spec = clean(reg.specification or '')
-            reg_mfr  = clean(reg.manufacturer_name or '')
-            reg_unit = clean(reg.order_unit or '')
-
-            # Weighted similarity — name is the primary signal
-            name_sim = calculate_similarity(item_name, reg_name) if (item_name or reg_name) else 0.0
-            spec_sim = calculate_similarity(item_spec, reg_spec) if (item_spec or reg_spec) else 0.0
-            mfr_sim  = calculate_similarity(item_mfr,  reg_mfr)  if (item_mfr  or reg_mfr)  else 0.0
-            unit_sim = calculate_similarity(item_unit, reg_unit) if (item_unit or reg_unit) else 0.0
-
-            total_sim = (name_sim * 0.50) + (spec_sim * 0.30) + (mfr_sim * 0.15) + (unit_sim * 0.05)
+            name_sim = calculate_similarity(item.prod_name, reg.product_name)
+            spec_sim = calculate_similarity(item.spec, reg.specification)
+            mfr_sim = calculate_similarity(item.mfr_name, reg.manufacturer_name)
+            unit_sim = calculate_similarity(item.odr_unit, reg.order_unit)
+            total_sim = (name_sim + spec_sim + mfr_sim + unit_sim) / 4.0
 
             if total_sim > 80.0:
                 similar_items.append({
-                    'product_id':        reg.product_id,
-                    'product_name':      reg.product_name or '',
-                    'specification':     reg.specification or '',
+                    'product_id': reg_prod_id,
+                    'product_name': reg.product_name or '',
+                    'specification': reg.specification or '',
                     'manufacturer_name': reg.manufacturer_name or '',
-                    'order_unit':        reg.order_unit or '',
-                    'similarity':        round(total_sim, 1),
+                    'order_unit': reg.order_unit or '',
+                    'similarity': round(total_sim, 1)
                 })
 
-        similar_items.sort(key=lambda x: x['similarity'], reverse=True)
-
+        similar_items.sort(key=lambda x: (-x['similarity'], x['product_id']))
         if not similar_items:
             result = None
         else:
             best = similar_items[0]
             result = {
-                # All matching product IDs, comma-separated, ordered by similarity desc
-                'product_ids':       ', '.join(s['product_id'] for s in similar_items),
-                # Fields from the best match (shown once)
-                'product_name':      best['product_name'],
-                'specification':     best['specification'],
+                'product_ids': ', '.join(x['product_id'] for x in similar_items),
+                'product_name': best['product_name'],
+                'specification': best['specification'],
                 'manufacturer_name': best['manufacturer_name'],
-                'order_unit':        best['order_unit'],
-                'similarity':        best['similarity'],
-                'count':             len(similar_items),
+                'order_unit': best['order_unit'],
+                'similarity': best['similarity'],
+                'count': len(similar_items)
             }
 
         _SIMILARITY_CACHE[cache_key] = result
-        save_similarity_cache()
         return result
-
     except Exception as e:
         print(f"Error finding similar items: {e}")
-        import traceback; traceback.print_exc()
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -3834,8 +3885,7 @@ def get_item_registration_data():
             q = q.filter(ItemRegistration.client_name.in_(item_clients))
         if categories:
             q = q.filter(ItemRegistration.category.in_(categories))
-        if pics:
-            q = q.filter(ItemRegistration.pic.in_(pics))
+        q = apply_item_registration_pic_filter(q, pics)
         if proc_statuses:
             q = q.filter(ItemRegistration.proc_status.in_(proc_statuses))
         if req_numbers:
@@ -3853,64 +3903,31 @@ def get_item_registration_data():
 
         total = q.count()
         missing_prod_rows = q.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-')).all()
-        # Pre-load MasterPIC map once for all row resolutions below
-        _kpi_pic_map = {p.category_id: p.pic_name for p in db.session.query(MasterPIC).all()}
-        def _resolve_pic_for_kpi(cat_id, raw_pic, client_name):
-            cid = normalize_category_id(cat_id) if cat_id else ''
-            pic = _kpi_pic_map.get(cid) or ''
-            if not pic and cid and re.match(r'^\d+$', cid):
-                pic = _kpi_pic_map.get(f'{cid}.0') or ''
-            # Fall back to raw_pic stored in DB (never discard e.g. ADIT)
-            final = pic or raw_pic or ''
-            if 'YUPI' in (client_name or '').upper():
-                final = 'ANDRE'
-            return final or 'Unassigned'
         missing_by_pic = {}
         for r in missing_prod_rows:
-            pic = _resolve_pic_for_kpi(r.category_id, r.pic, r.client_name)
+            pic = canonical_pending_pic(r.pic, r.client_name)
             missing_by_pic[pic] = missing_by_pic.get(pic, 0) + 1
-        # Exclude 'Unassigned' from KPI cards — only show named PICs
         missing_prod_id_by_pic = [
             {'pic': pic, 'count': count}
-            for pic, count in sorted(missing_by_pic.items(), key=lambda x: x[1], reverse=True)
-            if pic != 'Unassigned'
+            for pic, count in [(row['pic'], row['count']) for row in sort_pic_kpis([{'pic': pic, 'count': count} for pic, count in missing_by_pic.items()])]
         ]
         rows = q.order_by(ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()).offset((page-1)*per_page).limit(per_page).all()
-
-        # Use DISTINCT queries instead of fetching all rows — much faster on large tables
-        option_q_base = ItemRegistration.query
+        option_q = ItemRegistration.query
         if clients:
-            option_q_base = option_q_base.filter(ItemRegistration.client_name.in_(clients))
-        all_clients = sorted(
-            v for (v,) in option_q_base.with_entities(ItemRegistration.client_name).distinct().all() if v
-        )
-        all_categories = sorted(
-            v for (v,) in option_q_base.with_entities(ItemRegistration.category).distinct().all() if v
-        )
-        all_proc_statuses = sorted(
-            v for (v,) in option_q_base.with_entities(ItemRegistration.proc_status).distinct().all() if v
-        )
-        # pic_options: use resolved PIC names — preserve raw DB pic when no MasterPIC match
-        _pic_map = {p.category_id: p.pic_name for p in db.session.query(MasterPIC).all()}
-        def _resolve_pic_fast(cat_id, raw_pic, client_name):
-            cid = normalize_category_id(cat_id) if cat_id else ''
-            pic = _pic_map.get(cid) or ''
-            if not pic and cid and re.match(r'^\d+$', cid):
-                pic = _pic_map.get(f'{cid}.0') or ''
-            # Fall back to raw_pic (preserves e.g. ADIT when no MasterPIC entry)
-            final = pic or raw_pic or ''
-            if 'YUPI' in (client_name or '').upper():
-                final = 'ANDRE'
-            return final
-
-        _pic_rows = option_q_base.with_entities(
-            ItemRegistration.category_id, ItemRegistration.pic, ItemRegistration.client_name
-        ).distinct().all()
-        _resolved_pics = [_resolve_pic_fast(r[0], r[1], r[2]) for r in _pic_rows]
-        all_pics = sorted({p for p in _resolved_pics if p})
+            option_q = option_q.filter(ItemRegistration.client_name.in_(clients))
+        option_rows = option_q.all()
+        all_clients = sorted({r.client_name for r in option_rows if r.client_name})
+        all_categories = sorted({r.category for r in option_rows if r.category})
+        all_pics = sorted({canonical_pending_pic(r.pic, r.client_name) for r in option_rows if canonical_pending_pic(r.pic, r.client_name) != 'Unassigned'})
+        all_proc_statuses = sorted({r.proc_status for r in option_rows if r.proc_status})
         last_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'ITEM_REG').scalar()
+        registered_products = ProductIDDB.query.filter(
+            ProductIDDB.product_id.isnot(None),
+            ProductIDDB.product_id != ''
+        ).all()
+
         return jsonify({
-            'data': [item_registration_dict(r, include_similarity=False) for r in rows],
+            'data': [item_registration_dict(r, registered_products) for r in rows],
             'total': total,
             'page': page,
             'per_page': per_page,
@@ -3926,37 +3943,32 @@ def get_item_registration_data():
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/item-registration/similarity/<path:req_no>', methods=['GET'])
-def get_item_registration_similarity(req_no):
-    """Lazy-load similarity for a single Item Registration row by req_no."""
-    try:
-        item = ItemRegistration.query.filter_by(req_no=req_no).first()
-        if not item:
-            return jsonify({'similar_items': None})
-        similar = find_similar_registered_items(item)
-        return jsonify({'similar_items': similar})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
 @app.route('/api/upload/item-registration', methods=['POST'])
 def upload_item_registration():
     try:
-        if 'file' not in request.files:
+        files = uploaded_files()
+        if not files:
             return jsonify({'error': 'No file uploaded'}), 400
-        file = request.files['file']
-        df = pd.read_excel(file, engine='openpyxl')
-        count = import_item_registration_dataframe(df, file.filename)
+
+        summary = {'processed': 0, 'added': 0, 'updated': 0, 'removed_duplicates': 0}
+        for file in files:
+            df = read_upload_excel(file)
+            result = import_item_registration_dataframe(df, file.filename)
+            for key in summary:
+                summary[key] += result.get(key, 0)
         db.session.commit()
-        # Invalidate similarity cache so fresh checks run on next page load
-        global _SIMILARITY_CACHE
-        _SIMILARITY_CACHE = {}
-        try:
-            if os.path.exists(_SIMILARITY_CACHE_FILE):
-                os.remove(_SIMILARITY_CACHE_FILE)
-        except Exception:
-            pass
-        return jsonify({'message': f'Berhasil upload {count} data Item Registration', 'uploaded': count})
+        return jsonify({
+            'message': (
+                f'Berhasil upload {len(files)} file Item Registration: '
+                f'+{summary["added"]} added, {summary["updated"]} updated'
+            ),
+            'uploaded': summary['processed'],
+            'files': len(files),
+            **summary,
+        })
+    except ValueError as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 400
     except Exception as e:
         db.session.rollback()
         import traceback; traceback.print_exc()
@@ -3993,8 +4005,7 @@ def apply_item_registration_request_filters(query):
         query = query.filter(ItemRegistration.client_name.in_(item_clients))
     if categories:
         query = query.filter(ItemRegistration.category.in_(categories))
-    if pics:
-        query = query.filter(ItemRegistration.pic.in_(pics))
+    query = apply_item_registration_pic_filter(query, pics)
     if proc_statuses:
         query = query.filter(ItemRegistration.proc_status.in_(proc_statuses))
     if req_numbers:
@@ -4076,14 +4087,21 @@ def export_item_registration():
         ws.title = "Item Registration"
         headers = [
             'Proc. Status', 'Client Nm.', 'Category', 'PIC', 'Req. No', 'Prod. ID',
-            'Prod. Nm.', 'Spec.', 'Mfr. Nm.', 'Odr. Unit', 'Prod. Price', 'Curr.', 'Remarks'
+            'Prod. Nm.', 'Spec.', 'Mfr. Nm.', 'Odr. Unit', 'Prod. Price', 'Curr.',
+            'Similar Product ID', 'Similar Product Name', 'Similar Specification',
+            'Similar Manufacturer Name', 'Similar Order Unit', 'Remarks'
         ]
         _style_wb(ws, headers, num_cols=[11])
-        widths = [26, 34, 24, 16, 18, 18, 28, 48, 24, 14, 16, 12, 60]
+        widths = [26, 34, 24, 16, 18, 18, 28, 48, 24, 14, 16, 12, 34, 34, 48, 28, 16, 60]
         for i, width in enumerate(widths, 1):
             ws.column_dimensions[get_column_letter(i)].width = width
 
+        registered_products = ProductIDDB.query.filter(
+            ProductIDDB.product_id.isnot(None),
+            ProductIDDB.product_id != ''
+        ).all()
         for row in rows:
+            row_data = item_registration_dict(row, registered_products)
             ws.append([
                 row.proc_status or '',
                 row.client_name or '',
@@ -4097,6 +4115,11 @@ def export_item_registration():
                 row.odr_unit or '',
                 row.prod_price or 0,
                 row.curr or '',
+                row_data['similar_prod_ids'],
+                row_data['similar_prod_name'],
+                row_data['similar_spec'],
+                row_data['similar_mfr_name'],
+                row_data['similar_odr_unit'],
                 row.remarks or '',
             ])
 
@@ -4176,97 +4199,62 @@ def _lookup_pic(product_id_str):
 def upload_product_id():
     """Upload Prod_ID Excel from SAP. Upserts product_id → category_id mapping."""
     try:
-        file = request.files.get('file')
-        if not file:
+        files = uploaded_files()
+        if not files:
             return jsonify({'error': 'No file provided'}), 400
-
-        # SAP ZMMR3190 kadang generate file BIFF8 (.xls) meski ekstensinya .xlsx.
-        # Deteksi format sebenarnya dari magic bytes, bukan dari nama file.
-        raw = file.read()
-        file.seek(0)
-
-        # Magic bytes: BIFF8/XLS = D0 CF 11 E0 | XLSX (ZIP) = 50 4B 03 04
-        is_xls_format = raw[:4] == b'\xd0\xcf\x11\xe0'
-        filename = (file.filename or '').lower()
-
-        if is_xls_format:
-            engine = 'xlrd'
-        elif filename.endswith('.xls'):
-            engine = 'xlrd'
-        else:
-            engine = 'openpyxl'
-
-        df = pd.read_excel(file, sheet_name=0, engine=engine)
-        df.columns = [str(c).strip() for c in df.columns]
-
-        pid_col = next((c for c in df.columns if 'Product ID' in c or c.lower() == 'product id'), None)
-        cat_col = next((c for c in df.columns if 'Category ID' in c or c.lower() == 'category id'), None)
-        catn_col = next((c for c in df.columns if 'Category Name' in c or c.lower() == 'category name'), None)
-        pname_col = next((c for c in df.columns if ('Product Name' in c and 'EN' not in c) or 'Prod. Nm' in c or c.lower() == 'product name'), None)
-        status_col = next((c for c in df.columns if 'Product Status' in c or 'Prod. Status' in c or c.lower() == 'product status'), None)
-        spec_col = next((c for c in df.columns if 'Specification' in c or c.lower() == 'specification'), None)
-        mfr_col = next((c for c in df.columns if 'Manufacturer Name' in c or 'Mfr. Nm' in c or c.lower() == 'manufacturer name'), None)
-        unit_col = next((c for c in df.columns if 'Order Unit' in c or 'Odr. Unit' in c or c.lower() == 'order unit'), None)
-        hub_col = next((c for c in df.columns if 'HUB Handling Check' in c or 'HUB Handling Chk' in c), None)
-        tax_col = next((c for c in df.columns if 'Purchasing Price Tax Type' in c or c.lower() == 'tax type' or 'Tax Type' in c), None)
-        reg_date_col = next((c for c in df.columns if c.lower() == 'registration date' or 'Prod. Reg. Date' in c or 'Product Registration Date' in c), None)
-        registry_pic_col = next((c for c in df.columns if 'Product Registy PIC(Name)' in c or 'Product Registry PIC(Name)' in c or 'Prod. Reg. PIC Nm' in c), None)
-        if not registry_pic_col:
-            registry_pic_col = next((c for c in df.columns if 'Product Registy PIC' in c or 'Product Registry PIC' in c or 'Product Registered by(Name)' in c), None)
-
-        if not pid_col or not cat_col:
-            return jsonify({'error': f'Missing required columns. Found: {list(df.columns)[:10]}'}), 400
 
         added = updated = 0
         pic_cache = {}  # category_id → pic_name
 
-        for _, row in df.iterrows():
-            pid = str(row[pid_col]).strip() if pd.notna(row[pid_col]) else None
-            cat_id = normalize_category_id(row[cat_col]) if pd.notna(row[cat_col]) else None
-            if not pid or pid == 'nan':
-                continue
-            cat_name = str(row[catn_col]).strip() if catn_col and pd.notna(row[catn_col]) else None
-            pname = str(row[pname_col]).strip() if pname_col and pd.notna(row[pname_col]) else None
-            product_status = clean(df_val(row, status_col)) if status_col else None
-            spec = str(row[spec_col]).strip() if spec_col and pd.notna(row[spec_col]) else None
-            mfr_name = str(row[mfr_col]).strip() if mfr_col and pd.notna(row[mfr_col]) else None
-            order_unit = str(row[unit_col]).strip() if unit_col and pd.notna(row[unit_col]) else None
-            hub_handling_check = clean(df_val(row, hub_col)) if hub_col else None
-            tax_type = clean(df_val(row, tax_col)) if tax_col else None
-            registration_date = parse_date(df_val(row, reg_date_col)) if reg_date_col else None
-            product_registry_pic = clean(df_val(row, registry_pic_col)) if registry_pic_col else None
+        expected = [
+            ('product_id', 'Product ID'), ('category_id', 'Category ID'),
+            ('category_name', 'Category Name'), ('product_name', 'Product Name'),
+            ('product_status', 'Product Status'), ('specification', 'Specification'),
+            ('manufacturer_name', 'Manufacturer Name'), ('order_unit', 'Order Unit'),
+            ('hub_handling_check', 'HUB Handling Check'), ('tax_type', 'Tax Type'),
+            ('registration_date', 'Registration Date'), ('product_registry_pic', 'Product Registry PIC')
+        ]
+        required = [('product_id', 'Product ID')]
 
-            existing = db.session.query(ProductIDDB).filter_by(product_id=pid).first()
-            if existing:
-                existing.category_id = cat_id
-                existing.category_name = cat_name
-                existing.product_name = pname
-                existing.product_status = product_status
-                existing.specification = spec
-                existing.manufacturer_name = mfr_name
-                existing.order_unit = order_unit
-                existing.hub_handling_check = hub_handling_check
-                existing.tax_type = tax_type
-                existing.registration_date = registration_date
-                existing.product_registry_pic = product_registry_pic
-                existing.updated_at = datetime.utcnow()
-                updated += 1
-            else:
-                db.session.add(ProductIDDB(
-                    product_id=pid, category_id=cat_id,
-                    category_name=cat_name, product_name=pname,
-                    product_status=product_status,
-                    specification=spec, manufacturer_name=mfr_name,
-                    order_unit=order_unit,
-                    hub_handling_check=hub_handling_check,
-                    tax_type=tax_type,
-                    registration_date=registration_date,
-                    product_registry_pic=product_registry_pic,
-                    updated_at=datetime.utcnow()
-                ))
-                added += 1
+        for file in files:
+            df = read_upload_excel(file)
+            df.columns = [str(c).strip() for c in df.columns]
+            col = _product_id_columns(df)
+            validate_upload_columns(file.filename, 'Prod ID', col, expected, required)
+
+            for _, row in df.iterrows():
+                pid = clean_product_id(df_val(row, col['product_id']))
+                if not pid:
+                    continue
+                cat_id = normalize_category_id(df_val(row, col['category_id']))
+                payload = {
+                    'category_id': cat_id,
+                    'category_name': clean(df_val(row, col['category_name'])),
+                    'product_name': clean(df_val(row, col['product_name'])),
+                    'product_status': clean(df_val(row, col['product_status'])),
+                    'specification': clean(df_val(row, col['specification'])),
+                    'manufacturer_name': clean(df_val(row, col['manufacturer_name'])),
+                    'order_unit': clean(df_val(row, col['order_unit'])),
+                    'hub_handling_check': clean(df_val(row, col['hub_handling_check'])),
+                    'tax_type': clean(df_val(row, col['tax_type'])),
+                    'registration_date': parse_date(df_val(row, col['registration_date'])),
+                    'product_registry_pic': clean(df_val(row, col['product_registry_pic'])),
+                    'updated_at': datetime.utcnow(),
+                }
+
+                existing = db.session.query(ProductIDDB).filter_by(product_id=pid).first()
+                if existing:
+                    for key, value in payload.items():
+                        setattr(existing, key, value)
+                    updated += 1
+                else:
+                    db.session.add(ProductIDDB(product_id=pid, **payload))
+                    added += 1
 
         db.session.commit()
+
+        global _SIMILARITY_CACHE
+        _SIMILARITY_CACHE = {}
 
         # After upserting ProductIDDB, refresh pic_name on SO rows that have a product_id
         so_rows = db.session.query(SOData).filter(
@@ -4289,10 +4277,14 @@ def upload_product_id():
 
         return jsonify({
             'status': 'ok',
+            'files': len(files),
             'added': added, 'updated': updated,
             'so_pic_refreshed': refreshed,
             'total_in_db': db.session.query(ProductIDDB).count()
         })
+    except ValueError as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 400
     except Exception as e:
         import traceback; traceback.print_exc()
         db.session.rollback()
@@ -4303,42 +4295,41 @@ def upload_product_id():
 def upload_master_pic():
     """Upload Master PIC Excel. Upserts category_id → PIC mapping, then refreshes SO pic_name."""
     try:
-        file = request.files.get('file')
-        if not file:
+        files = uploaded_files()
+        if not files:
             return jsonify({'error': 'No file provided'}), 400
 
-        filename = (file.filename or '').lower()
-        engine = 'xlrd' if filename.endswith('.xls') else 'openpyxl'
-        df = pd.read_excel(file, sheet_name=0, engine=engine)
-        df.columns = [str(c).strip() for c in df.columns]
-
-        cat_col = next((c for c in df.columns if 'Category ID' in c or c.lower() == 'category id'), None)
-        catn_col = next((c for c in df.columns if 'Category Name' in c or c.lower() == 'category name'), None)
-        pic_col = next((c for c in df.columns if c.upper() == 'PIC' or 'PIC' in c), None)
-
-        if not cat_col or not pic_col:
-            return jsonify({'error': f'Missing required columns. Found: {list(df.columns)}'}), 400
-
         added = updated = 0
-        for _, row in df.iterrows():
-            cat_id = normalize_category_id(row[cat_col]) if pd.notna(row[cat_col]) else None
-            if not cat_id or cat_id == 'nan':
-                continue
-            cat_name = str(row[catn_col]).strip() if catn_col and pd.notna(row[catn_col]) else None
-            pic_name = str(row[pic_col]).strip() if pd.notna(row[pic_col]) else None
+        expected = [
+            ('category_id', 'Category ID'), ('category_name', 'Category Name'), ('pic', 'PIC')
+        ]
+        required = [('category_id', 'Category ID'), ('pic', 'PIC')]
 
-            existing = db.session.query(MasterPIC).filter_by(category_id=cat_id).first()
-            if existing:
-                existing.category_name = cat_name
-                existing.pic_name = pic_name
-                existing.updated_at = datetime.utcnow()
-                updated += 1
-            else:
-                db.session.add(MasterPIC(
-                    category_id=cat_id, category_name=cat_name,
-                    pic_name=pic_name, updated_at=datetime.utcnow()
-                ))
-                added += 1
+        for file in files:
+            df = read_upload_excel(file)
+            df.columns = [str(c).strip() for c in df.columns]
+            col = _master_pic_columns(df)
+            validate_upload_columns(file.filename, 'Update PIC', col, expected, required)
+
+            for _, row in df.iterrows():
+                cat_id = normalize_category_id(df_val(row, col['category_id']))
+                if not cat_id:
+                    continue
+                cat_name = clean(df_val(row, col['category_name']))
+                pic_name = clean(df_val(row, col['pic']))
+
+                existing = db.session.query(MasterPIC).filter_by(category_id=cat_id).first()
+                if existing:
+                    existing.category_name = cat_name
+                    existing.pic_name = pic_name
+                    existing.updated_at = datetime.utcnow()
+                    updated += 1
+                else:
+                    db.session.add(MasterPIC(
+                        category_id=cat_id, category_name=cat_name,
+                        pic_name=pic_name, updated_at=datetime.utcnow()
+                    ))
+                    added += 1
         db.session.commit()
 
         # Rebuild pic_cache from DB for refreshing SO rows
@@ -4360,10 +4351,14 @@ def upload_master_pic():
 
         return jsonify({
             'status': 'ok',
+            'files': len(files),
             'added': added, 'updated': updated,
             'so_pic_refreshed': refreshed,
             'total_categories': db.session.query(MasterPIC).count()
         })
+    except ValueError as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 400
     except Exception as e:
         import traceback; traceback.print_exc()
         db.session.rollback()
