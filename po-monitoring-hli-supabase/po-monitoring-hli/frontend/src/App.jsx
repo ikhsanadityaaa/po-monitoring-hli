@@ -1093,6 +1093,44 @@ const App = () => {
     } finally { setLoading(false); }
   }, [addToast, itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters]);
 
+  // Auto-load similarity for all rows missing prod_id whenever itemRegData changes
+  useEffect(() => {
+    const rowsNeedingSimilarity = itemRegData.filter(row => !row.prod_id && row.req_no);
+    if (rowsNeedingSimilarity.length === 0) return;
+    // Batch load in sequence with small delays to avoid hammering the backend
+    let cancelled = false;
+    const loadAll = async () => {
+      for (const row of rowsNeedingSimilarity) {
+        if (cancelled) break;
+        const reqNo = row.req_no;
+        setSimilarityCache(prev => {
+          if (prev[reqNo]) return prev; // already loading or loaded
+          return { ...prev, [reqNo]: { loading: true, result: null } };
+        });
+      }
+      for (const row of rowsNeedingSimilarity) {
+        if (cancelled) break;
+        const reqNo = row.req_no;
+        setSimilarityCache(prev => {
+          if (prev[reqNo] && !prev[reqNo].loading) return prev; // already done
+          return prev;
+        });
+        try {
+          const res = await api.get(`/api/item-registration/similarity/${encodeURIComponent(reqNo)}`);
+          if (!cancelled) {
+            setSimilarityCache(prev => ({ ...prev, [reqNo]: { loading: false, result: res.data.similar_items } }));
+          }
+        } catch {
+          if (!cancelled) {
+            setSimilarityCache(prev => ({ ...prev, [reqNo]: { loading: false, result: null } }));
+          }
+        }
+      }
+    };
+    loadAll();
+    return () => { cancelled = true; };
+  }, [itemRegData]);
+
   const fetchRegisteredItems = useCallback(async (
     page = registeredItemsPage,
     perPage = registeredItemsPerPage,
@@ -3044,17 +3082,9 @@ const App = () => {
                     const cached = similarityCache[reqNo];
                     // Only check items without prod_id (not yet registered)
                     if (row.prod_id) return <td key={key} className={`px-2 py-2 text-center ${txt2}`}><span className="text-[10px] opacity-40">—</span></td>;
-                    if (!cached) {
-                      return (
-                        <td key={key} className="px-2 py-2">
-                          <button
-                            onClick={() => loadSimilarity(reqNo)}
-                            className={`text-[10px] px-2 py-0.5 rounded border border-dashed ${darkMode ? 'border-gray-600 text-gray-400 hover:text-blue-400 hover:border-blue-500' : 'border-gray-300 text-gray-400 hover:text-blue-600 hover:border-blue-400'} transition-colors`}
-                          >Cek Similar</button>
-                        </td>
-                      );
+                    if (!cached || cached.loading) {
+                      return <td key={key} className={`px-2 py-2 text-center ${txt2}`}><span className="text-[10px] animate-pulse opacity-60">Checking…</span></td>;
                     }
-                    if (cached.loading) return <td key={key} className={`px-2 py-2 text-center ${txt2}`}><span className="text-[10px] animate-pulse">Loading…</span></td>;
                     const sim = cached.result;
                     if (!sim) return <td key={key} className={`px-2 py-2 text-center ${txt2}`}><span className="text-[10px] opacity-40">Tidak ada</span></td>;
                     return (
