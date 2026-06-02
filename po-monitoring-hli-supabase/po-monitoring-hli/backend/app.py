@@ -912,15 +912,19 @@ def apply_so_pic_filter(query, pics):
         return query.filter(empty_pic)
     return query.filter(SOData.pic_name.in_(pics))
 
-def item_registration_dict(row):
+def item_registration_dict(row, include_similarity=False):
     pic = _lookup_pic_by_category_id(row.category_id)
-    similar_items = find_similar_registered_items(row)
+    final_pic = pic or row.pic or ''
+    # If client name contains YUPI, override PIC to ANDRE
+    if 'YUPI' in (row.client_name or '').upper():
+        final_pic = 'ANDRE'
+    similar_items = find_similar_registered_items(row) if include_similarity else None
     return {
         'id': row.id,
         'proc_status': row.proc_status or '',
         'client_name': row.client_name or '',
         'category': source_category_level1(row.category),
-        'pic': pic or row.pic or '',
+        'pic': final_pic,
         'req_no': row.req_no or '',
         'prod_id': row.prod_id or '',
         'batch_grp_no': row.batch_grp_no or '',
@@ -1023,41 +1027,81 @@ def import_item_registration_dataframe(df, filename='Item Registration'):
     if missing:
         raise ValueError(f'Kolom wajib tidak ditemukan: {", ".join(missing)}. Kolom tersedia: {df.columns.tolist()}')
 
-    ItemRegistration.query.delete()
-    rows = []
+    # Upsert by Req. No (unique key): update existing, insert new, no delete
+    added = updated = 0
+    # Build a lookup of existing records by req_no for fast access
+    existing_map = {}
+    for item in ItemRegistration.query.all():
+        key = clean(item.req_no)
+        if key:
+            existing_map[key] = item
+
     for _, row in df.iterrows():
         req_no = clean(df_val(row, col['req_no']))
         prod_id = clean_product_id(df_val(row, col['prod_id']))
         prod_name = clean(df_val(row, col['prod_name']))
         if not req_no and not prod_id and not prod_name:
             continue
-        rows.append(ItemRegistration(
-            proc_status=clean(df_val(row, col['proc_status'])),
-            client_name=clean(df_val(row, col['client_name'])),
-            category=source_category_level1(df_val(row, col['category'])),
-            category_id=normalize_category_id(df_val(row, col['category_id'])),
-            pic=_lookup_pic_by_category_id(df_val(row, col['category_id'])) or '',
-            req_no=req_no,
-            prod_id=prod_id,
-            product_status=clean(df_val(row, col['product_status'])),
-            batch_grp_no=clean(df_val(row, col['batch_grp_no'])),
-            prod_name=prod_name,
-            spec=clean(df_val(row, col['spec'])),
-            mfr_name=clean(df_val(row, col['mfr_name'])),
-            odr_unit=clean(df_val(row, col['odr_unit'])),
-            vendor_name=clean(df_val(row, col['vendor_name'])),
-            prod_price=safe_float(df_val(row, col['prod_price'])),
-            curr=clean(df_val(row, col['curr'])),
-            hub_handling_check=clean(df_val(row, col['hub_handling_check'])),
-            tax_type=clean(df_val(row, col['tax_type'])),
-            registration_date=parse_date(df_val(row, col['registration_date'])),
-            product_registry_pic=clean(df_val(row, col['product_registry_pic'])),
-            uploaded_at=datetime.utcnow(),
-        ))
-    if rows:
-        db.session.bulk_save_objects(rows)
-    db.session.add(UploadLog(file_type='ITEM_REG', filename=filename, records_count=len(rows)))
-    return len(rows)
+
+        cat_id = normalize_category_id(df_val(row, col['category_id']))
+        pic = _lookup_pic_by_category_id(cat_id) or ''
+
+        if req_no and req_no in existing_map:
+            # Update existing record
+            item = existing_map[req_no]
+            item.proc_status = clean(df_val(row, col['proc_status']))
+            item.client_name = clean(df_val(row, col['client_name']))
+            item.category = source_category_level1(df_val(row, col['category']))
+            item.category_id = cat_id
+            item.pic = pic
+            item.prod_id = prod_id
+            item.product_status = clean(df_val(row, col['product_status']))
+            item.batch_grp_no = clean(df_val(row, col['batch_grp_no']))
+            item.prod_name = prod_name
+            item.spec = clean(df_val(row, col['spec']))
+            item.mfr_name = clean(df_val(row, col['mfr_name']))
+            item.odr_unit = clean(df_val(row, col['odr_unit']))
+            item.vendor_name = clean(df_val(row, col['vendor_name']))
+            item.prod_price = safe_float(df_val(row, col['prod_price']))
+            item.curr = clean(df_val(row, col['curr']))
+            item.hub_handling_check = clean(df_val(row, col['hub_handling_check']))
+            item.tax_type = clean(df_val(row, col['tax_type']))
+            item.registration_date = parse_date(df_val(row, col['registration_date']))
+            item.product_registry_pic = clean(df_val(row, col['product_registry_pic']))
+            item.uploaded_at = datetime.utcnow()
+            updated += 1
+        else:
+            # Insert new record
+            new_item = ItemRegistration(
+                proc_status=clean(df_val(row, col['proc_status'])),
+                client_name=clean(df_val(row, col['client_name'])),
+                category=source_category_level1(df_val(row, col['category'])),
+                category_id=cat_id,
+                pic=pic,
+                req_no=req_no,
+                prod_id=prod_id,
+                product_status=clean(df_val(row, col['product_status'])),
+                batch_grp_no=clean(df_val(row, col['batch_grp_no'])),
+                prod_name=prod_name,
+                spec=clean(df_val(row, col['spec'])),
+                mfr_name=clean(df_val(row, col['mfr_name'])),
+                odr_unit=clean(df_val(row, col['odr_unit'])),
+                vendor_name=clean(df_val(row, col['vendor_name'])),
+                prod_price=safe_float(df_val(row, col['prod_price'])),
+                curr=clean(df_val(row, col['curr'])),
+                hub_handling_check=clean(df_val(row, col['hub_handling_check'])),
+                tax_type=clean(df_val(row, col['tax_type'])),
+                registration_date=parse_date(df_val(row, col['registration_date'])),
+                product_registry_pic=clean(df_val(row, col['product_registry_pic'])),
+                uploaded_at=datetime.utcnow(),
+            )
+            db.session.add(new_item)
+            if req_no:
+                existing_map[req_no] = new_item
+            added += 1
+
+    db.session.add(UploadLog(file_type='ITEM_REG', filename=filename, records_count=added + updated))
+    return added + updated
 
 def ensure_default_item_registration_loaded():
     if db.session.query(func.count(ItemRegistration.id)).scalar():
@@ -3813,7 +3857,7 @@ def get_item_registration_data():
         all_proc_statuses = sorted({r.proc_status for r in option_rows if r.proc_status})
         last_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'ITEM_REG').scalar()
         return jsonify({
-            'data': [item_registration_dict(r) for r in rows],
+            'data': [item_registration_dict(r, include_similarity=False) for r in rows],
             'total': total,
             'page': page,
             'per_page': per_page,
@@ -3826,6 +3870,19 @@ def get_item_registration_data():
         })
     except Exception as e:
         import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/item-registration/similarity/<path:req_no>', methods=['GET'])
+def get_item_registration_similarity(req_no):
+    """Lazy-load similarity for a single Item Registration row by req_no."""
+    try:
+        item = ItemRegistration.query.filter_by(req_no=req_no).first()
+        if not item:
+            return jsonify({'similar_items': None})
+        similar = find_similar_registered_items(item)
+        return jsonify({'similar_items': similar})
+    except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
