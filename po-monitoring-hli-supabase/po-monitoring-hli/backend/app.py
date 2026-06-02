@@ -3840,7 +3840,14 @@ def get_item_registration_data():
         missing_prod_rows = q.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-')).all()
         missing_by_pic = {}
         for r in missing_prod_rows:
-            pic = r.pic or 'Unassigned'
+            # Use same PIC resolution logic as item_registration_dict:
+            # 1. lookup from MasterPIC by category_id
+            # 2. YUPI client_name -> override to ANDRE
+            # 3. fallback to r.pic, then Unassigned
+            resolved_pic = _lookup_pic_by_category_id(r.category_id) or r.pic or ''
+            if 'YUPI' in (r.client_name or '').upper():
+                resolved_pic = 'ANDRE'
+            pic = resolved_pic or 'Unassigned'
             missing_by_pic[pic] = missing_by_pic.get(pic, 0) + 1
         missing_prod_id_by_pic = [
             {'pic': pic, 'count': count}
