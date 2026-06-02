@@ -2963,8 +2963,11 @@ const App = () => {
         </div>
 
         <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-3">
-            {itemRegPicKpis.slice(0, 8).map((row) => {
+          <div
+            className="grid gap-3"
+            style={{ gridTemplateColumns: `repeat(${Math.min(itemRegPicKpis.length, Math.max(2, itemRegPicKpis.length))}, minmax(120px, 1fr))` }}
+          >
+            {itemRegPicKpis.map((row) => {
               return (
                 <div key={row.pic} className={`p-4 rounded-2xl transition-all ${row.isTotal ? (darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200') : card}`}>
                   <div className="flex items-start justify-between gap-3">
@@ -3125,85 +3128,75 @@ const App = () => {
     const pendingVendorAmount = sumRows(pendingVendors, 'total_amount');
     const pendingStatusTotal = sumRows(statusMonthlyRows, 'total');
     const pendingStatusAmount = sumRows(statusMonthlyRows, 'amount');
-    const itemRegCategoryChart = (rows, title, color) => {
+    const itemRegCategoryChart = (rows, title) => {
       const data = (rows || []).map(r => ({
         ...r,
-        shortLabel: String(r.name || '-').slice(0, 32),
+        shortLabel: String(r.name || '-').slice(0, 40),
         value: Number(r.value || 0),
       }));
       const total = sumRows(data, 'value');
 
-      // For Proc. Status: Pie chart, top 5 + Others
-      if (title === 'Proc. Status') {
-        const sorted = [...data].sort((a, b) => b.value - a.value);
-        const top5 = sorted.slice(0, 5);
-        const rest = sorted.slice(5);
-        const othersValue = rest.reduce((s, r) => s + r.value, 0);
-        const pieData = othersValue > 0
-          ? [...top5, { name: 'Others', shortLabel: 'Others', value: othersValue }]
-          : top5;
-        const PIE_COLORS = ['#2563EB', '#14B8A6', '#F59E0B', '#8B5CF6', '#EF4444', '#9CA3AF'];
-        const RADIAN = Math.PI / 180;
-        const renderCustomLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent, name }) => {
-          if (percent < 0.04) return null;
-          const radius = innerRadius + (outerRadius - innerRadius) * 0.55;
-          const x = cx + radius * Math.cos(-midAngle * RADIAN);
-          const y = cy + radius * Math.sin(-midAngle * RADIAN);
-          return (
-            <text x={x} y={y} fill="white" textAnchor="middle" dominantBaseline="central" fontSize={11} fontWeight="600">
-              {`${(percent * 100).toFixed(0)}%`}
-            </text>
-          );
-        };
+      // Both Proc. Status and Client Nm.: pie chart, top 5 + Others, no legend
+      const PIE_PALETTE = ['#2563EB', '#14B8A6', '#F59E0B', '#8B5CF6', '#EF4444', '#9CA3AF'];
+      const sorted = [...data].sort((a, b) => b.value - a.value);
+      const top5 = sorted.slice(0, 5);
+      const rest = sorted.slice(5);
+      const othersValue = rest.reduce((s, r) => s + r.value, 0);
+      const pieData = othersValue > 0
+        ? [...top5, { name: 'Others', shortLabel: 'Others', value: othersValue }]
+        : top5;
+      const RADIAN = Math.PI / 180;
+      const renderCustomLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent }) => {
+        if (percent < 0.04) return null;
+        const radius = innerRadius + (outerRadius - innerRadius) * 0.55;
+        const x = cx + radius * Math.cos(-midAngle * RADIAN);
+        const y = cy + radius * Math.sin(-midAngle * RADIAN);
         return (
-          <div className={`p-5 rounded-2xl ${card}`}>
-            <h3 className={`text-base font-bold ${txt}`}>{title}</h3>
-            <p className={`text-xs mb-2 ${txt2}`}>Total: {fmtNum(total)} Req. No</p>
-            {pieData.length === 0 ? (
-              <div className={`h-[220px] flex items-center justify-center text-sm ${txt2}`}>No Item Registration data</div>
-            ) : (
-              <div className="flex flex-col gap-2">
-                <ResponsiveContainer width="100%" height={220}>
-                  <PieChart>
-                    <Pie data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={95} labelLine={false} label={renderCustomLabel}>
-                      {pieData.map((entry, i) => <Cell key={`cell-${i}`} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
-                    </Pie>
-                    <Tooltip formatter={(v, n) => [fmtNum(v), n]} contentStyle={{background: darkMode?'#1F2937':'#fff', border:'none', borderRadius:8, fontSize:12}}/>
-                  </PieChart>
-                </ResponsiveContainer>
-                <div className="flex flex-wrap gap-x-4 gap-y-1 justify-center">
-                  {pieData.map((entry, i) => (
-                    <div key={entry.name} className="flex items-center gap-1.5 text-xs">
-                      <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{backgroundColor: PIE_COLORS[i % PIE_COLORS.length]}}/>
-                      <span className={`${txt2} truncate max-w-[150px]`} title={entry.name}>{entry.name}</span>
-                      <span className={`font-semibold ${txt}`}>{fmtNum(entry.value)}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+          <text x={x} y={y} fill="white" textAnchor="middle" dominantBaseline="central" fontSize={11} fontWeight="600">
+            {`${(percent * 100).toFixed(0)}%`}
+          </text>
+        );
+      };
+      // Custom tooltip to show name + count
+      const CustomTooltip = ({ active, payload }) => {
+        if (!active || !payload || !payload.length) return null;
+        const entry = payload[0].payload;
+        const pct = total > 0 ? ((entry.value / total) * 100).toFixed(1) : '0';
+        return (
+          <div className={`px-3 py-2 rounded-xl text-xs shadow-lg border ${darkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-white border-gray-200 text-gray-800'}`}>
+            <p className="font-semibold mb-0.5 max-w-[200px] break-words">{entry.name}</p>
+            <p>{fmtNum(entry.value)} Req. No <span className="ml-1 opacity-60">({pct}%)</span></p>
           </div>
         );
-      }
-
-      // Default: bar chart (for other titles like Client Nm.)
-      const height = Math.max(240, data.length * 34 + 56);
+      };
       return (
         <div className={`p-5 rounded-2xl ${card}`}>
           <h3 className={`text-base font-bold ${txt}`}>{title}</h3>
-          <p className={`text-xs mb-4 ${txt2}`}>Total: {fmtNum(total)} Req. No</p>
-          {data.length === 0 ? (
+          <p className={`text-xs mb-3 ${txt2}`}>Total: {fmtNum(total)} Req. No</p>
+          {pieData.length === 0 ? (
             <div className={`h-[220px] flex items-center justify-center text-sm ${txt2}`}>No Item Registration data</div>
           ) : (
-            <ResponsiveContainer width="100%" height={height}>
-              <BarChart data={data} layout="vertical" margin={{ top: 8, right: 18, left: 8, bottom: 8 }}>
-                <CartesianGrid strokeDasharray="3 3" horizontal={true} stroke={darkMode?'#374151':'#E5E7EB'}/>
-                <XAxis type="number" allowDecimals={false} stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={12}/>
-                <YAxis type="category" dataKey="shortLabel" width={190} stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={12} tick={{fontSize: 12, textAnchor: 'end'}} tickMargin={8}/>
-                <Tooltip formatter={(v)=>[fmtNum(v), 'Req. No']} labelFormatter={(_, payload)=>payload?.[0]?.payload?.name || '-'} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
-                <Bar dataKey="value" name="Req. No" fill={color} radius={[0,6,6,0]}/>
-              </BarChart>
-            </ResponsiveContainer>
+            <div className="flex gap-4 items-center">
+              <div className="flex-shrink-0" style={{width: 180, height: 180}}>
+                <ResponsiveContainer width={180} height={180}>
+                  <PieChart>
+                    <Pie data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={82} innerRadius={32} labelLine={false} label={renderCustomLabel}>
+                      {pieData.map((entry, i) => <Cell key={`cell-${i}`} fill={PIE_PALETTE[i % PIE_PALETTE.length]} />)}
+                    </Pie>
+                    <Tooltip content={<CustomTooltip />} />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="flex flex-col gap-1.5 min-w-0 flex-1">
+                {pieData.map((entry, i) => (
+                  <div key={entry.name} className="flex items-center gap-2 min-w-0">
+                    <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{backgroundColor: PIE_PALETTE[i % PIE_PALETTE.length]}}/>
+                    <span className={`text-[11px] ${txt2} truncate flex-1`} title={entry.name}>{entry.name}</span>
+                    <span className={`text-[11px] font-semibold ${txt} flex-shrink-0`}>{fmtNum(entry.value)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
         </div>
       );
@@ -3392,8 +3385,8 @@ const App = () => {
             <Wrench className="w-5 h-5 text-blue-600"/> Pending Item Registration
           </h3>
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-            {itemRegCategoryChart(itemRegProcStatus, 'Proc. Status', '#2563EB')}
-            {itemRegCategoryChart(itemRegClients, 'Client Nm.', '#14B8A6')}
+            {itemRegCategoryChart(itemRegProcStatus, 'Proc. Status')}
+            {itemRegCategoryChart(itemRegClients, 'Client Nm.')}
           </div>
         </div>
       </div>
