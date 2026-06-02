@@ -762,6 +762,8 @@ const App = () => {
   const [itemRegFilters, setItemRegFilters] = useState({ clients: [], categories: [], pics: [], proc_statuses: [] });
   const [itemRegOptions, setItemRegOptions] = useState({ clients: [], categories: [], pics: [], proc_statuses: [] });
   const [itemRegMissingPicKpis, setItemRegMissingPicKpis] = useState([]);
+  // similarity: { [req_no]: { loading, result } }
+  const [similarityCache, setSimilarityCache] = useState({});
 
   // All Registered Items
   const [registeredItemsData, setRegisteredItemsData] = useState([]);
@@ -1076,6 +1078,7 @@ const App = () => {
       resolveFilter(filters.proc_statuses).forEach(v => params.append('proc_status', v));
       const res = await api.get(`/api/item-registration/data?${params}`);
       setItemRegData(Array.isArray(res.data.data) ? res.data.data : []);
+      setSimilarityCache({});  // Reset lazy-load cache on new page/filter
       setItemRegTotal(res.data.total || 0);
       setItemRegLastUpdated(res.data.last_updated || null);
       setItemRegMissingPicKpis(Array.isArray(res.data.missing_prod_id_by_pic) ? res.data.missing_prod_id_by_pic : []);
@@ -1309,67 +1312,129 @@ const App = () => {
   };
 
   const handleUploadProductID = async (e) => {
-    const file = e.target.files[0]; if (!file) return;
+    const files = Array.from(e.target.files || []); if (!files.length) return;
     e.target.value = '';
-    const fd = new FormData(); fd.append('file', file);
-    setPicUploadMsg('⏳ Uploading Product ID database...');
-    setUploadProgress({ label: 'Product ID', pct: 0 });
-    try {
-      const res = await api.post('/api/upload/product-id', fd, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        onUploadProgress: (ev) => setUploadProgress({ label: 'Product ID', pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
-      });
-      const d = res.data;
-      setUploadProgress(null);
-      setPicUploadMsg(`✅ Prod ID: +${d.added} added, ${d.updated} updated (total: ${d.total_in_db}). SO PIC refreshed: ${d.so_pic_refreshed} rows.`);
-      fetchPicDbStatus();
-      fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
-    } catch (err) {
-      setUploadProgress(null);
-      setPicUploadMsg(`❌ Error: ${err?.response?.data?.error || err.message}`);
+    // Validate each file has expected columns before uploading
+    const EXPECTED_PROD_ID_COLS = ['Product ID', 'Category ID'];
+    for (const file of files) {
+      try {
+        const XLSX = await import('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm');
+        const buf = await file.arrayBuffer();
+        const wb = XLSX.read(buf, { type: 'array', sheetRows: 1 });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const headers = XLSX.utils.sheet_to_json(ws, { header: 1 })[0] || [];
+        const missing = EXPECTED_PROD_ID_COLS.filter(c => !headers.some(h => String(h).includes(c)));
+        if (missing.length > 3) {
+          addToast(`❌ File "${file.name}" sepertinya file yang salah — kolom berbeda lebih dari 3. Cek lagi file yang diupload.`, 'error');
+          return;
+        }
+      } catch {}
     }
+    setPicUploadMsg(`⏳ Uploading ${files.length} Product ID file(s)...`);
+    let totalAdded = 0, totalUpdated = 0, totalRefreshed = 0;
+    for (const file of files) {
+      setUploadProgress({ label: `Product ID: ${file.name}`, pct: 0 });
+      const fd = new FormData(); fd.append('file', file);
+      try {
+        const res = await api.post('/api/upload/product-id', fd, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+          onUploadProgress: (ev) => setUploadProgress({ label: `Product ID: ${file.name}`, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
+        });
+        const d = res.data;
+        totalAdded += d.added || 0; totalUpdated += d.updated || 0; totalRefreshed += d.so_pic_refreshed || 0;
+      } catch (err) {
+        setUploadProgress(null);
+        setPicUploadMsg(`❌ Error pada "${file.name}": ${err?.response?.data?.error || err.message}`);
+        return;
+      }
+    }
+    setUploadProgress(null);
+    setPicUploadMsg(`✅ Prod ID (${files.length} file): +${totalAdded} added, ${totalUpdated} updated. SO PIC refreshed: ${totalRefreshed} rows.`);
+    fetchPicDbStatus();
+    fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
   };
 
   const handleUpdatePIC = async (e) => {
-    const file = e.target.files[0]; if (!file) return;
+    const files = Array.from(e.target.files || []); if (!files.length) return;
     e.target.value = '';
-    const fd = new FormData(); fd.append('file', file);
-    setPicUploadMsg('⏳ Updating Master PIC...');
-    setUploadProgress({ label: 'Master PIC', pct: 0 });
-    try {
-      const res = await api.post('/api/upload/master-pic', fd, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        onUploadProgress: (ev) => setUploadProgress({ label: 'Master PIC', pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
-      });
-      const d = res.data;
-      setUploadProgress(null);
-      setPicUploadMsg(`✅ Master PIC: +${d.added} added, ${d.updated} updated (total categories: ${d.total_categories}). SO rows updated: ${d.so_pic_refreshed}.`);
-      fetchPicDbStatus();
-      fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
-    } catch (err) {
-      setUploadProgress(null);
-      setPicUploadMsg(`❌ Error: ${err?.response?.data?.error || err.message}`);
+    const EXPECTED_PIC_COLS = ['Category ID', 'PIC'];
+    for (const file of files) {
+      try {
+        const XLSX = await import('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm');
+        const buf = await file.arrayBuffer();
+        const wb = XLSX.read(buf, { type: 'array', sheetRows: 1 });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const headers = XLSX.utils.sheet_to_json(ws, { header: 1 })[0] || [];
+        const missing = EXPECTED_PIC_COLS.filter(c => !headers.some(h => String(h).includes(c)));
+        if (missing.length > 3) {
+          addToast(`❌ File "${file.name}" sepertinya file yang salah — kolom berbeda lebih dari 3. Cek lagi file yang diupload.`, 'error');
+          return;
+        }
+      } catch {}
     }
+    setPicUploadMsg(`⏳ Updating ${files.length} Master PIC file(s)...`);
+    let totalAdded = 0, totalUpdated = 0, totalRefreshed = 0;
+    for (const file of files) {
+      setUploadProgress({ label: `Master PIC: ${file.name}`, pct: 0 });
+      const fd = new FormData(); fd.append('file', file);
+      try {
+        const res = await api.post('/api/upload/master-pic', fd, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+          onUploadProgress: (ev) => setUploadProgress({ label: `Master PIC: ${file.name}`, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
+        });
+        const d = res.data;
+        totalAdded += d.added || 0; totalUpdated += d.updated || 0; totalRefreshed += d.so_pic_refreshed || 0;
+      } catch (err) {
+        setUploadProgress(null);
+        setPicUploadMsg(`❌ Error pada "${file.name}": ${err?.response?.data?.error || err.message}`);
+        return;
+      }
+    }
+    setUploadProgress(null);
+    setPicUploadMsg(`✅ Master PIC (${files.length} file): +${totalAdded} added, ${totalUpdated} updated. SO rows updated: ${totalRefreshed}.`);
+    fetchPicDbStatus();
+    fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
   };
 
   const handleUploadItemRegistration = async (e) => {
-    const file = e.target.files[0]; if (!file) return;
+    const files = Array.from(e.target.files || []); if (!files.length) return;
     e.target.value = '';
-    const fd = new FormData(); fd.append('file', file);
-    setUploadProgress({ label: 'Item Registration', pct: 0 });
-    try {
-      const res = await api.post('/api/upload/item-registration', fd, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        onUploadProgress: (ev) => setUploadProgress({ label: 'Item Registration', pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
-      });
-      setUploadProgress(null);
-      addToast(`✅ ${res.data.message || 'Item Registration uploaded successfully'}`, 'success');
-      setItemRegPage(1);
-      fetchItemRegistration(1, itemRegPerPage, itemRegAppliedSearch, itemRegFilters);
-    } catch (err) {
-      setUploadProgress(null);
-      addToast(`❌ Failed to upload Item Registration: ${err?.response?.data?.error || err.message}`, 'error');
+    // Expected columns for Item Registration
+    const EXPECTED_ITEM_REG_COLS = ['Req. No', 'Proc. Status', 'Client Nm.', 'Prod. Nm.'];
+    for (const file of files) {
+      try {
+        const XLSX = await import('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm');
+        const buf = await file.arrayBuffer();
+        const wb = XLSX.read(buf, { type: 'array', sheetRows: 1 });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const headers = XLSX.utils.sheet_to_json(ws, { header: 1 })[0] || [];
+        const missing = EXPECTED_ITEM_REG_COLS.filter(c => !headers.some(h => String(h).toLowerCase().includes(c.toLowerCase().replace('. ','').replace('.',''))));
+        if (missing.length > 3) {
+          addToast(`❌ File "${file.name}" sepertinya file yang salah — kolom berbeda lebih dari 3. Cek lagi file yang diupload.`, 'error');
+          return;
+        }
+      } catch {}
     }
+    let totalUploaded = 0;
+    for (const file of files) {
+      setUploadProgress({ label: `Item Registration: ${file.name}`, pct: 0 });
+      const fd = new FormData(); fd.append('file', file);
+      try {
+        const res = await api.post('/api/upload/item-registration', fd, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+          onUploadProgress: (ev) => setUploadProgress({ label: `Item Registration: ${file.name}`, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
+        });
+        totalUploaded += res.data.uploaded || res.data.upserted || 0;
+      } catch (err) {
+        setUploadProgress(null);
+        addToast(`❌ Error pada "${file.name}": ${err?.response?.data?.error || err.message}`, 'error');
+        return;
+      }
+    }
+    setUploadProgress(null);
+    addToast(`✅ Item Registration (${files.length} file): ${totalUploaded} records diproses`, 'success');
+    setItemRegPage(1);
+    fetchItemRegistration(1, itemRegPerPage, itemRegAppliedSearch, itemRegFilters);
   };
 
   const handleBatchUpload = async (e) => {
@@ -2573,14 +2638,20 @@ const App = () => {
       }, {});
       return { ...m, ...yoyValues };
     });
-    const purchaseYoyColors = ['#14B8A6', '#0F766E'];
+    // Assign colors: oldest year gets light grey, newer years get teal shades
+    const purchaseYoyColorMap = (year) => {
+      const allYears = [...purchaseYoyYears].sort((a, b) => a - b);
+      const idx = allYears.indexOf(year);
+      const palette = ['#D1D5DB', '#14B8A6', '#0F766E', '#0891B2'];
+      return palette[idx % palette.length];
+    };
     const completedTrendLegendPayload = [
       { value: 'PO Amount', type: 'rect', color: '#93C5FD', dataKey: 'purchase_amount' },
       { value: 'Sales Amount', type: 'rect', color: '#2563EB', dataKey: 'sales_amount' },
-      ...activePurchaseYoyYears.map((year, i) => ({
-        value: `Purchase ${year}`,
+      ...activePurchaseYoyYears.map((year) => ({
+        value: `PO ${year}`,
         type: 'line',
-        color: purchaseYoyColors[i % purchaseYoyColors.length],
+        color: purchaseYoyColorMap(year),
         dataKey: `purchase_${year}`,
       })),
     ];
@@ -2623,18 +2694,24 @@ const App = () => {
               <Legend wrapperStyle={{fontSize:12}} payload={completedTrendLegendPayload}/>
               <Bar dataKey="purchase_amount" name="PO Amount" fill="#93C5FD" radius={[4,4,0,0]}/>
               <Bar dataKey="sales_amount" name="Sales Amount" fill="#2563EB" radius={[4,4,0,0]}/>
-              {activePurchaseYoyYears.map((year, i) => (
-                <Line
-                  key={year}
-                  type="monotone"
-                  dataKey={`purchase_${year}`}
-                  name={`Purchase ${year}`}
-                  stroke={purchaseYoyColors[i % purchaseYoyColors.length]}
-                  strokeWidth={3}
-                  dot={{ r: 3, fill: purchaseYoyColors[i % purchaseYoyColors.length] }}
-                  activeDot={{ r: 6 }}
-                />
-              ))}
+              {activePurchaseYoyYears.map((year) => {
+                const lineColor = purchaseYoyColorMap(year);
+                const allYears = [...purchaseYoyYears].sort((a, b) => a - b);
+                const isOldest = allYears.indexOf(year) === 0;
+                return (
+                  <Line
+                    key={year}
+                    type="monotone"
+                    dataKey={`purchase_${year}`}
+                    name={`PO ${year}`}
+                    stroke={lineColor}
+                    strokeWidth={isOldest ? 2 : 3}
+                    strokeDasharray={isOldest ? '5 3' : undefined}
+                    dot={{ r: 3, fill: lineColor }}
+                    activeDot={{ r: 6 }}
+                  />
+                );
+              })}
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -2826,7 +2903,9 @@ const App = () => {
       ['Proc. Status', 'proc_status'], ['Client Nm.', 'client_name'], ['Category', 'category'], ['PIC', 'pic'],
       ['Req. No', 'req_no'], ['Prod. ID', 'prod_id'], ['Prod. Nm.', 'prod_name'],
       ['Spec.', 'spec'], ['Mfr. Nm.', 'mfr_name'], ['Unit', 'odr_unit'],
-      ['Prod. Price', 'prod_price'], ['Curr.', 'curr'], ['Remarks', 'remarks']
+      ['Prod. Price', 'prod_price'], ['Curr.', 'curr'],
+      ['Similar Item', 'similar_item'],
+      ['Remarks', 'remarks']
     ];
     const statusClass = (status) => {
       const s = String(status || '').toLowerCase();
@@ -2845,8 +2924,20 @@ const App = () => {
     const colWidth = (key) => ({
       proc_status: '9%', client_name: '10%', category: '8%', pic: '5%', req_no: 'auto', prod_id: '5%',
       prod_name: 'auto', spec: '15%', mfr_name: '6%', odr_unit: '4%',
-      prod_price: '5%', curr: '3%', remarks: '18%'
+      prod_price: '5%', curr: '3%', similar_item: '18%', remarks: '14%'
     }[key] || 'auto');
+
+    const loadSimilarity = (reqNo) => {
+      if (!reqNo || similarityCache[reqNo]) return;
+      setSimilarityCache(prev => ({ ...prev, [reqNo]: { loading: true, result: null } }));
+      api.get(`/api/item-registration/similarity/${encodeURIComponent(reqNo)}`)
+        .then(res => {
+          setSimilarityCache(prev => ({ ...prev, [reqNo]: { loading: false, result: res.data.similar_items } }));
+        })
+        .catch(() => {
+          setSimilarityCache(prev => ({ ...prev, [reqNo]: { loading: false, result: null } }));
+        });
+    };
 
     return (
       <div className={`rounded-2xl overflow-hidden ${card}`}>
@@ -2932,7 +3023,7 @@ const App = () => {
         </div>
 
         <div className="overflow-x-auto">
-          <table className="min-w-[1900px] table-fixed text-xs">
+          <table className="min-w-[2200px] table-fixed text-xs">
             <colgroup>{columns.map(([, key]) => <col key={key} style={{ width: colWidth(key) }}/>)}</colgroup>
             <thead className={tblHd}><tr>{columns.map(([label, key]) => <th key={label} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{label}</th>)}</tr></thead>
             <tbody className={`divide-y ${tblDv}`}>
@@ -2944,6 +3035,39 @@ const App = () => {
                   if (key === 'pic') {
                     const c = getPicColor(row.pic);
                     return <td key={key} className="px-2 py-2 text-center truncate">{row.pic ? <span className={`inline-flex max-w-full truncate px-2 py-0.5 rounded-full text-[11px] font-semibold ${c ? `${c.bg} ${c.text}` : 'bg-gray-100 text-gray-700'}`}>{row.pic}</span> : <span className={txt2}>-</span>}</td>;
+                  }
+                  if (key === 'similar_item') {
+                    const reqNo = row.req_no;
+                    const cached = similarityCache[reqNo];
+                    // Only check items without prod_id (not yet registered)
+                    if (row.prod_id) return <td key={key} className={`px-2 py-2 text-center ${txt2}`}><span className="text-[10px] opacity-40">—</span></td>;
+                    if (!cached) {
+                      return (
+                        <td key={key} className="px-2 py-2">
+                          <button
+                            onClick={() => loadSimilarity(reqNo)}
+                            className={`text-[10px] px-2 py-0.5 rounded border border-dashed ${darkMode ? 'border-gray-600 text-gray-400 hover:text-blue-400 hover:border-blue-500' : 'border-gray-300 text-gray-400 hover:text-blue-600 hover:border-blue-400'} transition-colors`}
+                          >Cek Similar</button>
+                        </td>
+                      );
+                    }
+                    if (cached.loading) return <td key={key} className={`px-2 py-2 text-center ${txt2}`}><span className="text-[10px] animate-pulse">Loading…</span></td>;
+                    const sim = cached.result;
+                    if (!sim) return <td key={key} className={`px-2 py-2 text-center ${txt2}`}><span className="text-[10px] opacity-40">Tidak ada</span></td>;
+                    return (
+                      <td key={key} className="px-2 py-2">
+                        <div className="flex flex-col gap-0.5">
+                          <div className="flex items-center gap-1 flex-wrap">
+                            {String(sim.product_ids || '').split(',').map(pid => (
+                              <span key={pid.trim()} className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${darkMode ? 'bg-blue-900 text-blue-200' : 'bg-blue-50 text-blue-700'}`}>{pid.trim()}</span>
+                            ))}
+                            <span className={`ml-1 text-[10px] font-semibold ${sim.similarity >= 90 ? 'text-green-600' : 'text-amber-500'}`}>{sim.similarity}%</span>
+                          </div>
+                          <span className={`text-[10px] ${txt2} truncate`} title={sim.product_name}>{sim.product_name || ''}</span>
+                          {sim.specification && <span className={`text-[10px] ${txt2} truncate opacity-70`} title={sim.specification}>{sim.specification}</span>}
+                        </div>
+                      </td>
+                    );
                   }
                   if (key === 'remarks') return <td key={key} className="px-2 py-2 truncate" title={row.remarks}>{editingCell?.id===row.id && editingCell.field==='item_remarks' ? (
                     <input type="text" defaultValue={row.remarks}
@@ -3008,6 +3132,61 @@ const App = () => {
         value: Number(r.value || 0),
       }));
       const total = sumRows(data, 'value');
+
+      // For Proc. Status: Pie chart, top 5 + Others
+      if (title === 'Proc. Status') {
+        const sorted = [...data].sort((a, b) => b.value - a.value);
+        const top5 = sorted.slice(0, 5);
+        const rest = sorted.slice(5);
+        const othersValue = rest.reduce((s, r) => s + r.value, 0);
+        const pieData = othersValue > 0
+          ? [...top5, { name: 'Others', shortLabel: 'Others', value: othersValue }]
+          : top5;
+        const PIE_COLORS = ['#2563EB', '#14B8A6', '#F59E0B', '#8B5CF6', '#EF4444', '#9CA3AF'];
+        const RADIAN = Math.PI / 180;
+        const renderCustomLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent, name }) => {
+          if (percent < 0.04) return null;
+          const radius = innerRadius + (outerRadius - innerRadius) * 0.55;
+          const x = cx + radius * Math.cos(-midAngle * RADIAN);
+          const y = cy + radius * Math.sin(-midAngle * RADIAN);
+          return (
+            <text x={x} y={y} fill="white" textAnchor="middle" dominantBaseline="central" fontSize={11} fontWeight="600">
+              {`${(percent * 100).toFixed(0)}%`}
+            </text>
+          );
+        };
+        return (
+          <div className={`p-5 rounded-2xl ${card}`}>
+            <h3 className={`text-base font-bold ${txt}`}>{title}</h3>
+            <p className={`text-xs mb-2 ${txt2}`}>Total: {fmtNum(total)} Req. No</p>
+            {pieData.length === 0 ? (
+              <div className={`h-[220px] flex items-center justify-center text-sm ${txt2}`}>No Item Registration data</div>
+            ) : (
+              <div className="flex flex-col gap-2">
+                <ResponsiveContainer width="100%" height={220}>
+                  <PieChart>
+                    <Pie data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={95} labelLine={false} label={renderCustomLabel}>
+                      {pieData.map((entry, i) => <Cell key={`cell-${i}`} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
+                    </Pie>
+                    <Tooltip formatter={(v, n) => [fmtNum(v), n]} contentStyle={{background: darkMode?'#1F2937':'#fff', border:'none', borderRadius:8, fontSize:12}}/>
+                  </PieChart>
+                </ResponsiveContainer>
+                <div className="flex flex-wrap gap-x-4 gap-y-1 justify-center">
+                  {pieData.map((entry, i) => (
+                    <div key={entry.name} className="flex items-center gap-1.5 text-xs">
+                      <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{backgroundColor: PIE_COLORS[i % PIE_COLORS.length]}}/>
+                      <span className={`${txt2} truncate max-w-[150px]`} title={entry.name}>{entry.name}</span>
+                      <span className={`font-semibold ${txt}`}>{fmtNum(entry.value)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      }
+
+      // Default: bar chart (for other titles like Client Nm.)
       const height = Math.max(240, data.length * 34 + 56);
       return (
         <div className={`p-5 rounded-2xl ${card}`}>
@@ -3254,7 +3433,12 @@ const App = () => {
     return (
       <div className="mb-5">
         {pendingKpis.length > 0 ? (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-3">
+          <div
+            className="grid gap-3"
+            style={{
+              gridTemplateColumns: `repeat(${Math.min(pendingKpis.length, Math.max(2, pendingKpis.length))}, minmax(0, 1fr))`,
+            }}
+          >
             {pendingKpis.map((p) => {
               const currentPics = Array.isArray(soFilters.pics) ? soFilters.pics : [];
               const activePic = !p.isTotal && currentPics.includes(p.pic);
@@ -3867,7 +4051,7 @@ const App = () => {
                   <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-blue-50'}`}>
                     <Upload className="w-4 h-4 text-blue-500"/>
                     <span className={`text-sm font-medium ${txt}`}>Upload SO - Search Client Odr</span>
-                    <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUpload(e,'scor'); setShowUploadDropdown(false);}} className="hidden"/>
+                    <input type="file" accept=".xlsx,.xls" multiple onChange={e=>{handleUpload(e,'scor'); setShowUploadDropdown(false);}} className="hidden"/>
                   </label>
                   <div className={`${darkMode?'border-t border-gray-700':'border-t border-gray-100'}`}></div>
                   <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-sky-50'}`}>
@@ -3876,7 +4060,7 @@ const App = () => {
                       <span className={`text-sm font-medium ${txt}`}>Upload Prod ID (SAP)</span>
                       <p className={`text-xs ${txt2}`}>Update Product ID to category mapping</p>
                     </div>
-                    <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUploadProductID(e); setShowUploadDropdown(false);}} className="hidden"/>
+                    <input type="file" accept=".xlsx,.xls" multiple onChange={e=>{handleUploadProductID(e); setShowUploadDropdown(false);}} className="hidden"/>
                   </label>
                   <div className={`${darkMode?'border-t border-gray-700':'border-t border-gray-100'}`}></div>
                   <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-indigo-50'}`}>
@@ -3885,7 +4069,7 @@ const App = () => {
                       <span className={`text-sm font-medium ${txt}`}>Update PIC</span>
                       <p className={`text-xs ${txt2}`}>Update PIC by category</p>
                     </div>
-                    <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUpdatePIC(e); setShowUploadDropdown(false);}} className="hidden"/>
+                    <input type="file" accept=".xlsx,.xls" multiple onChange={e=>{handleUpdatePIC(e); setShowUploadDropdown(false);}} className="hidden"/>
                   </label>
                   <div className={`${darkMode?'border-t border-gray-700':'border-t border-gray-100'}`}></div>
                   <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-blue-50'}`}>
@@ -3894,7 +4078,7 @@ const App = () => {
                       <span className={`text-sm font-medium ${txt}`}>Upload Item Registration</span>
                       <p className={`text-xs ${txt2}`}>Update Process Purchase Info Registration</p>
                     </div>
-                    <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUploadItemRegistration(e); setShowUploadDropdown(false);}} className="hidden"/>
+                    <input type="file" accept=".xlsx,.xls" multiple onChange={e=>{handleUploadItemRegistration(e); setShowUploadDropdown(false);}} className="hidden"/>
                   </label>
                 </div>
               )}
