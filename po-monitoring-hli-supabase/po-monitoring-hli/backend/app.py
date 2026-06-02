@@ -966,7 +966,22 @@ def normalize_category_id(value):
         return cat_id[:-2]
     return cat_id.strip()
 
+_REFRESH_MAPPINGS_LAST_RUN = 0
+_REFRESH_MAPPINGS_TTL = 60  # seconds
+
 def refresh_item_registration_mappings():
+    """Sync category/PIC values for all ItemRegistration rows.
+    Throttled to at most once per 60 seconds to avoid hammering the DB on every page load."""
+    import time
+    global _REFRESH_MAPPINGS_LAST_RUN
+    now = time.time()
+    if now - _REFRESH_MAPPINGS_LAST_RUN < _REFRESH_MAPPINGS_TTL:
+        return
+    _REFRESH_MAPPINGS_LAST_RUN = now
+
+    # Pre-load all MasterPIC rows into a dict to avoid N+1 queries
+    pic_map = {p.category_id: p.pic_name for p in db.session.query(MasterPIC).all()}
+
     rows = ItemRegistration.query.all()
     changed = False
     for row in rows:
@@ -979,7 +994,10 @@ def refresh_item_registration_mappings():
             row.category = category
             changed = True
         if normalized_cat_id:
-            pic = _lookup_pic_by_category_id(normalized_cat_id) or ''
+            # Try exact match, then with .0 suffix (same logic as _lookup_pic_by_category_id)
+            pic = pic_map.get(normalized_cat_id) or ''
+            if not pic and re.match(r'^\d+$', normalized_cat_id):
+                pic = pic_map.get(f'{normalized_cat_id}.0') or ''
             if row.pic != pic:
                 row.pic = pic
                 changed = True
@@ -3854,14 +3872,38 @@ def get_item_registration_data():
             for pic, count in sorted(missing_by_pic.items(), key=lambda x: x[1], reverse=True)
         ]
         rows = q.order_by(ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()).offset((page-1)*per_page).limit(per_page).all()
-        option_q = ItemRegistration.query
+
+        # Use DISTINCT queries instead of fetching all rows — much faster on large tables
+        option_q_base = ItemRegistration.query
         if clients:
-            option_q = option_q.filter(ItemRegistration.client_name.in_(clients))
-        option_rows = option_q.all()
-        all_clients = sorted({r.client_name for r in option_rows if r.client_name})
-        all_categories = sorted({r.category for r in option_rows if r.category})
-        all_pics = sorted({r.pic for r in option_rows if r.pic})
-        all_proc_statuses = sorted({r.proc_status for r in option_rows if r.proc_status})
+            option_q_base = option_q_base.filter(ItemRegistration.client_name.in_(clients))
+        all_clients = sorted(
+            v for (v,) in option_q_base.with_entities(ItemRegistration.client_name).distinct().all() if v
+        )
+        all_categories = sorted(
+            v for (v,) in option_q_base.with_entities(ItemRegistration.category).distinct().all() if v
+        )
+        all_proc_statuses = sorted(
+            v for (v,) in option_q_base.with_entities(ItemRegistration.proc_status).distinct().all() if v
+        )
+        # pic_options: use resolved PIC names (from missing_by_pic which already has full resolved set)
+        # Collect all unique resolved PICs across all records (not just missing ones) using same resolution
+        _pic_map = {p.category_id: p.pic_name for p in db.session.query(MasterPIC).all()}
+        def _resolve_pic_fast(cat_id, raw_pic, client_name):
+            cid = cat_id or ''
+            pic = _pic_map.get(cid) or ''
+            if not pic and re.match(r'^\d+$', cid):
+                pic = _pic_map.get(f'{cid}.0') or ''
+            final = pic or raw_pic or ''
+            if 'YUPI' in (client_name or '').upper():
+                final = 'ANDRE'
+            return final
+
+        _pic_rows = option_q_base.with_entities(
+            ItemRegistration.category_id, ItemRegistration.pic, ItemRegistration.client_name
+        ).distinct().all()
+        _resolved_pics = [_resolve_pic_fast(r[0], r[1], r[2]) for r in _pic_rows]
+        all_pics = sorted({p for p in _resolved_pics if p})
         last_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'ITEM_REG').scalar()
         return jsonify({
             'data': [item_registration_dict(r, include_similarity=False) for r in rows],
