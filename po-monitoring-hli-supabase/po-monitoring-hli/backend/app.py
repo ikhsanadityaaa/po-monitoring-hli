@@ -34,6 +34,7 @@ _COMPLETED_SUMMARY_CACHE_TTL_SECONDS = 300
 # Stores similarity results keyed by (req_no, line_no) to avoid recalculating
 _SIMILARITY_CACHE = {}
 _SIMILARITY_CACHE_FILE = os.path.join(os.path.dirname(__file__), 'instance', 'similarity_cache.json')
+_MASTER_PIC_CACHE = {'signature': None, 'by_id': {}, 'by_name': {}}
 
 def _holiday_set():
     """Return cached set of Indonesian non-working public holidays.
@@ -327,13 +328,15 @@ class ItemRegistration(db.Model):
 
 
 # ─── Exchange rate helpers ─────────────────────────────────────────────────
-_RATE_CACHE = {}   # {date: float} in-process cache
+_RATE_CACHE = {}   # {date: float} in-process cache for USD -> IDR
+_FX_RATE_CACHE = {}  # {(currency, date): float} in-process cache for non-USD FX
 
-def _fetch_rate_from_api(d):
-    """Try Frankfurter (ECB data) for historical USD->IDR. Returns float or None."""
+def _fetch_rate_from_api(d, currency='USD'):
+    """Try Frankfurter (ECB data) for historical currency->IDR. Returns float or None."""
     try:
         import urllib.request, json as _json
-        url = f"https://api.frankfurter.app/{d.isoformat()}?from=USD&to=IDR"
+        cur = (currency or 'USD').strip().upper()
+        url = f"https://api.frankfurter.app/{d.isoformat()}?from={cur}&to=IDR"
         with urllib.request.urlopen(url, timeout=6) as resp:
             data = _json.loads(resp.read())
         return float(data['rates']['IDR'])
@@ -379,7 +382,38 @@ def get_usd_to_idr(d, cache_only=False):
     return _get_fallback_rate()
 
 
-def prefetch_exchange_rates(dates, fetch_missing=True):
+def get_currency_to_idr(currency, d, cache_only=False):
+    cur = (currency or 'IDR').strip().upper()
+    if cur in ('IDR', ''):
+        return 1.0
+    if cur == 'USD':
+        return get_usd_to_idr(d, cache_only=cache_only)
+
+    if d is None:
+        d = date.today()
+    key = (cur, d)
+    if key in _FX_RATE_CACHE:
+        return _FX_RATE_CACHE[key]
+    if not cache_only and d <= date.today():
+        rate = _fetch_rate_from_api(d, cur)
+        if rate:
+            _FX_RATE_CACHE[key] = rate
+            return rate
+
+    same_currency_rates = [(rate_date, rate) for (fx_cur, rate_date), rate in _FX_RATE_CACHE.items() if fx_cur == cur]
+    if same_currency_rates:
+        _nearest_date, nearest_rate = min(same_currency_rates, key=lambda r: abs((r[0] - d).days))
+        _FX_RATE_CACHE[key] = nearest_rate
+        return nearest_rate
+
+    fallback_rate = _fetch_rate_from_api(date.today(), cur) if not cache_only else None
+    if fallback_rate:
+        _FX_RATE_CACHE[key] = fallback_rate
+        return fallback_rate
+    return _get_fallback_rate()
+
+
+def prefetch_exchange_rates(dates, fetch_missing=True, currency='USD'):
     """Warm the in-memory _RATE_CACHE for a collection of dates, minimising
     round-trips to the Frankfurter API.
 
@@ -398,7 +432,28 @@ def prefetch_exchange_rates(dates, fetch_missing=True):
     calls convert_to_idr(), then pass cache_only=True to get_usd_to_idr()
     inside the loop.
     """
-    if not dates:
+    cur = (currency or 'USD').strip().upper()
+    if not dates or cur in ('IDR', ''):
+        return
+
+    if cur != 'USD':
+        needed = {d for d in dates if d is not None and (cur, d) not in _FX_RATE_CACHE}
+        if fetch_missing:
+            today = date.today()
+            for d in sorted(x for x in needed if x <= today):
+                rate = _fetch_rate_from_api(d, cur)
+                if rate:
+                    _FX_RATE_CACHE[(cur, d)] = rate
+                    needed.discard(d)
+        if needed:
+            same_currency_rates = [(rate_date, rate) for (fx_cur, rate_date), rate in _FX_RATE_CACHE.items() if fx_cur == cur]
+            fallback = get_currency_to_idr(cur, date.today(), cache_only=not fetch_missing)
+            for d in needed:
+                if same_currency_rates:
+                    _nearest_date, nearest_rate = min(same_currency_rates, key=lambda r: abs((r[0] - d).days))
+                    _FX_RATE_CACHE[(cur, d)] = nearest_rate
+                else:
+                    _FX_RATE_CACHE[(cur, d)] = fallback
         return
 
     # 1. Filter to dates not already cached
@@ -451,7 +506,7 @@ def prefetch_exchange_rates(dates, fetch_missing=True):
 
 
 def convert_to_idr(amount, currency, rate_date=None, cache_only=False):
-    """Convert amount to IDR. Non-USD/IDR currencies returned as-is.
+    """Convert amount to IDR. USD and EUR use FX rates; other currencies are returned as-is.
 
     When called inside a loop preceded by prefetch_exchange_rates(), pass
     cache_only=True to skip the per-row HTTP fallback path entirely."""
@@ -460,9 +515,18 @@ def convert_to_idr(amount, currency, rate_date=None, cache_only=False):
     cur = (currency or 'IDR').strip().upper()
     if cur in ('IDR', ''):
         return float(amount)
-    if cur == 'USD':
-        return float(amount) * get_usd_to_idr(rate_date, cache_only=cache_only)
+    if cur in ('USD', 'EUR'):
+        return float(amount) * get_currency_to_idr(cur, rate_date, cache_only=cache_only)
     return float(amount)
+
+
+def prefetch_convertible_exchange_rates(rows, fetch_missing=True):
+    for currency in ('USD', 'EUR'):
+        dates = {
+            s.so_create_date for s in rows
+            if s.so_create_date and (s.purchasing_currency or '').strip().upper() == currency
+        }
+        prefetch_exchange_rates(dates, fetch_missing=fetch_missing, currency=currency)
 
 
 def raw_purchase_amount(s):
@@ -477,16 +541,16 @@ def purchase_amount_idr(s, allow_persist=False):
     """Return cached/persisted purchase amount in IDR for SOData.
 
     Delivery Completed pages call this for every row. For IDR rows the value is
-    already final. For USD rows we persist the converted result in so_data, so
+    already final. For USD/EUR rows we persist the converted result in so_data, so
     old rows are not converted again on every page load. Only rows whose cache
     is still empty (typically newly uploaded/updated non-IDR rows) are computed.
     """
     cached = getattr(s, 'purchasing_amount_idr', None)
-    if cached is not None:
+    cur = (s.purchasing_currency or 'IDR').strip().upper()
+    if cached is not None and cur != 'EUR':
         return float(cached)
 
     raw = raw_purchase_amount(s)
-    cur = (s.purchasing_currency or 'IDR').strip().upper()
     if cur in ('IDR', ''):
         converted = raw
     else:
@@ -500,13 +564,15 @@ def purchase_amount_idr(s, allow_persist=False):
 
 def ensure_purchase_amount_idr_cache(rows):
     """Persist missing IDR purchase amounts for rows in the current result set."""
-    missing = [s for s in rows if getattr(s, 'purchasing_amount_idr', None) is None]
+    missing = [
+        s for s in rows
+        if getattr(s, 'purchasing_amount_idr', None) is None
+        or (s.purchasing_currency or '').strip().upper() == 'EUR'
+    ]
     if not missing:
         return 0
 
-    usd_missing = [s for s in missing if (s.purchasing_currency or '').strip().upper() == 'USD']
-    if usd_missing:
-        prefetch_exchange_rates({s.so_create_date for s in usd_missing if s.so_create_date}, fetch_missing=False)
+    prefetch_convertible_exchange_rates(missing, fetch_missing=True)
 
     for s in missing:
         purchase_amount_idr(s, allow_persist=True)
@@ -994,14 +1060,14 @@ def apply_item_registration_pic_filter(query, pics):
     return query.filter(ItemRegistration.pic.in_(pics))
 
 def item_registration_dict(row, registered_items=None):
-    pic = _lookup_pic_by_category_id(row.category_id)
+    pic = resolve_item_registration_pic(row)
     similar_items = find_similar_registered_items(row, registered_items)
     return {
         'id': row.id,
         'proc_status': row.proc_status or '',
         'client_name': row.client_name or '',
         'category': source_category_level1(row.category),
-        'pic': pic or row.pic or '',
+        'pic': pic,
         'req_no': row.req_no or '',
         'prod_id': row.prod_id or '',
         'batch_grp_no': row.batch_grp_no or '',
@@ -1050,6 +1116,54 @@ def normalize_category_id(value):
         return cat_id[:-2]
     return cat_id.strip()
 
+def normalize_category_name(value):
+    category = source_category_level1(value)
+    if not category:
+        return ''
+    return re.sub(r'\s+', ' ', category).strip().lower()
+
+def invalidate_master_pic_cache():
+    _MASTER_PIC_CACHE['signature'] = None
+    _MASTER_PIC_CACHE['by_id'] = {}
+    _MASTER_PIC_CACHE['by_name'] = {}
+
+def master_pic_maps():
+    signature = db.session.query(func.count(MasterPIC.id), func.max(MasterPIC.updated_at)).one()
+    signature = tuple(signature)
+    if _MASTER_PIC_CACHE.get('signature') == signature:
+        return _MASTER_PIC_CACHE['by_id'], _MASTER_PIC_CACHE['by_name']
+
+    by_id = {}
+    by_name = {}
+    for m in MasterPIC.query.with_entities(MasterPIC.category_id, MasterPIC.category_name, MasterPIC.pic_name).all():
+        pic = clean(m.pic_name)
+        if not pic:
+            continue
+        cat_id = normalize_category_id(m.category_id)
+        if cat_id and cat_id not in by_id:
+            by_id[cat_id] = pic
+        cat_name = normalize_category_name(m.category_name)
+        if cat_name and cat_name not in by_name:
+            by_name[cat_name] = pic
+    _MASTER_PIC_CACHE['signature'] = signature
+    _MASTER_PIC_CACHE['by_id'] = by_id
+    _MASTER_PIC_CACHE['by_name'] = by_name
+    return by_id, by_name
+
+def _lookup_pic_by_category(category_id=None, category_name=None):
+    by_id, by_name = master_pic_maps()
+    cat_id = normalize_category_id(category_id)
+    if cat_id and cat_id in by_id:
+        return by_id[cat_id]
+    cat_name = normalize_category_name(category_name)
+    if cat_name and cat_name in by_name:
+        return by_name[cat_name]
+    return None
+
+def resolve_item_registration_pic(row):
+    mapped = _lookup_pic_by_category(row.category_id, row.category)
+    return canonical_pending_pic(mapped or row.pic or '', row.client_name)
+
 def refresh_item_registration_mappings():
     rows = ItemRegistration.query.all()
     changed = False
@@ -1062,11 +1176,10 @@ def refresh_item_registration_mappings():
         if row.category != category:
             row.category = category
             changed = True
-        if normalized_cat_id:
-            pic = _lookup_pic_by_category_id(normalized_cat_id) or ''
-            if row.pic != pic:
-                row.pic = pic
-                changed = True
+        pic = _lookup_pic_by_category(normalized_cat_id, category) or ''
+        if row.pic != pic:
+            row.pic = pic
+            changed = True
     if changed:
         db.session.commit()
 
@@ -1129,12 +1242,13 @@ def import_item_registration_dataframe(df, filename='Item Registration'):
         if not req_no:
             continue
         category_id = normalize_category_id(df_val(row, col['category_id']))
+        category = source_category_level1(df_val(row, col['category']))
         incoming[req_no] = {
             'proc_status': clean(df_val(row, col['proc_status'])),
             'client_name': clean(df_val(row, col['client_name'])),
-            'category': source_category_level1(df_val(row, col['category'])),
+            'category': category,
             'category_id': category_id,
-            'pic': _lookup_pic_by_category_id(category_id) or '',
+            'pic': _lookup_pic_by_category(category_id, category) or '',
             'req_no': req_no,
             'prod_id': prod_id,
             'product_status': clean(df_val(row, col['product_status'])),
@@ -2039,9 +2153,7 @@ def get_all_so():
 
         if margin_filter in ('positive', 'negative'):
             # Warm cache before filtering loop to avoid per-row HTTP calls.
-            usd_sos = [s for s in all_sos if (s.purchasing_currency or '').strip().upper() == 'USD']
-            if usd_sos:
-                prefetch_exchange_rates({s.so_create_date for s in usd_sos if s.so_create_date})
+            prefetch_convertible_exchange_rates(all_sos)
 
             def calc_margin(s):
                 po_amt = convert_to_idr((s.purchasing_amount or 0) or (s.purchasing_price or 0) * (s.so_qty or 0), s.purchasing_currency, s.so_create_date, cache_only=True)
@@ -3010,9 +3122,7 @@ def download_so_batch_template():
         # Margin filter
         if margin_filter in ('positive', 'negative'):
             # Warm cache before filtering loop to avoid per-row HTTP calls.
-            usd_sos = [s for s in all_sos if (s.purchasing_currency or '').strip().upper() == 'USD']
-            if usd_sos:
-                prefetch_exchange_rates({s.so_create_date for s in usd_sos if s.so_create_date})
+            prefetch_convertible_exchange_rates(all_sos)
 
             def calc_margin(s):
                 po_amt = convert_to_idr((s.purchasing_amount or 0) or (s.purchasing_price or 0) * (s.so_qty or 0), s.purchasing_currency, s.so_create_date, cache_only=True)
@@ -3784,6 +3894,49 @@ def calculate_similarity(str1, str2):
     
     return min(100.0, jaccard + substring_bonus)
 
+def _similarity_token(value):
+    text_value = (clean(value) or '').lower()
+    tokens = [t for t in re.split(r'[^a-z0-9]+', text_value) if len(t) >= 3]
+    return max(tokens, key=len) if tokens else ''
+
+def _candidate_registered_items_for_similarity(item, registered_items=None, limit=1200):
+    unit = (clean(item.odr_unit) or '').lower()
+    mfr_token = _similarity_token(item.mfr_name)
+    name_token = _similarity_token(item.prod_name)
+
+    if registered_items is not None:
+        candidates = []
+        for reg in registered_items:
+            if unit and (clean(reg.order_unit) or '').lower() != unit:
+                continue
+            reg_mfr = (clean(reg.manufacturer_name) or '').lower()
+            reg_name = (clean(reg.product_name) or '').lower()
+            if mfr_token and mfr_token not in reg_mfr:
+                continue
+            if name_token and name_token not in reg_name:
+                continue
+            candidates.append(reg)
+            if len(candidates) >= limit:
+                break
+        return candidates
+
+    q = ProductIDDB.query.filter(
+        ProductIDDB.product_id.isnot(None),
+        ProductIDDB.product_id != ''
+    )
+    if unit:
+        q = q.filter(func.lower(ProductIDDB.order_unit) == unit)
+    token_filters = []
+    if mfr_token:
+        token_filters.append(ProductIDDB.manufacturer_name.ilike(f'%{mfr_token}%'))
+    if name_token:
+        token_filters.append(ProductIDDB.product_name.ilike(f'%{name_token}%'))
+    if token_filters:
+        q = q.filter(*token_filters)
+    elif not unit:
+        return []
+    return q.limit(limit).all()
+
 
 def find_similar_registered_items(item, registered_items=None):
     """Find Product ID master rows similar to an Item Registration row.
@@ -3811,11 +3964,7 @@ def find_similar_registered_items(item, registered_items=None):
         if cache_key in _SIMILARITY_CACHE:
             return _SIMILARITY_CACHE[cache_key]
 
-        if registered_items is None:
-            registered_items = ProductIDDB.query.filter(
-                ProductIDDB.product_id.isnot(None),
-                ProductIDDB.product_id != ''
-            ).all()
+        registered_items = _candidate_registered_items_for_similarity(item, registered_items)
 
         similar_items = []
         for reg in registered_items:
@@ -3867,7 +4016,6 @@ def find_similar_registered_items(item, registered_items=None):
 def get_item_registration_data():
     try:
         ensure_default_item_registration_loaded()
-        refresh_item_registration_mappings()
         page = int(request.args.get('page', 1))
         per_page = int(request.args.get('per_page', 10))
         search = request.args.get('search', '').strip()
@@ -3905,7 +4053,7 @@ def get_item_registration_data():
         missing_prod_rows = q.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-')).all()
         missing_by_pic = {}
         for r in missing_prod_rows:
-            pic = canonical_pending_pic(r.pic, r.client_name)
+            pic = resolve_item_registration_pic(r)
             missing_by_pic[pic] = missing_by_pic.get(pic, 0) + 1
         missing_prod_id_by_pic = [
             {'pic': pic, 'count': count}
@@ -3915,19 +4063,21 @@ def get_item_registration_data():
         option_q = ItemRegistration.query
         if clients:
             option_q = option_q.filter(ItemRegistration.client_name.in_(clients))
-        option_rows = option_q.all()
+        option_rows = option_q.with_entities(
+            ItemRegistration.client_name,
+            ItemRegistration.category,
+            ItemRegistration.category_id,
+            ItemRegistration.pic,
+            ItemRegistration.proc_status,
+        ).all()
         all_clients = sorted({r.client_name for r in option_rows if r.client_name})
         all_categories = sorted({r.category for r in option_rows if r.category})
-        all_pics = sorted({canonical_pending_pic(r.pic, r.client_name) for r in option_rows if canonical_pending_pic(r.pic, r.client_name) != 'Unassigned'})
+        all_pics = sorted({resolve_item_registration_pic(r) for r in option_rows if resolve_item_registration_pic(r) != 'Unassigned'})
         all_proc_statuses = sorted({r.proc_status for r in option_rows if r.proc_status})
         last_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'ITEM_REG').scalar()
-        registered_products = ProductIDDB.query.filter(
-            ProductIDDB.product_id.isnot(None),
-            ProductIDDB.product_id != ''
-        ).all()
 
         return jsonify({
-            'data': [item_registration_dict(r, registered_products) for r in rows],
+            'data': [item_registration_dict(r) for r in rows],
             'total': total,
             'page': page,
             'per_page': per_page,
@@ -4175,13 +4325,7 @@ def batch_upload_item_registration():
 
 def _lookup_pic_by_category_id(category_id):
     """Return PIC name for a Master PIC category id, or None if not found."""
-    cat_id = normalize_category_id(category_id)
-    if not cat_id:
-        return None
-    pic = db.session.query(MasterPIC).filter_by(category_id=cat_id).first()
-    if not pic and re.match(r'^\d+$', cat_id):
-        pic = db.session.query(MasterPIC).filter_by(category_id=f'{cat_id}.0').first()
-    return pic.pic_name if pic else None
+    return _lookup_pic_by_category(category_id, None)
 
 
 def _lookup_pic(product_id_str):
@@ -4331,6 +4475,7 @@ def upload_master_pic():
                     ))
                     added += 1
         db.session.commit()
+        invalidate_master_pic_cache()
 
         # Rebuild pic_cache from DB for refreshing SO rows
         pic_map = {normalize_category_id(m.category_id): m.pic_name for m in db.session.query(MasterPIC).all()}
