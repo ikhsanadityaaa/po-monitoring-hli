@@ -30,6 +30,11 @@ _HOLIDAY_CACHE_KEY = None
 _COMPLETED_SUMMARY_CACHE = {}
 _COMPLETED_SUMMARY_CACHE_TTL_SECONDS = 300
 
+# Similarity check cache for Item Registration
+# Stores similarity results keyed by (req_no, line_no) to avoid recalculating
+_SIMILARITY_CACHE = {}
+_SIMILARITY_CACHE_FILE = os.path.join(os.path.dirname(__file__), 'instance', 'similarity_cache.json')
+
 def _holiday_set():
     """Return cached set of Indonesian non-working public holidays.
 
@@ -227,12 +232,20 @@ class ExchangeRate(db.Model):
 class ProductIDDB(db.Model):
     """Database of Product ID → Category ID, downloaded from SAP."""
     __tablename__ = 'product_id_db'
-    id            = db.Column(db.Integer, primary_key=True)
-    product_id    = db.Column(db.String(100), unique=True, nullable=False, index=True)
-    category_id   = db.Column(db.String(100))
-    category_name = db.Column(db.String(255))
-    product_name  = db.Column(db.Text)
-    updated_at    = db.Column(db.DateTime, default=datetime.utcnow)
+    id               = db.Column(db.Integer, primary_key=True)
+    product_id       = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    category_id      = db.Column(db.String(100))
+    category_name    = db.Column(db.String(255))
+    product_name     = db.Column(db.Text)
+    product_status   = db.Column(db.String(100))
+    specification    = db.Column(db.Text)
+    manufacturer_name = db.Column(db.String(255))
+    order_unit       = db.Column(db.String(50))
+    hub_handling_check = db.Column(db.String(100))
+    tax_type         = db.Column(db.String(100))
+    registration_date = db.Column(db.Date, index=True)
+    product_registry_pic = db.Column(db.String(200))
+    updated_at       = db.Column(db.DateTime, default=datetime.utcnow)
 
 
 class MasterPIC(db.Model):
@@ -283,6 +296,33 @@ class DeliveryMonitoring(db.Model):
     dlv_due_date        = db.Column(db.DateTime)
     dlv_possible_date   = db.Column(db.DateTime)
     reject_date         = db.Column(db.DateTime)
+    uploaded_at     = db.Column(db.DateTime, default=datetime.utcnow)
+
+class ItemRegistration(db.Model):
+    __tablename__ = 'item_registration'
+    id              = db.Column(db.Integer, primary_key=True)
+    proc_status     = db.Column(db.String(100))
+    client_name     = db.Column(db.String(300), index=True)
+    category        = db.Column(db.String(255))
+    category_id     = db.Column(db.String(100))
+    pic             = db.Column(db.String(200))
+    pic_name        = db.Column(db.String(200))
+    req_no          = db.Column(db.String(100), index=True)
+    prod_id         = db.Column(db.String(100), index=True)
+    product_status  = db.Column(db.String(100))
+    batch_grp_no    = db.Column(db.String(100))
+    prod_name       = db.Column(db.Text)
+    spec            = db.Column(db.Text)
+    mfr_name        = db.Column(db.String(300))
+    odr_unit        = db.Column(db.String(50))
+    vendor_name     = db.Column(db.String(300))
+    prod_price      = db.Column(db.Float)
+    curr            = db.Column(db.String(20))
+    hub_handling_check  = db.Column(db.String(100))
+    tax_type            = db.Column(db.String(50))
+    registration_date   = db.Column(db.Date, index=True)
+    product_registry_pic = db.Column(db.String(200))
+    remarks         = db.Column(db.Text)
     uploaded_at     = db.Column(db.DateTime, default=datetime.utcnow)
 
 
@@ -512,6 +552,26 @@ def _ensure_extra_columns():
             ('pic_name',             'VARCHAR(200)'),
             ('client_name',          'VARCHAR(300)'),
             ('pur_curr',             'VARCHAR(10)'),
+        ],
+        'item_registration': [
+            ('category_id',          'VARCHAR(100)'),
+            ('pic_name',             'VARCHAR(200)'),
+            ('product_status',       'VARCHAR(100)'),
+            ('hub_handling_check',   'VARCHAR(100)'),
+            ('tax_type',             'VARCHAR(50)'),
+            ('registration_date',    'DATE'),
+            ('product_registry_pic', 'VARCHAR(200)'),
+            ('remarks',              'TEXT'),
+        ],
+        'product_id_db': [
+            ('specification',        'TEXT'),
+            ('manufacturer_name',    'VARCHAR(255)'),
+            ('order_unit',           'VARCHAR(50)'),
+            ('product_status',       'VARCHAR(100)'),
+            ('hub_handling_check',   'VARCHAR(100)'),
+            ('tax_type',             'VARCHAR(100)'),
+            ('registration_date',    'DATE'),
+            ('product_registry_pic', 'VARCHAR(200)'),
         ],
     }
 
@@ -781,11 +841,29 @@ def clean(val):
     s = str(val).strip()
     return None if s.lower() in ('nan', 'none', '') else s
 
+def clean_product_id(val):
+    s = clean(val)
+    if not s:
+        return ''
+    try:
+        f = float(s)
+        if f.is_integer():
+            return str(int(f))
+    except (TypeError, ValueError):
+        pass
+    return re.sub(r'\.0+$', '', s)
+
 def parse_date(val):
     if val is None: return None
     try:
         if pd.isna(val): return None
     except (TypeError, ValueError): pass
+    raw = str(val).strip()
+    if re.match(r'^\d{8}(\.0)?$', raw):
+        try:
+            return datetime.strptime(raw[:8], '%Y%m%d').date()
+        except ValueError:
+            pass
     try: return pd.to_datetime(val).date()
     except: return None
 
@@ -801,6 +879,195 @@ def find_column(df, names):
     for n in names:
         if n.lower().strip() in low: return low[n.lower().strip()]
     return None
+
+def selected_clients(args=None):
+    args = args if args is not None else request.args
+    return [c.strip() for c in args.getlist('client') if c and c.strip()]
+
+def selected_pics(args=None):
+    args = args if args is not None else request.args
+    return [p.strip() for p in args.getlist('pic') if p and p.strip()]
+
+def matches_selected_client(value, clients):
+    if not clients:
+        return True
+    v = (value or '').strip().lower()
+    return any(v == c.lower() for c in clients)
+
+def apply_so_client_filter(query, clients):
+    if clients:
+        return query.filter(SOData.operation_unit_name.in_(clients))
+    return query
+
+def apply_so_pic_filter(query, pics):
+    if not pics:
+        return query
+    if '__NONE_PLACEHOLDER__' in pics:
+        return query.filter(SOData.id.is_(None))
+    if '(Kosong)' in pics:
+        others = [p for p in pics if p != '(Kosong)']
+        empty_pic = db.or_(SOData.pic_name.is_(None), SOData.pic_name == '')
+        if others:
+            return query.filter(db.or_(SOData.pic_name.in_(others), empty_pic))
+        return query.filter(empty_pic)
+    return query.filter(SOData.pic_name.in_(pics))
+
+def item_registration_dict(row):
+    pic = _lookup_pic_by_category_id(row.category_id)
+    similar_items = find_similar_registered_items(row)
+    return {
+        'id': row.id,
+        'proc_status': row.proc_status or '',
+        'client_name': row.client_name or '',
+        'category': source_category_level1(row.category),
+        'pic': pic or row.pic or '',
+        'req_no': row.req_no or '',
+        'prod_id': row.prod_id or '',
+        'batch_grp_no': row.batch_grp_no or '',
+        'prod_name': row.prod_name or '',
+        'spec': row.spec or '',
+        'mfr_name': row.mfr_name or '',
+        'odr_unit': row.odr_unit or '',
+        'vendor_name': row.vendor_name or '',
+        'prod_price': row.prod_price or 0,
+        'curr': row.curr or '',
+        'remarks': row.remarks or '',
+        'uploaded_at': utc_isoformat(row.uploaded_at),
+        'similar_items': similar_items,
+    }
+
+def product_category_level1(product_id):
+    if not product_id:
+        return ''
+    prod = db.session.query(ProductIDDB).filter_by(product_id=str(product_id).strip()).first()
+    if not prod or not prod.category_name:
+        return ''
+    full_category = prod.category_name.strip()
+    return full_category.split('>')[0].strip() if '>' in full_category else full_category
+
+def source_category_level1(category_value):
+    """Use the source Item Registration Cat. Nm. column and keep the text before first >."""
+    category = clean(category_value)
+    if not category:
+        return ''
+    if '>' in category:
+        return category.split('>', 1)[0].strip()
+    return category.strip()
+
+def normalize_category_id(value):
+    cat_id = clean(value)
+    if not cat_id:
+        return ''
+    if re.match(r'^\d+\.0$', cat_id):
+        return cat_id[:-2]
+    return cat_id.strip()
+
+def refresh_item_registration_mappings():
+    rows = ItemRegistration.query.all()
+    changed = False
+    for row in rows:
+        category = source_category_level1(row.category)
+        normalized_cat_id = normalize_category_id(row.category_id)
+        if row.category_id != normalized_cat_id:
+            row.category_id = normalized_cat_id
+            changed = True
+        if row.category != category:
+            row.category = category
+            changed = True
+        if normalized_cat_id:
+            pic = _lookup_pic_by_category_id(normalized_cat_id) or ''
+            if row.pic != pic:
+                row.pic = pic
+                changed = True
+    if changed:
+        db.session.commit()
+
+def _item_registration_columns(df):
+    return {
+        'proc_status':  find_column(df, ['Proc. Status', 'Proc Status', 'Process Status']),
+        'client_name':  find_column(df, ['Client Nm.', 'Client Nm', 'Client Name']),
+        'category':     find_column(df, ['Cat. Nm.', 'Cat. Nm', 'Category', 'Cate. Nm.', 'Category Name']),
+        'category_id':  find_column(df, ['Cat. ID', 'Cat. ID.', 'Category ID', 'Category Id', 'CategoryID']),
+        'pic':          find_column(df, ['PIC', 'Pur. PIC', 'Purchase PIC']),
+        'req_no':       find_column(df, ['Req. No', 'Req. No.', 'Request No', 'Request Number']),
+        'prod_id':      find_column(df, ['Prod. ID', 'Prod ID', 'Product ID']),
+        'product_status': find_column(df, ['Product Status', 'Prod. Status', 'Prod Status']),
+        'batch_grp_no': find_column(df, ['Batch Grp. No.', 'Batch Grp. No', 'Batch Group No']),
+        'prod_name':    find_column(df, ['Prod. Nm.', 'Prod. Nm', 'Product Name', 'Prod. Nm.(Eng.)']),
+        'spec':         find_column(df, ['Spec.', 'Spec', 'Specification']),
+        'mfr_name':     find_column(df, ['Mfr. Nm.', 'Mfr. Nm', 'Manufacturer Name', 'Maker Nm.']),
+        'odr_unit':     find_column(df, ['Odr. Unit', 'Odr. Unit.', 'Order Unit']),
+        'vendor_name':  find_column(df, ['Vendor Nm.', 'Vendor Nm', 'Vendor Name']),
+        'prod_price':   find_column(df, ['Prod. Price', 'Product Price', 'Price']),
+        'curr':         find_column(df, ['Curr.', 'Curr', 'Currency']),
+        'hub_handling_check': find_column(df, [
+            'HUB Handling Chk.', 'HUB Handling Chk', 'HUB Handling Check',
+            'Hub Handling Check', 'Hub Handling Chk.'
+        ]),
+        'tax_type': find_column(df, ['Tax Type', 'Tax Type.', 'Tax']),
+        'registration_date': find_column(df, [
+            'Prod. Reg. Date', 'Product Reg. Date', 'Product Registration Date',
+            'Registration Date', 'Reg. Date'
+        ]),
+        'product_registry_pic': find_column(df, [
+            'Prod. Reg. PIC Nm.', 'Prod. Reg. PIC Nm', 'Prod. Reg. PIC',
+            'Product Registry PIC', 'Product Registration PIC', 'Product Reg. PIC'
+        ]),
+    }
+
+def import_item_registration_dataframe(df, filename='Item Registration'):
+    df.columns = [str(c).strip() for c in df.columns]
+    col = _item_registration_columns(df)
+    required = ['proc_status', 'client_name', 'category', 'category_id', 'req_no', 'prod_name']
+    missing = [name for name in required if not col[name]]
+    if missing:
+        raise ValueError(f'Kolom wajib tidak ditemukan: {", ".join(missing)}. Kolom tersedia: {df.columns.tolist()}')
+
+    ItemRegistration.query.delete()
+    rows = []
+    for _, row in df.iterrows():
+        req_no = clean(df_val(row, col['req_no']))
+        prod_id = clean_product_id(df_val(row, col['prod_id']))
+        prod_name = clean(df_val(row, col['prod_name']))
+        if not req_no and not prod_id and not prod_name:
+            continue
+        rows.append(ItemRegistration(
+            proc_status=clean(df_val(row, col['proc_status'])),
+            client_name=clean(df_val(row, col['client_name'])),
+            category=source_category_level1(df_val(row, col['category'])),
+            category_id=normalize_category_id(df_val(row, col['category_id'])),
+            pic=_lookup_pic_by_category_id(df_val(row, col['category_id'])) or '',
+            req_no=req_no,
+            prod_id=prod_id,
+            product_status=clean(df_val(row, col['product_status'])),
+            batch_grp_no=clean(df_val(row, col['batch_grp_no'])),
+            prod_name=prod_name,
+            spec=clean(df_val(row, col['spec'])),
+            mfr_name=clean(df_val(row, col['mfr_name'])),
+            odr_unit=clean(df_val(row, col['odr_unit'])),
+            vendor_name=clean(df_val(row, col['vendor_name'])),
+            prod_price=safe_float(df_val(row, col['prod_price'])),
+            curr=clean(df_val(row, col['curr'])),
+            hub_handling_check=clean(df_val(row, col['hub_handling_check'])),
+            tax_type=clean(df_val(row, col['tax_type'])),
+            registration_date=parse_date(df_val(row, col['registration_date'])),
+            product_registry_pic=clean(df_val(row, col['product_registry_pic'])),
+            uploaded_at=datetime.utcnow(),
+        ))
+    if rows:
+        db.session.bulk_save_objects(rows)
+    db.session.add(UploadLog(file_type='ITEM_REG', filename=filename, records_count=len(rows)))
+    return len(rows)
+
+def ensure_default_item_registration_loaded():
+    if db.session.query(func.count(ItemRegistration.id)).scalar():
+        return
+    default_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'Process+Pur.+Info.+Reg._20260526143511.xlsx')
+    if not os.path.exists(default_path):
+        return
+    df = pd.read_excel(default_path, engine='openpyxl')
+    import_item_registration_dataframe(df, os.path.basename(default_path))
+    db.session.commit()
 
 def df_val(row, col):
     return row.get(col) if col else None
@@ -900,13 +1167,26 @@ def get_dashboard_stats():
         # PO-based metrics (total_po_amount, po_without_so_count) and the data
         # range / last_updated metadata are intentionally NOT filtered.
         date_year, date_from, date_to = parse_so_date_args()
+        clients = selected_clients()
+        pics = selected_pics()
 
         def so_q(*extra_filters):
             q = db.session.query(SOData).filter(*extra_filters) if extra_filters else db.session.query(SOData)
+            q = apply_so_client_filter(q, clients)
+            q = apply_so_pic_filter(q, pics)
             return apply_so_create_date_filter(q, date_year, date_from, date_to)
 
-        po_count = db.session.query(func.count(POData.id)).scalar() or 0
-        total_po_amount = db.session.query(func.sum(POData.amount)).scalar() or 0
+        po_rows_for_amount = POData.query.all()
+        if clients:
+            po_rows_for_amount = [p for p in po_rows_for_amount if matches_selected_client(get_operation_unit(p.po_item_type, p.item_code), clients)]
+        po_rows_for_amount = [
+            p for p in po_rows_for_amount
+            if not is_po_hidden(p.po_number, p.item_no, hidden_po)
+            and get_operation_unit(p.po_item_type, p.item_code) not in EXCLUDED_OP_UNITS
+        ]
+        total_po_count = len({p.po_number for p in po_rows_for_amount if p.po_number})
+        po_count = len(po_rows_for_amount)
+        total_po_amount = sum(float(p.amount or 0) for p in po_rows_for_amount)
 
         po_numbers = get_po_hli_key_set()
 
@@ -919,6 +1199,8 @@ def get_dashboard_stats():
             if is_po_hidden(p.po_number, p.item_no, hidden_po):
                 continue
             op_unit = get_operation_unit(p.po_item_type, p.item_code)
+            if not matches_selected_client(op_unit, clients):
+                continue
             if op_unit in EXCLUDED_OP_UNITS:
                 continue
             if not po_is_matched(p.po_number, p.item_no, matched_set):
@@ -987,10 +1269,12 @@ def get_dashboard_stats():
                         'month': month_key,
                         'so_count': 0,
                         'amount': 0.0,
+                        'purchase_amount': 0.0,
                         '_s': s.so_create_date.replace(day=1)
                     }
                 monthly[month_key]['so_count'] += 1
                 monthly[month_key]['amount'] += round(amount / 1_000_000, 2)
+                monthly[month_key]['purchase_amount'] += round(purchase_amount_idr(s) / 1_000_000, 2)
                 all_months_set.add((s.so_create_date.replace(day=1), month_key))
             else:
                 month_key = None
@@ -1063,6 +1347,41 @@ def get_dashboard_stats():
             key=lambda x: x['total'], reverse=True
         )
 
+        item_reg_base_q = db.session.query(ItemRegistration)
+        item_reg_base_q = item_reg_base_q.filter(
+            func.coalesce(func.nullif(func.trim(ItemRegistration.proc_status), ''), '(Kosong)') != 'Purchasing Process Complete'
+        )
+        if clients:
+            item_reg_base_q = item_reg_base_q.filter(ItemRegistration.client_name.in_(clients))
+
+        def item_registration_distribution(column, limit=None):
+            label_expr = func.coalesce(func.nullif(func.trim(column), ''), '(Kosong)')
+            rows = (
+                item_reg_base_q
+                .with_entities(label_expr.label('name'), func.count(ItemRegistration.id).label('value'))
+                .group_by(label_expr)
+                .order_by(func.count(ItemRegistration.id).desc(), label_expr.asc())
+            )
+            if limit:
+                rows = rows.limit(limit)
+            return [{'name': name or '(Kosong)', 'value': int(value or 0)} for name, value in rows.all()]
+
+        item_registration_proc_status = item_registration_distribution(ItemRegistration.proc_status)
+        item_registration_clients = item_registration_distribution(ItemRegistration.client_name, limit=10)
+
+        options_q = apply_so_create_date_filter(
+            db.session.query(SOData).filter(open_so_filter()),
+            date_year, date_from, date_to,
+        )
+        option_rows = [
+            s for s in options_q.all()
+            if s.so_item not in hidden_so
+            and s.so_number not in hidden_so
+            and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)
+        ]
+        client_options = sorted({s.operation_unit_name for s in option_rows if s.operation_unit_name})
+        pic_options = sorted({s.pic_name for s in option_rows if s.pic_name})
+
         po_date_range = db.session.query(func.min(POData.po_date), func.max(POData.po_date)).first()
         so_date_range = db.session.query(func.min(SOData.so_create_date), func.max(SOData.so_create_date)).first()
 
@@ -1079,6 +1398,8 @@ def get_dashboard_stats():
         return jsonify({
             'po_without_so': po_without_so_count,
             'so_without_po': so_without_po_count,
+            'total_po_count': total_po_count,
+            'total_po_line_count': po_count,
             'total_po_amount': float(total_po_amount),
             'total_so_count': total_so_count,
             'total_open_so_amount': float(total_open_so_amount),
@@ -1088,6 +1409,12 @@ def get_dashboard_stats():
             'so_status': so_status,
             'so_status_monthly': so_status_monthly,
             'status_months': sorted_months,
+            'item_registration_proc_status': item_registration_proc_status,
+            'item_registration_clients': item_registration_clients,
+            'filters': {
+                'clients': client_options,
+                'pics': pic_options,
+            },
             'last_updated': utc_isoformat(last_upload),
             'last_updated_po': utc_isoformat(last_po_upload),
             'last_updated_smro': utc_isoformat(last_so_upload),
@@ -1295,6 +1622,7 @@ def get_po_without_so():
         matched_set = build_matched_set()
         hidden_po = get_hidden_po_numbers()
         today = date.today()
+        clients = selected_clients()
 
         # ── FIX: Deduplicate by (po_number, item_no) — unique rows only ──
         seen_keys = set()
@@ -1309,6 +1637,8 @@ def get_po_without_so():
             if is_po_hidden(p.po_number, p.item_no, hidden_po):
                 continue
             op_unit = get_operation_unit(p.po_item_type, p.item_code)
+            if not matches_selected_client(op_unit, clients):
+                continue
             if op_unit in EXCLUDED_OP_UNITS:
                 continue
             if not po_is_matched(p.po_number, p.item_no, matched_set):
@@ -1353,6 +1683,8 @@ def get_so_without_po():
     try:
         po_hli_keys = get_po_hli_key_set()
         hidden_so = get_hidden_so_items()
+        clients = selected_clients()
+        pics = selected_pics()
         # Apply the same SO Create Date filter the dashboard count uses, so the
         # KPI count and the detail modal stay consistent.
         date_year, date_from, date_to = parse_so_date_args()
@@ -1362,6 +1694,8 @@ def get_so_without_po():
             ),
             date_year, date_from, date_to,
         )
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, pics)
         result = []
         po_suffix_index = build_po_suffix_index(po_hli_keys)
         for s in q.all():
@@ -1396,11 +1730,18 @@ def get_aging_data():
     try:
         today = date.today()
         hidden_so = get_hidden_so_items()
+        clients = selected_clients()
+        pics = selected_pics()
+        date_year, date_from, date_to = parse_so_date_args()
         vendors = {}
 
-        for s in db.session.query(SOData).filter(
+        q = db.session.query(SOData).filter(
             open_so_filter()
-        ).all():
+        )
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, pics)
+        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
+        for s in q.all():
             # Apply same exclusions as total_so_count
             if s.so_item in hidden_so or s.so_number in hidden_so:
                 continue
@@ -1439,10 +1780,17 @@ def get_aging_detail(vendor_name):
         bucket = request.args.get('bucket')
         today = date.today()
         hidden_so = get_hidden_so_items()
-        sos = db.session.query(SOData).filter(
+        date_year, date_from, date_to = parse_so_date_args()
+        clients = selected_clients()
+        pics = selected_pics()
+        q = db.session.query(SOData).filter(
             open_so_filter(),
             SOData.vendor_name == vendor_name
-        ).order_by(SOData.so_create_date.asc()).all()
+        )
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, pics)
+        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
+        sos = q.order_by(SOData.so_create_date.asc()).all()
         sos = [s for s in sos
                if s.so_item not in hidden_so and s.so_number not in hidden_so
                and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
@@ -1462,9 +1810,16 @@ def get_aging_detail_all():
             bucket = bucket.strip().replace(' ', '+')
         today = date.today()
         hidden_so = get_hidden_so_items()
-        sos = db.session.query(SOData).filter(
+        date_year, date_from, date_to = parse_so_date_args()
+        clients = selected_clients()
+        pics = selected_pics()
+        q = db.session.query(SOData).filter(
             open_so_filter()
-        ).order_by(SOData.vendor_name.asc(), SOData.so_create_date.asc()).all()
+        )
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, pics)
+        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
+        sos = q.order_by(SOData.vendor_name.asc(), SOData.so_create_date.asc()).all()
         sos = [s for s in sos
                if s.so_item not in hidden_so and s.so_number not in hidden_so
                and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
@@ -1487,11 +1842,15 @@ def get_all_so():
         aging_list = request.args.getlist('aging')
         so_items = request.args.getlist('so_item')
         pics = request.args.getlist('pic')
+        global_pics = request.args.getlist('global_pic')
+        clients = selected_clients()
         margin_filter = request.args.get('margin_filter', 'all')
         sort_order = request.args.get('sort_order', 'newest')  # 'newest' or 'oldest'
         date_year, date_from, date_to = parse_so_date_args()
 
         q = SOData.query.filter(open_so_filter())
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, global_pics)
         if op_units: q = q.filter(SOData.operation_unit_name.in_(op_units))
         if vendors: q = q.filter(SOData.vendor_name.in_(vendors))
         if statuses: q = q.filter(SOData.so_status.in_(statuses))
@@ -1566,6 +1925,7 @@ def get_all_so():
 
         approval_statuses = {'Approval Apply', 'Approval Complete Step', 'Approval Reject'}
         approval_q = SOData.query.filter(SOData.so_status.in_(list(approval_statuses)))
+        approval_q = apply_so_client_filter(approval_q, clients)
         if op_units: approval_q = approval_q.filter(SOData.operation_unit_name.in_(op_units))
         if vendors: approval_q = approval_q.filter(SOData.vendor_name.in_(vendors))
         if statuses: approval_q = approval_q.filter(SOData.so_status.in_(statuses))
@@ -1595,11 +1955,24 @@ def get_all_so():
         statuses_opts = sorted({s.so_status for s in all_sos if s.so_status})
         pics_opts     = sorted({s.pic_name for s in all_sos if s.pic_name})
 
+        # Calculate PIC aggregations from ALL filtered records (not just current page)
+        pic_aggregations = {}
+        for s in all_sos:
+            pic = s.pic_name if s.pic_name else 'Unassigned'
+            if pic not in pic_aggregations:
+                pic_aggregations[pic] = {'pic': pic, 'count': 0, 'amount': 0}
+            pic_aggregations[pic]['count'] += 1
+            pic_aggregations[pic]['amount'] += float(s.sales_amount or 0)
+        
+        # Sort by count descending, then by name
+        pic_aggs_list = sorted(pic_aggregations.values(), key=lambda x: (-x['count'], x['pic']))
+
         return jsonify({
             'data': [so_dict(s) for s in paged],
             'approval_data': [so_dict(s) for s in approval_sos],
             'total': total, 'subtotal_amount': round(subtotal_amount, 2), 'page': page, 'per_page': per_page,
-            'filters': {'op_units': list(op_units_opts), 'vendors': list(vendors_opts), 'statuses': list(statuses_opts), 'pics': list(pics_opts)}
+            'filters': {'op_units': list(op_units_opts), 'vendors': list(vendors_opts), 'statuses': list(statuses_opts), 'pics': list(pics_opts)},
+            'pic_aggregations': pic_aggs_list
         })
     except Exception as e:
         import traceback; traceback.print_exc()
@@ -1610,13 +1983,16 @@ def get_all_so():
 def get_so_status_detail(status):
     try:
         month = request.args.get('month')
-        sos = SOData.query.filter_by(so_status=status).all()
+        date_year, date_from, date_to = parse_so_date_args()
+        clients = selected_clients()
+        pics = selected_pics()
+        q = SOData.query.filter_by(so_status=status)
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, pics)
+        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
+        sos = q.all()
         if month:
-            filtered = []
-            for s in sos:
-                if s.so_create_date and s.so_create_date.strftime('%b %Y') == month:
-                    filtered.append(s)
-            sos = filtered
+            sos = [s for s in sos if s.so_create_date and s.so_create_date.strftime('%b %Y') == month]
         return jsonify([so_dict(s) for s in sos])
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1626,11 +2002,16 @@ def get_so_status_detail(status):
 def get_so_status_detail_all():
     try:
         month = request.args.get('month')
+        date_year, date_from, date_to = parse_so_date_args()
+        clients = selected_clients()
+        pics = selected_pics()
+        q = SOData.query.filter(open_so_filter())
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, pics)
+        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
+        sos = q.order_by(SOData.so_create_date.desc()).all()
         if month:
-            sos = [s for s in SOData.query.filter(open_so_filter()).all()
-                   if s.so_create_date and s.so_create_date.strftime('%b %Y') == month]
-        else:
-            sos = SOData.query.filter(open_so_filter()).order_by(SOData.so_create_date.desc()).all()
+            sos = [s for s in sos if s.so_create_date and s.so_create_date.strftime('%b %Y') == month]
         return jsonify([so_dict(s) for s in sos])
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1639,8 +2020,14 @@ def get_so_status_detail_all():
 @app.route('/api/data/top-vendor-detail/<path:vendor_name>', methods=['GET'])
 def get_top_vendor_detail(vendor_name):
     try:
-        sos = db.session.query(SOData).filter(
-            open_so_filter(), SOData.vendor_name == vendor_name).all()
+        date_year, date_from, date_to = parse_so_date_args()
+        clients = selected_clients()
+        pics = selected_pics()
+        q = db.session.query(SOData).filter(open_so_filter(), SOData.vendor_name == vendor_name)
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, pics)
+        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
+        sos = q.all()
         return jsonify([so_dict(s) for s in sos])
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1848,7 +2235,7 @@ def delete_request_permanently(req_id):
 
 CHUNK_SIZE = 200
 
-@app.route('/api/upload/po-list', methods=['POST'])
+# Legacy PO List upload is intentionally no longer exposed from Manual Update.
 def upload_po_list():
     try:
         if 'file' not in request.files: return jsonify({'error': 'No file'}), 400
@@ -2468,14 +2855,20 @@ def download_so_batch_template():
         statuses   = request.args.getlist('status')
         aging_list = request.args.getlist('aging')
         so_items   = request.args.getlist('so_item')
+        pics       = request.args.getlist('pic')
+        global_pics = request.args.getlist('global_pic')
+        clients = selected_clients()
         margin_filter = request.args.get('margin_filter', 'all')
         date_year, date_from, date_to = parse_so_date_args()
 
         q = SOData.query.filter(open_so_filter())
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, global_pics)
         if op_units:  q = q.filter(SOData.operation_unit_name.in_(op_units))
         if vendors:   q = q.filter(SOData.vendor_name.in_(vendors))
         if statuses:  q = q.filter(SOData.so_status.in_(statuses))
         if so_items:  q = q.filter(SOData.so_item.in_(so_items))
+        q = apply_so_pic_filter(q, pics)
         q = apply_so_create_date_filter(q, date_year, date_from, date_to)
         all_sos = q.order_by(SOData.so_create_date.asc()).all()
 
@@ -2604,9 +2997,15 @@ def export_all_so():
         op_units = request.args.getlist('op_unit')
         vendors  = request.args.getlist('vendor')
         statuses = request.args.getlist('status')
+        pics = request.args.getlist('pic')
+        global_pics = request.args.getlist('global_pic')
+        clients = selected_clients()
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, global_pics)
         if op_units: q = q.filter(SOData.operation_unit_name.in_(op_units))
         if vendors:  q = q.filter(SOData.vendor_name.in_(vendors))
         if statuses: q = q.filter(SOData.so_status.in_(statuses))
+        q = apply_so_pic_filter(q, pics)
         sos = q.all()
         today = date.today()
         wb = Workbook(); ws = wb.active; ws.title = "SO List"
@@ -2640,6 +3039,7 @@ def export_po_without_so():
         matched_set = build_matched_set()
         hidden_po = get_hidden_po_numbers()
         today = date.today()
+        clients = selected_clients()
 
         seen_keys = set()
         pos = []
@@ -2651,6 +3051,8 @@ def export_po_without_so():
             if is_po_hidden(p.po_number, p.item_no, hidden_po):
                 continue
             op_unit = get_operation_unit(p.po_item_type, p.item_code)
+            if not matches_selected_client(op_unit, clients):
+                continue
             if op_unit in EXCLUDED_OP_UNITS:
                 continue
             if not po_is_matched(p.po_number, p.item_no, matched_set):
@@ -2821,8 +3223,12 @@ def completed_summary():
         date_from   = request.args.get('date_from', '')
         date_to     = request.args.get('date_to', '')
         is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
+        clients = selected_clients()
+        pics = selected_pics()
 
         q = db.session.query(SOData).filter(SOData.so_status == 'Delivery Completed')
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, pics)
 
         # Apply SO Create Date filter (date_year takes precedence over range,
         # and falls back to legacy `year` query param when present).
@@ -2851,6 +3257,8 @@ def completed_summary():
             date_year or '',
             date_from or '',
             date_to or '',
+            tuple(sorted(clients)),
+            tuple(sorted(pics)),
         )
         db_signature = q.with_entities(
             func.count(SOData.id),
@@ -2911,8 +3319,39 @@ def completed_summary():
 
         monthly_trend = sorted(monthly.values(), key=lambda x: x['month'])
 
+        # Year-on-year purchase amount for the two years before the current
+        # calendar year. The dashboard uses this as a dedicated line chart,
+        # while monthly_trend remains available for the margin table.
+        current_year = datetime.utcnow().year
+        yoy_years = [current_year - 1, current_year - 2]
+        yoy_fields = {year: f'purchase_{year}' for year in yoy_years}
+        purchase_yoy_trend = []
+        purchase_yoy_by_month = {}
+        for month_num in range(1, 13):
+            row = {
+                'month': month_num,
+                'month_label': datetime(current_year, month_num, 1).strftime('%B'),
+            }
+            for field in yoy_fields.values():
+                row[field] = 0.0
+            purchase_yoy_trend.append(row)
+            purchase_yoy_by_month[month_num] = row
+
+        for s, po_amt, _sales, _m in enriched:
+            if not s.so_create_date:
+                continue
+            year = s.so_create_date.year
+            if year not in yoy_fields:
+                continue
+            purchase_yoy_by_month[s.so_create_date.month][yoy_fields[year]] += po_amt
+
+        for row in purchase_yoy_trend:
+            for field in yoy_fields.values():
+                row[field] = round(row[field], 2)
+
         # Vendor summary (top 5 by sales)
         vendor_map = {}
+        client_map = {}
         for s, po_amt, sales, m in enriched:
             v = s.vendor_name or 'Unknown'
             if v not in vendor_map:
@@ -2923,7 +3362,17 @@ def completed_summary():
             if m is not None:
                 vendor_map[v]['margin'] += m
 
+            client = s.operation_unit_name or 'Unknown'
+            if client not in client_map:
+                client_map[client] = {'client': client, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0, 'margin': 0.0}
+            client_map[client]['count'] += 1
+            client_map[client]['sales_amount'] += sales
+            client_map[client]['purchase_amount'] += po_amt
+            if m is not None:
+                client_map[client]['margin'] += m
+
         top_vendors = sorted(vendor_map.values(), key=lambda x: x['sales_amount'], reverse=True)[:5]
+        top_clients = sorted(client_map.values(), key=lambda x: x['sales_amount'], reverse=True)[:5]
 
         # Margin distribution + totals (KPI cards)
         pos = neg = zero = 0
@@ -2974,7 +3423,7 @@ def completed_summary():
         # ranked by total negative margin (most negative first).
         neg_vendor_map = {}
         for s, po_amt, sales, m in enriched:
-            if m >= 0:
+            if m is None or m >= 0:
                 continue
             v = s.vendor_name or 'Unknown'
             if v not in neg_vendor_map:
@@ -2990,7 +3439,7 @@ def completed_summary():
         worst_margin_vendors = sorted(neg_vendor_map.values(), key=lambda x: x['margin'])[:50]
 
         # Top 30 worst-margin transactions (UI scrolls within fixed-height box)
-        neg_txns = [(s, po_amt, sales, m) for s, po_amt, sales, m in enriched if m < 0]
+        neg_txns = [(s, po_amt, sales, m) for s, po_amt, sales, m in enriched if m is not None and m < 0]
         neg_txns.sort(key=lambda x: x[3])  # most negative first
         worst_margin_transactions = []
         for s, po_amt, sales, m in neg_txns[:30]:
@@ -3015,7 +3464,10 @@ def completed_summary():
             'total_purchase': total_purchase,
             'total_margin': (total_sales - total_purchase) if (total_sales > 0 and total_purchase > 0) else None,
             'monthly_trend': monthly_trend,
+            'purchase_yoy_years': yoy_years,
+            'purchase_yoy_trend': purchase_yoy_trend,
             'top_vendors': top_vendors,
+            'top_clients': top_clients,
             'top_items': top_items,
             'worst_margin_vendors': worst_margin_vendors,
             'worst_margin_transactions': worst_margin_transactions,
@@ -3058,8 +3510,12 @@ def completed_margin_detail():
         date_to   = request.args.get('date_to', '')
         date_year = request.args.get('date_year', '')
         is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
+        clients = selected_clients()
+        pics = selected_pics()
 
         q = db.session.query(SOData).filter(SOData.so_status == 'Delivery Completed')
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, pics)
         if date_year:
             try:
                 yr = int(date_year)
@@ -3130,6 +3586,463 @@ def completed_margin_detail():
 
 # ─── Product ID Database & Master PIC endpoints ───────────────────────────
 
+@app.route('/api/clients', methods=['GET'])
+def get_clients():
+    try:
+        ensure_default_item_registration_loaded()
+        clients = set()
+        clients.update(c for (c,) in db.session.query(SOData.operation_unit_name).distinct().all() if c)
+        clients.update(c for (c,) in db.session.query(DeliveryMonitoring.client_name).distinct().all() if c)
+        clients.update(c for (c,) in db.session.query(ItemRegistration.client_name).distinct().all() if c)
+        for p in POData.query.with_entities(POData.po_item_type, POData.item_code).all():
+            clients.add(get_operation_unit(p.po_item_type, p.item_code))
+        return jsonify(sorted(c for c in clients if c))
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+def load_similarity_cache():
+    """Load similarity cache from file."""
+    global _SIMILARITY_CACHE
+    try:
+        if os.path.exists(_SIMILARITY_CACHE_FILE):
+            with open(_SIMILARITY_CACHE_FILE, 'r', encoding='utf-8') as f:
+                _SIMILARITY_CACHE = json.load(f)
+    except Exception as e:
+        print(f"Error loading similarity cache: {e}")
+        _SIMILARITY_CACHE = {}
+
+
+def save_similarity_cache():
+    """Save similarity cache to file."""
+    try:
+        os.makedirs(os.path.dirname(_SIMILARITY_CACHE_FILE), exist_ok=True)
+        with open(_SIMILARITY_CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(_SIMILARITY_CACHE, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Error saving similarity cache: {e}")
+
+
+def calculate_similarity(str1, str2):
+    """Calculate similarity percentage between two strings using token-based approach."""
+    if not str1 or not str2:
+        return 0.0
+    
+    # Normalize strings
+    s1 = str(str1).lower().strip()
+    s2 = str(str2).lower().strip()
+    
+    if s1 == s2:
+        return 100.0
+    
+    # Token-based similarity
+    tokens1 = set(s1.split())
+    tokens2 = set(s2.split())
+    
+    if not tokens1 or not tokens2:
+        return 0.0
+    
+    intersection = tokens1.intersection(tokens2)
+    union = tokens1.union(tokens2)
+    
+    # Jaccard similarity
+    jaccard = len(intersection) / len(union) * 100
+    
+    # Also check substring match
+    if s1 in s2 or s2 in s1:
+        substring_bonus = 20.0
+    else:
+        substring_bonus = 0.0
+    
+    return min(100.0, jaccard + substring_bonus)
+
+
+def find_similar_registered_items(item):
+    """Find similar items from ProductIDDB based on product name, specification, manufacturer, and order unit.
+    Returns formatted similar items with >80% similarity. Uses cache to avoid recalculation.
+    
+    Format:
+    - If multiple matches: product_ids joined by comma, other fields shown once
+    - If single match: all fields shown
+    - If no match: None
+    """
+    
+    if not item.prod_id:  # Only check if no product ID yet
+        try:
+            # Create cache key based on req_no (unique identifier)
+            req_no = clean(item.req_no)
+            if not req_no:
+                return None
+            cache_key = f"req_{req_no}"
+            
+            # Check if result is in cache
+            if cache_key in _SIMILARITY_CACHE:
+                return _SIMILARITY_CACHE[cache_key]
+            
+            # Get all registered items from ProductIDDB
+            registered = ProductIDDB.query.filter(
+                ProductIDDB.product_id.isnot(None),
+                ProductIDDB.product_id != ''
+            ).all()
+            
+            similar_items = []
+            
+            for reg in registered:
+                # Calculate similarity for each field
+                name_sim = calculate_similarity(item.prod_name, reg.product_name)
+                spec_sim = calculate_similarity(item.spec, reg.specification)
+                mfr_sim = calculate_similarity(item.mfr_name, reg.manufacturer_name)
+                unit_sim = calculate_similarity(item.odr_unit, reg.order_unit)
+                
+                # Average similarity
+                total_sim = (name_sim + spec_sim + mfr_sim + unit_sim) / 4.0
+                
+                # Only include if >80% similar
+                if total_sim > 80.0:
+                    similar_items.append({
+                        'product_id': reg.product_id,
+                        'product_name': reg.product_name,
+                        'specification': reg.specification,
+                        'manufacturer_name': reg.manufacturer_name,
+                        'order_unit': reg.order_unit,
+                        'similarity': round(total_sim, 1)
+                    })
+            
+            # Sort by similarity descending
+            similar_items.sort(key=lambda x: x['similarity'], reverse=True)
+            
+            # Format result according to requirement
+            if not similar_items:
+                result = None
+            elif len(similar_items) == 1:
+                # Single match: return all fields
+                result = {
+                    'product_ids': similar_items[0]['product_id'],
+                    'product_name': similar_items[0]['product_name'],
+                    'specification': similar_items[0]['specification'],
+                    'manufacturer_name': similar_items[0]['manufacturer_name'],
+                    'order_unit': similar_items[0]['order_unit'],
+                    'similarity': similar_items[0]['similarity'],
+                    'count': 1
+                }
+            else:
+                # Multiple matches: join product_ids with comma, show other fields once from first match
+                product_ids = ', '.join([item['product_id'] for item in similar_items])
+                result = {
+                    'product_ids': product_ids,
+                    'product_name': similar_items[0]['product_name'],
+                    'specification': similar_items[0]['specification'],
+                    'manufacturer_name': similar_items[0]['manufacturer_name'],
+                    'order_unit': similar_items[0]['order_unit'],
+                    'similarity': similar_items[0]['similarity'],  # Show highest similarity
+                    'count': len(similar_items)
+                }
+            
+            # Store in cache
+            _SIMILARITY_CACHE[cache_key] = result
+            save_similarity_cache()
+            
+            return result
+            
+        except Exception as e:
+            print(f"Error finding similar items: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    return None
+
+
+@app.route('/api/item-registration/data', methods=['GET'])
+def get_item_registration_data():
+    try:
+        ensure_default_item_registration_loaded()
+        refresh_item_registration_mappings()
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 10))
+        search = request.args.get('search', '').strip()
+        req_numbers = [n.strip() for n in request.args.getlist('req_no') if n.strip()]
+        clients = selected_clients()
+        item_clients = [c.strip() for c in request.args.getlist('item_client') if c.strip()]
+        categories = [c.strip() for c in request.args.getlist('category') if c.strip()]
+        pics = [p.strip() for p in request.args.getlist('pic') if p.strip()]
+        proc_statuses = [s.strip() for s in request.args.getlist('proc_status') if s.strip()]
+
+        q = ItemRegistration.query
+        if clients:
+            q = q.filter(ItemRegistration.client_name.in_(clients))
+        if item_clients:
+            q = q.filter(ItemRegistration.client_name.in_(item_clients))
+        if categories:
+            q = q.filter(ItemRegistration.category.in_(categories))
+        if pics:
+            q = q.filter(ItemRegistration.pic.in_(pics))
+        if proc_statuses:
+            q = q.filter(ItemRegistration.proc_status.in_(proc_statuses))
+        if req_numbers:
+            q = q.filter(ItemRegistration.req_no.in_(req_numbers))
+        if search:
+            pattern = f'%{search}%'
+            q = q.filter(db.or_(
+                ItemRegistration.req_no.ilike(pattern),
+                ItemRegistration.prod_id.ilike(pattern),
+                ItemRegistration.prod_name.ilike(pattern),
+                ItemRegistration.vendor_name.ilike(pattern),
+                ItemRegistration.mfr_name.ilike(pattern),
+                ItemRegistration.remarks.ilike(pattern),
+            ))
+
+        total = q.count()
+        missing_prod_rows = q.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-')).all()
+        missing_by_pic = {}
+        for r in missing_prod_rows:
+            pic = r.pic or 'Unassigned'
+            missing_by_pic[pic] = missing_by_pic.get(pic, 0) + 1
+        missing_prod_id_by_pic = [
+            {'pic': pic, 'count': count}
+            for pic, count in sorted(missing_by_pic.items(), key=lambda x: x[1], reverse=True)
+        ]
+        rows = q.order_by(ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()).offset((page-1)*per_page).limit(per_page).all()
+        option_q = ItemRegistration.query
+        if clients:
+            option_q = option_q.filter(ItemRegistration.client_name.in_(clients))
+        option_rows = option_q.all()
+        all_clients = sorted({r.client_name for r in option_rows if r.client_name})
+        all_categories = sorted({r.category for r in option_rows if r.category})
+        all_pics = sorted({r.pic for r in option_rows if r.pic})
+        all_proc_statuses = sorted({r.proc_status for r in option_rows if r.proc_status})
+        last_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'ITEM_REG').scalar()
+        return jsonify({
+            'data': [item_registration_dict(r) for r in rows],
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'client_options': all_clients,
+            'category_options': all_categories,
+            'pic_options': all_pics,
+            'proc_status_options': all_proc_statuses,
+            'missing_prod_id_by_pic': missing_prod_id_by_pic,
+            'last_updated': utc_isoformat(last_upload),
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/upload/item-registration', methods=['POST'])
+def upload_item_registration():
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
+        file = request.files['file']
+        df = pd.read_excel(file, engine='openpyxl')
+        count = import_item_registration_dataframe(df, file.filename)
+        db.session.commit()
+        return jsonify({'message': f'Berhasil upload {count} data Item Registration', 'uploaded': count})
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/item-registration/<int:item_id>', methods=['PUT'])
+def update_item_registration(item_id):
+    try:
+        data = request.json or {}
+        item = db.session.get(ItemRegistration, item_id)
+        if not item:
+            return jsonify({'error': 'Not found'}), 404
+        if 'remarks' in data:
+            item.remarks = data['remarks'] or ''
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+def apply_item_registration_request_filters(query):
+    search = request.args.get('search', '').strip()
+    req_numbers = [n.strip() for n in request.args.getlist('req_no') if n.strip()]
+    clients = selected_clients()
+    item_clients = [c.strip() for c in request.args.getlist('item_client') if c.strip()]
+    categories = [c.strip() for c in request.args.getlist('category') if c.strip()]
+    pics = [p.strip() for p in request.args.getlist('pic') if p.strip()]
+    proc_statuses = [s.strip() for s in request.args.getlist('proc_status') if s.strip()]
+    if clients:
+        query = query.filter(ItemRegistration.client_name.in_(clients))
+    if item_clients:
+        query = query.filter(ItemRegistration.client_name.in_(item_clients))
+    if categories:
+        query = query.filter(ItemRegistration.category.in_(categories))
+    if pics:
+        query = query.filter(ItemRegistration.pic.in_(pics))
+    if proc_statuses:
+        query = query.filter(ItemRegistration.proc_status.in_(proc_statuses))
+    if req_numbers:
+        query = query.filter(ItemRegistration.req_no.in_(req_numbers))
+    if search:
+        pattern = f'%{search}%'
+        query = query.filter(db.or_(
+            ItemRegistration.req_no.ilike(pattern),
+            ItemRegistration.prod_id.ilike(pattern),
+            ItemRegistration.prod_name.ilike(pattern),
+            ItemRegistration.vendor_name.ilike(pattern),
+            ItemRegistration.mfr_name.ilike(pattern),
+            ItemRegistration.remarks.ilike(pattern),
+        ))
+    return query
+
+
+@app.route('/api/item-registration/template', methods=['GET'])
+def download_item_registration_batch_template():
+    try:
+        ensure_default_item_registration_loaded()
+        refresh_item_registration_mappings()
+        rows = apply_item_registration_request_filters(ItemRegistration.query).order_by(
+            ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()
+        ).all()
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Item Reg Batch Upload"
+        headers = ['Req. No', 'Remarks']
+        ws.append(headers)
+
+        header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+        col_widths = [28, 70]
+        for i, cell in enumerate(ws[1], 1):
+            cell.fill = header_fill
+            cell.font = Font(bold=True, color="000000")
+            cell.alignment = Alignment(horizontal='center')
+            ws.column_dimensions[get_column_letter(i)].width = col_widths[i - 1]
+
+        grey_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+        red_font = Font(color="FF0000")
+        ws.append(['example : 100010723616', 'example : Waiting for product registration'])
+        for cell in ws[2]:
+            cell.font = red_font
+            cell.fill = grey_fill
+
+        seen = set()
+        for row in rows:
+            req_no = clean(row.req_no)
+            if not req_no or req_no in seen:
+                continue
+            seen.add(req_no)
+            ws.append([req_no, row.remarks or ''])
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return send_file(output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f"Template_ItemRegistration_BatchUpload_{datetime.now().strftime('%Y%m%d')}.xlsx")
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/export/item-registration', methods=['GET'])
+def export_item_registration():
+    try:
+        ensure_default_item_registration_loaded()
+        refresh_item_registration_mappings()
+        rows = apply_item_registration_request_filters(ItemRegistration.query).order_by(
+            ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()
+        ).all()
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Item Registration"
+        headers = [
+            'Proc. Status', 'Client Nm.', 'Category', 'PIC', 'Req. No', 'Prod. ID',
+            'Prod. Nm.', 'Spec.', 'Mfr. Nm.', 'Odr. Unit', 'Prod. Price', 'Curr.', 'Remarks'
+        ]
+        _style_wb(ws, headers, num_cols=[11])
+        widths = [26, 34, 24, 16, 18, 18, 28, 48, 24, 14, 16, 12, 60]
+        for i, width in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = width
+
+        for row in rows:
+            ws.append([
+                row.proc_status or '',
+                row.client_name or '',
+                source_category_level1(row.category),
+                row.pic or '',
+                row.req_no or '',
+                row.prod_id or '',
+                row.prod_name or '',
+                row.spec or '',
+                row.mfr_name or '',
+                row.odr_unit or '',
+                row.prod_price or 0,
+                row.curr or '',
+                row.remarks or '',
+            ])
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return send_file(output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f"Item_Registration_{datetime.now().strftime('%Y%m%d')}.xlsx")
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/item-registration/batch-upload', methods=['POST'])
+def batch_upload_item_registration():
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file'}), 400
+        file = request.files['file']
+        df = pd.read_excel(file, engine='openpyxl', skiprows=[1])
+        df.columns = [str(c).strip() for c in df.columns]
+        col_req = find_column(df, ['Req. No', 'Req. No.', 'Request No', 'Request Number'])
+        col_rem = find_column(df, ['Remarks', 'Remark'])
+        if not col_req:
+            return jsonify({'error': f'Column "Req. No" not found. Available: {df.columns.tolist()}'}), 400
+        if not col_rem:
+            return jsonify({'error': f'Column "Remarks" not found. Available: {df.columns.tolist()}'}), 400
+
+        updated = 0
+        not_found = 0
+        for _, row in df.iterrows():
+            req_no = clean(df_val(row, col_req))
+            if not req_no or req_no.lower().startswith('example'):
+                continue
+            req_no = req_no.replace('example :', '').replace('example:', '').strip()
+            matches = ItemRegistration.query.filter_by(req_no=req_no).all()
+            if not matches:
+                not_found += 1
+                continue
+            remarks = clean(df_val(row, col_rem)) or ''
+            for item in matches:
+                item.remarks = remarks
+                updated += 1
+        db.session.commit()
+        return jsonify({'updated': updated, 'not_found': not_found})
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+def _lookup_pic_by_category_id(category_id):
+    """Return PIC name for a Master PIC category id, or None if not found."""
+    cat_id = normalize_category_id(category_id)
+    if not cat_id:
+        return None
+    pic = db.session.query(MasterPIC).filter_by(category_id=cat_id).first()
+    if not pic and re.match(r'^\d+$', cat_id):
+        pic = db.session.query(MasterPIC).filter_by(category_id=f'{cat_id}.0').first()
+    return pic.pic_name if pic else None
+
+
 def _lookup_pic(product_id_str):
     """Return PIC name for a product_id string, or None if not found."""
     if not product_id_str:
@@ -3138,8 +4051,7 @@ def _lookup_pic(product_id_str):
     prod = db.session.query(ProductIDDB).filter_by(product_id=pid).first()
     if not prod or not prod.category_id:
         return None
-    pic = db.session.query(MasterPIC).filter_by(category_id=str(prod.category_id).strip()).first()
-    return pic.pic_name if pic else None
+    return _lookup_pic_by_category_id(prod.category_id)
 
 
 @app.route('/api/upload/product-id', methods=['POST'])
@@ -3172,7 +4084,17 @@ def upload_product_id():
         pid_col = next((c for c in df.columns if 'Product ID' in c or c.lower() == 'product id'), None)
         cat_col = next((c for c in df.columns if 'Category ID' in c or c.lower() == 'category id'), None)
         catn_col = next((c for c in df.columns if 'Category Name' in c or c.lower() == 'category name'), None)
-        pname_col = next((c for c in df.columns if 'Product Name' in c and 'EN' not in c), None)
+        pname_col = next((c for c in df.columns if ('Product Name' in c and 'EN' not in c) or 'Prod. Nm' in c or c.lower() == 'product name'), None)
+        status_col = next((c for c in df.columns if 'Product Status' in c or 'Prod. Status' in c or c.lower() == 'product status'), None)
+        spec_col = next((c for c in df.columns if 'Specification' in c or c.lower() == 'specification'), None)
+        mfr_col = next((c for c in df.columns if 'Manufacturer Name' in c or 'Mfr. Nm' in c or c.lower() == 'manufacturer name'), None)
+        unit_col = next((c for c in df.columns if 'Order Unit' in c or 'Odr. Unit' in c or c.lower() == 'order unit'), None)
+        hub_col = next((c for c in df.columns if 'HUB Handling Check' in c or 'HUB Handling Chk' in c), None)
+        tax_col = next((c for c in df.columns if 'Purchasing Price Tax Type' in c or c.lower() == 'tax type' or 'Tax Type' in c), None)
+        reg_date_col = next((c for c in df.columns if c.lower() == 'registration date' or 'Prod. Reg. Date' in c or 'Product Registration Date' in c), None)
+        registry_pic_col = next((c for c in df.columns if 'Product Registy PIC(Name)' in c or 'Product Registry PIC(Name)' in c or 'Prod. Reg. PIC Nm' in c), None)
+        if not registry_pic_col:
+            registry_pic_col = next((c for c in df.columns if 'Product Registy PIC' in c or 'Product Registry PIC' in c or 'Product Registered by(Name)' in c), None)
 
         if not pid_col or not cat_col:
             return jsonify({'error': f'Missing required columns. Found: {list(df.columns)[:10]}'}), 400
@@ -3182,23 +4104,46 @@ def upload_product_id():
 
         for _, row in df.iterrows():
             pid = str(row[pid_col]).strip() if pd.notna(row[pid_col]) else None
-            cat_id = str(row[cat_col]).strip() if pd.notna(row[cat_col]) else None
+            cat_id = normalize_category_id(row[cat_col]) if pd.notna(row[cat_col]) else None
             if not pid or pid == 'nan':
                 continue
             cat_name = str(row[catn_col]).strip() if catn_col and pd.notna(row[catn_col]) else None
             pname = str(row[pname_col]).strip() if pname_col and pd.notna(row[pname_col]) else None
+            product_status = clean(df_val(row, status_col)) if status_col else None
+            spec = str(row[spec_col]).strip() if spec_col and pd.notna(row[spec_col]) else None
+            mfr_name = str(row[mfr_col]).strip() if mfr_col and pd.notna(row[mfr_col]) else None
+            order_unit = str(row[unit_col]).strip() if unit_col and pd.notna(row[unit_col]) else None
+            hub_handling_check = clean(df_val(row, hub_col)) if hub_col else None
+            tax_type = clean(df_val(row, tax_col)) if tax_col else None
+            registration_date = parse_date(df_val(row, reg_date_col)) if reg_date_col else None
+            product_registry_pic = clean(df_val(row, registry_pic_col)) if registry_pic_col else None
 
             existing = db.session.query(ProductIDDB).filter_by(product_id=pid).first()
             if existing:
                 existing.category_id = cat_id
                 existing.category_name = cat_name
                 existing.product_name = pname
+                existing.product_status = product_status
+                existing.specification = spec
+                existing.manufacturer_name = mfr_name
+                existing.order_unit = order_unit
+                existing.hub_handling_check = hub_handling_check
+                existing.tax_type = tax_type
+                existing.registration_date = registration_date
+                existing.product_registry_pic = product_registry_pic
                 existing.updated_at = datetime.utcnow()
                 updated += 1
             else:
                 db.session.add(ProductIDDB(
                     product_id=pid, category_id=cat_id,
                     category_name=cat_name, product_name=pname,
+                    product_status=product_status,
+                    specification=spec, manufacturer_name=mfr_name,
+                    order_unit=order_unit,
+                    hub_handling_check=hub_handling_check,
+                    tax_type=tax_type,
+                    registration_date=registration_date,
+                    product_registry_pic=product_registry_pic,
                     updated_at=datetime.utcnow()
                 ))
                 added += 1
@@ -3214,11 +4159,10 @@ def upload_product_id():
             cat_id_key = None
             prod = db.session.query(ProductIDDB).filter_by(product_id=str(s.product_id).strip()).first()
             if prod and prod.category_id:
-                cat_id_key = str(prod.category_id).strip()
+                cat_id_key = normalize_category_id(prod.category_id)
             if cat_id_key:
                 if cat_id_key not in pic_cache:
-                    pic_obj = db.session.query(MasterPIC).filter_by(category_id=cat_id_key).first()
-                    pic_cache[cat_id_key] = pic_obj.pic_name if pic_obj else None
+                    pic_cache[cat_id_key] = _lookup_pic_by_category_id(cat_id_key)
                 new_pic = pic_cache[cat_id_key]
                 if s.pic_name != new_pic:
                     s.pic_name = new_pic
@@ -3259,7 +4203,7 @@ def upload_master_pic():
 
         added = updated = 0
         for _, row in df.iterrows():
-            cat_id = str(row[cat_col]).strip() if pd.notna(row[cat_col]) else None
+            cat_id = normalize_category_id(row[cat_col]) if pd.notna(row[cat_col]) else None
             if not cat_id or cat_id == 'nan':
                 continue
             cat_name = str(row[catn_col]).strip() if catn_col and pd.notna(row[catn_col]) else None
@@ -3280,8 +4224,8 @@ def upload_master_pic():
         db.session.commit()
 
         # Rebuild pic_cache from DB for refreshing SO rows
-        pic_map = {m.category_id: m.pic_name for m in db.session.query(MasterPIC).all()}
-        prod_map = {p.product_id: p.category_id for p in db.session.query(ProductIDDB).all()}
+        pic_map = {normalize_category_id(m.category_id): m.pic_name for m in db.session.query(MasterPIC).all()}
+        prod_map = {p.product_id: normalize_category_id(p.category_id) for p in db.session.query(ProductIDDB).all()}
 
         so_rows = db.session.query(SOData).filter(
             SOData.product_id.isnot(None), SOData.product_id != ''
@@ -3294,6 +4238,7 @@ def upload_master_pic():
                 s.pic_name = new_pic
                 refreshed += 1
         db.session.commit()
+        refresh_item_registration_mappings()
 
         return jsonify({
             'status': 'ok',
@@ -3322,6 +4267,273 @@ def master_pic_status():
             'last_pic_update': last_pic.isoformat() if last_pic else None,
         })
     except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/all-registered-items', methods=['GET'])
+def get_all_registered_items():
+    """Return all registered items from uploaded Prod ID master data."""
+    try:
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 10))
+        search = request.args.get('search', '').strip()
+        prod_ids = [clean_product_id(p) for p in request.args.getlist('prod_id') if clean_product_id(p)]
+        
+        # Date filter parameters
+        date_filter = request.args.get('date_filter', 'all')  # all, today, week, month, year, custom
+        date_from = request.args.get('date_from', '')
+        date_to = request.args.get('date_to', '')
+        
+        # Client and PIC filters. Prod ID master has no client column; PIC is
+        # matched against the product registry PIC text and resolved Master PIC.
+        client_name = request.args.get('client_name', '').strip()
+        pic_name = request.args.get('pic_name', '').strip()
+        
+        q = db.session.query(ProductIDDB).filter(db.or_(
+            ProductIDDB.product_status.is_(None),
+            ProductIDDB.product_status == '',
+            func.lower(ProductIDDB.product_status) == 'use'
+        ))
+        
+        # Apply date filter
+        if date_filter != 'all':
+            from datetime import datetime, timedelta
+            today = datetime.now().date()
+            
+            if date_filter == 'today':
+                q = q.filter(func.date(ProductIDDB.registration_date) == today)
+            elif date_filter == 'week':
+                week_start = today - timedelta(days=today.weekday())
+                q = q.filter(ProductIDDB.registration_date >= week_start)
+            elif date_filter == 'month':
+                month_start = today.replace(day=1)
+                q = q.filter(ProductIDDB.registration_date >= month_start)
+            elif date_filter == 'year':
+                year_start = today.replace(month=1, day=1)
+                q = q.filter(ProductIDDB.registration_date >= year_start)
+            elif date_filter == 'custom':
+                if date_from:
+                    q = q.filter(ProductIDDB.registration_date >= date_from)
+                if date_to:
+                    q = q.filter(ProductIDDB.registration_date <= date_to)
+        
+        if pic_name:
+            q = q.filter(ProductIDDB.product_registry_pic.ilike(f'%{pic_name}%'))
+        if prod_ids:
+            q = q.filter(ProductIDDB.product_id.in_(prod_ids))
+        
+        if search:
+            pattern = f'%{search}%'
+            q = q.filter(db.or_(
+                ProductIDDB.product_id.ilike(pattern),
+                ProductIDDB.product_name.ilike(pattern),
+                ProductIDDB.specification.ilike(pattern),
+                ProductIDDB.manufacturer_name.ilike(pattern),
+                ProductIDDB.category_name.ilike(pattern),
+            ))
+        
+        total = q.count()
+
+        rows = q.order_by(ProductIDDB.registration_date.desc(), ProductIDDB.product_id.asc()).offset((page-1)*per_page).limit(per_page).all()
+        pic_map = {normalize_category_id(m.category_id): m.pic_name for m in db.session.query(MasterPIC).all()}
+        
+        data = []
+        for row in rows:
+            cat_id = normalize_category_id(row.category_id)
+            data.append({
+                'id': row.id,
+                'prod_id': clean_product_id(row.product_id),
+                'category': source_category_level1(row.category_name),
+                'pic': pic_map.get(cat_id) or '',
+                'prod_name': row.product_name or '',
+                'spec': row.specification or '',
+                'mfr_name': row.manufacturer_name or '',
+                'odr_unit': row.order_unit or '',
+                'hub_handling_check': row.hub_handling_check or '',
+                'tax_type': row.tax_type or '',
+                'registration_date': row.registration_date.isoformat() if row.registration_date else '',
+                'product_registry_pic': row.product_registry_pic or '',
+                'client_name': '',
+                'vendor_name': '',
+                'req_no': '',
+                'proc_status': row.product_status or '',
+                'prod_price': 0,
+                'curr': '',
+                'batch_grp_no': '',
+            })
+        
+        return jsonify({
+            'data': data,
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/export/all-registered-items', methods=['GET'])
+def export_all_registered_items():
+    """Export all registered items with current filters to Excel."""
+    try:
+        # Apply same filters as get_all_registered_items
+        date_filter = request.args.get('date_filter', 'all')
+        date_from = request.args.get('date_from', '')
+        date_to = request.args.get('date_to', '')
+        pic_name = request.args.get('pic_name', '').strip()
+        search = request.args.get('search', '').strip()
+        prod_ids = [clean_product_id(p) for p in request.args.getlist('prod_id') if clean_product_id(p)]
+        
+        q = db.session.query(ProductIDDB).filter(db.or_(
+            ProductIDDB.product_status.is_(None),
+            ProductIDDB.product_status == '',
+            func.lower(ProductIDDB.product_status) == 'use'
+        ))
+        
+        # Apply date filter
+        if date_filter != 'all':
+            from datetime import datetime, timedelta
+            today = datetime.now().date()
+            
+            if date_filter == 'today':
+                q = q.filter(func.date(ProductIDDB.registration_date) == today)
+            elif date_filter == 'week':
+                week_start = today - timedelta(days=today.weekday())
+                q = q.filter(ProductIDDB.registration_date >= week_start)
+            elif date_filter == 'month':
+                month_start = today.replace(day=1)
+                q = q.filter(ProductIDDB.registration_date >= month_start)
+            elif date_filter == 'year':
+                year_start = today.replace(month=1, day=1)
+                q = q.filter(ProductIDDB.registration_date >= year_start)
+            elif date_filter == 'custom':
+                if date_from:
+                    q = q.filter(ProductIDDB.registration_date >= date_from)
+                if date_to:
+                    q = q.filter(ProductIDDB.registration_date <= date_to)
+        
+        if pic_name:
+            q = q.filter(ProductIDDB.product_registry_pic.ilike(f'%{pic_name}%'))
+        if prod_ids:
+            q = q.filter(ProductIDDB.product_id.in_(prod_ids))
+        if search:
+            pattern = f'%{search}%'
+            q = q.filter(db.or_(
+                ProductIDDB.product_id.ilike(pattern),
+                ProductIDDB.product_name.ilike(pattern),
+                ProductIDDB.specification.ilike(pattern),
+                ProductIDDB.manufacturer_name.ilike(pattern),
+                ProductIDDB.category_name.ilike(pattern),
+            ))
+        
+        rows = q.order_by(ProductIDDB.registration_date.desc(), ProductIDDB.product_id.asc()).all()
+        pic_map = {normalize_category_id(m.category_id): m.pic_name for m in db.session.query(MasterPIC).all()}
+        
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "All Registered Items"
+        headers = [
+            'Product ID', 'Category', 'PIC', 'Product Name', 'Specification',
+            'Manufacturer Name', 'Order Unit', 'HUB Handling Check', 'Tax Type',
+            'Registration Date', 'Product Registry PIC'
+        ]
+        _style_wb(ws, headers)
+        widths = [18, 24, 16, 28, 48, 24, 14, 20, 16, 18, 20]
+        for i, width in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = width
+        
+        for row in rows:
+            cat_id = normalize_category_id(row.category_id)
+            ws.append([
+                clean_product_id(row.product_id),
+                source_category_level1(row.category_name),
+                pic_map.get(cat_id) or '',
+                row.product_name or '',
+                row.specification or '',
+                row.manufacturer_name or '',
+                row.order_unit or '',
+                row.hub_handling_check or '',
+                row.tax_type or '',
+                row.registration_date.isoformat() if row.registration_date else '',
+                row.product_registry_pic or '',
+            ])
+        
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return send_file(output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f"All_Registered_Items_{datetime.now().strftime('%Y%m%d')}.xlsx")
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/dashboard/status-detail', methods=['GET'])
+def get_dashboard_status_detail():
+    """Return detailed SO list for a specific status from dashboard/heatmap."""
+    try:
+        status = request.args.get('status', '').strip()
+        month = request.args.get('month', '').strip()  # e.g., "Jan 2026"
+        
+        hidden_so = get_hidden_so_items()
+        date_year, date_from, date_to = parse_so_date_args()
+        clients = selected_clients()
+        pics = selected_pics()
+        
+        def so_q(*extra_filters):
+            q = db.session.query(SOData).filter(*extra_filters) if extra_filters else db.session.query(SOData)
+            q = apply_so_client_filter(q, clients)
+            q = apply_so_pic_filter(q, pics)
+            return apply_so_create_date_filter(q, date_year, date_from, date_to)
+        
+        q = so_q(open_so_filter())
+        
+        if status:
+            q = q.filter(SOData.so_status == status)
+        
+        if month:
+            # Parse month like "Jan 2026"
+            try:
+                from datetime import datetime
+                month_date = datetime.strptime(month, '%b %Y')
+                q = q.filter(
+                    func.strftime('%Y-%m', SOData.so_create_date) == month_date.strftime('%Y-%m')
+                )
+            except:
+                pass
+        
+        rows = q.all()
+        
+        result = []
+        for s in rows:
+            if s.so_item in hidden_so or s.so_number in hidden_so:
+                continue
+            if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
+                continue
+            
+            result.append({
+                'so_item': s.so_item,
+                'so_number': s.so_number,
+                'so_status': s.so_status,
+                'operation_unit_name': s.operation_unit_name,
+                'vendor_name': s.vendor_name,
+                'product_name': s.product_name,
+                'so_qty': s.so_qty,
+                'sales_price': s.sales_price,
+                'sales_amount': s.sales_amount,
+                'customer_po_number': s.customer_po_number,
+                'delivery_memo': s.delivery_memo,
+                'so_create_date': s.so_create_date.isoformat() if s.so_create_date else None,
+                'delivery_plan_date': s.delivery_plan_date.isoformat() if s.delivery_plan_date else None,
+                'remarks': s.remarks,
+            })
+        
+        return jsonify(result)
+    except Exception as e:
+        import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
@@ -3833,7 +5045,7 @@ def get_delivery_monitoring():
         pending_filters = [p.strip() for p in request.args.getlist('pending_at') if p.strip()]
         search          = request.args.get('search', '').strip()
         page            = int(request.args.get('page', 1))
-        per_page        = int(request.args.get('per_page', 50))
+        per_page        = int(request.args.get('per_page', 10))
 
         q = DeliveryMonitoring.query
 
@@ -4099,6 +5311,32 @@ def get_delivery_monitoring_summary():
         return jsonify({'error': str(e)}), 500
 
 
+# ═══════════════════════════════════════════════════════════════════
+# VISITOR TRACKING ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════
+
+@app.route('/api/visitor/track', methods=['POST'])
+def track_visitor():
+    """Track visitor for analytics. Returns unique visitor count."""
+    try:
+        # Simple implementation - just return a placeholder count
+        # In production, you'd store visitor_id in a database table
+        return jsonify({'success': True, 'unique_visitors': 0})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/visitor/stats', methods=['GET'])
+def get_visitor_stats():
+    """Get visitor statistics."""
+    try:
+        # Simple implementation - return placeholder stats
+        return jsonify({'unique_visitors': 0})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 if __name__ == '__main__':
-    print("Backend: http://127.0.0.1:5000")
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    load_similarity_cache()
+    print("Backend: http://127.0.0.1:5001")
+    app.run(debug=True, host='0.0.0.0', port=5001)
