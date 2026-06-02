@@ -762,14 +762,12 @@ const App = () => {
   const [itemRegFilters, setItemRegFilters] = useState({ clients: [], categories: [], pics: [], proc_statuses: [] });
   const [itemRegOptions, setItemRegOptions] = useState({ clients: [], categories: [], pics: [], proc_statuses: [] });
   const [itemRegMissingPicKpis, setItemRegMissingPicKpis] = useState([]);
-  // similarity: { [req_no]: { loading, result } }
-  const [similarityCache, setSimilarityCache] = useState({});
 
   // All Registered Items
   const [registeredItemsData, setRegisteredItemsData] = useState([]);
   const [registeredItemsTotal, setRegisteredItemsTotal] = useState(0);
   const [registeredItemsPage, setRegisteredItemsPage] = useState(1);
-  const [registeredItemsPerPage, setRegisteredItemsPerPage] = useState(15);
+  const [registeredItemsPerPage, setRegisteredItemsPerPage] = useState(10);
   const [registeredItemsSearch, setRegisteredItemsSearch] = useState('');
   const [registeredItemsAppliedSearch, setRegisteredItemsAppliedSearch] = useState('');
   const [registeredItemsProdIds, setRegisteredItemsProdIds] = useState([]);
@@ -1078,7 +1076,6 @@ const App = () => {
       resolveFilter(filters.proc_statuses).forEach(v => params.append('proc_status', v));
       const res = await api.get(`/api/item-registration/data?${params}`);
       setItemRegData(Array.isArray(res.data.data) ? res.data.data : []);
-      setSimilarityCache({});  // Reset lazy-load cache on new page/filter
       setItemRegTotal(res.data.total || 0);
       setItemRegLastUpdated(res.data.last_updated || null);
       setItemRegMissingPicKpis(Array.isArray(res.data.missing_prod_id_by_pic) ? res.data.missing_prod_id_by_pic : []);
@@ -1092,67 +1089,6 @@ const App = () => {
       addToast(`Failed to load Item Registration: ${e.response?.data?.error || e.message}`, 'error');
     } finally { setLoading(false); }
   }, [addToast, itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters]);
-
-  // Auto-load similarity for all rows missing prod_id whenever itemRegData changes
-  useEffect(() => {
-    const rowsNeedingSimilarity = itemRegData.filter(row => !row.prod_id && row.req_no);
-    if (rowsNeedingSimilarity.length === 0) return;
-    let cancelled = false;
-
-    const loadAll = async () => {
-      // Mark all uncached rows as loading immediately (single state update)
-      setSimilarityCache(prev => {
-        const next = { ...prev };
-        let dirty = false;
-        for (const row of rowsNeedingSimilarity) {
-          if (!next[row.req_no]) {
-            next[row.req_no] = { loading: true, result: null };
-            dirty = true;
-          }
-        }
-        return dirty ? next : prev;
-      });
-
-      // Fetch sequentially — only rows not already in cache
-      for (const row of rowsNeedingSimilarity) {
-        if (cancelled) break;
-        // Read current cache snapshot synchronously via functional updater peek
-        // Skip rows already fetched (result set, even if null)
-        // We track this via a local set built from the initial scan
-        try {
-          const res = await api.get(`/api/item-registration/similarity/${encodeURIComponent(row.req_no)}`);
-          if (!cancelled) {
-            setSimilarityCache(prev => {
-              // Only update if still in loading state (not already set by another trigger)
-              if (prev[row.req_no]?.loading === false) return prev;
-              return { ...prev, [row.req_no]: { loading: false, result: res.data.similar_items } };
-            });
-          }
-        } catch {
-          if (!cancelled) {
-            setSimilarityCache(prev => {
-              if (prev[row.req_no]?.loading === false) return prev;
-              return { ...prev, [row.req_no]: { loading: false, result: null } };
-            });
-          }
-        }
-      }
-    };
-
-    // Filter to only rows not already in cache before starting
-    // Use a ref snapshot to avoid reading stale closure
-    setSimilarityCache(prev => {
-      const uncached = rowsNeedingSimilarity.filter(row => !prev[row.req_no]);
-      if (uncached.length > 0 && !cancelled) {
-        // Kick off async load after state settles
-        setTimeout(() => { if (!cancelled) loadAll(); }, 0);
-      }
-      return prev; // no state change here, just a peek
-    });
-
-    return () => { cancelled = true; };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [itemRegData]);
 
   const fetchRegisteredItems = useCallback(async (
     page = registeredItemsPage,
@@ -1289,9 +1225,9 @@ const App = () => {
   }, [globalDateFilter, globalClientFilter, globalPicFilter, fetchDashboard]);
 
   const handleUpload = async (e, type) => {
-    const file = e.target.files[0]; if (!file) return;
+    const files = Array.from(e.target.files || []); if (!files.length) return;
     e.target.value = '';
-    const label = 'SO - Search Client Odr';
+    const label = files.length > 1 ? `SO - Search Client Odr (${files.length} files)` : 'SO - Search Client Odr';
     const endpoint = '/api/upload/scor';
 
     // ── Client-side header validation ──────────────────────────────────
@@ -1309,24 +1245,26 @@ const App = () => {
     };
 
     try {
-      const arrayBuffer = await file.arrayBuffer();
-      const wb = XLSX.read(arrayBuffer, { type: 'array' });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      const jsonData = XLSX.utils.sheet_to_json(ws, { header: 1 });
-      const headerRow = (jsonData[0] || []).map(h => String(h || '').trim().toLowerCase());
+      for (const file of files) {
+        const arrayBuffer = await file.arrayBuffer();
+        const wb = XLSX.read(arrayBuffer, { type: 'array' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const jsonData = XLSX.utils.sheet_to_json(ws, { header: 1 });
+        const headerRow = (jsonData[0] || []).map(h => String(h || '').trim().toLowerCase());
 
-      const reqHeaders = REQUIRED_HEADERS[type];
-      const missing = [];
-      for (const [friendlyName, aliases] of Object.entries(reqHeaders)) {
-        const found = aliases.some(alias => headerRow.includes(alias.toLowerCase()));
-        if (!found) missing.push(friendlyName);
-      }
-      if (missing.length >= 3) {
-        addToast(
-          `❌ Invalid file — ${missing.length} required columns not found: ${missing.join(', ')}. Please check the ${label} file is correct and try again.`,
-          'error'
-        );
-        return;
+        const reqHeaders = REQUIRED_HEADERS[type];
+        const missing = [];
+        for (const [friendlyName, aliases] of Object.entries(reqHeaders)) {
+          const found = aliases.some(alias => headerRow.includes(alias.toLowerCase()));
+          if (!found) missing.push(friendlyName);
+        }
+        if (missing.length > 3) {
+          addToast(
+            `❌ Invalid file ${file.name} — ${missing.length} required columns not found: ${missing.join(', ')}. Please check the ${label} file is correct and try again.`,
+            'error'
+          );
+          return;
+        }
       }
     } catch (readErr) {
       addToast(`❌ Failed to read file: ${readErr.message}`, 'error');
@@ -1334,7 +1272,7 @@ const App = () => {
     }
     // ── End client-side header validation ──────────────────────────────
 
-    const fd = new FormData(); fd.append('file', file);
+    const fd = new FormData(); files.forEach(file => fd.append('file', file));
     setUploadProgress({ label, pct: 0 });
     try {
       const res = await api.post(endpoint, fd, {
@@ -1375,127 +1313,72 @@ const App = () => {
   const handleUploadProductID = async (e) => {
     const files = Array.from(e.target.files || []); if (!files.length) return;
     e.target.value = '';
-    // Validate each file has expected columns before uploading
-    const EXPECTED_PROD_ID_COLS = ['Product ID', 'Category ID'];
-    for (const file of files) {
-      try {
-        const XLSX = await import('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm');
-        const buf = await file.arrayBuffer();
-        const wb = XLSX.read(buf, { type: 'array', sheetRows: 1 });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        const headers = XLSX.utils.sheet_to_json(ws, { header: 1 })[0] || [];
-        const missing = EXPECTED_PROD_ID_COLS.filter(c => !headers.some(h => String(h).includes(c)));
-        if (missing.length > 3) {
-          addToast(`❌ File "${file.name}" sepertinya file yang salah — kolom berbeda lebih dari 3. Cek lagi file yang diupload.`, 'error');
-          return;
-        }
-      } catch {}
+    const fd = new FormData(); files.forEach(file => fd.append('file', file));
+    const label = files.length > 1 ? `Product ID (${files.length} files)` : 'Product ID';
+    setPicUploadMsg('⏳ Uploading Product ID database...');
+    setUploadProgress({ label, pct: 0 });
+    try {
+      const res = await api.post('/api/upload/product-id', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (ev) => setUploadProgress({ label, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
+      });
+      const d = res.data;
+      setUploadProgress(null);
+      setPicUploadMsg(`✅ Prod ID (${d.files || files.length} file): +${d.added} added, ${d.updated} updated (total: ${d.total_in_db}). SO PIC refreshed: ${d.so_pic_refreshed} rows.`);
+      fetchPicDbStatus();
+      fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+    } catch (err) {
+      setUploadProgress(null);
+      const msg = err?.response?.data?.error || err.message;
+      setPicUploadMsg(`❌ Error: ${msg}`);
+      addToast(`❌ ${msg}`, 'error');
     }
-    setPicUploadMsg(`⏳ Uploading ${files.length} Product ID file(s)...`);
-    let totalAdded = 0, totalUpdated = 0, totalRefreshed = 0;
-    for (const file of files) {
-      setUploadProgress({ label: `Product ID: ${file.name}`, pct: 0 });
-      const fd = new FormData(); fd.append('file', file);
-      try {
-        const res = await api.post('/api/upload/product-id', fd, {
-          headers: { 'Content-Type': 'multipart/form-data' },
-          onUploadProgress: (ev) => setUploadProgress({ label: `Product ID: ${file.name}`, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
-        });
-        const d = res.data;
-        totalAdded += d.added || 0; totalUpdated += d.updated || 0; totalRefreshed += d.so_pic_refreshed || 0;
-      } catch (err) {
-        setUploadProgress(null);
-        setPicUploadMsg(`❌ Error pada "${file.name}": ${err?.response?.data?.error || err.message}`);
-        return;
-      }
-    }
-    setUploadProgress(null);
-    setPicUploadMsg(`✅ Prod ID (${files.length} file): +${totalAdded} added, ${totalUpdated} updated. SO PIC refreshed: ${totalRefreshed} rows.`);
-    fetchPicDbStatus();
-    fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
   };
 
   const handleUpdatePIC = async (e) => {
     const files = Array.from(e.target.files || []); if (!files.length) return;
     e.target.value = '';
-    const EXPECTED_PIC_COLS = ['Category ID', 'PIC'];
-    for (const file of files) {
-      try {
-        const XLSX = await import('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm');
-        const buf = await file.arrayBuffer();
-        const wb = XLSX.read(buf, { type: 'array', sheetRows: 1 });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        const headers = XLSX.utils.sheet_to_json(ws, { header: 1 })[0] || [];
-        const missing = EXPECTED_PIC_COLS.filter(c => !headers.some(h => String(h).includes(c)));
-        if (missing.length > 3) {
-          addToast(`❌ File "${file.name}" sepertinya file yang salah — kolom berbeda lebih dari 3. Cek lagi file yang diupload.`, 'error');
-          return;
-        }
-      } catch {}
+    const fd = new FormData(); files.forEach(file => fd.append('file', file));
+    const label = files.length > 1 ? `Master PIC (${files.length} files)` : 'Master PIC';
+    setPicUploadMsg('⏳ Updating Master PIC...');
+    setUploadProgress({ label, pct: 0 });
+    try {
+      const res = await api.post('/api/upload/master-pic', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (ev) => setUploadProgress({ label, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
+      });
+      const d = res.data;
+      setUploadProgress(null);
+      setPicUploadMsg(`✅ Master PIC (${d.files || files.length} file): +${d.added} added, ${d.updated} updated (total categories: ${d.total_categories}). SO rows updated: ${d.so_pic_refreshed}.`);
+      fetchPicDbStatus();
+      fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+    } catch (err) {
+      setUploadProgress(null);
+      const msg = err?.response?.data?.error || err.message;
+      setPicUploadMsg(`❌ Error: ${msg}`);
+      addToast(`❌ ${msg}`, 'error');
     }
-    setPicUploadMsg(`⏳ Updating ${files.length} Master PIC file(s)...`);
-    let totalAdded = 0, totalUpdated = 0, totalRefreshed = 0;
-    for (const file of files) {
-      setUploadProgress({ label: `Master PIC: ${file.name}`, pct: 0 });
-      const fd = new FormData(); fd.append('file', file);
-      try {
-        const res = await api.post('/api/upload/master-pic', fd, {
-          headers: { 'Content-Type': 'multipart/form-data' },
-          onUploadProgress: (ev) => setUploadProgress({ label: `Master PIC: ${file.name}`, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
-        });
-        const d = res.data;
-        totalAdded += d.added || 0; totalUpdated += d.updated || 0; totalRefreshed += d.so_pic_refreshed || 0;
-      } catch (err) {
-        setUploadProgress(null);
-        setPicUploadMsg(`❌ Error pada "${file.name}": ${err?.response?.data?.error || err.message}`);
-        return;
-      }
-    }
-    setUploadProgress(null);
-    setPicUploadMsg(`✅ Master PIC (${files.length} file): +${totalAdded} added, ${totalUpdated} updated. SO rows updated: ${totalRefreshed}.`);
-    fetchPicDbStatus();
-    fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
   };
 
   const handleUploadItemRegistration = async (e) => {
     const files = Array.from(e.target.files || []); if (!files.length) return;
     e.target.value = '';
-    // Expected columns for Item Registration
-    const EXPECTED_ITEM_REG_COLS = ['Req. No', 'Proc. Status', 'Client Nm.', 'Prod. Nm.'];
-    for (const file of files) {
-      try {
-        const XLSX = await import('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm');
-        const buf = await file.arrayBuffer();
-        const wb = XLSX.read(buf, { type: 'array', sheetRows: 1 });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        const headers = XLSX.utils.sheet_to_json(ws, { header: 1 })[0] || [];
-        const missing = EXPECTED_ITEM_REG_COLS.filter(c => !headers.some(h => String(h).toLowerCase().includes(c.toLowerCase().replace('. ','').replace('.',''))));
-        if (missing.length > 3) {
-          addToast(`❌ File "${file.name}" sepertinya file yang salah — kolom berbeda lebih dari 3. Cek lagi file yang diupload.`, 'error');
-          return;
-        }
-      } catch {}
+    const fd = new FormData(); files.forEach(file => fd.append('file', file));
+    const label = files.length > 1 ? `Item Registration (${files.length} files)` : 'Item Registration';
+    setUploadProgress({ label, pct: 0 });
+    try {
+      const res = await api.post('/api/upload/item-registration', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (ev) => setUploadProgress({ label, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
+      });
+      setUploadProgress(null);
+      addToast(`✅ ${res.data.message || 'Item Registration uploaded successfully'}`, 'success');
+      setItemRegPage(1);
+      fetchItemRegistration(1, itemRegPerPage, itemRegAppliedSearch, itemRegFilters);
+    } catch (err) {
+      setUploadProgress(null);
+      addToast(`❌ Failed to upload Item Registration: ${err?.response?.data?.error || err.message}`, 'error');
     }
-    let totalUploaded = 0;
-    for (const file of files) {
-      setUploadProgress({ label: `Item Registration: ${file.name}`, pct: 0 });
-      const fd = new FormData(); fd.append('file', file);
-      try {
-        const res = await api.post('/api/upload/item-registration', fd, {
-          headers: { 'Content-Type': 'multipart/form-data' },
-          onUploadProgress: (ev) => setUploadProgress({ label: `Item Registration: ${file.name}`, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
-        });
-        totalUploaded += res.data.uploaded || res.data.upserted || 0;
-      } catch (err) {
-        setUploadProgress(null);
-        addToast(`❌ Error pada "${file.name}": ${err?.response?.data?.error || err.message}`, 'error');
-        return;
-      }
-    }
-    setUploadProgress(null);
-    addToast(`✅ Item Registration (${files.length} file): ${totalUploaded} records diproses`, 'success');
-    setItemRegPage(1);
-    fetchItemRegistration(1, itemRegPerPage, itemRegAppliedSearch, itemRegFilters);
   };
 
   const handleBatchUpload = async (e) => {
@@ -2674,6 +2557,8 @@ const App = () => {
         count: null
       };
     });
+    const completedPoCountThisYear = monthlyCompleted.reduce((sum, m) => sum + (Number(m.count) || 0), 0);
+    const completedPoAmountThisYear = monthlyCompleted.reduce((sum, m) => sum + (Number(m.purchase_amount) || 0), 0);
     
     const marginPct = d.total_sales ? ((d.total_margin || 0) / d.total_sales * 100) : null;
     const fmtM = (v) => v >= 1e9 ? `${(v/1e9).toFixed(1)}B` : v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `${(v/1e3).toFixed(0)}K` : String(Math.round(v || 0));
@@ -2699,20 +2584,14 @@ const App = () => {
       }, {});
       return { ...m, ...yoyValues };
     });
-    // Assign colors: oldest year gets light grey, newer years get teal shades
-    const purchaseYoyColorMap = (year) => {
-      const allYears = [...purchaseYoyYears].sort((a, b) => a - b);
-      const idx = allYears.indexOf(year);
-      const palette = ['#D1D5DB', '#14B8A6', '#0F766E', '#0891B2'];
-      return palette[idx % palette.length];
-    };
+    const purchaseYoyColors = ['#14B8A6', '#CBD5E1'];
     const completedTrendLegendPayload = [
       { value: 'PO Amount', type: 'rect', color: '#93C5FD', dataKey: 'purchase_amount' },
       { value: 'Sales Amount', type: 'rect', color: '#2563EB', dataKey: 'sales_amount' },
-      ...activePurchaseYoyYears.map((year) => ({
+      ...activePurchaseYoyYears.map((year, i) => ({
         value: `PO ${year}`,
         type: 'line',
-        color: purchaseYoyColorMap(year),
+        color: purchaseYoyColors[i % purchaseYoyColors.length],
         dataKey: `purchase_${year}`,
       })),
     ];
@@ -2733,8 +2612,8 @@ const App = () => {
       <div className="space-y-5">
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
           {[
-            { label:'Total PO', value: fmtNum(stats?.total_po_count), sub: `${fmtNum(stats?.total_po_line_count)} line items`, icon:<FileText className="w-5 h-5"/> },
-            { label:'PO Amount', value: fmtCurShort(stats?.total_po_amount), sub: fmtCur(stats?.total_po_amount), icon:<Coins className="w-5 h-5"/> },
+            { label:'Total PO', value: fmtNum(completedPoCountThisYear), sub: `Delivery Complete ${currentYear}`, icon:<FileText className="w-5 h-5"/> },
+            { label:'PO Amount', value: fmtCurShort(completedPoAmountThisYear), sub: fmtCur(completedPoAmountThisYear), icon:<Coins className="w-5 h-5"/> },
             { label:'Sales Amount', value: fmtCurShort(d.total_sales), sub: fmtCur(d.total_sales), icon:<Wallet className="w-5 h-5"/> },
             { label:'Margin', value: fmtCurShort(d.total_margin), sub: marginPct == null ? 'Avg margin -' : `Avg margin ${marginPct.toFixed(1)}%`, icon:<TrendingUp className="w-5 h-5"/> },
             { label:'Total Pending Delivery', value: fmtNum(stats?.total_so_count), sub: 'Pending delivery records', icon:<Package className="w-5 h-5"/>, goPending:true },
@@ -2755,24 +2634,18 @@ const App = () => {
               <Legend wrapperStyle={{fontSize:12}} payload={completedTrendLegendPayload}/>
               <Bar dataKey="purchase_amount" name="PO Amount" fill="#93C5FD" radius={[4,4,0,0]}/>
               <Bar dataKey="sales_amount" name="Sales Amount" fill="#2563EB" radius={[4,4,0,0]}/>
-              {activePurchaseYoyYears.map((year) => {
-                const lineColor = purchaseYoyColorMap(year);
-                const allYears = [...purchaseYoyYears].sort((a, b) => a - b);
-                const isOldest = allYears.indexOf(year) === 0;
-                return (
-                  <Line
-                    key={year}
-                    type="monotone"
-                    dataKey={`purchase_${year}`}
-                    name={`PO ${year}`}
-                    stroke={lineColor}
-                    strokeWidth={isOldest ? 2 : 3}
-                    strokeDasharray={isOldest ? '5 3' : undefined}
-                    dot={{ r: 3, fill: lineColor }}
-                    activeDot={{ r: 6 }}
-                  />
-                );
-              })}
+              {activePurchaseYoyYears.map((year, i) => (
+                <Line
+                  key={year}
+                  type="monotone"
+                  dataKey={`purchase_${year}`}
+                  name={`PO ${year}`}
+                  stroke={purchaseYoyColors[i % purchaseYoyColors.length]}
+                  strokeWidth={3}
+                  dot={{ r: 3, fill: purchaseYoyColors[i % purchaseYoyColors.length] }}
+                  activeDot={{ r: 6 }}
+                />
+              ))}
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -2937,7 +2810,7 @@ const App = () => {
                 setRegisteredItemsPage(1);
                 fetchRegisteredItems(1, next, registeredItemsAppliedSearch, registeredItemsAppliedProdIds);
               }}>
-                <option value={15}>15</option><option value={50}>50</option><option value={100}>100</option><option value={500}>500</option>
+                <option value={10}>10</option><option value={25}>25</option><option value={50}>50</option><option value={100}>100</option><option value={500}>500</option>
               </select>
             </label>
           </div>
@@ -2964,8 +2837,9 @@ const App = () => {
       ['Proc. Status', 'proc_status'], ['Client Nm.', 'client_name'], ['Category', 'category'], ['PIC', 'pic'],
       ['Req. No', 'req_no'], ['Prod. ID', 'prod_id'], ['Prod. Nm.', 'prod_name'],
       ['Spec.', 'spec'], ['Mfr. Nm.', 'mfr_name'], ['Unit', 'odr_unit'],
-      ['Prod. Price', 'prod_price'], ['Curr.', 'curr'],
-      ['Similar Item', 'similar_item'],
+      ['Prod. Price', 'prod_price'], ['Curr.', 'curr'], ['Similar Product ID', 'similar_prod_ids'],
+      ['Similar Product Name', 'similar_prod_name'], ['Similar Specification', 'similar_spec'],
+      ['Similar Manufacturer Name', 'similar_mfr_name'], ['Similar Order Unit', 'similar_odr_unit'],
       ['Remarks', 'remarks']
     ];
     const statusClass = (status) => {
@@ -2982,23 +2856,13 @@ const App = () => {
       { pic: 'Total Pending Regist.', count: totalMissingProdId, sub: 'Items Pending', isTotal: true },
       ...itemRegMissingPicKpis.map(row => ({ pic: row.pic, count: row.count, sub: 'Items Pending' }))
     ];
+    const itemRegKpiCols = Math.max(1, itemRegPicKpis.length);
     const colWidth = (key) => ({
       proc_status: '9%', client_name: '10%', category: '8%', pic: '5%', req_no: 'auto', prod_id: '5%',
-      prod_name: 'auto', spec: '12%', mfr_name: '6%', odr_unit: '4%',
-      prod_price: '5%', curr: '3%', similar_item: '22%', remarks: '12%'
+      prod_name: 'auto', spec: '15%', mfr_name: '6%', odr_unit: '4%',
+      prod_price: '5%', curr: '3%', similar_prod_ids: '9%', similar_prod_name: '10%',
+      similar_spec: '14%', similar_mfr_name: '8%', similar_odr_unit: '5%', remarks: '18%'
     }[key] || 'auto');
-
-    const loadSimilarity = (reqNo) => {
-      if (!reqNo || similarityCache[reqNo]) return;
-      setSimilarityCache(prev => ({ ...prev, [reqNo]: { loading: true, result: null } }));
-      api.get(`/api/item-registration/similarity/${encodeURIComponent(reqNo)}`)
-        .then(res => {
-          setSimilarityCache(prev => ({ ...prev, [reqNo]: { loading: false, result: res.data.similar_items } }));
-        })
-        .catch(() => {
-          setSimilarityCache(prev => ({ ...prev, [reqNo]: { loading: false, result: null } }));
-        });
-    };
 
     return (
       <div className={`rounded-2xl overflow-hidden ${card}`}>
@@ -3024,24 +2888,29 @@ const App = () => {
         </div>
 
         <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
-          <div
-            className="grid gap-3"
-            style={{ gridTemplateColumns: `repeat(${Math.min(itemRegPicKpis.length, Math.max(2, itemRegPicKpis.length))}, minmax(120px, 1fr))` }}
-          >
+          <div className="grid grid-flow-col gap-2" style={{ gridTemplateColumns: `repeat(${itemRegKpiCols}, minmax(0, 1fr))` }}>
             {itemRegPicKpis.map((row) => {
+              const currentPics = Array.isArray(itemRegFilters.pics) ? itemRegFilters.pics : [];
+              const activePic = !row.isTotal && currentPics.includes(row.pic);
+              const applyItemRegPicFilter = () => {
+                const next = {...itemRegFilters, pics: row.isTotal || activePic ? [] : [row.pic]};
+                setItemRegFilters(next);
+                setItemRegPage(1);
+                fetchItemRegistration(1, itemRegPerPage, itemRegAppliedSearch, next);
+              };
               return (
-                <div key={row.pic} className={`p-4 rounded-2xl transition-all ${row.isTotal ? (darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200') : card}`}>
-                  <div className="flex items-start justify-between gap-3">
+                <button key={row.pic} type="button" onClick={applyItemRegPicFilter} className={`min-w-0 p-3 rounded-xl text-left transition-all ${activePic ? (darkMode ? 'bg-amber-900/30 border border-amber-500 ring-2 ring-amber-400' : 'bg-amber-50 border border-amber-300 ring-2 ring-amber-200') : row.isTotal ? (darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200') : card} ${row.isTotal ? 'hover:border-slate-300' : 'hover:border-amber-300'}`}>
+                  <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
-                      <p className={`text-xs font-semibold truncate ${row.isTotal ? (darkMode ? 'text-gray-200' : 'text-gray-700') : txt2}`} title={row.pic}>{row.pic}</p>
-                      <h3 className={`text-2xl font-bold mt-0.5 ${row.isTotal ? (darkMode ? 'text-gray-100' : 'text-gray-800') : kpiValue}`}>{fmtNum(row.count)}</h3>
-                      <p className={`text-[11px] mt-0.5 ${txt2}`}>{row.sub}</p>
+                      <p className={`text-xs font-semibold truncate ${activePic ? 'text-amber-700' : row.isTotal ? (darkMode ? 'text-gray-200' : 'text-gray-700') : txt2}`} title={row.pic}>{row.pic}</p>
+                      <h3 className={`text-xl font-bold leading-tight ${activePic ? 'text-amber-700' : row.isTotal ? (darkMode ? 'text-gray-100' : 'text-gray-800') : kpiValue}`}>{fmtNum(row.count)}</h3>
+                      <p className={`text-[11px] leading-tight whitespace-nowrap ${txt2}`}>{row.sub}</p>
                     </div>
-                    <div className={`p-2.5 rounded-xl ${row.isTotal ? (darkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-100 text-gray-600') : neutralIcon}`}>
-                      <Package className="w-4 h-4" />
+                    <div className={`p-1.5 rounded-lg flex-shrink-0 ${activePic ? 'bg-amber-100 text-amber-700' : row.isTotal ? (darkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-100 text-gray-600') : neutralIcon}`}>
+                      <Package className="w-3.5 h-3.5" />
                     </div>
                   </div>
-                </div>
+                </button>
               );
             })}
           </div>
@@ -3087,7 +2956,7 @@ const App = () => {
         </div>
 
         <div className="overflow-x-auto">
-          <table className="min-w-[2200px] table-fixed text-xs">
+          <table className="min-w-[2600px] table-fixed text-xs">
             <colgroup>{columns.map(([, key]) => <col key={key} style={{ width: colWidth(key) }}/>)}</colgroup>
             <thead className={tblHd}><tr>{columns.map(([label, key]) => <th key={label} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{label}</th>)}</tr></thead>
             <tbody className={`divide-y ${tblDv}`}>
@@ -3100,45 +2969,6 @@ const App = () => {
                     const c = getPicColor(row.pic);
                     return <td key={key} className="px-2 py-2 text-center truncate">{row.pic ? <span className={`inline-flex max-w-full truncate px-2 py-0.5 rounded-full text-[11px] font-semibold ${c ? `${c.bg} ${c.text}` : 'bg-gray-100 text-gray-700'}`}>{row.pic}</span> : <span className={txt2}>-</span>}</td>;
                   }
-                  if (key === 'similar_item') {
-                    const reqNo = row.req_no;
-                    const cached = similarityCache[reqNo];
-                    // Only check items without prod_id (not yet registered)
-                    if (row.prod_id) return <td key={key} className={`px-2 py-2 text-center ${txt2}`}><span className="text-[10px] opacity-40">—</span></td>;
-                    if (!cached || cached.loading) {
-                      return <td key={key} className={`px-2 py-2 text-center ${txt2}`}><span className="text-[10px] animate-pulse opacity-60">Checking…</span></td>;
-                    }
-                    const sim = cached.result;
-                    if (!sim) return <td key={key} className={`px-2 py-2 text-center ${txt2}`}><span className="text-[10px] opacity-40">Tidak ada</span></td>;
-                    const simColor = sim.similarity >= 95 ? 'text-green-600' : sim.similarity >= 85 ? 'text-amber-500' : 'text-orange-500';
-                    const pidList = String(sim.product_ids || '').split(',').map(s => s.trim()).filter(Boolean);
-                    return (
-                      <td key={key} className="px-2 py-1.5">
-                        <div className="flex flex-col gap-0.5 min-w-0">
-                          {/* Row 1: similarity badge + prod IDs */}
-                          <div className="flex items-center gap-1 flex-wrap">
-                            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${darkMode ? 'bg-gray-700' : 'bg-gray-100'} ${simColor}`}>{sim.similarity}%</span>
-                            {pidList.map(pid => (
-                              <span key={pid} className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${darkMode ? 'bg-blue-900 text-blue-200' : 'bg-blue-50 text-blue-700'}`}>{pid}</span>
-                            ))}
-                            {sim.count > 1 && <span className={`text-[10px] ${txt2}`}>({sim.count} match)</span>}
-                          </div>
-                          {/* Row 2: Product Name */}
-                          {sim.product_name && <span className={`text-[10px] font-semibold truncate ${darkMode ? 'text-gray-200' : 'text-gray-700'}`} title={sim.product_name}>{sim.product_name}</span>}
-                          {/* Row 3: Specification */}
-                          {sim.specification && <span className={`text-[10px] truncate ${txt2}`} title={sim.specification}><span className="opacity-50">Spec: </span>{sim.specification}</span>}
-                          {/* Row 4: Mfr + Unit */}
-                          {(sim.manufacturer_name || sim.order_unit) && (
-                            <span className={`text-[10px] truncate ${txt2}`}>
-                              {sim.manufacturer_name && <span title={sim.manufacturer_name}><span className="opacity-50">Mfr: </span>{sim.manufacturer_name}</span>}
-                              {sim.manufacturer_name && sim.order_unit && <span className="opacity-40 mx-1">·</span>}
-                              {sim.order_unit && <span><span className="opacity-50">Unit: </span>{sim.order_unit}</span>}
-                            </span>
-                          )}
-                        </div>
-                      </td>
-                    );
-                  }
                   if (key === 'remarks') return <td key={key} className="px-2 py-2 truncate" title={row.remarks}>{editingCell?.id===row.id && editingCell.field==='item_remarks' ? (
                     <input type="text" defaultValue={row.remarks}
                       className={`w-full px-2 py-1 rounded text-xs border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
@@ -3149,6 +2979,8 @@ const App = () => {
                   ) : (
                     <span className="cursor-pointer text-blue-600 hover:underline" onClick={()=>{setEditingCell({id:row.id,field:'item_remarks'});setEditValue(row.remarks||'');}}>{row.remarks||'✏️ Add'}</span>
                   )}</td>;
+                  if (key === 'similar_prod_ids') return <td key={key} className="px-2 py-2 truncate font-mono text-blue-600" title={row[key]}>{value}</td>;
+                  if (['similar_prod_name','similar_spec','similar_mfr_name','similar_odr_unit'].includes(key)) return <td key={key} className={`px-2 py-2 truncate ${txt2}`} title={row[key]}>{value}</td>;
                   return <td key={key} className={`px-2 py-2 ${['req_no','prod_name'].includes(key) ? '' : 'truncate'} ${key === 'prod_price' ? `text-right font-semibold ${kpiValue}` : txt2} ${['req_no','prod_id','prod_name','odr_unit','curr'].includes(key) ? 'whitespace-nowrap' : ''}`} title={row[key]}>{value}</td>;
                 })}
               </tr>)}
@@ -3196,70 +3028,42 @@ const App = () => {
     const pendingStatusTotal = sumRows(statusMonthlyRows, 'total');
     const pendingStatusAmount = sumRows(statusMonthlyRows, 'amount');
     const itemRegCategoryChart = (rows, title) => {
-      const data = (rows || []).map(r => ({
-        ...r,
-        shortLabel: String(r.name || '-').slice(0, 40),
-        value: Number(r.value || 0),
-      }));
-      const total = sumRows(data, 'value');
-
-      // Both Proc. Status and Client Nm.: pie chart, top 5 + Others, no legend
-      const PIE_PALETTE = ['#2563EB', '#14B8A6', '#F59E0B', '#8B5CF6', '#EF4444', '#9CA3AF'];
-      const sorted = [...data].sort((a, b) => b.value - a.value);
-      const top5 = sorted.slice(0, 5);
+      const sorted = [...(rows || [])]
+        .map(r => ({ name: r.name || '-', value: Number(r.value || 0) }))
+        .filter(r => r.value > 0)
+        .sort((a, b) => b.value - a.value);
+      const top = sorted.slice(0, 5);
       const rest = sorted.slice(5);
-      const othersValue = rest.reduce((s, r) => s + r.value, 0);
-      const pieData = othersValue > 0
-        ? [...top5, { name: 'Others', shortLabel: 'Others', value: othersValue }]
-        : top5;
-      const RADIAN = Math.PI / 180;
-      const renderCustomLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent }) => {
-        if (percent < 0.04) return null;
-        const radius = innerRadius + (outerRadius - innerRadius) * 0.55;
-        const x = cx + radius * Math.cos(-midAngle * RADIAN);
-        const y = cy + radius * Math.sin(-midAngle * RADIAN);
-        return (
-          <text x={x} y={y} fill="white" textAnchor="middle" dominantBaseline="central" fontSize={11} fontWeight="600">
-            {`${(percent * 100).toFixed(0)}%`}
-          </text>
-        );
-      };
-      // Custom tooltip to show name + count
-      const CustomTooltip = ({ active, payload }) => {
-        if (!active || !payload || !payload.length) return null;
-        const entry = payload[0].payload;
-        const pct = total > 0 ? ((entry.value / total) * 100).toFixed(1) : '0';
-        return (
-          <div className={`px-3 py-2 rounded-xl text-xs shadow-lg border ${darkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-white border-gray-200 text-gray-800'}`}>
-            <p className="font-semibold mb-0.5 max-w-[200px] break-words">{entry.name}</p>
-            <p>{fmtNum(entry.value)} Req. No <span className="ml-1 opacity-60">({pct}%)</span></p>
-          </div>
-        );
-      };
+      const restValue = rest.reduce((sum, r) => sum + r.value, 0);
+      const data = restValue > 0 ? [...top, { name: `Others (${rest.length})`, value: restValue, isOthers: true }] : top;
+      const total = sumRows(data, 'value');
+      const pieColors = ['#2563EB', '#14B8A6', '#DC2626', '#60A5FA', '#5EEAD4', '#94A3B8'];
       return (
         <div className={`p-5 rounded-2xl ${card}`}>
           <h3 className={`text-base font-bold ${txt}`}>{title}</h3>
-          <p className={`text-xs mb-3 ${txt2}`}>Total: {fmtNum(total)} Req. No</p>
-          {pieData.length === 0 ? (
-            <div className={`h-[220px] flex items-center justify-center text-sm ${txt2}`}>No Item Registration data</div>
+          <p className={`text-xs mb-4 ${txt2}`}>Total: {fmtNum(total)} Req. No</p>
+          {data.length === 0 ? (
+            <div className={`h-[180px] flex items-center justify-center text-sm ${txt2}`}>No Item Registration data</div>
           ) : (
-            <div className="flex gap-4 items-center">
-              <div className="flex-shrink-0" style={{width: 180, height: 180}}>
-                <ResponsiveContainer width={180} height={180}>
-                  <PieChart>
-                    <Pie data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={82} innerRadius={32} labelLine={false} label={renderCustomLabel}>
-                      {pieData.map((entry, i) => <Cell key={`cell-${i}`} fill={PIE_PALETTE[i % PIE_PALETTE.length]} />)}
+            <div className="flex flex-col gap-4 md:flex-row md:items-center">
+              <div className="h-[230px] w-full min-w-0 md:w-[300px] md:flex-none">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart margin={{ top: 4, right: 4, bottom: 4, left: 4 }}>
+                    <Pie data={data} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={46} outerRadius={82} labelLine={false} label={renderPctLabel}>
+                      {data.map((_, i) => <Cell key={i} fill={pieColors[i % pieColors.length]} />)}
                     </Pie>
-                    <Tooltip content={<CustomTooltip />} />
+                    <Tooltip formatter={(v, n) => [`${fmtNum(v)} Req. No`, n]} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
                   </PieChart>
                 </ResponsiveContainer>
               </div>
-              <div className="flex flex-col gap-1.5 min-w-0 flex-1">
-                {pieData.map((entry, i) => (
-                  <div key={entry.name} className="flex items-center gap-2 min-w-0">
-                    <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{backgroundColor: PIE_PALETTE[i % PIE_PALETTE.length]}}/>
-                    <span className={`text-[11px] ${txt2} truncate flex-1`} title={entry.name}>{entry.name}</span>
-                    <span className={`text-[11px] font-semibold ${txt} flex-shrink-0`}>{fmtNum(entry.value)}</span>
+              <div className="w-full md:w-[310px] space-y-2">
+                {data.map((item, i) => (
+                  <div key={item.name} className="flex items-start gap-2 text-xs">
+                    <span className="mt-1 h-2.5 w-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: pieColors[i % pieColors.length] }} />
+                    <div className="min-w-0 flex-1">
+                      <p className={`font-semibold leading-snug break-words ${txt}`} title={item.name}>{item.name}</p>
+                      <p className={txt2}>{fmtNum(item.value)} | {total ? ((item.value / total) * 100).toFixed(1) : '0.0'}%</p>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -3489,16 +3293,12 @@ const App = () => {
       { pic: 'Total Pending', count: soTotal, amount: totalPendingAmount, isTotal: true },
       ...picKpis
     ];
+    const pendingKpiCols = Math.max(1, pendingKpis.length);
 
     return (
       <div className="mb-5">
         {pendingKpis.length > 0 ? (
-          <div
-            className="grid gap-3"
-            style={{
-              gridTemplateColumns: `repeat(${Math.min(pendingKpis.length, Math.max(2, pendingKpis.length))}, minmax(0, 1fr))`,
-            }}
-          >
+          <div className="grid grid-flow-col gap-2" style={{ gridTemplateColumns: `repeat(${pendingKpiCols}, minmax(0, 1fr))` }}>
             {pendingKpis.map((p) => {
               const currentPics = Array.isArray(soFilters.pics) ? soFilters.pics : [];
               const activePic = !p.isTotal && currentPics.includes(p.pic);
@@ -3509,15 +3309,15 @@ const App = () => {
                 fetchSOData(next, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
               };
               return (
-              <button key={p.pic} type="button" onClick={applyPicKpiFilter} className={`p-4 rounded-2xl text-left transition-all ${activePic ? (darkMode ? 'bg-amber-900/30 border border-amber-500 ring-2 ring-amber-400' : 'bg-amber-50 border border-amber-300 ring-2 ring-amber-200') : p.isTotal ? (darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200') : card} ${p.isTotal ? 'hover:border-slate-300' : 'hover:border-amber-300'}`}>
-                <div className="flex items-start justify-between gap-3">
+              <button key={p.pic} type="button" onClick={applyPicKpiFilter} className={`min-w-0 p-3 rounded-xl text-left transition-all ${activePic ? (darkMode ? 'bg-amber-900/30 border border-amber-500 ring-2 ring-amber-400' : 'bg-amber-50 border border-amber-300 ring-2 ring-amber-200') : p.isTotal ? (darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200') : card} ${p.isTotal ? 'hover:border-slate-300' : 'hover:border-amber-300'}`}>
+                <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <p className={`text-xs font-semibold truncate ${activePic ? 'text-amber-700' : p.isTotal ? (darkMode ? 'text-gray-200' : 'text-gray-700') : txt2}`} title={p.pic}>{p.pic}</p>
-                    <h3 className={`text-2xl font-bold mt-0.5 ${activePic ? 'text-amber-700' : p.isTotal ? (darkMode ? 'text-gray-100' : 'text-gray-800') : kpiValue}`}>{fmtNum(p.count)}</h3>
-                    <p className={`text-[11px] mt-0.5 ${txt2}`}>{fmtCurShort(p.amount)}</p>
+                    <h3 className={`text-xl font-bold leading-tight ${activePic ? 'text-amber-700' : p.isTotal ? (darkMode ? 'text-gray-100' : 'text-gray-800') : kpiValue}`}>{fmtNum(p.count)}</h3>
+                    <p className={`text-[11px] leading-tight whitespace-nowrap ${txt2}`}>{fmtCurShort(p.amount)}</p>
                   </div>
-                  <div className={`p-2.5 rounded-xl ${activePic ? 'bg-amber-100 text-amber-700' : p.isTotal ? (darkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-100 text-gray-600') : neutralIcon}`}>
-                    <Package className="w-4 h-4" />
+                  <div className={`p-1.5 rounded-lg flex-shrink-0 ${activePic ? 'bg-amber-100 text-amber-700' : p.isTotal ? (darkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-100 text-gray-600') : neutralIcon}`}>
+                    <Package className="w-3.5 h-3.5" />
                   </div>
                 </div>
               </button>
@@ -3822,17 +3622,17 @@ const App = () => {
         </div>
 
         {/* Pagination */}
-        <div className={`mt-3 pt-2 border-t ${darkMode?'border-gray-700':'border-gray-200'} flex flex-wrap justify-between items-center gap-3`}>
+        <div className={`px-5 py-3 border-t ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
           <div className="flex items-center gap-3">
             <span className={`text-sm ${txt2}`}>
               Showing {((soPage-1)*soPerPage)+1}–{Math.min(soPage*soPerPage,soTotal)} of {fmtNum(soTotal)}
             </span>
             <label className={`flex items-center gap-1 text-xs ${txt2}`}>
               Rows
-              <select className={`px-2 py-1 rounded-lg text-xs border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-300'}`}
+              <select className={`px-2 py-1 rounded-lg text-xs border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-200'}`}
                 value={soPerPage} onChange={e=>{ setSoPerPage(Number(e.target.value)); setSoPage(1); fetchSOData(soFilters,1,Number(e.target.value),soSearchNums,soMarginFilter,soDateFilter); }}>
                 <option value={10}>10</option>
-                <option value={20}>20</option>
+                <option value={25}>25</option>
                 <option value={50}>50</option>
                 <option value={100}>100</option>
                 <option value={500}>500</option>
@@ -3982,15 +3782,15 @@ const App = () => {
             </tbody>
           </table>
         </div>
-        <div className={`px-4 py-3 border-t ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+        <div className={`px-5 py-3 border-t ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
           <div className="flex items-center gap-3">
             <span className={`text-sm ${txt2}`}>Showing {(poPage-1)*poPerPage+1}–{Math.min(poPage*poPerPage,poFiltered.length)} of {fmtNum(poFiltered.length)}</span>
             <label className={`flex items-center gap-1 text-xs ${txt2}`}>
               Rows
-              <select className={`px-2 py-1 rounded-lg text-xs border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-300'}`}
+              <select className={`px-2 py-1 rounded-lg text-xs border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-200'}`}
                 value={poPerPage} onChange={e=>{ setPoPerPage(Number(e.target.value)); setPoPage(1); }}>
                 <option value={10}>10</option>
-                <option value={20}>20</option>
+                <option value={25}>25</option>
                 <option value={50}>50</option>
                 <option value={100}>100</option>
                 <option value={500}>500</option>
@@ -4084,7 +3884,7 @@ const App = () => {
         <header className="mb-7 flex flex-wrap justify-between items-center gap-4">
           <div data-tour="page-title">
             <h1 className={`text-[28px] leading-tight font-bold tracking-[-0.02em] ${txt}`}>
-              Serveone <span className="text-[#2563EB]">Summary</span>
+              Serveone <span className="text-[#2563EB]">Dashboard</span>
             </h1>
             <p className={`mt-0.5 text-sm ${txt2}`}>
               {activePage==='dashboard'?'Purchase Orders & Sales Orders Summary'
