@@ -8,24 +8,60 @@ import {
   Package, TrendingUp, TrendingDown, Award, Calendar, ChevronLeft,
   ChevronRight, Moon, Sun, FileText, BarChart3, FileSpreadsheet,
   Filter, X, ChevronDown, ChevronUp, Building2, Search, Loader2,
-  EyeOff, Eye, Trash2, RotateCcw, Plus, Coins, Wallet, Clock
+  EyeOff, Eye, Trash2, RotateCcw, Plus, Coins, Wallet, Mail, Minus,
+  Clock, Wrench
 } from 'lucide-react';
 import axios from 'axios';
 import { format, parseISO } from 'date-fns';
 import * as XLSX from 'xlsx';
 import { saveAs } from 'file-saver';
 
-const BACKEND = import.meta.env.VITE_API_URL || 'http://127.0.0.1:5000';
+const BACKEND = import.meta.env.VITE_API_URL || 'http://127.0.0.1:5001';
 const api = axios.create({ baseURL: BACKEND, timeout: 600000 });
 
-const PIE_COLORS = ['#8B5CF6','#F97316','#10B981','#EF4444','#3B82F6',
-                    '#EC4899','#14B8A6','#F59E0B','#6366F1','#84CC16'];
+const PIE_COLORS = ['#2563EB','#14B8A6','#22C55E','#EF4444','#06B6D4',
+                    '#84CC16','#EC4899','#0EA5E9','#F43F5E','#94A3B8'];
 
 const AGING_LABELS = ['0-30','30-90','90-180','180+'];
-const AGING_COLORS = { '0-30':'#10B981','30-90':'#F59E0B','90-180':'#F97316','180+':'#EF4444' };
+const AGING_COLORS = { '0-30':'#10B981','30-90':'#0EA5E9','90-180':'#F43F5E','180+':'#EF4444' };
 
-// ─── Excluded from PO HLI without SO calculation ──────────────────────────
-const EXCLUDED_OP_UNITS = new Set(['HLI GREEN POWER (CONSUMABLE)']);
+const localISODate = (d) => {
+  const dt = new Date(d);
+  dt.setMinutes(dt.getMinutes() - dt.getTimezoneOffset());
+  return dt.toISOString().slice(0, 10);
+};
+
+const getDateFilterBounds = (filter) => {
+  if (!filter || filter.mode === 'all') return {};
+  if (filter.mode === 'range') return { date_from: filter.start || '', date_to: filter.end || '' };
+
+  const now = new Date();
+  const start = new Date(now);
+  const end = new Date(now);
+
+  if (filter.mode === 'today') {
+    return { date_from: localISODate(now), date_to: localISODate(now) };
+  }
+  if (filter.mode === 'week') {
+    const day = start.getDay() || 7;
+    start.setDate(start.getDate() - day + 1);
+    end.setTime(start.getTime());
+    end.setDate(end.getDate() + 6);
+  } else if (filter.mode === 'month') {
+    start.setDate(1);
+    end.setMonth(start.getMonth() + 1, 0);
+  } else if (filter.mode === 'year') {
+    start.setMonth(0, 1);
+    end.setMonth(11, 31);
+  } else {
+    return {};
+  }
+
+  return { date_from: localISODate(start), date_to: localISODate(end) };
+};
+
+// ─── Excluded from PO without SO calculation ──────────────────────────
+const EXCLUDED_OP_UNITS = new Set(['ACM ENERGY SOLUTIONS (CONSUMABLE)']);
 
 const renderPctLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent }) => {
   if (percent < 0.04) return null;
@@ -76,7 +112,7 @@ const workingDaysUntilToday = (dateValue) => {
 // ─── Download Toast ────────────────────────────────────────────────────────
 const DownloadToast = ({ message, onClose }) => {
   return (
-    <div className="fixed top-5 right-5 z-[200] flex items-center gap-3 px-5 py-3 rounded-xl shadow-2xl text-white bg-purple-700 max-w-sm animate-slide-in">
+    <div className="fixed top-5 right-5 z-[200] flex items-center gap-3 px-5 py-3 rounded-xl shadow-2xl text-white bg-blue-700 max-w-sm animate-slide-in">
       <Loader2 className="w-5 h-5 flex-shrink-0 animate-spin"/>
       <span className="text-sm font-medium">{message}</span>
     </div>
@@ -152,26 +188,26 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
         </div>
         <div className="overflow-auto flex-1">
           <table className="w-full text-sm">
-            <thead className={`sticky top-0 ${darkMode?'bg-gray-700':'bg-purple-50'}`}>
+            <thead className={`sticky top-0 ${darkMode?'bg-gray-700':'bg-blue-50'}`}>
               <tr>{['SO Item', ...(!hasSoItem ? ['SO Number'] : []), 'Status','Op Unit','Vendor','Product','Qty','Sales Amount','Cust PO','Delivery Memo','SO Date','Plan Date','Remarks'].map(h=>(
                 <th key={h} className={`px-3 py-2 text-center font-bold whitespace-nowrap ${darkMode?'text-gray-200':'text-gray-700'}`}>{h}</th>
               ))}</tr>
             </thead>
             <tbody className={`divide-y ${darkMode?'divide-gray-700':'divide-gray-100'}`}>
               {rows.map((s,i)=>(
-                <tr key={i} className={darkMode?'hover:bg-gray-700':'hover:bg-purple-50'}>
-                  <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{s.so_item||'-'}</td>
+                <tr key={i} className={darkMode?'hover:bg-gray-700':'hover:bg-blue-50'}>
+                  <td className="px-3 py-2 text-blue-600 font-medium whitespace-nowrap">{s.so_item||'-'}</td>
                   {!hasSoItem && <td className="px-3 py-2 whitespace-nowrap">{s.so_number}</td>}
                   <td className="px-3 py-2 whitespace-nowrap"><span className={`px-2 py-0.5 rounded-full text-xs font-medium ${s.so_status==='Delivery Completed'?'bg-green-100 text-green-700':s.so_status==='SO Cancel'?'bg-red-100 text-red-700':'bg-blue-100 text-blue-700'}`}>{s.so_status||'-'}</span></td>
                   <td className="px-3 py-2 whitespace-nowrap min-w-[180px]">{s.operation_unit_name}</td>
                   <td className="px-3 py-2 whitespace-nowrap max-w-[140px] truncate">{s.vendor_name}</td>
                   <td className="px-3 py-2 max-w-[160px] truncate">{s.product_name}</td>
                   <td className="px-3 py-2 text-right">{fmtNum(s.so_qty)}</td>
-                  <td className="px-3 py-2 text-center font-bold text-orange-600 whitespace-nowrap">{fmtCur(s.sales_amount)}</td>
+                  <td className="px-3 py-2 text-center font-bold text-slate-700 whitespace-nowrap">{fmtCur(s.sales_amount)}</td>
                   <td className="px-3 py-2 whitespace-nowrap">{s.customer_po_number||'-'}</td>
                   <td className="px-3 py-2 max-w-[160px] truncate">{s.delivery_memo||'-'}</td>
                   <td className="px-3 py-2 whitespace-nowrap">{s.so_create_date||'-'}</td>
-                  <td className="px-3 py-2 whitespace-nowrap text-purple-600">{s.delivery_plan_date||'-'}</td>
+                  <td className="px-3 py-2 whitespace-nowrap text-blue-600">{s.delivery_plan_date||'-'}</td>
                   <td className="px-3 py-2 min-w-[560px] max-w-[560px] truncate">{s.remarks||'-'}</td>
                 </tr>
               ))}
@@ -183,7 +219,7 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
             <span className={`text-sm ${darkMode?'text-gray-400':'text-gray-600'}`}>{(dlPage-1)*PER+1}–{Math.min(dlPage*PER,data.length)} / {fmtNum(data.length)}</span>
             <div className="flex gap-2">
               <button disabled={dlPage===1} onClick={()=>setDlPage(p=>p-1)} className={`p-1.5 rounded ${dlPage===1?'opacity-40':'hover:bg-gray-200'}`}><ChevronLeft className="w-4 h-4"/></button>
-              <span className="px-3 py-1 bg-purple-100 rounded text-sm text-purple-700">{dlPage}/{pages}</span>
+              <span className="px-3 py-1 bg-blue-100 rounded text-sm text-blue-700">{dlPage}/{pages}</span>
               <button disabled={dlPage===pages} onClick={()=>setDlPage(p=>p+1)} className={`p-1.5 rounded ${dlPage===pages?'opacity-40':'hover:bg-gray-200'}`}><ChevronRight className="w-4 h-4"/></button>
             </div>
           </div>
@@ -194,16 +230,17 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
 };
 
 // ─── MultiSelect dropdown — Excel-style (all checked by default) ─────────
-const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, noDropdownScroll = false, hideLabel = false }) => {
+const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, hideLabel = false }) => {
   const [open, setOpen] = useState(false);
   const [draftSelected, setDraftSelected] = useState([]);
   const [draftNone, setDraftNone] = useState(false);
   const ref = useRef(null);
 
+  const noSelection = selected === '__NONE__';
   const safeSelected = Array.isArray(selected) ? selected : [];
-  const noneSelected = safeSelected.length === 0;
+  const noneSelected = !noSelection && safeSelected.length === 0;
   const currentSelected = open ? draftSelected : safeSelected;
-  const currentNone = open ? draftNone : false;
+  const currentNone = open ? draftNone : noSelection;
   const currentAll = !currentNone && currentSelected.length === 0;
   const someSelected = !currentNone && currentSelected.length > 0 && currentSelected.length < options.length;
 
@@ -226,7 +263,7 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, noDro
   useEffect(() => {
     if (!open) return;
     setDraftSelected(safeSelected);
-    setDraftNone(false);
+    setDraftNone(noSelection);
   }, [open, selected]);
 
   const applySelection = () => {
@@ -288,7 +325,7 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, noDro
     : noneSelected
     ? `All ${label}`
     : `${safeSelected.length} selected`;
-  const hasActiveFilter = !noneSelected;
+  const hasActiveFilter = noSelection || !noneSelected;
 
   return (
     <div className="relative w-full min-w-0" ref={ref}>
@@ -297,32 +334,32 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, noDro
         className={`w-full h-10 px-3 py-2 rounded-lg text-sm border text-left flex justify-between items-center transition-colors
           ${darkMode
             ? hasActiveFilter
-              ? 'bg-orange-900/30 border-orange-500 text-orange-200 hover:bg-orange-900/40'
+              ? 'bg-amber-900/30 border-amber-500 text-amber-100 hover:bg-amber-900/40'
               : 'bg-gray-600 border-gray-500 text-white hover:bg-gray-500'
             : hasActiveFilter
-              ? 'bg-orange-50 border-orange-300 text-orange-700 hover:bg-orange-100'
+              ? 'bg-amber-50 border-amber-300 text-amber-800 hover:bg-amber-100'
               : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
-        <span className={`truncate ${hasActiveFilter ? 'font-semibold text-orange-600' : ''}`}>{displayLabel}</span>
+        <span className={`truncate ${hasActiveFilter ? 'font-semibold' : ''}`}>{displayLabel}</span>
         <ChevronDown className="w-4 h-4 flex-shrink-0 ml-1"/>
       </button>
       {open && (
-        <div className={`absolute z-[9999] mt-1 w-full rounded-lg shadow-xl border ${noDropdownScroll ? 'overflow-visible' : 'overflow-hidden'} ${darkMode?'bg-gray-700 border-gray-600':'bg-white border-gray-200'}`}>
-          <div className={noDropdownScroll ? "overflow-visible" : "max-h-48 overflow-auto"}>
+        <div className={`absolute z-50 mt-1 w-full rounded-lg shadow-xl border overflow-hidden ${darkMode?'bg-gray-700 border-gray-600':'bg-white border-gray-200'}`}>
+          <div className="max-h-48 overflow-auto">
             {/* Select All row — like Excel */}
             <label style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold border-b
-              ${darkMode?'border-gray-600 hover:bg-gray-600 text-white':'border-gray-100 hover:bg-purple-50 text-gray-700'}`}>
+              ${darkMode?'border-gray-600 hover:bg-gray-600 text-white':'border-gray-100 hover:bg-blue-50 text-gray-700'}`}>
               <input type="checkbox"
                 checked={isAllChecked}
                 ref={el => { if (el) el.indeterminate = someSelected; }}
                 onChange={toggleAll}
-                className="accent-purple-600" style={{cursor:'pointer'}}/>
+                className="accent-blue-600" style={{cursor:'pointer'}}/>
               <span>(Select All)</span>
             </label>
             {options.map(opt => (
               <label key={opt} style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs
-                ${darkMode?'hover:bg-gray-600 text-white':'hover:bg-purple-50 text-gray-700'}`}>
+                ${darkMode?'hover:bg-gray-600 text-white':'hover:bg-blue-50 text-gray-700'}`}>
                 <input type="checkbox" checked={isChecked(opt)} onChange={()=>toggle(opt)}
-                  className="accent-purple-600" style={{cursor:'pointer'}}/>
+                  className="accent-blue-600" style={{cursor:'pointer'}}/>
                 <span className="truncate" title={opt}>{opt}</span>
               </label>
             ))}
@@ -332,7 +369,7 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, noDro
             <button
               type="button"
               onClick={applySelection}
-              className="flex-1 px-3 py-2 rounded-lg text-xs font-bold bg-purple-600 text-white hover:bg-purple-700 shadow-sm"
+              className="flex-1 px-3 py-2 rounded-lg text-xs font-bold bg-blue-600 text-white hover:bg-blue-700 shadow-sm"
             >
               Apply
             </button>
@@ -380,7 +417,7 @@ const SearchInput = ({ placeholder, onSearch, darkMode, txt2, label }) => {
         onClick={() => setOpen(o => !o)}
         title={`Search ${label}`}
         className={`w-full h-10 flex items-center justify-between gap-1.5 px-3 py-2 rounded-lg text-sm border font-medium transition-all
-          ${darkMode ? 'bg-gray-600 border-gray-500 text-white hover:bg-gray-500' : 'bg-white border-gray-300 text-gray-700 hover:bg-purple-50 hover:border-purple-400'}`}
+          ${darkMode ? 'bg-gray-600 border-gray-500 text-white hover:bg-gray-500' : 'bg-white border-gray-300 text-gray-700 hover:bg-blue-50 hover:border-blue-400'}`}
       >
         <span className="flex items-center gap-1.5 min-w-0">
           <Search className="w-4 h-4 flex-shrink-0"/>
@@ -404,7 +441,7 @@ const SearchInput = ({ placeholder, onSearch, darkMode, txt2, label }) => {
           />
           <div className="flex gap-2 mt-2">
             <button onClick={handleSearch}
-              className="flex-1 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-semibold">
+              className="flex-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold">
               Search
             </button>
             <button onClick={handleClear}
@@ -483,8 +520,8 @@ const DeleteRequestModal = ({ darkMode, onClose, deleteForm, setDeleteForm, dele
       <div className={`rounded-2xl shadow-2xl w-full max-w-md ${bg}`} onClick={e=>e.stopPropagation()}>
         <div className={`flex justify-between items-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-200'}`}>
           <div className="flex items-center gap-2">
-            <EyeOff className="w-5 h-5 text-orange-500"/>
-            <h3 className="font-bold text-base">Hide from Dashboard</h3>
+            <EyeOff className="w-5 h-5 text-slate-600"/>
+            <h3 className="font-bold text-base">Hide from Summary</h3>
           </div>
           <button onClick={onClose} className={`p-1.5 rounded-lg ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`}><X className="w-5 h-5"/></button>
         </div>
@@ -495,15 +532,15 @@ const DeleteRequestModal = ({ darkMode, onClose, deleteForm, setDeleteForm, dele
               {['PO','SO'].map(t=>(
                 <label key={t} className="flex items-center gap-2 cursor-pointer">
                   <input type="radio" name="ref_type" value={t} checked={deleteForm.ref_type===t}
-                    onChange={()=>setDeleteForm(f=>({...f,ref_type:t}))} className="accent-purple-600"/>
-                  <span className="text-sm font-medium">{t === 'PO' ? 'PO HLI' : 'SO (Sales Order)'}</span>
+                    onChange={()=>setDeleteForm(f=>({...f,ref_type:t}))} className="accent-blue-600"/>
+                  <span className="text-sm font-medium">{t === 'PO' ? 'PO' : 'SO (Sales Order)'}</span>
                 </label>
               ))}
             </div>
           </div>
           <div>
             <label className={`block text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>
-              {deleteForm.ref_type === 'PO' ? 'PO HLI Number' : 'SO Number / SO Item'}
+              {deleteForm.ref_type === 'PO' ? 'PO Number' : 'SO Number / SO Item'}
             </label>
             <input
               type="text"
@@ -531,7 +568,7 @@ const DeleteRequestModal = ({ darkMode, onClose, deleteForm, setDeleteForm, dele
         </div>
         <div className={`px-6 py-4 border-t flex justify-end gap-3 ${darkMode?'border-gray-700':'border-gray-200'}`}>
           <button onClick={onClose} className={`px-4 py-2 rounded-lg text-sm font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>Cancel</button>
-          <button onClick={onSubmit} className="px-5 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-sm font-semibold flex items-center gap-2">
+          <button onClick={onSubmit} className="px-5 py-2 bg-slate-600 hover:bg-slate-700 text-white rounded-lg text-sm font-semibold flex items-center gap-2">
             <EyeOff className="w-4 h-4"/>Hide
           </button>
         </div>
@@ -551,8 +588,8 @@ const HiddenItemsPanel = ({ darkMode, requests, onRestore, onClose }) => {
       <div className={`rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col ${bg}`} onClick={e=>e.stopPropagation()}>
         <div className={`flex justify-between items-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-200'}`}>
           <div className="flex items-center gap-2">
-            <Eye className="w-5 h-5 text-purple-500"/>
-            <h3 className="font-bold text-base">Items Hidden from Dashboard</h3>
+            <Eye className="w-5 h-5 text-blue-500"/>
+            <h3 className="font-bold text-base">Items Hidden from Summary</h3>
             <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${darkMode?'bg-gray-700 text-gray-300':'bg-gray-100 text-gray-600'}`}>{hidden.length} item</span>
           </div>
           <button onClick={onClose} className={`p-1.5 rounded-lg ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`}><X className="w-5 h-5"/></button>
@@ -569,7 +606,7 @@ const HiddenItemsPanel = ({ darkMode, requests, onRestore, onClose }) => {
                 <div key={r.id} className={`flex items-start justify-between gap-4 p-4 rounded-xl border ${darkMode?'bg-gray-700 border-gray-600':'bg-gray-50 border-gray-200'}`}>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-1">
-                      <span className={`px-2 py-0.5 rounded text-xs font-bold ${r.ref_type==='PO'?'bg-red-100 text-red-700':'bg-orange-100 text-orange-700'}`}>{r.ref_type}</span>
+                      <span className={`px-2 py-0.5 rounded text-xs font-bold ${r.ref_type==='PO'?'bg-red-100 text-red-700':'bg-slate-100 text-slate-700'}`}>{r.ref_type}</span>
                       <span className="font-semibold text-sm">{r.ref_number}</span>
                     </div>
                     <p className={`text-xs ${txt2} mb-1`}><span className="font-medium">Reason:</span> {r.reason}</p>
@@ -590,11 +627,8 @@ const HiddenItemsPanel = ({ darkMode, requests, onRestore, onClose }) => {
 };
 
 // ─── Date Range Filter ────────────────────────────────────────────────────
-const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = 'Filter SO Create Date', className = 'mb-4' }) => {
-  const currentYear = new Date().getFullYear();
-  const years = Array.from({ length: 6 }, (_, i) => currentYear - i);
-  const [mode, setMode] = useState(value?.mode || 'all'); // 'all' | 'year' | 'range'
-  const [selectedYear, setSelectedYear] = useState(String(value?.year || currentYear));
+const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = 'Filter SO Create Date', compact = false }) => {
+  const [mode, setMode] = useState(value?.mode || 'all'); // all | today | week | month | year | range
   const [startDate, setStartDate] = useState(value?.start || '');
   const [endDate, setEndDate] = useState(value?.end || '');
 
@@ -603,25 +637,24 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
   useEffect(() => {
     if (!value) return;
     setMode(value.mode || 'all');
-    if (value.year)  setSelectedYear(String(value.year));
     if (value.start !== undefined) setStartDate(value.start || '');
     if (value.end   !== undefined) setEndDate(value.end || '');
-  }, [value?.mode, value?.year, value?.start, value?.end]);
+  }, [value?.mode, value?.start, value?.end]);
 
   useEffect(() => {
     const next =
       mode === 'all'
         ? { mode: 'all' }
-        : mode === 'year'
-        ? { mode: 'year', year: selectedYear }
-        : { mode: 'range', start: startDate, end: endDate };
+        : mode === 'range'
+        ? { mode: 'range', start: startDate, end: endDate }
+        : { mode };
 
     const current =
       !value || value.mode === 'all'
         ? { mode: 'all' }
-        : value.mode === 'year'
-        ? { mode: 'year', year: String(value.year || currentYear) }
-        : { mode: 'range', start: value.start || '', end: value.end || '' };
+        : value.mode === 'range'
+        ? { mode: 'range', start: value.start || '', end: value.end || '' }
+        : { mode: value.mode };
 
     // Only notify the parent when the user actually changed the filter.
     // Without this guard, mounting the filter emits a new `{ mode: 'all' }`
@@ -630,44 +663,40 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
     if (JSON.stringify(next) !== JSON.stringify(current)) {
       onFilter(next);
     }
-  }, [mode, selectedYear, startDate, endDate, value, currentYear, onFilter]);
+  }, [mode, startDate, endDate, value, onFilter]);
 
   const reset = () => {
     setMode('all');
-    setSelectedYear(String(currentYear));
     setStartDate(''); setEndDate('');
     onFilter({ mode: 'all' });
   };
 
   return (
-    <div className={`flex flex-wrap items-center gap-3 px-5 py-3 rounded-xl ${card} shadow ${className}`}>
-      <Calendar className="w-4 h-4 text-purple-500 flex-shrink-0"/>
+    <div data-tour="date-filter" className={`relative flex min-h-[64px] flex-wrap items-center gap-3 px-5 py-3 rounded-xl ${card} shadow ${compact ? 'mb-0' : 'mb-4'}`}>
+      <Calendar className="w-4 h-4 text-blue-500 flex-shrink-0"/>
       <span className={`text-sm font-semibold ${txt} flex-shrink-0`}>{label}:</span>
       {/* Mode selector */}
-      <div className="flex gap-1">
-        {[['all','All'], ['year','Per Year'], ['range','Date Range']].map(([m, lbl]) => (
+      <div className="relative flex flex-wrap gap-1">
+        {[
+          ['all','All'], ['today','Today'], ['week','This Week'],
+          ['month','This Month'], ['year','This Year'], ['range','Custom Date Range']
+        ].map(([m, lbl]) => (
           <button key={m} onClick={() => setMode(m)}
             className={`px-3 py-1 rounded-full text-xs font-semibold transition-all
-              ${mode === m ? 'bg-purple-600 text-white shadow' : darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-100 text-gray-600 hover:bg-purple-100'}`}>
+              ${mode === m ? 'bg-blue-600 text-white shadow' : darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-100 text-gray-600 hover:bg-blue-100'}`}>
             {lbl}
           </button>
         ))}
+        {mode === 'range' && (
+          <div className={`absolute left-0 top-full z-50 mt-2 flex items-center gap-2 rounded-xl border p-3 shadow-xl ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-200'}`}>
+            <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
+              className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300'}`}/>
+            <span className={`text-xs ${txt2}`}>to</span>
+            <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)}
+              className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300'}`}/>
+          </div>
+        )}
       </div>
-      {mode === 'year' && (
-        <select value={selectedYear} onChange={e => setSelectedYear(e.target.value)}
-          className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300'}`}>
-          {years.map(y => <option key={y} value={y}>{y}</option>)}
-        </select>
-      )}
-      {mode === 'range' && (
-        <div className="flex items-center gap-2">
-          <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
-            className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300'}`}/>
-          <span className={`text-xs ${txt2}`}>to</span>
-          <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)}
-            className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300'}`}/>
-        </div>
-      )}
       {mode !== 'all' && (
         <button onClick={reset} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${darkMode ? 'bg-gray-600 text-gray-200 hover:bg-gray-500' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}>
           Reset
@@ -683,29 +712,10 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
 const App = () => {
   const [darkMode, setDarkMode] = useState(false);
   const [activePage, setActivePage] = useState('dashboard');
-  const [activeClient, setActiveClient] = useState('hli'); // 'all' | 'hli'
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [poMenuOpen, setPoMenuOpen] = useState(true); // PO Monitoring submenu
-  const [hliMenuOpen, setHliMenuOpen] = useState(true); // HLI sub-pages submenu
   const [showUploadDropdown, setShowUploadDropdown] = useState(false);
+  const [showAboutModal, setShowAboutModal] = useState(false);
+  const [sidebarExpanded, setSidebarExpanded] = useState(false);
   const uploadDropdownRef = useRef(null);
-  // ── Delivery Monitoring State ──
-  const [dlvSummary, setDlvSummary] = useState(null);
-  const [dlvData, setDlvData] = useState([]);
-  const [dlvTotal, setDlvTotal] = useState(0);
-  const [dlvPage, setDlvPage] = useState(1);
-  const [dlvPerPage, setDlvPerPage] = useState(10);
-  const [dlvSearch, setDlvSearch] = useState('');
-  const [dlvStatusFilter, setDlvStatusFilter] = useState([]);
-  const [dlvPendingFilter, setDlvPendingFilter] = useState([]);
-  const [dlvSortOrder, setDlvSortOrder] = useState('oldest');
-  const [dlvDetailModal, setDlvDetailModal] = useState(null);
-  const [dlvClientFilter, setDlvClientFilter] = useState([]);
-  const [dlvPicFilter, setDlvPicFilter] = useState([]);
-  const [dlvAgingFilter, setDlvAgingFilter] = useState([]);
-  const [dlvDateFilter, setDlvDateFilter] = useState({ mode: 'all' });
-  const [dlvLoading, setDlvLoading] = useState(false);
-  const [dlvUploadMsg, setDlvUploadMsg] = useState('');
 
   const [stats, setStats] = useState(null);
   const [poWithoutSO, setPoWithoutSO] = useState([]);
@@ -713,6 +723,7 @@ const App = () => {
   const [agingData, setAgingData] = useState([]);
   const [allSOData, setAllSOData] = useState([]);
   const [approvalSOData, setApprovalSOData] = useState([]);
+  const [picAggregations, setPicAggregations] = useState([]); // PIC aggregations from backend (all filtered data)
   const [soTotal, setSoTotal] = useState(0);
   const [soFilterOptions, setSoFilterOptions] = useState({ op_units: [], vendors: [], statuses: [], pics: [] });
 
@@ -733,17 +744,42 @@ const App = () => {
   // PO filters
   const [poPage, setPoPage] = useState(1);
   const [poPerPage, setPoPerPage] = useState(10);
-  const [poSearchNums, setPoSearchNums] = useState([]); // search PO HLI Number
+  const [poSearchNums, setPoSearchNums] = useState([]); // search PO Number
   const [poFilterItemType, setPoFilterItemType] = useState([]); // multi-select
   const [poFilterOpUnit, setPoFilterOpUnit] = useState([]);   // multi-select
   const [poSortOrder, setPoSortOrder] = useState('oldest'); // 'oldest' | 'newest'
   const [poItemTypeOptions, setPoItemTypeOptions] = useState([]);
   const [poOpUnitOptions, setPoOpUnitOptions] = useState([]);
 
+  // Item Registration
+  const [itemRegData, setItemRegData] = useState([]);
+  const [itemRegTotal, setItemRegTotal] = useState(0);
+  const [itemRegPage, setItemRegPage] = useState(1);
+  const [itemRegPerPage, setItemRegPerPage] = useState(10);
+  const [itemRegSearch, setItemRegSearch] = useState([]);
+  const [itemRegAppliedSearch, setItemRegAppliedSearch] = useState([]);
+  const [itemRegLastUpdated, setItemRegLastUpdated] = useState(null);
+  const [itemRegFilters, setItemRegFilters] = useState({ clients: [], categories: [], pics: [], proc_statuses: [] });
+  const [itemRegOptions, setItemRegOptions] = useState({ clients: [], categories: [], pics: [], proc_statuses: [] });
+  const [itemRegMissingPicKpis, setItemRegMissingPicKpis] = useState([]);
+
+  // All Registered Items
+  const [registeredItemsData, setRegisteredItemsData] = useState([]);
+  const [registeredItemsTotal, setRegisteredItemsTotal] = useState(0);
+  const [registeredItemsPage, setRegisteredItemsPage] = useState(1);
+  const [registeredItemsPerPage, setRegisteredItemsPerPage] = useState(15);
+  const [registeredItemsSearch, setRegisteredItemsSearch] = useState('');
+  const [registeredItemsAppliedSearch, setRegisteredItemsAppliedSearch] = useState('');
+  const [registeredItemsProdIds, setRegisteredItemsProdIds] = useState([]);
+  const [registeredItemsAppliedProdIds, setRegisteredItemsAppliedProdIds] = useState([]);
+
   const [loading, setLoading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(null);
   const [toasts, setToasts] = useState([]);
   const [modal, setModal] = useState(null);
+  const [showTour, setShowTour] = useState(false);
+  const [tourStep, setTourStep] = useState(0);
+  const [tourTarget, setTourTarget] = useState(null);
   const [editingCell, setEditingCell] = useState(null);
   const [editValue, setEditValue] = useState('');
   const [downloadToast, setDownloadToast] = useState(null);
@@ -763,6 +799,7 @@ const App = () => {
   const [marginDetailModal, setMarginDetailModal] = useState(null); // {category, data}
   const [picDbStatus, setPicDbStatus] = useState(null); // {product_id_count, master_pic_count, last_product_id_upload, last_pic_update}
   const [picUploadMsg, setPicUploadMsg] = useState(''); // feedback message for PIC uploads
+  const [uniqueVisitors, setUniqueVisitors] = useState(null);
 
   // Dynamic color palette for PIC badges — each unique name gets a consistent color
   const PIC_COLORS = [
@@ -770,14 +807,14 @@ const App = () => {
     { bg: 'bg-emerald-100', text: 'text-emerald-700' },
     { bg: 'bg-amber-100',   text: 'text-amber-700'   },
     { bg: 'bg-cyan-100',    text: 'text-cyan-700'    },
-    { bg: 'bg-violet-100',  text: 'text-violet-700'  },
-    { bg: 'bg-orange-100',  text: 'text-orange-700'  },
+    { bg: 'bg-blue-100',  text: 'text-blue-700'  },
+    { bg: 'bg-slate-100',   text: 'text-slate-700'   },
     { bg: 'bg-teal-100',    text: 'text-teal-700'    },
     { bg: 'bg-pink-100',    text: 'text-pink-700'    },
     { bg: 'bg-lime-100',    text: 'text-lime-700'    },
     { bg: 'bg-fuchsia-100', text: 'text-fuchsia-700' },
-    { bg: 'bg-purple-100',  text: 'text-purple-700'  },
-    { bg: 'bg-yellow-100',  text: 'text-yellow-700'  },
+    { bg: 'bg-blue-100',  text: 'text-blue-700'  },
+    { bg: 'bg-slate-100',   text: 'text-slate-700'   },
   ];
   const picColorMap = useRef({});
   const picColorCounter = useRef(0);
@@ -793,6 +830,9 @@ const App = () => {
 
   // ── Global SO Create Date filter (shared across Dashboard / All SO / Delivery Completed)
   const [globalDateFilter, setGlobalDateFilter] = useState({ mode: 'all' });
+  const [globalClientFilter, setGlobalClientFilter] = useState([]);
+  const [globalPicFilter, setGlobalPicFilter] = useState([]);
+  const [dashboardFilterOptions, setDashboardFilterOptions] = useState({ clients: [], pics: [] });
   // Aliases kept so existing references continue to compile.
   const dashDateFilter      = globalDateFilter;
   const setDashDateFilter   = setGlobalDateFilter;
@@ -800,6 +840,95 @@ const App = () => {
   const setSODateFilter     = setGlobalDateFilter;
   const completedDateFilter = globalDateFilter;
   const setCompletedDateFilter = setGlobalDateFilter;
+
+  const tourSteps = [
+    {
+      title: 'Summary Overview',
+      body: 'This page summarizes open purchase orders, open sales orders, unmatched records, and total amounts so you can quickly see portfolio health.',
+      target: '[data-tour="page-title"]',
+      page: 'dashboard',
+    },
+    {
+      title: 'Manual Update',
+      body: 'Use Manual Update to upload SO data, Product ID, PIC mapping, or Item Registration files. The dashboard refreshes its calculations after upload.',
+      target: '[data-tour="manual-update"]',
+      page: 'dashboard',
+    },
+    {
+      title: 'Date Filter',
+      body: 'Use the SO Create Date filter to review all data, one selected year, or a custom date range across dashboard and Pending Delivery views.',
+      target: '[data-tour="date-filter"]',
+      page: 'dashboard',
+    },
+    {
+      title: 'KPI Cards',
+      body: 'The top cards show key counts and amounts. Click cards such as PO without SO or SO without PO to open the related detail table.',
+      target: '[data-tour="kpi-cards"]',
+      page: 'dashboard',
+    },
+    {
+      title: 'Monthly Trend',
+      body: 'Monthly Trend shows sales amount, purchase amount, and transaction count over time. It helps you spot volume spikes and business movement by month.',
+      target: '[data-tour="monthly-trend"]',
+      page: 'dashboard',
+    },
+    {
+      title: 'Status and Aging Charts',
+      body: 'Status distribution, operation unit summaries, and aging charts show where open SO records are concentrated and how long they have been pending.',
+      target: '[data-tour="status-aging"]',
+      page: 'dashboard',
+    },
+    {
+      title: 'Pending Delivery Detail',
+      body: 'Pending Delivery includes aging KPIs, monthly pending trends, status distribution, vendor ranking, filters, inline edits, templates, batch uploads, and Excel exports.',
+      target: '[data-tour="open-so-nav"]',
+      page: 'all-so',
+    },
+    {
+      title: 'Hide and Restore',
+      body: 'Use Hide to temporarily remove selected PO or SO records from dashboard calculations. Hidden records can be reviewed and restored later.',
+      target: '[data-tour="hide-menu"]',
+      page: 'dashboard',
+    },
+  ];
+  const currentTour = tourSteps[tourStep] || tourSteps[0];
+
+  useEffect(() => {
+    if (!showTour) {
+      setTourTarget(null);
+      return;
+    }
+    if (currentTour.page && activePage !== currentTour.page) {
+      setTourTarget(null);
+      setActivePage(currentTour.page);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+    const updateTarget = () => {
+      const el = document.querySelector(currentTour.target);
+      if (!el) {
+        setTourTarget(null);
+        return;
+      }
+      el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+      window.setTimeout(() => {
+        const r = el.getBoundingClientRect();
+        setTourTarget({
+          top: Math.max(12, r.top - 10),
+          left: Math.max(12, r.left - 10),
+          width: r.width + 20,
+          height: r.height + 20,
+        });
+      }, 260);
+    };
+    updateTarget();
+    window.addEventListener('resize', updateTarget);
+    window.addEventListener('scroll', updateTarget, true);
+    return () => {
+      window.removeEventListener('resize', updateTarget);
+      window.removeEventListener('scroll', updateTarget, true);
+    };
+  }, [showTour, currentTour.target, currentTour.page, activePage]);
   
   // Click-outside handlers
   useEffect(() => {
@@ -814,59 +943,75 @@ const App = () => {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
+  useEffect(() => {
+    const key = 'po_monitoring_visitor_id';
+    let visitorId = '';
+    try {
+      visitorId = localStorage.getItem(key) || '';
+      if (!visitorId) {
+        visitorId = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        localStorage.setItem(key, visitorId);
+      }
+    } catch {
+      visitorId = '';
+    }
+    api.post('/api/visitor/track', visitorId ? { visitor_id: visitorId } : {})
+      .then(res => setUniqueVisitors(res.data?.unique_visitors ?? null))
+      .catch(() => api.get('/api/visitor/stats')
+        .then(res => setUniqueVisitors(res.data?.unique_visitors ?? null))
+        .catch(() => {}));
+  }, []);
+
   const addToast = useCallback((message, type='success') => {
     const id = Date.now(); setToasts(t => [...t, { id, message, type }]);
   }, []);
   const removeToast = useCallback((id) => setToasts(t => t.filter(x => x.id !== id)), []);
+
+  function appendMultiParam(params, key, value) {
+    if (value === '__NONE__') {
+      params.append(key, '__NONE_PLACEHOLDER__');
+      return;
+    }
+    (Array.isArray(value) ? value : []).forEach(v => params.append(key, v));
+  }
 
   const fetchDashboard = useCallback(async (dateFilter) => {
     setLoading(true);
     try {
       const params = new URLSearchParams();
       const f = dateFilter || globalDateFilter;
-      if (f && f.mode !== 'all') {
-        if (f.mode === 'year') params.append('date_year', f.year);
-        else if (f.mode === 'range') {
-          if (f.start) params.append('date_from', f.start);
-          if (f.end)   params.append('date_to',   f.end);
-        }
-      }
+      Object.entries(dateFilterParams(f)).forEach(([key, value]) => { if (value) params.append(key, value); });
+      appendMultiParam(params, 'client', globalClientFilter);
+      appendMultiParam(params, 'pic', globalPicFilter);
       const qs = params.toString() ? `?${params}` : '';
-      const [sRes, pRes, aRes] = await Promise.all([
+      const completedParams = new URLSearchParams({ year: 'all' });
+      params.forEach((value, key) => completedParams.append(key, value));
+      const completedQs = completedParams.toString();
+      const [sRes, aRes, cRes] = await Promise.all([
         api.get(`/api/dashboard/stats${qs}`),
-        api.get('/api/data/po-without-so'),
-        api.get('/api/data/aging')
+        api.get(`/api/data/aging${qs}`),
+        api.get(`/api/completed/summary?${completedQs}`)
       ]);
       setStats(sRes.data);
-      const poData = Array.isArray(pRes.data) ? pRes.data : [];
-      // Filter out EXCLUDED op units on client side
-      const poFiltered = poData.filter(p => !EXCLUDED_OP_UNITS.has(p.operation_unit));
-      setPoWithoutSO(poFiltered);
-      setPoFiltered(poFiltered);
-      // Build filter options from PO data
-      const itemTypes = [...new Set(poFiltered.map(p=>p.po_item_type).filter(Boolean))].sort();
-      const opUnits   = [...new Set(poFiltered.map(p=>p.operation_unit).filter(Boolean))].sort();
-      setPoItemTypeOptions(itemTypes);
-      setPoOpUnitOptions(opUnits);
+      setDashboardFilterOptions(sRes.data?.filters || { clients: [], pics: [] });
       setAgingData(Array.isArray(aRes.data) ? aRes.data : []);
+      setCompletedData(cRes.data);
+      setCompletedLoaded(true);
     } catch (e) {
       addToast(`Error: ${e.response?.data?.error || e.message}`, 'error');
     } finally { setLoading(false); }
-  }, [addToast, globalDateFilter]);
+  }, [addToast, globalDateFilter, globalClientFilter, globalPicFilter]);
 
   // Helper: filter array of objects by date field using a DateRangeFilter config
   const applyDateFilter = useCallback((arr, dateField, filter) => {
     if (!filter || filter.mode === 'all') return arr;
+    const bounds = getDateFilterBounds(filter);
     return arr.filter(item => {
       const d = item[dateField];
       if (!d) return false;
       const iso = d.slice(0, 10);
-      if (filter.mode === 'year') return iso.startsWith(filter.year);
-      if (filter.mode === 'range') {
-        if (filter.start && iso < filter.start) return false;
-        if (filter.end && iso > filter.end) return false;
-        return true;
-      }
+      if (bounds.date_from && iso < bounds.date_from) return false;
+      if (bounds.date_to && iso > bounds.date_to) return false;
       return true;
     });
   }, []);
@@ -874,9 +1019,17 @@ const App = () => {
   // Helper: build date query params for backend
   const dateFilterParams = (filter) => {
     if (!filter || filter.mode === 'all') return {};
-    if (filter.mode === 'year') return { date_year: filter.year };
     if (filter.mode === 'range') return { date_from: filter.start || '', date_to: filter.end || '' };
-    return {};
+    return getDateFilterBounds(filter);
+  };
+
+  const appendDateQuery = (url, filter = globalDateFilter) => {
+    const params = new URLSearchParams(dateFilterParams(filter));
+    appendMultiParam(params, 'client', globalClientFilter);
+    appendMultiParam(params, 'pic', globalPicFilter);
+    const qs = params.toString();
+    if (!qs) return url;
+    return `${url}${url.includes('?') ? '&' : '?'}${qs}`;
   };
 
   // Helper: resolve filter array
@@ -896,24 +1049,71 @@ const App = () => {
       (filters.pics || []).forEach(v => params.append('pic', v));
       (filters.aging || []).forEach(a => params.append('aging', a));
       (searchNums || []).forEach(n => params.append('so_item', n));
+      appendMultiParam(params, 'client', globalClientFilter);
+      appendMultiParam(params, 'global_pic', globalPicFilter);
       if (marginFilter && marginFilter !== 'all') params.append('margin_filter', marginFilter);
-      // Date filter
-      if (dateFilter && dateFilter.mode !== 'all') {
-        if (dateFilter.mode === 'year') params.append('date_year', dateFilter.year);
-        else if (dateFilter.mode === 'range') {
-          if (dateFilter.start) params.append('date_from', dateFilter.start);
-          if (dateFilter.end) params.append('date_to', dateFilter.end);
-        }
-      }
+      Object.entries(dateFilterParams(dateFilter)).forEach(([key, value]) => { if (value) params.append(key, value); });
       const res = await api.get(`/api/data/all-so?${params}`);
       setAllSOData(Array.isArray(res.data.data) ? res.data.data : []);
       setApprovalSOData(Array.isArray(res.data.approval_data) ? res.data.approval_data : []);
+      setPicAggregations(Array.isArray(res.data.pic_aggregations) ? res.data.pic_aggregations : []);
       setSoTotal(res.data.total || 0);
       setSoFilterOptions(res.data.filters || { op_units: [], vendors: [], statuses: [], pics: [] });
     } catch (e) {
       addToast(`Failed to load SO: ${e.message}`, 'error');
     } finally { setLoading(false); }
-  }, [addToast, soSortOrder]);
+  }, [addToast, soSortOrder, globalClientFilter, globalPicFilter]);
+
+  const fetchItemRegistration = useCallback(async (page = itemRegPage, perPage = itemRegPerPage, search = itemRegAppliedSearch, filters = itemRegFilters) => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ page, per_page: perPage });
+      if (Array.isArray(search)) search.forEach(v => params.append('req_no', v));
+      else if (search) params.append('search', search);
+      resolveFilter(filters.clients).forEach(v => params.append('item_client', v));
+      resolveFilter(filters.categories).forEach(v => params.append('category', v));
+      resolveFilter(filters.pics).forEach(v => params.append('pic', v));
+      resolveFilter(filters.proc_statuses).forEach(v => params.append('proc_status', v));
+      const res = await api.get(`/api/item-registration/data?${params}`);
+      setItemRegData(Array.isArray(res.data.data) ? res.data.data : []);
+      setItemRegTotal(res.data.total || 0);
+      setItemRegLastUpdated(res.data.last_updated || null);
+      setItemRegMissingPicKpis(Array.isArray(res.data.missing_prod_id_by_pic) ? res.data.missing_prod_id_by_pic : []);
+      setItemRegOptions({
+        clients: res.data.client_options || [],
+        categories: res.data.category_options || [],
+        pics: res.data.pic_options || [],
+        proc_statuses: res.data.proc_status_options || []
+      });
+    } catch (e) {
+      addToast(`Failed to load Item Registration: ${e.response?.data?.error || e.message}`, 'error');
+    } finally { setLoading(false); }
+  }, [addToast, itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters]);
+
+  const fetchRegisteredItems = useCallback(async (
+    page = registeredItemsPage,
+    perPage = registeredItemsPerPage,
+    search = registeredItemsAppliedSearch,
+    prodIds = registeredItemsAppliedProdIds
+  ) => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ page, per_page: perPage });
+      if (search) params.append('search', search);
+      (prodIds || []).forEach(v => params.append('prod_id', v));
+      const res = await api.get(`/api/all-registered-items?${params}`);
+      setRegisteredItemsData(Array.isArray(res.data.data) ? res.data.data : []);
+      setRegisteredItemsTotal(res.data.total || 0);
+    } catch (e) {
+      addToast(`Failed to load All Registered Items: ${e.response?.data?.error || e.message}`, 'error');
+    } finally { setLoading(false); }
+  }, [
+    addToast,
+    registeredItemsPage,
+    registeredItemsPerPage,
+    registeredItemsAppliedSearch,
+    registeredItemsAppliedProdIds
+  ]);
 
   // ─── Delete Request API functions ────────────────────────────────────────
   const fetchDeleteRequests = useCallback(async () => {
@@ -990,17 +1190,31 @@ const App = () => {
     if (activePage === 'all-so') {
       fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter, soSortOrder);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activePage, soSortOrder, soPage, soPerPage, soFilters, soSearchNums, soMarginFilter, soDateFilter, fetchSOData]);
+  }, [activePage, soSortOrder, soPage, soPerPage, soFilters, soSearchNums, soMarginFilter, soDateFilter, globalClientFilter, globalPicFilter, fetchSOData]);
 
-  // Load delivery monitoring data when page becomes active
   useEffect(() => {
-    if (activePage === 'delivery-monitoring') {
-      fetchDlvSummary();
-      fetchDlvData(1, '', '', '');
+    if (activePage === 'item-registration') {
+      fetchItemRegistration(itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activePage]);
+  }, [activePage, itemRegPage, itemRegPerPage, fetchItemRegistration]);
+
+  useEffect(() => {
+    if (activePage === 'all-registered-items') {
+      fetchRegisteredItems(
+        registeredItemsPage,
+        registeredItemsPerPage,
+        registeredItemsAppliedSearch,
+        registeredItemsAppliedProdIds
+      );
+    }
+  }, [
+    activePage,
+    registeredItemsPage,
+    registeredItemsPerPage,
+    registeredItemsAppliedSearch,
+    registeredItemsAppliedProdIds,
+    fetchRegisteredItems
+  ]);
 
   // Refetch dashboard whenever the global SO Create Date filter changes
   // (skip the very first run since the mount effect above already fetched).
@@ -1008,27 +1222,17 @@ const App = () => {
   useEffect(() => {
     if (skipFirstFilterRefetch.current) { skipFirstFilterRefetch.current = false; return; }
     fetchDashboard(globalDateFilter);
-  }, [globalDateFilter, fetchDashboard]);
+  }, [globalDateFilter, globalClientFilter, globalPicFilter, fetchDashboard]);
 
   const handleUpload = async (e, type) => {
     const file = e.target.files[0]; if (!file) return;
     e.target.value = '';
-    const label = type === 'po' ? 'HLI PO List (Item)' : 'SMRO - Search Client Odr';
-    const endpoint = type === 'po' ? '/api/upload/po-list' : '/api/upload/smro';
+    const label = 'SO - Search Client Odr';
+    const endpoint = '/api/upload/scor';
 
     // ── Client-side header validation ──────────────────────────────────
     const REQUIRED_HEADERS = {
-      po: {
-        'PO Number':        ['po no.','po no','po number','po'],
-        'Item No':          ['item no.','item no','item number','no. item'],
-        'PO Item Type':     ['po item type','item type','type','po type'],
-        'Supplier':         ['supplier','vendor','supplier name'],
-        'Qty':              ['qty.','qty','quantity'],
-        'Amount':           ['amount','total amount','total'],
-        'PO Date':          ['po date','order date','tanggal po'],
-        'Request Delivery': ['request delivery date','delivery date','req delivery'],
-      },
-      smro: {
+      scor: {
         'SO Number':      ['so number','so no','so no.','so','sales order','sales order number','no so','nomor so'],
         'SO Item':        ['so item no','item no','line','so line','so item'],
         'SO Status':      ['so status','status','order status'],
@@ -1074,13 +1278,13 @@ const App = () => {
         onUploadProgress: (ev) => setUploadProgress({ label, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
       });
       setUploadProgress(null);
-      // Combine success message and SMRO Specification/Product ID diagnostics
+      // Combine success message and SO Specification/Product ID diagnostics
       // into a single toast so the success and diagnostic don't get the same
       // Date.now() ID and trample each other.
       const diag = res.data.diagnostics;
       let toastMsg = `✅ ${res.data.message}`;
       let toastKind = 'success';
-      if (type === 'smro' && diag) {
+      if (type === 'scor' && diag) {
         const det = diag.columns_detected || {};
         const detail = `Specification col=${det.specification||'(none)'}; Product ID col=${det.product_id||'(none)'}. ` +
                        `Filled rows: spec=${diag.rows_with_specification||0}, pid=${diag.rows_with_product_id||0}.`;
@@ -1097,77 +1301,6 @@ const App = () => {
     }
   };
 
-  // ── Delivery Monitoring Functions ──
-  const appendDlvDateParams = (params, dateFilter) => {
-    const f = dateFilter || { mode: 'all' };
-    if (f.mode === 'year') params.append('date_year', f.year);
-    else if (f.mode === 'range') {
-      if (f.start) params.append('date_from', f.start);
-      if (f.end) params.append('date_to', f.end);
-    }
-  };
-
-  const fetchDlvSummary = useCallback(async (clientFilter=[], dateFilter={ mode: 'all' }) => {
-    try {
-      const params = new URLSearchParams();
-      const clientValues = Array.isArray(clientFilter) ? clientFilter : (clientFilter ? [clientFilter] : []);
-      clientValues.forEach(client => params.append('client', client));
-      appendDlvDateParams(params, dateFilter);
-      const res = await api.get(`/api/delivery-monitoring/summary${params.toString() ? `?${params}` : ''}`);
-      setDlvSummary(res.data);
-      // Reset client/pic filter options from fresh summary
-    } catch {}
-  }, []);
-
-  const fetchDlvData = useCallback(async (page=1, search='', statusFilter='', pendingFilter='', perPage=10, sortOrder='oldest', clientFilter='', picFilter='', agingFilter=[], dateFilter={ mode: 'all' }) => {
-    setDlvLoading(true);
-    try {
-      const params = new URLSearchParams({ page, per_page: perPage });
-      appendDlvDateParams(params, dateFilter);
-      if (search) params.set('search', search);
-      const statusValues = Array.isArray(statusFilter) ? statusFilter : (statusFilter ? [statusFilter] : []);
-      statusValues.forEach(status => params.append('status', status));
-      const pendingValues = Array.isArray(pendingFilter) ? pendingFilter : (pendingFilter ? [pendingFilter] : []);
-      pendingValues.forEach(pending => params.append('pending_at', pending));
-      const clientValues = Array.isArray(clientFilter) ? clientFilter : (clientFilter ? [clientFilter] : []);
-      clientValues.forEach(client => params.append('client', client));
-      const picValues = Array.isArray(picFilter) ? picFilter : (picFilter ? [picFilter] : []);
-      picValues.forEach(pic => params.append('pic', pic));
-      if (agingFilter && agingFilter.length === 1) params.set('aging', agingFilter[0]);
-      const res = await api.get(`/api/delivery-monitoring/data?${params}`);
-      let rows = res.data.data || [];
-      // Client-side sort
-      rows = [...rows].sort((a, b) => {
-        const da = a.po_create_date ? new Date(a.po_create_date) : new Date(0);
-        const db2 = b.po_create_date ? new Date(b.po_create_date) : new Date(0);
-        return sortOrder === 'oldest' ? da - db2 : db2 - da;
-      });
-      setDlvData(rows);
-      setDlvTotal(res.data.total || 0);
-    } catch {} finally { setDlvLoading(false); }
-  }, []);
-
-  const handleUploadDelivery = async (e) => {
-    const file = e.target.files[0]; if (!file) return;
-    e.target.value = '';
-    const fd = new FormData(); fd.append('file', file);
-    setDlvUploadMsg('⏳ Mengupload data Delivery Monitoring...');
-    setUploadProgress({ label: 'Search PO Details', pct: 0 });
-    try {
-      const res = await api.post('/api/delivery-monitoring/upload', fd, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        onUploadProgress: ev => setUploadProgress({ label: 'Search PO Details', pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
-      });
-      setUploadProgress(null);
-      setDlvUploadMsg(`✅ ${res.data.message}`);
-      fetchDlvSummary(dlvClientFilter, dlvDateFilter);
-      fetchDlvData(1, dlvSearch, dlvStatusFilter, dlvPendingFilter, dlvPerPage, dlvSortOrder, dlvClientFilter, dlvPicFilter, dlvAgingFilter, dlvDateFilter);
-    } catch (err) {
-      setUploadProgress(null);
-      setDlvUploadMsg(`❌ ${err?.response?.data?.error || err.message}`);
-    }
-  };
-
   const fetchPicDbStatus = async () => {
     try {
       const res = await api.get('/api/master-pic/status');
@@ -1180,13 +1313,19 @@ const App = () => {
     e.target.value = '';
     const fd = new FormData(); fd.append('file', file);
     setPicUploadMsg('⏳ Uploading Product ID database...');
+    setUploadProgress({ label: 'Product ID', pct: 0 });
     try {
-      const res = await api.post('/api/upload/product-id', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+      const res = await api.post('/api/upload/product-id', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (ev) => setUploadProgress({ label: 'Product ID', pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
+      });
       const d = res.data;
+      setUploadProgress(null);
       setPicUploadMsg(`✅ Prod ID: +${d.added} added, ${d.updated} updated (total: ${d.total_in_db}). SO PIC refreshed: ${d.so_pic_refreshed} rows.`);
       fetchPicDbStatus();
       fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
     } catch (err) {
+      setUploadProgress(null);
       setPicUploadMsg(`❌ Error: ${err?.response?.data?.error || err.message}`);
     }
   };
@@ -1196,14 +1335,40 @@ const App = () => {
     e.target.value = '';
     const fd = new FormData(); fd.append('file', file);
     setPicUploadMsg('⏳ Updating Master PIC...');
+    setUploadProgress({ label: 'Master PIC', pct: 0 });
     try {
-      const res = await api.post('/api/upload/master-pic', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+      const res = await api.post('/api/upload/master-pic', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (ev) => setUploadProgress({ label: 'Master PIC', pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
+      });
       const d = res.data;
+      setUploadProgress(null);
       setPicUploadMsg(`✅ Master PIC: +${d.added} added, ${d.updated} updated (total categories: ${d.total_categories}). SO rows updated: ${d.so_pic_refreshed}.`);
       fetchPicDbStatus();
       fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
     } catch (err) {
+      setUploadProgress(null);
       setPicUploadMsg(`❌ Error: ${err?.response?.data?.error || err.message}`);
+    }
+  };
+
+  const handleUploadItemRegistration = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    e.target.value = '';
+    const fd = new FormData(); fd.append('file', file);
+    setUploadProgress({ label: 'Item Registration', pct: 0 });
+    try {
+      const res = await api.post('/api/upload/item-registration', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (ev) => setUploadProgress({ label: 'Item Registration', pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
+      });
+      setUploadProgress(null);
+      addToast(`✅ ${res.data.message || 'Item Registration uploaded successfully'}`, 'success');
+      setItemRegPage(1);
+      fetchItemRegistration(1, itemRegPerPage, itemRegAppliedSearch, itemRegFilters);
+    } catch (err) {
+      setUploadProgress(null);
+      addToast(`❌ Failed to upload Item Registration: ${err?.response?.data?.error || err.message}`, 'error');
     }
   };
 
@@ -1226,6 +1391,25 @@ const App = () => {
     }
   };
 
+  const handleItemRegistrationBatchUpload = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    e.target.value = '';
+    const fd = new FormData(); fd.append('file', file);
+    setUploadProgress({ label: 'Item Registration Batch', pct: 0 });
+    try {
+      const res = await api.post('/api/item-registration/batch-upload', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (ev) => setUploadProgress({ label: 'Item Registration Batch', pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
+      });
+      setUploadProgress(null);
+      addToast(`Item Registration batch: ${res.data.updated} records updated${res.data.not_found ? `, ${res.data.not_found} Req. No not found` : ''}`, 'success');
+      fetchItemRegistration(itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters);
+    } catch (e) {
+      setUploadProgress(null);
+      addToast(`Failed to upload Item Registration batch: ${e.response?.data?.error || e.message}`, 'error');
+    }
+  };
+
   const downloadBlob = async (url, filename, label) => {
     const toastId = Date.now();
     setDownloadToast({ id: toastId, message: `Downloading ${label || filename}...` });
@@ -1243,17 +1427,33 @@ const App = () => {
     }
   };
 
+  const downloadItemRegistrationTemplate = () => {
+    const p = new URLSearchParams();
+    (itemRegAppliedSearch || []).forEach(v => p.append('req_no', v));
+    (itemRegFilters.clients || []).forEach(v => p.append('item_client', v));
+    (itemRegFilters.categories || []).forEach(v => p.append('category', v));
+    (itemRegFilters.pics || []).forEach(v => p.append('pic', v));
+    (itemRegFilters.proc_statuses || []).forEach(v => p.append('proc_status', v));
+    downloadBlob(`/api/item-registration/template?${p}`, `Template_ItemRegistration_BatchUpload_${new Date().toISOString().slice(0,10)}.xlsx`, 'Item Registration Batch Upload Template');
+  };
+
+  const downloadItemRegistrationExcel = () => {
+    const p = new URLSearchParams();
+    (itemRegAppliedSearch || []).forEach(v => p.append('req_no', v));
+    (itemRegFilters.clients || []).forEach(v => p.append('item_client', v));
+    (itemRegFilters.categories || []).forEach(v => p.append('category', v));
+    (itemRegFilters.pics || []).forEach(v => p.append('pic', v));
+    (itemRegFilters.proc_statuses || []).forEach(v => p.append('proc_status', v));
+    downloadBlob(`/api/export/item-registration?${p}`, `Item_Registration_${new Date().toISOString().slice(0,10)}.xlsx`, 'Item Registration Excel');
+  };
+
   const fetchCompletedData = useCallback(async (year='all', dateFilter=null) => {
     setCompletedLoading(true);
     try {
       const params = new URLSearchParams({ year });
-      if (dateFilter && dateFilter.mode !== 'all') {
-        if (dateFilter.mode === 'year') params.append('date_year', dateFilter.year);
-        else if (dateFilter.mode === 'range') {
-          if (dateFilter.start) params.append('date_from', dateFilter.start);
-          if (dateFilter.end) params.append('date_to', dateFilter.end);
-        }
-      }
+      Object.entries(dateFilterParams(dateFilter)).forEach(([key, value]) => { if (value) params.append(key, value); });
+      appendMultiParam(params, 'client', globalClientFilter);
+      appendMultiParam(params, 'pic', globalPicFilter);
       const res = await api.get(`/api/completed/summary?${params}`);
       setCompletedData(res.data);
       setCompletedLoaded(true);
@@ -1263,7 +1463,7 @@ const App = () => {
 
   const downloadHideTemplate = (type) => {
     setShowHideMenu(false);
-    downloadBlob(`/api/template/hide?type=${type}`, `Template_Hide_${type === 'SO' ? 'SO' : 'PO_HLI'}.xlsx`, `Template Hide ${type}`);
+    downloadBlob(`/api/template/hide?type=${type}`, `Template_Hide_${type === 'SO' ? 'SO' : 'PO'}.xlsx`, `Template Hide ${type}`);
   };
 
   const handleHideBatchUpload = async (e, type) => {
@@ -1296,14 +1496,10 @@ const App = () => {
     (soFilters.statuses||[]).forEach(v => p.append('status', v));
     (soFilters.aging||[]).forEach(v => p.append('aging', v));
     (soSearchNums||[]).forEach(n => p.append('so_item', n));
+    appendMultiParam(p, 'client', globalClientFilter);
+    appendMultiParam(p, 'global_pic', globalPicFilter);
     if (soMarginFilter && soMarginFilter !== 'all') p.append('margin_filter', soMarginFilter);
-    if (soDateFilter && soDateFilter.mode !== 'all') {
-      if (soDateFilter.mode === 'year') p.append('date_year', soDateFilter.year);
-      else if (soDateFilter.mode === 'range') {
-        if (soDateFilter.start) p.append('date_from', soDateFilter.start);
-        if (soDateFilter.end) p.append('date_to', soDateFilter.end);
-      }
-    }
+    Object.entries(dateFilterParams(soDateFilter)).forEach(([key, value]) => { if (value) p.append(key, value); });
     downloadBlob(`/api/export/all-so?${p}`, `SO_List_${new Date().toISOString().slice(0,10)}.xlsx`, 'SO List');
   };
   const downloadApprovalSOExcel = () => {
@@ -1343,14 +1539,10 @@ const App = () => {
     (soFilters.statuses||[]).forEach(v => p.append('status', v));
     (soFilters.aging||[]).forEach(v => p.append('aging', v));
     (soSearchNums||[]).forEach(n => p.append('so_item', n));
+    appendMultiParam(p, 'client', globalClientFilter);
+    appendMultiParam(p, 'global_pic', globalPicFilter);
     if (soMarginFilter && soMarginFilter !== 'all') p.append('margin_filter', soMarginFilter);
-    if (soDateFilter && soDateFilter.mode !== 'all') {
-      if (soDateFilter.mode === 'year') p.append('date_year', soDateFilter.year);
-      else if (soDateFilter.mode === 'range') {
-        if (soDateFilter.start) p.append('date_from', soDateFilter.start);
-        if (soDateFilter.end) p.append('date_to', soDateFilter.end);
-      }
-    }
+    Object.entries(dateFilterParams(soDateFilter)).forEach(([key, value]) => { if (value) p.append(key, value); });
     downloadBlob(`/api/data/so/template?${p}`, `Template_SO_BatchUpload_${new Date().toISOString().slice(0,10)}.xlsx`, 'SO Batch Upload Template');
   };
 
@@ -1360,6 +1552,14 @@ const App = () => {
       await api.put(`/api/data/so/${soId}`, { [field]: value });
       setAllSOData(prev => prev.map(s => s.id === soId ? { ...s, [field]: value } : s));
     } catch (e) { addToast(`❌ Failed to update: ${e.message}`, 'error'); }
+  };
+
+  const updateItemRegistrationCell = async (itemId, field, value) => {
+    setEditingCell(null);
+    try {
+      await api.put(`/api/item-registration/${itemId}`, { [field]: value });
+      setItemRegData(prev => prev.map(row => row.id === itemId ? { ...row, [field]: value } : row));
+    } catch (e) { addToast(`Failed to update Item Registration: ${e.response?.data?.error || e.message}`, 'error'); }
   };
 
   const openModal = async (title, endpointOrData) => {
@@ -1406,598 +1606,19 @@ const App = () => {
     return soSortOrder === 'newest' ? db - da : da - db;
   });
   const soTotalPages = Math.max(1, Math.ceil(soTotal / soPerPage));
+  const itemRegTotalPages = Math.max(1, Math.ceil(itemRegTotal / itemRegPerPage));
 
   // PO KPI — unique PO numbers from filtered set (excluding consumable)
   const uniquePOCount = new Set(poFiltered.map(p=>p.po_no)).size;
 
-  const card  = darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-100';
-  const txt   = darkMode ? 'text-white' : 'text-gray-900';
-  const txt2  = darkMode ? 'text-gray-400' : 'text-gray-600';
-  const tblHd = darkMode ? 'bg-gray-700' : 'bg-purple-50';
+  const card  = darkMode ? 'bg-gray-800 border border-gray-700 shadow-sm' : 'bg-white border border-gray-200/80 shadow-[0_8px_24px_rgba(15,23,42,0.05)]';
+  const txt   = darkMode ? 'text-white' : 'text-[#1f2937]';
+  const txt2  = darkMode ? 'text-gray-400' : 'text-[#55585d]';
+  const tblHd = darkMode ? 'bg-gray-700' : 'bg-[#f6f6f4]';
   const tblDv = darkMode ? 'divide-gray-700' : 'divide-gray-100';
-  const trHov = darkMode ? 'hover:bg-gray-700' : 'hover:bg-purple-50';
-
-  // ══════════════════════════════════════════════════════════════
-  // RENDER DELIVERY MONITORING PAGE
-  // ══════════════════════════════════════════════════════════════
-  const renderDeliveryMonitoring = () => {
-    const s = dlvSummary;
-    const STAGE_COLORS   = ['#8B5CF6','#3B82F6','#06B6D4','#10B981','#F59E0B','#EF4444','#EC4899','#6366F1'];
-    const PENDING_STAGES = ['SO ERP Created','PO Received','Shipping Order','Ship Completed','HUB Received','HUB Shipped','Delivery Completed'];
-    const stageAvgCards = (s?.stage_avg || []).filter((st, idx, arr) => (
-      st.label_to !== 'Delivery Completed' || idx === arr.findLastIndex(item => item.label_to === 'Delivery Completed')
-    )).map((st) => st.label_to === 'Delivery Completed'
-      ? { ...st, label_from: 'PO Created', stage: 'PO Created → Delivery Completed' }
-      : st
-    );
-    const avgVendorLeadtime = s?.avg_vendor_leadtime || [];
-    const maxVendorLeadtime = Math.max(1, ...avgVendorLeadtime.map(v => v.avg_workdays || 0));
-    const clientOptions  = s?.client_options || [];
-    const picOptions     = s?.pic_options    || [];
-    const AGING_LABELS   = ['0-30','30-90','90-180','180+'];
-    const AGING_COLORS   = { '0-30':'#10B981','30-90':'#F59E0B','90-180':'#F97316','180+':'#EF4444' };
-
-    const statusBadge = (status) => {
-      if (!status) return null;
-      const sl = status.toLowerCase();
-      const cls = sl.includes('cancel') ? 'bg-red-100 text-red-700'
-        : sl.includes('complete') ? 'bg-green-100 text-green-700'
-        : sl.includes('ship') ? 'bg-blue-100 text-blue-700'
-        : sl.includes('received') ? 'bg-purple-100 text-purple-700'
-        : 'bg-gray-100 text-gray-600';
-      return <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${cls}`}>{status}</span>;
-    };
-
-    const agingBadge = (days, label) => {
-      if (days === null || days === undefined) return <span className="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-400">—</span>;
-      const col = AGING_COLORS[label] || '#9CA3AF';
-      return (
-        <span className="px-2 py-0.5 rounded text-xs font-bold text-white" style={{backgroundColor: col}}>
-          {days}d
-        </span>
-      );
-    };
-
-    const dlvPages = Math.max(1, Math.ceil(dlvTotal / dlvPerPage));
-    const fmtDate = (iso) => {
-      if (!iso) return '—';
-      return new Date(iso).toLocaleDateString('id-ID', { day:'2-digit', month:'short', year:'2-digit' });
-    };
-    const fmtDateFull = (iso) => {
-      if (!iso) return '—';
-      return new Date(iso).toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
-    };
-
-    const doFetch = (overrides={}) => {
-      const p   = overrides.page   ?? 1;
-      const q   = overrides.search  !== undefined ? overrides.search  : dlvSearch;
-      const st  = overrides.status  !== undefined ? overrides.status  : dlvStatusFilter;
-      const pnd = overrides.pending !== undefined ? overrides.pending : dlvPendingFilter;
-      const pp  = overrides.perPage !== undefined ? overrides.perPage : dlvPerPage;
-      const so  = overrides.sort    !== undefined ? overrides.sort    : dlvSortOrder;
-      const cl  = overrides.client  !== undefined ? overrides.client  : dlvClientFilter;
-      const pic = overrides.pic     !== undefined ? overrides.pic     : dlvPicFilter;
-      const ag  = overrides.aging   !== undefined ? overrides.aging   : dlvAgingFilter;
-      const df  = overrides.date    !== undefined ? overrides.date    : dlvDateFilter;
-      if (overrides.client !== undefined || overrides.date !== undefined) fetchDlvSummary(cl, df);
-      fetchDlvData(p, q, st, pnd, pp, so, cl, pic, ag, df);
-    };
-
-    const toggleAging = (label) => {
-      const next = dlvAgingFilter.includes(label) ? dlvAgingFilter.filter(a=>a!==label) : [label];
-      setDlvAgingFilter(next);
-      setDlvPage(1);
-      doFetch({ aging: next });
-    };
-
-    return (
-      <div className="space-y-6">
-        {dlvUploadMsg && (
-          <div className={`flex items-start gap-3 px-4 py-3 rounded-xl text-sm shadow
-            ${dlvUploadMsg.startsWith('✅') ? (darkMode?'bg-green-900/40 text-green-300':'bg-green-50 text-green-800 border border-green-200')
-            : dlvUploadMsg.startsWith('❌') ? (darkMode?'bg-red-900/40 text-red-300':'bg-red-50 text-red-800 border border-red-200')
-            : (darkMode?'bg-blue-900/40 text-blue-300':'bg-blue-50 text-blue-800 border border-blue-200')}`}>
-            <span className="flex-1">{dlvUploadMsg}</span>
-            <button onClick={()=>setDlvUploadMsg('')} className="opacity-60 hover:opacity-100 font-bold text-lg leading-none">×</button>
-          </div>
-        )}
-
-        {!s && (
-          <div className={`flex flex-col items-center justify-center py-20 rounded-2xl border-2 border-dashed ${darkMode?'border-gray-600 text-gray-400':'border-gray-300 text-gray-500'}`}>
-            <Package className="w-12 h-12 mb-4 opacity-40"/>
-            <p className="text-lg font-semibold mb-1">No Delivery Monitoring data yet</p>
-            <p className="text-sm mb-4">Upload a <strong>Search PO Details</strong> file via the <strong>Manual Update</strong> button in the top right</p>
-            <label className="flex items-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl cursor-pointer text-sm font-medium shadow transition-all">
-              <Upload className="w-4 h-4"/>Upload Search PO Details
-              <input type="file" accept=".xlsx,.xls" onChange={handleUploadDelivery} className="hidden"/>
-            </label>
-          </div>
-        )}
-
-        {s && (<>
-          {/* KPI + charts card */}
-          <div className={`p-4 rounded-2xl shadow ${card}`}>
-            {s.date_range?.min && (
-              <div className={`flex flex-wrap gap-4 items-center px-3 py-2 mb-4 rounded-xl text-xs ${darkMode?'bg-gray-700/60 text-gray-400':'bg-gray-50 text-gray-500 border border-gray-100'}`}>
-                <span>📅 PO Create Range: <span className={`font-semibold ${txt}`}>{fmtDate(s.date_range.min)} — {fmtDate(s.date_range.max)}</span></span>
-                {s.date_range.compl_max && <span>✅ Latest Delivery: <span className={`font-semibold ${txt}`}>{fmtDate(s.date_range.compl_max)}</span></span>}
-                <span className="ml-auto">Last Update: <span className={`font-semibold ${txt}`}>{s.last_updated ? fmtDateFull(s.last_updated) : '-'}</span></span>
-              </div>
-            )}
-
-            {/* Global filters — filters KPI, charts, longest pending, and Detail Data */}
-            <div className={`mb-4 px-3 py-3 rounded-xl ${darkMode?'bg-gray-700/60':'bg-gray-50 border border-gray-100'}`}>
-              <div className="flex flex-wrap items-center gap-3">
-                <div className="w-full lg:flex-1">
-                  <DateRangeFilter
-                    darkMode={darkMode} txt={txt} txt2={txt2} card={card}
-                    value={dlvDateFilter}
-                    label="Filter PO Create Date"
-                    className="mb-0"
-                    onFilter={(value) => {
-                      setDlvDateFilter(value);
-                      setDlvPage(1);
-                      doFetch({ page: 1, date: value });
-                    }}
-                  />
-                </div>
-                <div className="w-full sm:w-72">
-                  <MultiSelect
-                    label="Client"
-                    options={clientOptions}
-                    selected={dlvClientFilter}
-                    onChange={(value) => {
-                      setDlvClientFilter(value);
-                      setDlvPage(1);
-                      doFetch({ client: value });
-                    }}
-                    darkMode={darkMode}
-                    txt2={txt2}
-                    hideLabel
-                  />
-                </div>
-                {(dlvClientFilter.length > 0 || dlvDateFilter.mode !== 'all') && (
-                  <button
-                    onClick={() => { setDlvClientFilter([]); setDlvDateFilter({ mode: 'all' }); setDlvStatusFilter([]); setDlvPendingFilter([]); setDlvSearch(''); setDlvPicFilter([]); setDlvAgingFilter([]); setDlvPage(1); fetchDlvSummary([], { mode: 'all' }); fetchDlvData(1,'',[],[], dlvPerPage, dlvSortOrder,[],[],[], { mode: 'all' }); }}
-                    className={`h-10 px-3 py-2 rounded-lg text-sm font-medium ${darkMode?'bg-gray-600 text-gray-100 hover:bg-gray-500':'bg-white border border-gray-300 text-gray-700 hover:bg-gray-100'}`}
-                  >
-                    Reset Filter
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* KPI Cards */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5">
-              {[
-                { label:'Total PO', value:s.total, color:'text-purple-600', bg:darkMode?'bg-purple-900/30':'bg-purple-50', border:darkMode?'border-purple-800/40':'border-purple-100', icon:<Package className="w-5 h-5 text-purple-600"/>, statusKey:'' },
-                { label:'In Progress', value:s.in_progress, color:'text-blue-600', bg:darkMode?'bg-blue-900/30':'bg-blue-50', border:darkMode?'border-blue-800/40':'border-blue-100', icon:<Loader2 className="w-5 h-5 text-blue-600"/>, statusKey:'in_progress' },
-                { label:'Completed', value:s.completed, color:'text-green-600', bg:darkMode?'bg-green-900/30':'bg-green-50', border:darkMode?'border-green-800/40':'border-green-100', icon:<CheckCircle className="w-5 h-5 text-green-600"/>, statusKey:'Delivery Complete' },
-                { label:'PO Cancel', value:s.cancelled, color:'text-red-500', bg:darkMode?'bg-red-900/30':'bg-red-50', border:darkMode?'border-red-800/40':'border-red-100', icon:<XCircle className="w-5 h-5 text-red-500"/>, statusKey:'PO Cancel' },
-              ].map(c => (
-                <button key={c.label}
-                  onClick={() => {
-                    const ns = c.statusKey === 'in_progress' ? [] : [c.statusKey];
-                    setDlvStatusFilter(ns); setDlvPendingFilter([]); setDlvPage(1);
-                    doFetch({ status: ns, pending: [] });
-                    document.getElementById('dlv-detail-table')?.scrollIntoView({ behavior:'smooth' });
-                  }}
-                  className={`rounded-xl p-4 border transition-all duration-200 text-left cursor-pointer hover:shadow-lg hover:-translate-y-0.5 group ${c.bg} ${c.border}`}>
-                  <div className="flex items-center justify-between">
-                    <span className={`text-xs font-medium ${darkMode?'text-gray-400':'text-gray-500'}`}>{c.label}</span>
-                    <span className={`p-2 rounded-lg ${darkMode?'bg-gray-800/40':'bg-white/70'} shadow-sm`}>{c.icon}</span>
-                  </div>
-                  <p className={`text-2xl font-bold mt-1 ${c.color} group-hover:underline`}>{c.value?.toLocaleString()}</p>
-                </button>
-              ))}
-            </div>
-
-            {/* Avg leadtime KPI cards - compact single row */}
-            <div className={`rounded-xl p-3 shadow-sm mb-4 ${darkMode?'bg-gray-700/60':'bg-gray-50'}`}>
-              <div className="grid grid-cols-7 gap-2">
-                {stageAvgCards.map((st) => {
-                  const avg = st.avg_workdays;
-                  const colorClass = avg === null
-                    ? darkMode ? 'text-gray-400' : 'text-gray-500'
-                    : avg < 0
-                      ? 'text-emerald-600'
-                      : avg > 5
-                        ? 'text-red-600'
-                        : avg > 2
-                          ? 'text-amber-600'
-                          : 'text-emerald-600';
-                  const cardClass = avg === null
-                    ? darkMode ? 'bg-gray-800/50 border-gray-600' : 'bg-white border-gray-200'
-                    : avg < 0
-                      ? darkMode ? 'bg-emerald-900/20 border-emerald-800/50' : 'bg-emerald-50 border-emerald-100'
-                      : avg > 5
-                        ? darkMode ? 'bg-red-900/20 border-red-800/50' : 'bg-red-50 border-red-100'
-                        : avg > 2
-                          ? darkMode ? 'bg-amber-900/20 border-amber-800/50' : 'bg-amber-50 border-amber-100'
-                          : darkMode ? 'bg-emerald-900/20 border-emerald-800/50' : 'bg-emerald-50 border-emerald-100';
-                  return (
-                    <div
-                      key={st.stage}
-                      className={`min-w-0 rounded-xl border px-2.5 py-2.5 shadow-sm ${cardClass}`}
-                      title={avg < 0 ? 'Leadtime minus terjadi karena tanggal proses berikutnya lebih awal dari tanggal proses sebelumnya pada data upload. Biasanya disebabkan urutan tanggal di file tidak konsisten, tanggal koreksi/backdate, atau input tanggal yang perlu dicek ulang.' : `${st.label_from} → ${st.label_to}`}
-                    >
-                      <p className={`truncate text-center text-xs font-bold ${txt}`} title={st.label_to}>
-                        {st.label_to}
-                      </p>
-                      <div className="mt-2 flex items-baseline justify-center gap-1">
-                        <span className={`text-2xl font-bold leading-none ${colorClass}`}>
-                          {avg !== null ? avg : '—'}
-                        </span>
-                        {avg !== null && <span className={`text-[10px] font-semibold ${colorClass}`}>days</span>}
-                      </div>
-                      <p className={`mt-2 text-center text-xs font-semibold ${txt2}`}>
-                        {st.count} PO
-                      </p>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-              {/* Pending by stage */}
-              <div className={`rounded-xl p-5 shadow-sm ${darkMode?'bg-gray-700/60':'bg-gray-50'}`}>
-                <h3 className={`font-semibold text-sm mb-3 ${txt} flex items-center gap-2`}><Clock className="w-4 h-4 text-purple-500"/>Pending by Stage</h3>
-                <div className="space-y-2">
-                  {PENDING_STAGES.map((stage, i) => {
-                    const cnt = s.pending_counts?.[stage] || 0;
-                    const maxCnt = Math.max(1, ...Object.values(s.pending_counts || {}));
-                    const pct = Math.round((cnt / maxCnt) * 100);
-                    return (
-                      <button key={stage}
-                        onClick={() => { setDlvPendingFilter([stage]); setDlvStatusFilter([]); setDlvPage(1); doFetch({ pending: [stage], status: [] }); document.getElementById('dlv-detail-table')?.scrollIntoView({ behavior:'smooth' }); }}
-                        className="flex items-center gap-2 w-full hover:opacity-75 transition-opacity text-left">
-                        <span className={`text-xs w-36 flex-shrink-0 ${txt2}`}>{stage}</span>
-                        <div className={`flex-1 h-5 rounded-full overflow-hidden ${darkMode?'bg-gray-600':'bg-gray-200'}`}>
-                          <div className="h-full rounded-full flex items-center pl-2 transition-all"
-                            style={{ width:`${Math.max(pct, cnt>0?8:0)}%`, backgroundColor:STAGE_COLORS[i] }}>
-                            {cnt > 0 && <span className="text-white text-xs font-bold">{cnt}</span>}
-                          </div>
-                        </div>
-                        {cnt === 0 && <span className={`text-xs ${txt2}`}>0</span>}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Avg leadtime by vendor */}
-              <div className={`rounded-xl p-5 shadow-sm ${darkMode?'bg-gray-700/60':'bg-gray-50'}`}>
-                <h3 className={`font-semibold text-sm mb-1 ${txt} flex items-center gap-2`}><BarChart3 className="w-4 h-4 text-emerald-500"/>Avg Lead Time Vendor</h3>
-                <p className={`text-xs mb-3 ${txt2}`}>PO Created → Delivery Completed, hanya status yang sudah completed</p>
-                {avgVendorLeadtime.length === 0 ? (
-                  <div className={`py-10 text-center text-sm ${txt2}`}>No completed delivery data</div>
-                ) : (
-                  <div className="max-h-80 overflow-y-auto pr-1 space-y-2">
-                    {avgVendorLeadtime.map((v, i) => {
-                      const pct = Math.round(((v.avg_workdays || 0) / maxVendorLeadtime) * 100);
-                      return (
-                        <div key={v.vendor_name} className="flex items-center gap-2">
-                          <span className={`text-xs w-40 flex-shrink-0 truncate ${txt2}`} title={v.vendor_name}>{v.vendor_name}</span>
-                          <div className={`flex-1 h-6 rounded-full overflow-hidden ${darkMode?'bg-gray-600':'bg-gray-200'}`}>
-                            <div
-                              className="h-full rounded-full flex items-center justify-end pr-2 transition-all"
-                              style={{ width:`${Math.max(pct, 8)}%`, backgroundColor:STAGE_COLORS[(i + 3) % STAGE_COLORS.length] }}
-                            >
-                              <span className="text-white text-xs font-bold">{v.avg_workdays}d</span>
-                            </div>
-                          </div>
-                          <span className={`text-xs w-12 text-right ${txt2}`}>{v.count} PO</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Top longest pending */}
-          {s.longest_pending?.length > 0 && (
-            <div className={`rounded-2xl shadow p-5 ${card}`}>
-              <h3 className={`font-semibold text-sm mb-3 ${txt}`}>🚨 Longest Pending POs (Top 10)</h3>
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className={`${darkMode?'text-gray-400':'text-gray-500'} border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
-                      <th className="text-left py-2 pr-3 font-medium">PO No.</th>
-                      <th className="text-left py-2 pr-3 font-medium">SO No.</th>
-                      <th className="text-left py-2 pr-3 font-medium">Vendor</th>
-                      <th className="text-left py-2 pr-3 font-medium">Category</th>
-                      <th className="text-left py-2 pr-3 font-medium">Product ID</th>
-                      <th className="text-left py-2 pr-3 font-medium">Prod. Name</th>
-                      <th className="text-left py-2 pr-3 font-medium">PIC</th>
-                      <th className="text-left py-2 pr-3 font-medium">Status</th>
-                      <th className="text-left py-2 pr-3 font-medium">Pending At</th>
-                      <th className="text-right py-2 font-medium">Working Days</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {s.longest_pending.slice(0,10).map((r) => (
-                      <tr key={r.po_number} className={`border-b ${darkMode?'border-gray-700/50 hover:bg-gray-700/40':'border-gray-50 hover:bg-gray-50'}`}>
-                        <td className={`py-1.5 pr-3 font-mono ${txt}`}>{r.po_number}</td>
-                        <td className={`py-1.5 pr-3 font-mono ${txt2}`}>{r.so_number||'—'}</td>
-                        <td className={`py-1.5 pr-3 ${txt2} max-w-[120px] truncate`} title={r.vendor_name}>{r.vendor_name||'—'}</td>
-                        <td className={`py-1.5 pr-3 ${txt2} max-w-[130px] truncate`} title={r.category_name}>{r.category_name||'—'}</td>
-                        <td className={`py-1.5 pr-3 font-mono ${txt2} max-w-[110px] truncate`} title={r.prod_id}>{r.prod_id||'—'}</td>
-                        <td className={`py-1.5 pr-3 ${txt2} max-w-[150px] truncate`} title={r.prod_name}>{r.prod_name||'—'}</td>
-                        <td className="py-1.5 pr-3">
-                          {r.pic_name
-                            ? (() => {
-                                const c = getPicColor(r.pic_name);
-                                return (
-                                  <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${darkMode ? 'bg-gray-700 text-gray-100' : `${c.bg} ${c.text}`}`}>
-                                    {r.pic_name}
-                                  </span>
-                                );
-                              })()
-                            : <span className={txt2}>—</span>}
-                        </td>
-                        <td className="py-1.5 pr-3">{statusBadge(r.po_status)}</td>
-                        <td className={`py-1.5 pr-3 ${txt2}`}>{r.pending_at}</td>
-                        <td className="py-1.5 text-right">
-                          <span className={`px-2 py-0.5 rounded font-bold text-xs ${r.workdays>10?'bg-red-100 text-red-700':r.workdays>5?'bg-orange-100 text-orange-700':'bg-yellow-100 text-yellow-700'}`}>{r.workdays} days</span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-
-          {/* ── Detail Data Table ── */}
-          <div id="dlv-detail-table" className={`relative z-20 rounded-2xl shadow overflow-visible ${card}`}>
-            <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
-              <div>
-                <h2 className={`text-xl font-bold ${txt}`}>Detail Data</h2>
-                <p className={`text-sm ${txt2}`}>{dlvTotal.toLocaleString()} total records — page {dlvPage} of {dlvPages}</p>
-              </div>
-            </div>
-
-            {/* Aging filter pills — same as Open SO */}
-            <div className={`px-5 pt-3 pb-0`}>
-              <div className="flex flex-wrap gap-2 items-center mb-2">
-                <span className={`text-xs font-medium ${txt2}`}>Filter by Aging:</span>
-                {AGING_LABELS.map(label => {
-                  const active = dlvAgingFilter.includes(label);
-                  return (
-                    <button key={label} onClick={() => toggleAging(label)}
-                      className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${active?'text-white border-transparent':'border-gray-200 text-gray-400 bg-gray-100'}`}
-                      style={active ? { backgroundColor: AGING_COLORS[label], borderColor: AGING_COLORS[label] } : {}}>
-                      {label} working days
-                    </button>
-                  );
-                })}
-                {dlvAgingFilter.length > 0 && (
-                  <button onClick={() => { setDlvAgingFilter([]); setDlvPage(1); doFetch({ aging: [] }); }}
-                    className={`px-2 py-1 rounded text-xs ${txt2} hover:text-red-500`}>Reset Aging</button>
-                )}
-              </div>
-            </div>
-
-            {/* Filter controls */}
-            <div className={`relative z-30 px-5 py-3 border-b overflow-visible ${darkMode?'border-gray-700':'border-gray-100'}`}>
-              <div className={`px-4 py-3 rounded-xl overflow-visible ${darkMode?'bg-gray-700':'bg-gray-50'}`}>
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[150px_minmax(240px,1fr)_220px_240px_240px_110px_130px_130px] gap-3 items-end overflow-visible">
-                  {/* Sort */}
-                  <div className="min-w-0">
-                    <label className={`block text-xs font-medium mb-1 ${txt2}`}>↕ PO Create Date</label>
-                    <select className={`w-full h-10 px-3 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
-                      value={dlvSortOrder} onChange={e => setDlvSortOrder(e.target.value)}>
-                      <option value="oldest">Oldest ↑</option>
-                      <option value="newest">Newest ↓</option>
-                    </select>
-                  </div>
-                  {/* Search */}
-                  <div className="min-w-0">
-                    <label className={`block text-xs font-medium mb-1 ${txt2}`}>Search PO / SO / Vendor</label>
-                    <div className={`flex items-center h-10 px-3 rounded-lg border ${darkMode?'bg-gray-600 border-gray-500':'bg-white border-gray-300'}`}>
-                      <input type="text" placeholder="Search..." value={dlvSearch}
-                        onChange={e => setDlvSearch(e.target.value)}
-                        onKeyDown={e => { if (e.key==='Enter') { setDlvPage(1); doFetch({ search: dlvSearch, sort: dlvSortOrder }); } }}
-                        className={`flex-1 min-w-0 bg-transparent outline-none text-sm ${darkMode?'text-white placeholder-gray-400':'text-gray-700 placeholder-gray-400'}`}/>
-                    </div>
-                  </div>
-                  {/* PIC */}
-                  <div className="min-w-0">
-                    <MultiSelect
-                      label="PIC"
-                      options={[...picOptions, '__others__']}
-                      selected={dlvPicFilter}
-                      onChange={(value) => {
-                        setDlvPicFilter(value);
-                      }}
-                      darkMode={darkMode}
-                      txt2={txt2}
-                      noDropdownScroll
-                    />
-                  </div>
-                  {/* PO Status */}
-                  <div className="min-w-0">
-                    <MultiSelect
-                      label="PO Status"
-                      options={['PO Received Req.','PO Received','Shipping Order','Ship. Confirmed','Delivery Complete','PO Cancel']}
-                      selected={dlvStatusFilter}
-                      onChange={(value) => {
-                        setDlvStatusFilter(value);
-                      }}
-                      darkMode={darkMode}
-                      txt2={txt2}
-                      noDropdownScroll
-                    />
-                  </div>
-                  {/* Pending Stage */}
-                  <div className="min-w-0">
-                    <MultiSelect
-                      label="Pending Stage"
-                      options={PENDING_STAGES}
-                      selected={dlvPendingFilter}
-                      onChange={(value) => {
-                        setDlvPendingFilter(value);
-                      }}
-                      darkMode={darkMode}
-                      txt2={txt2}
-                      noDropdownScroll
-                    />
-                  </div>
-                  {/* Apply */}
-                  <div className="min-w-0">
-                    <label className={`block text-xs font-medium mb-1 opacity-0 ${txt2}`}>.</label>
-                    <button onClick={() => { setDlvPage(1); doFetch({ page: 1, search: dlvSearch, status: dlvStatusFilter, pending: dlvPendingFilter, sort: dlvSortOrder, pic: dlvPicFilter, aging: dlvAgingFilter }); }}
-                      className="w-full h-10 px-3 py-2 rounded-lg text-sm font-bold shadow-sm flex items-center justify-center whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700">
-                      Apply
-                    </button>
-                  </div>
-                  {/* Clear */}
-                  <div className="min-w-0">
-                    <label className={`block text-xs font-medium mb-1 opacity-0 ${txt2}`}>.</label>
-                    <button onClick={() => { setDlvStatusFilter([]); setDlvPendingFilter([]); setDlvSearch(''); setDlvPicFilter([]); setDlvClientFilter([]); setDlvAgingFilter([]); setDlvDateFilter({ mode: 'all' }); setDlvSortOrder('oldest'); setDlvPage(1); fetchDlvSummary([], { mode: 'all' }); fetchDlvData(1,'',[],[], dlvPerPage, 'oldest',[],[],[], { mode: 'all' }); }}
-                      className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>
-                      Clear
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {/* Active chips */}
-              {(dlvStatusFilter.length > 0 || dlvPendingFilter.length > 0 || dlvClientFilter.length > 0 || dlvPicFilter.length > 0 || dlvDateFilter.mode !== 'all') && (
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {dlvDateFilter.mode !== 'all' && <span className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${darkMode?'bg-purple-900/40 text-purple-300':'bg-purple-100 text-purple-700'}`}>PO Create: {dlvDateFilter.mode === 'year' ? dlvDateFilter.year : `${dlvDateFilter.start || '...'} → ${dlvDateFilter.end || '...'}`}</span>}
-                  {dlvClientFilter.map(v => <span key={`client-${v}`} className={`px-2 py-0.5 rounded-full text-xs font-medium ${darkMode?'bg-indigo-900/40 text-indigo-300':'bg-indigo-100 text-indigo-700'}`}>Client: {v}</span>)}
-                  {dlvPicFilter.map(v => <span key={`pic-${v}`} className={`px-2 py-0.5 rounded-full text-xs font-medium ${darkMode?'bg-blue-900/40 text-blue-300':'bg-blue-100 text-blue-700'}`}>PIC: {v === '__others__' ? 'Others' : v}</span>)}
-                  {dlvStatusFilter.map(v => <span key={`status-${v}`} className={`px-2 py-0.5 rounded-full text-xs font-medium ${darkMode?'bg-emerald-900/40 text-emerald-300':'bg-emerald-100 text-emerald-700'}`}>Status: {v}</span>)}
-                  {dlvPendingFilter.map(v => <span key={`pending-${v}`} className={`px-2 py-0.5 rounded-full text-xs font-medium ${darkMode?'bg-orange-900/40 text-orange-300':'bg-orange-100 text-orange-700'}`}>Pending: {v}</span>)}
-                </div>
-              )}
-            </div>
-
-            {dlvLoading ? (
-              <div className={`p-8 text-center ${txt2}`}>Loading delivery monitoring...</div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full text-xs">
-                  <thead className={`${darkMode?'bg-gray-700 text-gray-300':'bg-gray-50 text-gray-600'}`}>
-                    <tr>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Aging</th>
-                      <th className="text-right px-3 py-3 font-medium whitespace-nowrap">Age</th>
-                      <th className="text-left px-4 py-3 font-medium whitespace-nowrap">PO No.</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">SO No.</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Category</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Prod. ID</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">PO Status</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Vendor</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">PIC</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Prod. Name</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Spec.</th>
-                      <th className="text-right px-3 py-3 font-medium whitespace-nowrap">PO Qty</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Unit</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Op. Unit</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">PO Create</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">SO ERP</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">PO Rcvd</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Ship Odr</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Ship Compl</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">HUB Rcv</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">HUB Ship</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Dlv Compl</th>
-                      <th className="text-left px-3 py-3 font-medium whitespace-nowrap">Pending At</th>
-                      <th className="text-right px-4 py-3 font-medium whitespace-nowrap">Total (days)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {dlvData.map(row => {
-                      const isCancel = row.po_status && row.po_status.toLowerCase().includes('cancel');
-                      const agCol = AGING_COLORS[row.aging_label] || '#9CA3AF';
-                      return (
-                        <tr key={row.id || row.po_number}
-                          className={`border-b transition-colors ${darkMode?'border-gray-700/40 hover:bg-gray-700/30':'border-gray-50 hover:bg-purple-50/30'} ${isCancel?(darkMode?'opacity-40':'opacity-50'):''}`}>
-                          <td className="px-3 py-2 whitespace-nowrap">
-                            <span className="px-2 py-0.5 rounded text-xs font-bold text-white whitespace-nowrap"
-                              style={{backgroundColor: agCol}}>{row.aging_label || '—'}</span>
-                          </td>
-                          <td className="px-3 py-2 text-right whitespace-nowrap">
-                            <span className={`text-xs font-semibold ${txt}`}>{row.aging_days ?? '—'}</span>
-                          </td>
-                          <td className={`px-4 py-2 font-mono font-medium ${txt} whitespace-nowrap`}>{row.po_number}</td>
-                          <td className={`px-3 py-2 font-mono ${txt2} whitespace-nowrap`}>{row.so_number||'—'}</td>
-                          <td className={`px-3 py-2 ${txt2} max-w-[150px] truncate`} title={row.category_name}>{row.category_name||'—'}</td>
-                          <td className={`px-3 py-2 font-mono ${txt2} max-w-[120px] truncate`} title={row.prod_id}>{row.prod_id||'—'}</td>
-                          <td className="px-3 py-2 whitespace-nowrap">{statusBadge(row.po_status)}</td>
-                          <td className={`px-3 py-2 ${txt2} max-w-[130px] truncate`} title={row.vendor_name}>{row.vendor_name||'—'}</td>
-                          <td className="px-3 py-2 whitespace-nowrap">
-                            {row.pic_name
-                              ? (() => { const c = getPicColor(row.pic_name); return (
-                                <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${darkMode?'bg-gray-700 text-gray-100':`${c.bg} ${c.text}`}`}>{row.pic_name}</span>
-                              ); })()
-                              : <span className={`text-xs ${txt2}`}>—</span>}
-                          </td>
-                          <td className={`px-3 py-2 ${txt2} max-w-[160px] truncate`} title={row.prod_name}>{row.prod_name||'—'}</td>
-                          <td className={`px-3 py-2 ${txt2} max-w-[140px] truncate`} title={row.specification}>{row.specification||'—'}</td>
-                          <td className={`px-3 py-2 text-right ${txt}`}>{row.po_qty!=null?row.po_qty.toLocaleString():'—'}</td>
-                          <td className={`px-3 py-2 ${txt2}`}>{row.unit||'—'}</td>
-                          <td className={`px-3 py-2 ${txt2} max-w-[120px] truncate`} title={row.op_unit_name}>{row.op_unit_name||'—'}</td>
-                          <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{fmtDate(row.po_create_date)}</td>
-                          <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{fmtDate(row.so_erp_create_date)}</td>
-                          <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{fmtDate(row.po_rcvd_date)}</td>
-                          <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{fmtDate(row.ship_odr_date)}</td>
-                          <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{fmtDate(row.ship_compl_date)}</td>
-                          <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{fmtDate(row.hub_rcv_date)}</td>
-                          <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{fmtDate(row.hub_ship_date)}</td>
-                          <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{fmtDate(row.dlv_compl_date)}</td>
-                          <td className="px-3 py-2 whitespace-nowrap">
-                            {!isCancel && row.pending_at
-                              ? <span className="px-2 py-0.5 bg-orange-100 text-orange-700 rounded-full text-xs font-medium">{row.pending_at}</span>
-                              : isCancel ? <span className={`text-xs ${txt2}`}>—</span>
-                              : <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs font-medium">Done</span>}
-                          </td>
-                          <td className="px-4 py-2 text-right whitespace-nowrap">
-                            {!isCancel && row.total_workdays!=null
-                              ? <span className={`px-2 py-0.5 rounded font-bold text-xs ${row.total_workdays>14?'bg-red-100 text-red-700':row.total_workdays>7?'bg-orange-100 text-orange-700':'bg-green-100 text-green-700'}`}>{row.total_workdays} days</span>
-                              : <span className={`text-xs ${txt2}`}>—</span>}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            {/* Pagination */}
-            <div className={`mt-3 pt-2 border-t ${darkMode?'border-gray-700':'border-gray-200'} flex flex-wrap justify-between items-center gap-3 px-5 pb-3`}>
-              <div className="flex items-center gap-3">
-                <span className={`text-sm ${txt2}`}>
-                  {dlvTotal===0 ? 'No records' : `Showing ${((dlvPage-1)*dlvPerPage)+1}–${Math.min(dlvPage*dlvPerPage,dlvTotal)} of ${dlvTotal.toLocaleString()}`}
-                </span>
-                <label className={`flex items-center gap-1 text-xs ${txt2}`}>
-                  Rows
-                  <select className={`px-2 py-1 rounded-lg text-xs border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-300'}`}
-                    value={dlvPerPage} onChange={e => { const pp=Number(e.target.value); setDlvPerPage(pp); setDlvPage(1); doFetch({ perPage: pp }); }}>
-                    <option value={10}>10</option><option value={20}>20</option>
-                    <option value={50}>50</option><option value={100}>100</option>
-                    <option value={500}>500</option>
-                  </select>
-                </label>
-              </div>
-              <div className="flex gap-1 items-center">
-                <button disabled={dlvPage===1} onClick={() => { const p=dlvPage-1; setDlvPage(p); doFetch({ page:p }); }}
-                  className={`p-1.5 rounded ${dlvPage===1?'opacity-40':'hover:bg-purple-100'}`}><ChevronLeft className="w-4 h-4"/></button>
-                <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-purple-100 text-purple-700'}`}>{dlvPage}/{dlvPages}</span>
-                <button disabled={dlvPage===dlvPages} onClick={() => { const p=dlvPage+1; setDlvPage(p); doFetch({ page:p }); }}
-                  className={`p-1.5 rounded ${dlvPage===dlvPages?'opacity-40':'hover:bg-purple-100'}`}><ChevronRight className="w-4 h-4"/></button>
-              </div>
-            </div>
-          </div>
-        </>)}
-      </div>
-    );
-  };
+  const trHov = darkMode ? 'hover:bg-gray-700' : 'hover:bg-[#f7f7f5]';
+  const kpiValue = darkMode ? 'text-gray-100' : 'text-[#334155]';
+  const neutralIcon = darkMode ? 'bg-gray-700 text-gray-200' : 'bg-slate-100 text-slate-600';
 
   // ══════════════════════════════════════════════════════════════
   // RENDER COMPLETED TRANSACTIONS PAGE
@@ -2008,11 +1629,32 @@ const App = () => {
     const fmtM = (v) => v >= 1e9 ? `${(v/1e9).toFixed(1)}B` : v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `${(v/1e3).toFixed(0)}K` : String(Math.round(v));
     const mc = (m) => m > 0 ? 'text-green-600' : m < 0 ? 'text-red-600' : 'text-gray-400';
     const mcBg = (m) => m < 0 ? (darkMode?'bg-red-900/20':'bg-red-50') : (darkMode?'bg-gray-700':'bg-gray-50');
+    const monthLabel = (m) => { try { const [y,mo] = m.split('-'); return format(new Date(parseInt(y), parseInt(mo)-1, 1), 'MMM yy'); } catch { return m; } };
+    const renderPriceChange = (value, pct, trend) => {
+      const isUp = trend === 'up';
+      const isDown = trend === 'down';
+      const color = isUp ? 'text-green-600' : isDown ? 'text-red-600' : txt2;
+      const icon = isUp ? <TrendingUp className="w-4 h-4"/> : isDown ? <TrendingDown className="w-4 h-4"/> : <Minus className="w-4 h-4"/>;
+      if (value == null) {
+        return <div className={`text-right font-semibold ${txt2}`}>No data</div>;
+      }
+      return (
+        <div className={`text-right font-bold ${color}`}>
+          <div className="flex items-center justify-end gap-1">
+            {icon}
+            <span>{fmtCurShort(Math.abs(value))}</span>
+          </div>
+          <div className="text-[11px] font-semibold">
+            {pct == null ? '0%' : `${pct > 0 ? '+' : ''}${pct}%`}
+          </div>
+        </div>
+      );
+    };
 
     if (completedLoading || !completedLoaded) return (
       <div className="flex items-center justify-center h-64">
         <div className="flex flex-col items-center gap-3">
-          <div className="w-12 h-12 border-4 border-purple-600 border-t-transparent rounded-full animate-spin"/>
+          <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"/>
           <p className={`text-sm ${txt2}`}>Loading completed transactions...</p>
           <p className={`text-xs ${txt2} text-center max-w-sm`}>
             Preparing cached USD to IDR values. Existing historical data will be reused, only new non-IDR rows are converted.
@@ -2025,7 +1667,7 @@ const App = () => {
       <div className={`flex flex-col items-center justify-center h-64 rounded-2xl ${card}`}>
         <Coins className="w-16 h-16 text-gray-300 mb-4"/>
         <p className={`text-lg font-semibold ${txt}`}>No completed data yet</p>
-        <p className={`text-sm ${txt2} mt-1`}>Upload SMRO data to see completed transactions</p>
+        <p className={`text-sm ${txt2} mt-1`}>Upload SO data to see completed transactions</p>
       </div>
     );
 
@@ -2046,8 +1688,7 @@ const App = () => {
           label="Filter SO Create Date"
           onFilter={(f) => {
             setGlobalDateFilter(f);
-            if (f.mode === 'year') { setCompletedYear(f.year); fetchCompletedData(f.year, f); }
-            else { setCompletedYear('all'); fetchCompletedData('all', f); }
+            setCompletedYear('all'); fetchCompletedData('all', f);
           }}
         />
 
@@ -2055,16 +1696,16 @@ const App = () => {
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           {[
             { label:'Completed Transactions', value: fmtNum(d.total_count),
-              icon:<CheckCircle className="w-6 h-6 text-green-500"/>, bg:'bg-green-100', color:'text-green-600' },
+              icon:<CheckCircle className="w-6 h-6"/>, bg: neutralIcon, color:kpiValue },
             { label:'Total Sales Amount', value: fmtCurShort(d.total_sales), sub: fmtCur(d.total_sales),
-              icon:<Wallet className="w-6 h-6 text-blue-500"/>, bg:'bg-blue-100', color:'text-blue-600' },
+              icon:<Wallet className="w-6 h-6"/>, bg: neutralIcon, color:kpiValue },
             { label:'Total Purchase Amount', value: fmtCurShort(d.total_purchase), sub: fmtCur(d.total_purchase),
-              icon:<Coins className="w-6 h-6 text-purple-500"/>, bg:'bg-purple-100', color:'text-purple-600' },
+              icon:<Coins className="w-6 h-6"/>, bg: neutralIcon, color:kpiValue },
             { label:'Total Margin', value: fmtCurShort(d.total_margin), sub: fmtCur(d.total_margin),
-              icon: d.total_margin>=0?<TrendingUp className="w-6 h-6 text-emerald-500"/>:<TrendingDown className="w-6 h-6 text-red-500"/>,
-              bg: d.total_margin>=0?'bg-emerald-100':'bg-red-100', color: d.total_margin>=0?'text-emerald-600':'text-red-600' },
+              icon: d.total_margin>=0?<TrendingUp className="w-6 h-6"/>:<TrendingDown className="w-6 h-6"/>,
+              bg: neutralIcon, color:kpiValue },
           ].map((k,i)=>(
-            <div key={i} className={`p-5 rounded-2xl shadow hover:shadow-lg transition-all ${card}`}>
+            <div key={i} className={`p-5 rounded-2xl transition-all ${card}`}>
               <div className="flex justify-between items-start">
                 <div>
                   <p className={`text-sm font-medium ${txt2}`}>{k.label}</p>
@@ -2088,16 +1729,16 @@ const App = () => {
             }))} barGap={2}>
               <defs>
                 <linearGradient id="cgSales" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#8B5CF6" stopOpacity={0.9}/><stop offset="95%" stopColor="#8B5CF6" stopOpacity={0.5}/>
+                  <stop offset="5%" stopColor="#1D4ED8" stopOpacity={0.92}/><stop offset="95%" stopColor="#1D4ED8" stopOpacity={0.58}/>
                 </linearGradient>
                 <linearGradient id="cgPurchase" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#3B82F6" stopOpacity={0.9}/><stop offset="95%" stopColor="#3B82F6" stopOpacity={0.5}/>
+                  <stop offset="5%" stopColor="#93C5FD" stopOpacity={0.9}/><stop offset="95%" stopColor="#BFDBFE" stopOpacity={0.62}/>
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke={darkMode?'#374151':'#F3F4F6'}/>
               <XAxis dataKey="monthLabel" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10}/>
               <YAxis yAxisId="amt" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10} tickFormatter={fmtM}/>
-              <YAxis yAxisId="cnt" orientation="right" stroke="#F97316" fontSize={10}/>
+              <YAxis yAxisId="cnt" orientation="right" stroke="#64748B" fontSize={10}/>
               <Tooltip
                 formatter={(v, n) => n === 'Transactions' ? [fmtNum(v), n] : [fmtCur(v), n]}
                 contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}
@@ -2106,7 +1747,7 @@ const App = () => {
               <Legend wrapperStyle={{fontSize:12,color:darkMode?'#F3F4F6':'#111827'}} iconType="rect"/>
               <Bar yAxisId="amt" dataKey="sales_amount" name="Sales Amount" fill="url(#cgSales)" radius={[4,4,0,0]}/>
               <Bar yAxisId="amt" dataKey="purchase_amount" name="Purchase Amount" fill="url(#cgPurchase)" radius={[4,4,0,0]}/>
-              <Line yAxisId="cnt" type="monotone" dataKey="count" name="Transactions" stroke="#F97316" strokeWidth={3} dot={{r:3,fill:'#F97316'}} activeDot={{r:5}} z={10}/>
+              <Line yAxisId="cnt" type="monotone" dataKey="count" name="Transactions" stroke="#64748B" strokeWidth={3} dot={{r:3,fill:'#64748B'}} activeDot={{r:5, fill:'#64748B'}} z={10}/>
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -2117,24 +1758,24 @@ const App = () => {
           {/* Top 5 Vendors */}
           <div className={`p-5 rounded-2xl shadow ${card}`}>
             <h3 className={`text-base font-bold mb-4 ${txt} flex items-center gap-2`}>
-              <Award className="w-5 h-5 text-purple-500"/> Top 5 Vendors — Completed Transactions
+              <Award className="w-5 h-5 text-blue-500"/> Top 5 Vendors — Completed Transactions
             </h3>
             <div className="space-y-4">
               {(d.top_vendors||[]).map((v,i)=>{
                 const maxAmt = d.top_vendors[0]?.sales_amount || 1;
                 const pct = Math.round(v.sales_amount / maxAmt * 100);
-                const rankColors = ['bg-yellow-400','bg-gray-300','bg-orange-400','bg-purple-200','bg-purple-100'];
+                const rankColors = ['bg-blue-600 text-white','bg-slate-200 text-slate-700','bg-teal-100 text-teal-700','bg-blue-100 text-blue-700','bg-slate-100 text-slate-600'];
                 return (
                   <div key={i}>
                     <div className="flex items-center justify-between mb-1">
                       <div className="flex items-center gap-2 min-w-0">
-                        <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold text-gray-700 flex-shrink-0 ${rankColors[i]||'bg-gray-100'}`}>{i+1}</span>
+                        <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${rankColors[i]||'bg-gray-100 text-gray-700'}`}>{i+1}</span>
                         <span className={`text-sm font-semibold truncate ${txt}`} title={v.vendor}>{v.vendor}</span>
                       </div>
-                      <span className="text-xs font-bold text-purple-600 ml-2 flex-shrink-0">{fmtCurShort(v.sales_amount)}</span>
+                      <span className="text-xs font-bold text-blue-600 ml-2 flex-shrink-0">{fmtCurShort(v.sales_amount)}</span>
                     </div>
                     <div className={`w-full h-2 rounded-full ${darkMode?'bg-gray-700':'bg-gray-100'}`}>
-                      <div className="h-2 rounded-full bg-gradient-to-r from-purple-600 to-purple-400" style={{width:`${pct}%`}}/>
+                      <div className="h-2 rounded-full bg-gradient-to-r from-blue-600 to-blue-400" style={{width:`${pct}%`}}/>
                     </div>
                     <div className="flex justify-between text-xs mt-0.5">
                       <span className={txt2}>{fmtNum(v.count)} transactions · Purchase {fmtCurShort(v.purchase_amount)}</span>
@@ -2162,13 +1803,9 @@ const App = () => {
                   <button key={cat} onClick={async () => {
                     try {
                       const params = new URLSearchParams({category: cat});
-                      if (completedDateFilter && completedDateFilter.mode !== 'all') {
-                        if (completedDateFilter.mode === 'year') params.append('date_year', completedDateFilter.year);
-                        else if (completedDateFilter.mode === 'range') {
-                          if (completedDateFilter.start) params.append('date_from', completedDateFilter.start);
-                          if (completedDateFilter.end) params.append('date_to', completedDateFilter.end);
-                        }
-                      }
+                      Object.entries(dateFilterParams(completedDateFilter)).forEach(([key, value]) => { if (value) params.append(key, value); });
+                      appendMultiParam(params, 'client', globalClientFilter);
+                      appendMultiParam(params, 'pic', globalPicFilter);
                       const res = await api.get(`/api/completed/margin-detail?${params}`);
                       setMarginDetailModal({ category: label, data: Array.isArray(res.data) ? res.data : [] });
                     } catch(e) { addToast(`Failed to load detail: ${e.message}`, 'error'); }
@@ -2177,7 +1814,7 @@ const App = () => {
                     <p className={`text-xs font-bold ${color} mb-1`}>{label}</p>
                     <p className={`text-lg font-bold ${color}`}>{fmtNum(count)} <span className="text-xs font-normal">PO</span></p>
                     <p className={`text-xs ${txt2} mt-0.5`}>{totalCompleted ? Math.round(count/totalCompleted*100) : 0}% of total</p>
-                    <p className={`text-xs text-purple-500 font-semibold mt-1`}>Click for details →</p>
+                    <p className={`text-xs text-blue-500 font-semibold mt-1`}>Click for details →</p>
                   </button>
                 ))}
               </div>
@@ -2198,23 +1835,30 @@ const App = () => {
           </div>
         </div>
 
-        {/* ── Top 20 Items ────────────────────────────────────── */}
+        {/* ── Price Tracking ───────────────────────────────────── */}
         <div className={`p-5 rounded-2xl shadow ${card}`}>
-          <h3 className={`text-base font-bold mb-4 ${txt} flex items-center gap-2`}>
-            <Package className="w-5 h-5 text-orange-500"/> Top 20 Items by Sales Amount — Completed
-          </h3>
+          <div className="flex flex-wrap items-start justify-between gap-2 mb-4">
+            <div className="min-w-0 pr-3">
+              <h3 className={`text-base font-bold ${txt} flex items-center gap-2`}>
+                <Package className="w-5 h-5 text-slate-600"/> Price Tracking by Month — Top 20 Items
+              </h3>
+              <p className={`text-xs mt-1 ${txt2}`}>Monthly unit price trend from completed delivery transactions.</p>
+            </div>
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
                 <tr className={tblHd}>
-                  {['#','Item / Product','Specification','Product ID','Order Freq','Sales Amount','Purchase Amount','Margin','Margin %'].map(h=>(
-                    <th key={h} className={`px-3 py-2 text-center font-bold ${darkMode?'text-purple-300':'text-purple-700'}`}>{h}</th>
+                  {['#','Item / Product','Specification','Product ID','Order Freq','Total Purchase Amount','Previous Price','Last Price','Trend','MoM Price Change','YoY Price Change'].map(h=>(
+                    <th key={h} className={`px-3 py-2 text-center font-bold ${darkMode?'text-blue-300':'text-blue-700'}`}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody className={`divide-y ${tblDv}`}>
-                {(d.top_items||[]).map((item,i)=>{
-                  const mPct = item.sales_amount ? (item.margin/item.sales_amount*100).toFixed(1) : '—';
+                {(d.price_tracking||d.top_items||[]).map((item,i)=>{
+                  const isUp = item.trend === 'up';
+                  const isDown = item.trend === 'down';
+                  const trendData = (item.monthly_prices||[]).map(p => ({ ...p, monthLabel: monthLabel(p.month) }));
                   return (
                     <tr key={i} className={trHov}>
                       <td className={`px-3 py-2 font-bold ${txt2}`}>{i+1}</td>
@@ -2222,10 +1866,27 @@ const App = () => {
                       <td className={`px-3 py-2 ${txt2} max-w-xs truncate`} title={item.specification||''}>{item.specification||'—'}</td>
                       <td className={`px-3 py-2 ${txt2} font-mono whitespace-nowrap`}>{item.product_id||'—'}</td>
                       <td className={`px-3 py-2 ${txt2}`}>{fmtNum(item.count)}</td>
-                      <td className="px-3 py-2 text-purple-600 font-semibold">{fmtCurShort(item.sales_amount)}</td>
-                      <td className="px-3 py-2 text-orange-600">{fmtCurShort(item.purchase_amount)}</td>
-                      <td className={`px-3 py-2 font-bold ${mc(item.margin)}`}>{fmtCurShort(item.margin)}</td>
-                      <td className={`px-3 py-2 font-semibold ${mc(item.margin)}`}>{mPct !== '—' ? `${mPct}%` : '—'}</td>
+                      <td className={`px-3 py-2 font-semibold whitespace-nowrap ${kpiValue}`}>{fmtCurShort(item.purchase_amount)}</td>
+                      <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{item.previous_price ? fmtCurShort(item.previous_price) : '—'}</td>
+                      <td className="px-3 py-2 text-blue-600 font-semibold whitespace-nowrap">{item.current_price ? fmtCurShort(item.current_price) : '—'}</td>
+                      <td className="px-3 py-2 min-w-[130px]">
+                        <div className="w-28 h-10 mx-auto">
+                          {trendData.length > 1 ? (
+                            <ResponsiveContainer width="100%" height="100%">
+                              <LineChart data={trendData}>
+                                <XAxis dataKey="monthLabel" hide />
+                                <Tooltip
+                                  formatter={(v)=>[fmtCurShort(v), 'Price']}
+                                  contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}
+                                />
+                                <Line type="monotone" dataKey="price" stroke={isDown?'#EF4444':'#10B981'} strokeWidth={2.5} dot={false}/>
+                              </LineChart>
+                            </ResponsiveContainer>
+                          ) : <div className={`h-full flex items-center justify-center ${txt2}`}>—</div>}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 min-w-[120px]">{renderPriceChange(item.change_value, item.change_pct, item.trend)}</td>
+                      <td className="px-3 py-2 min-w-[120px]">{renderPriceChange(item.yoy_change_value, item.yoy_change_pct, item.yoy_trend)}</td>
                     </tr>
                   );
                 })}
@@ -2255,7 +1916,7 @@ const App = () => {
                       <div key={i} className={`p-3 rounded-xl ${mcBg(v.margin)}`}>
                         <div className="flex items-center justify-between mb-1">
                           <div className="flex items-center gap-2 min-w-0">
-                            <span className="text-xs font-bold text-red-600 flex-shrink-0">#{i+1}</span>
+                            <span className={`text-xs font-bold flex-shrink-0 ${darkMode?'text-gray-400':'text-gray-500'}`}>#{i+1}</span>
                             <span className={`text-sm font-semibold truncate ${txt}`} title={v.vendor}>{v.vendor}</span>
                           </div>
                           <span className="text-sm font-bold text-red-600 ml-2 flex-shrink-0">{fmtCurShort(v.margin)}</span>
@@ -2288,8 +1949,8 @@ const App = () => {
                   <table className="w-full text-xs">
                     <thead className={`sticky top-0 z-10 ${darkMode?'bg-gray-800':'bg-white'}`}>
                       <tr className={tblHd}>
-                        {['#','Product ID','Product','Vendor','Sales','Purchase','Margin','%','Txns','Last Date'].map(h=>(
-                          <th key={h} className={`px-2 py-2 text-center font-bold ${darkMode?'text-purple-300':'text-purple-700'}`}>{h}</th>
+                        {['#','SO Item','Product','Vendor','Sales','Purchase','Margin','%','Txns','Last Date'].map(h=>(
+                          <th key={h} className={`px-2 py-2 text-center font-bold ${darkMode?'text-blue-300':'text-blue-700'}`}>{h}</th>
                         ))}
                       </tr>
                     </thead>
@@ -2298,14 +1959,14 @@ const App = () => {
                         <tr key={i} className={`${trHov} ${i===0?darkMode?'bg-red-900/20':'bg-red-50':''}`}>
                           <td className={`px-2 py-2 font-bold text-red-600`}>{i+1}</td>
                           <td className="px-2 py-2">
-                            <p className="font-semibold text-purple-600 whitespace-nowrap">{t.item_code||'-'}</p>
+                            <p className="font-semibold text-blue-600 whitespace-nowrap">{t.so_item||'-'}</p>
                           </td>
                           <td className="px-2 py-2">
                             <p className={`truncate max-w-[120px] ${txt}`} title={t.product}>{t.product}</p>
                           </td>
                           <td className={`px-2 py-2 ${txt} truncate max-w-[90px]`} title={t.vendor}>{t.vendor}</td>
                           <td className="px-2 py-2 text-blue-600 whitespace-nowrap">{fmtCurShort(t.sales_amount)}</td>
-                          <td className="px-2 py-2 text-orange-600 whitespace-nowrap">{fmtCurShort(t.purchase_amount)}</td>
+                          <td className={`px-2 py-2 whitespace-nowrap ${kpiValue}`}>{fmtCurShort(t.purchase_amount)}</td>
                           <td className="px-2 py-2 font-bold text-red-600 whitespace-nowrap">{fmtCurShort(t.margin)}</td>
                           <td className="px-2 py-2 font-semibold text-red-500 whitespace-nowrap">{t.margin_pct != null ? `${t.margin_pct}%` : '—'}</td>
                           <td className={`px-2 py-2 text-center ${txt2}`}>{fmtNum(t.count||1)}</td>
@@ -2331,6 +1992,42 @@ const App = () => {
   // ══════════════════════════════════════════════════════════════
   // RENDER DASHBOARD
   // ══════════════════════════════════════════════════════════════
+  const globalSlicerPages = new Set(['dashboard', 'all-so']);
+  const renderGlobalSlicer = () => {
+    if (!globalSlicerPages.has(activePage)) return null;
+    return (
+      <div className="mb-5 grid grid-cols-1 gap-3 xl:grid-cols-2">
+        <DateRangeFilter
+          darkMode={darkMode}
+          txt={txt}
+          txt2={txt2}
+          card={card}
+          value={globalDateFilter}
+          label="Filter SO Create Date"
+          compact
+          onFilter={(f) => setGlobalDateFilter(f)}
+        />
+        <div className={`flex min-h-[64px] flex-wrap items-center justify-start gap-3 px-5 py-3 rounded-xl ${card} shadow xl:justify-end`}>
+          <div className="flex w-full items-center gap-2 sm:w-[260px]">
+            <span className={`shrink-0 text-sm font-semibold ${txt}`}>Client Nm.:</span>
+            <MultiSelect label="Client Nm." options={dashboardFilterOptions.clients || []} selected={globalClientFilter} onChange={setGlobalClientFilter} darkMode={darkMode} txt2={txt2} hideLabel />
+          </div>
+          <div className="flex w-full items-center gap-2 sm:w-[245px]">
+            <span className={`shrink-0 text-sm font-semibold ${txt}`}>PIC Name:</span>
+            <MultiSelect label="PIC Name" options={dashboardFilterOptions.pics || []} selected={globalPicFilter} onChange={setGlobalPicFilter} darkMode={darkMode} txt2={txt2} hideLabel />
+          </div>
+          <button
+            type="button"
+            onClick={() => { setGlobalDateFilter({ mode: 'all' }); setGlobalClientFilter([]); setGlobalPicFilter([]); }}
+            className={`h-10 px-4 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}
+          >
+            Clear Filter
+          </button>
+        </div>
+      </div>
+    );
+  };
+
   const renderDashboard = () => {
     // Apply client-side date filter to dashboard data
     const filteredMonthly = dashDateFilter.mode === 'all'
@@ -2341,10 +2038,10 @@ const App = () => {
           try {
             const d = new Date(m.month);
             const iso = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
-            if (dashDateFilter.mode === 'year') return iso.startsWith(dashDateFilter.year);
-            if (dashDateFilter.mode === 'range') {
-              if (dashDateFilter.start && iso < dashDateFilter.start.slice(0,7)) return false;
-              if (dashDateFilter.end && iso > dashDateFilter.end.slice(0,7)) return false;
+            const bounds = getDateFilterBounds(dashDateFilter);
+            if (bounds.date_from || bounds.date_to) {
+              if (bounds.date_from && iso < bounds.date_from.slice(0,7)) return false;
+              if (bounds.date_to && iso > bounds.date_to.slice(0,7)) return false;
               return true;
             }
           } catch { return true; }
@@ -2354,7 +2051,7 @@ const App = () => {
     return (
     <>
       {/* Date Range Filter + Info Row */}
-      <div className="mb-4">
+        <div className="mb-4">
         <DateRangeFilter
           darkMode={darkMode} txt={txt} txt2={txt2} card={card}
           value={globalDateFilter}
@@ -2362,9 +2059,9 @@ const App = () => {
           onFilter={(f) => { setGlobalDateFilter(f); }}
         />
         {/* Date range info row */}
-        <div className={`-mt-3 mb-4 px-5 py-2.5 rounded-b-xl flex flex-wrap gap-4 text-xs ${darkMode?'bg-gray-800/50':'bg-purple-50/80'} border-x border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
+        <div className={`-mt-3 mb-4 px-5 py-2.5 rounded-b-xl flex flex-wrap gap-4 text-xs ${darkMode?'bg-gray-800/50':'bg-slate-50/90'} border-x border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
           <div className="flex items-center gap-1.5">
-            <Calendar className="w-3.5 h-3.5 text-purple-400"/>
+            <Calendar className="w-3.5 h-3.5 text-blue-400"/>
             <span className={txt2}>PO Range:</span>
             <span className={`font-semibold ${txt}`}>{fmtDateRange(stats?.po_date_range)}</span>
           </div>
@@ -2377,8 +2074,8 @@ const App = () => {
       </div>
 
       {/* KPI Row */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        <div className={`p-5 rounded-2xl shadow hover:shadow-lg transition-all cursor-pointer ${card}`}
+      <div data-tour="kpi-cards" className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
+        <div className={`p-5 rounded-2xl transition-all cursor-pointer hover:border-slate-300 ${card}`}
           onClick={() => {
             setActivePage('all-so');
             setSoPage(1);
@@ -2386,49 +2083,40 @@ const App = () => {
             setTimeout(() => { poTableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 300);
           }}>
           <div className="flex justify-between items-start">
-            <div>
-              <p className={`text-sm font-medium ${txt2}`}>PO HLI without SO</p>
+            <div className="min-w-0 pr-3">
+              <p className={`text-sm font-medium ${txt2}`}>PO without SO</p>
               {/* Use client-side filtered count which excludes CONSUMABLE */}
-              <h3 className="text-3xl font-bold mt-1 text-red-500">{fmtNum(uniquePOCount)}</h3>
+              <h3 className={`text-3xl font-bold mt-1 ${kpiValue}`}>{fmtNum(uniquePOCount)}</h3>
               <p className={`text-xs mt-1 ${txt2}`}>unique PO numbers · click for details</p>
             </div>
-            <div className="p-3 bg-red-100 rounded-xl"><AlertCircle className="w-6 h-6 text-red-500"/></div>
+            <div className={`p-3 rounded-xl ${neutralIcon}`}><AlertCircle className="w-6 h-6"/></div>
           </div>
         </div>
 
-        <div className={`p-5 rounded-2xl shadow hover:shadow-lg transition-all cursor-pointer ${card}`}
-          onClick={() => openModal('SO without PO HLI', `/api/data/so-without-po${(() => {
-            const f = globalDateFilter; if (!f || f.mode === 'all') return '';
-            const p = new URLSearchParams();
-            if (f.mode === 'year') p.append('date_year', f.year);
-            else if (f.mode === 'range') {
-              if (f.start) p.append('date_from', f.start);
-              if (f.end)   p.append('date_to',   f.end);
-            }
-            return p.toString() ? `?${p}` : '';
-          })()}`)}>
+        <div className={`p-5 rounded-2xl transition-all cursor-pointer hover:border-slate-300 ${card}`}
+          onClick={() => openModal('SO without PO', appendDateQuery('/api/data/so-without-po'))}>
           <div className="flex justify-between items-start">
-            <div>
-              <p className={`text-sm font-medium ${txt2}`}>SO without PO HLI</p>
-              <h3 className="text-3xl font-bold mt-1 text-orange-500">{fmtNum(stats?.so_without_po)}</h3>
+            <div className="min-w-0 pr-3">
+              <p className={`text-sm font-medium ${txt2}`}>SO without PO</p>
+              <h3 className={`text-3xl font-bold mt-1 ${kpiValue}`}>{fmtNum(stats?.so_without_po)}</h3>
               <p className={`text-xs mt-1 ${txt2}`}>Click for details</p>
             </div>
-            <div className="p-3 bg-orange-100 rounded-xl"><XCircle className="w-6 h-6 text-orange-500"/></div>
+            <div className={`p-3 rounded-xl ${neutralIcon}`}><XCircle className="w-6 h-6"/></div>
           </div>
         </div>
 
-        <div className={`p-5 rounded-2xl shadow hover:shadow-lg transition-all ${card}`}>
+        <div className={`p-5 rounded-2xl transition-all ${card}`}>
           <div className="flex justify-between items-start">
-            <div>
-              <p className={`text-sm font-medium ${txt2}`}>Total PO HLI Amount</p>
-              <h3 className={`text-xl font-bold mt-1 text-purple-600`}>{fmtCurShort(stats?.total_po_amount)}</h3>
+            <div className="min-w-0 pr-3">
+              <p className={`text-sm font-medium ${txt2}`}>Total PO Amount</p>
+              <h3 className={`text-3xl font-bold mt-1 leading-tight ${kpiValue}`}>{fmtCurShort(stats?.total_po_amount)}</h3>
               <p className={`text-xs mt-1 ${txt2}`}>{fmtCur(stats?.total_po_amount)}</p>
             </div>
-            <div className="p-3 bg-purple-100 rounded-xl"><Coins className="w-6 h-6 text-purple-600"/></div>
+            <div className={`p-3 rounded-xl ${neutralIcon}`}><Coins className="w-6 h-6"/></div>
           </div>
         </div>
 
-        <div className={`p-5 rounded-2xl shadow hover:shadow-lg transition-all cursor-pointer ${card}`}
+        <div className={`p-5 rounded-2xl transition-all cursor-pointer hover:border-slate-300 ${card}`}
           onClick={() => {
             setActivePage('all-so');
             setSoPage(1);
@@ -2436,49 +2124,53 @@ const App = () => {
             window.scrollTo({ top: 0, behavior: 'smooth' });
           }}>
           <div className="flex justify-between items-start">
-            <div>
+            <div className="min-w-0 pr-3">
               <p className={`text-sm font-medium ${txt2}`}>Total SO (Open)</p>
-              <h3 className="text-3xl font-bold mt-1 text-green-600">{fmtNum(stats?.total_so_count)}</h3>
+              <h3 className={`text-3xl font-bold mt-1 ${kpiValue}`}>{fmtNum(stats?.total_so_count)}</h3>
               <p className={`text-xs mt-1 ${txt2}`}>{stats?.so_date_range?.max ? fmtDate(stats.so_date_range.max) : 'No data uploaded'} · click for details</p>
             </div>
-            <div className="p-3 bg-green-100 rounded-xl"><CheckCircle className="w-6 h-6 text-green-600"/></div>
+            <div className={`p-3 rounded-xl ${neutralIcon}`}><CheckCircle className="w-6 h-6"/></div>
           </div>
         </div>
       </div>
 
       {/* Charts Row 1 */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6 items-start">
-        <div className={`p-6 rounded-2xl shadow ${card}`}>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4 items-stretch">
+        <div data-tour="monthly-trend" className={`p-5 rounded-2xl h-full flex flex-col ${card}`}>
           <h3 className={`text-base font-bold mb-4 flex items-center gap-2 ${txt}`}>
-            <TrendingUp className="w-5 h-5 text-purple-600"/> Monthly Open SO Trend
+            <TrendingUp className="w-5 h-5 text-blue-600"/> Monthly Open SO Trend
           </h3>
-          <ResponsiveContainer width="100%" height={190}>
-            <AreaChart data={filteredMonthly}>              <defs>
+          <div className="flex-1 min-h-[220px]">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={filteredMonthly}>
+              <defs>
                 <linearGradient id="cSO" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#8B5CF6" stopOpacity={0.3}/><stop offset="95%" stopColor="#8B5CF6" stopOpacity={0}/>
+                  <stop offset="5%" stopColor="#2563EB" stopOpacity={0.3}/><stop offset="95%" stopColor="#2563EB" stopOpacity={0}/>
                 </linearGradient>
                 <linearGradient id="cAmt" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#F97316" stopOpacity={0.3}/><stop offset="95%" stopColor="#F97316" stopOpacity={0}/>
+                  <stop offset="5%" stopColor="#14B8A6" stopOpacity={0.22}/><stop offset="95%" stopColor="#14B8A6" stopOpacity={0}/>
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={darkMode?'#374151':'#E5E7EB'}/>
               <XAxis dataKey="month" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10}/>
-              <YAxis yAxisId="left" stroke="#8B5CF6" fontSize={10}/>
-              <YAxis yAxisId="right" orientation="right" stroke="#F97316" fontSize={10}/>
+              <YAxis yAxisId="left" stroke="#2563EB" fontSize={10}/>
+              <YAxis yAxisId="right" orientation="right" stroke="#14B8A6" fontSize={10}/>
               <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}}/>
               <Legend iconSize={8} wrapperStyle={{fontSize:'11px'}}/>
-              <Area yAxisId="left" type="monotone" dataKey="so_count" name="SO Count" stroke="#8B5CF6" strokeWidth={2} fill="url(#cSO)"/>
-              <Area yAxisId="right" type="monotone" dataKey="amount" name="Value (IDR Mil)" stroke="#F97316" strokeWidth={2} fill="url(#cAmt)"/>
-            </AreaChart>
+              <Area yAxisId="left" type="monotone" dataKey="so_count" name="SO Count" stroke="#2563EB" strokeWidth={2} fill="url(#cSO)"/>
+              <Area yAxisId="right" type="monotone" dataKey="amount" name="Value (IDR Mil)" stroke="#14B8A6" strokeWidth={2} fill="url(#cAmt)"/>
+              <Line yAxisId="right" type="monotone" dataKey="amount" name="Total Sales Amount" stroke="#14B8A6" strokeWidth={3} dot={{r:4,fill:'#14B8A6'}} activeDot={{r:6, fill:'#14B8A6'}} z={10}/>
+            </ComposedChart>
           </ResponsiveContainer>
+          </div>
         </div>
 
-        <div className="flex flex-col gap-4">
-          <div className={`p-5 rounded-2xl shadow ${card}`}>
+        <div className="flex flex-col gap-4 h-full">
+          <div className={`p-5 rounded-2xl h-full flex flex-col ${card}`}>
             <h3 className={`text-sm font-bold mb-3 flex items-center gap-2 ${txt}`}>
               <BarChart3 className="w-4 h-4 text-blue-600"/> Top 5 Vendors (Open SO)
             </h3>
-            <table className="w-full text-xs">
+            <table className="w-full text-xs flex-1">
               <thead className={tblHd}>
                 <tr>
                   <th className={`p-1.5 text-center font-bold ${txt2}`}>#</th>
@@ -2490,13 +2182,13 @@ const App = () => {
               <tbody className={`divide-y ${tblDv}`}>
                 {(stats?.top_vendors||[]).map((v,i)=>(
                   <tr key={i} className={`${trHov} cursor-pointer`}
-                    onClick={()=>openModal(`Vendor: ${v.vendor}`, `/api/data/top-vendor-detail/${encodeURIComponent(v.vendor)}`)}>
+                    onClick={()=>openModal(`Vendor: ${v.vendor}`, appendDateQuery(`/api/data/top-vendor-detail/${encodeURIComponent(v.vendor)}`))}>
                     <td className="p-1.5">
-                      <span className={`inline-flex items-center justify-center w-6 h-6 rounded text-xs font-bold ${i===0?'bg-yellow-100 text-yellow-700':i===1?'bg-gray-200 text-gray-700':i===2?'bg-orange-100 text-orange-700':'bg-purple-100 text-purple-700'}`}>#{i+1}</span>
+                      <span className={`inline-flex items-center justify-center w-6 h-6 rounded text-xs font-bold ${i===0?'bg-blue-600 text-white':i===1?'bg-slate-200 text-slate-700':i===2?'bg-teal-100 text-teal-700':'bg-blue-100 text-blue-700'}`}>#{i+1}</span>
                     </td>
                     <td className={`p-1.5 font-medium ${txt} max-w-[120px] truncate`} title={v.vendor}>{v.vendor}</td>
-                    <td className="p-1.5 text-center font-bold text-purple-600">{fmtNum(v.so_count)}</td>
-                    <td className="p-1.5 text-center font-bold text-orange-600">{fmtCurShort(v.total_amount)}</td>
+                    <td className={`p-1.5 text-center font-bold ${kpiValue}`}>{fmtNum(v.so_count)}</td>
+                    <td className={`p-1.5 text-center font-bold ${kpiValue}`}>{fmtCurShort(v.total_amount)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -2506,8 +2198,8 @@ const App = () => {
       </div>
 
       {/* Charts Row 2 */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6 items-stretch">
-        <div className={`p-6 rounded-2xl shadow flex flex-col ${card}`}>
+      <div data-tour="status-aging" className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4 items-stretch">
+        <div className={`p-5 rounded-2xl flex flex-col h-full ${card}`}>
           <h3 className={`text-base font-bold mb-4 flex items-center gap-2 ${txt}`}>
             <FileText className="w-5 h-5 text-green-600"/> SO Status Distribution
           </h3>
@@ -2517,13 +2209,14 @@ const App = () => {
             const totByMonth = months.reduce((acc, m) => { acc[m] = rows.reduce((s, r) => s + (r.monthly?.[m] || 0), 0); return acc; }, {});
             const grandTotal  = rows.reduce((s, r) => s + r.total, 0);
             const grandAmount = rows.reduce((s, r) => s + (r.amount || 0), 0);
+            const monthLabel = (m) => { try { const [y,mo] = m.split('-'); return format(new Date(parseInt(y), parseInt(mo)-1, 1), 'MMM yy'); } catch { return m; } };
             return (
               <div className="overflow-auto flex-1">
                 <table className="w-full text-xs" style={{minWidth: months.length > 4 ? `${160 + months.length * 72 + 200}px` : undefined}}>
                   <thead className={`sticky top-0 ${tblHd}`}>
                     <tr>
-                      <th className={`px-3 py-2 text-center font-bold whitespace-nowrap ${txt2} sticky left-0 ${darkMode?'bg-gray-700':'bg-purple-50'}`}>Status</th>
-                      {months.map(m => <th key={m} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{m}</th>)}
+                      <th className={`px-3 py-2 text-center font-bold whitespace-nowrap ${txt2} sticky left-0 ${darkMode?'bg-gray-700':'bg-blue-50'}`}>Status</th>
+                      {months.map(m => <th key={m} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{monthLabel(m)}</th>)}
                       <th className={`px-3 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>Total</th>
                       <th className={`px-3 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>%</th>
                       <th className={`px-3 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>Sales Amount</th>
@@ -2533,16 +2226,16 @@ const App = () => {
                     {rows.map((s, i) => (
                       <tr key={i} className={trHov}>
                         <td
-                          className={`px-3 py-2 font-medium whitespace-nowrap sticky left-0 ${darkMode?'bg-gray-800':'bg-white'} ${txt} cursor-pointer hover:text-purple-600 hover:underline`}
-                          onClick={() => openModal(`SO Status: ${s.name}`, `/api/data/so-status-detail/${encodeURIComponent(s.name)}`)}>
+                          className={`px-3 py-2 font-medium whitespace-nowrap sticky left-0 ${darkMode?'bg-gray-800':'bg-white'} ${txt} cursor-pointer hover:text-blue-600 hover:underline`}
+                          onClick={() => openModal(`SO Status: ${s.name}`, appendDateQuery(`/api/data/so-status-detail/${encodeURIComponent(s.name)}`))}>
                           {s.name}
                         </td>
                         {months.map(m => {
                           const val = s.monthly?.[m];
                           return val ? (
-                            <td key={m} className="px-2 py-2 text-center font-semibold text-white" style={{backgroundColor:'#7C3AED'}}>
+                            <td key={m} className="px-2 py-2 text-center font-semibold text-white" style={{backgroundColor:'#2563EB'}}>
                               <button
-                                onClick={() => openModal(`SO Status: ${s.name} — ${m}`, `/api/data/so-status-detail/${encodeURIComponent(s.name)}?month=${encodeURIComponent(m)}`)}
+                                onClick={() => openModal(`SO Status: ${s.name} — ${m}`, appendDateQuery(`/api/data/so-status-detail/${encodeURIComponent(s.name)}?month=${encodeURIComponent(m)}`))}
                                 className="font-semibold underline-offset-2 hover:underline cursor-pointer text-white w-full">
                                 {fmtNum(val)}
                               </button>
@@ -2551,27 +2244,27 @@ const App = () => {
                             <td key={m} className="px-2 py-2 text-center" style={{backgroundColor: darkMode?'rgba(59,130,246,0.08)':'rgba(219,234,254,0.45)'}}></td>
                           );
                         })}
-                        <td className="px-3 py-2 text-right font-bold text-purple-600">
+                        <td className={`px-3 py-2 text-right font-bold ${kpiValue}`}>
                           <button
-                            onClick={() => openModal(`SO Status: ${s.name}`, `/api/data/so-status-detail/${encodeURIComponent(s.name)}`)}
-                            className="font-bold text-purple-600 hover:underline cursor-pointer">
+                            onClick={() => openModal(`SO Status: ${s.name}`, appendDateQuery(`/api/data/so-status-detail/${encodeURIComponent(s.name)}`))}
+                            className="font-bold text-blue-600 hover:underline cursor-pointer">
                             {fmtNum(s.total)}
                           </button>
                         </td>
-                        <td className="px-3 py-2 text-right text-green-600">{s.percentage}%</td>
-                        <td className="px-3 py-2 text-right text-orange-600 whitespace-nowrap">{fmtCurShort(s.amount)}</td>
+                        <td className={`px-3 py-2 text-right ${txt2}`}>{s.percentage}%</td>
+                        <td className={`px-3 py-2 text-right whitespace-nowrap ${kpiValue}`}>{fmtCurShort(s.amount)}</td>
                       </tr>
                     ))}
                   </tbody>
                   <tfoot className={`${tblHd} font-bold`}>
                     <tr>
-                      <td className={`px-3 py-2 sticky left-0 ${darkMode?'bg-gray-700':'bg-purple-50'} ${txt}`}>TOTAL</td>
+                      <td className={`px-3 py-2 sticky left-0 ${darkMode?'bg-gray-700':'bg-blue-50'} ${txt}`}>TOTAL</td>
                       {months.map(m => (
                         <td key={m} className="px-2 py-2 text-center">
                           {totByMonth[m] ? (
                             <button
-                              onClick={() => openModal(`All Status — ${m}`, `/api/data/so-status-detail-all?month=${encodeURIComponent(m)}`)}
-                              className="font-bold text-purple-600 hover:underline cursor-pointer">
+                              onClick={() => openModal(`All Status — ${m}`, appendDateQuery(`/api/data/so-status-detail-all?month=${encodeURIComponent(m)}`))}
+                              className="font-bold text-blue-600 hover:underline cursor-pointer">
                               {fmtNum(totByMonth[m])}
                             </button>
                           ) : ''}
@@ -2579,13 +2272,13 @@ const App = () => {
                       ))}
                       <td className="px-3 py-2 text-right">
                         <button
-                          onClick={() => openModal('All SO', '/api/data/so-status-detail-all')}
-                          className="font-bold text-purple-600 hover:underline cursor-pointer">
+                          onClick={() => openModal('All SO', appendDateQuery('/api/data/so-status-detail-all'))}
+                          className="font-bold text-blue-600 hover:underline cursor-pointer">
                           {fmtNum(grandTotal)}
                         </button>
                       </td>
-                      <td className="px-3 py-2 text-right text-green-600">100%</td>
-                      <td className="px-3 py-2 text-right text-orange-600 whitespace-nowrap">{fmtCurShort(grandAmount)}</td>
+                      <td className={`px-3 py-2 text-right ${txt2}`}>100%</td>
+                      <td className={`px-3 py-2 text-right whitespace-nowrap ${kpiValue}`}>{fmtCurShort(grandAmount)}</td>
                     </tr>
                   </tfoot>
                 </table>
@@ -2594,8 +2287,8 @@ const App = () => {
           })()}
         </div>
 
-        <div className="flex flex-col gap-4">
-          <div className={`p-5 rounded-2xl shadow ${card}`}>
+        <div className="flex flex-col gap-4 h-full">
+          <div className={`p-5 rounded-2xl ${card}`}>
             <h3 className={`text-sm font-bold mb-3 flex items-center gap-2 ${txt}`}>
               <Building2 className="w-4 h-4 text-green-600"/> Total Open SO per Operation Unit
             </h3>
@@ -2612,8 +2305,8 @@ const App = () => {
                   {(stats?.top_op_units||[]).map((u,i)=>(
                     <tr key={i} className={`${trHov} transition-colors`}>
                       <td className={`p-1.5 font-medium ${txt} max-w-[160px] truncate`} title={u.op_unit}>{u.op_unit}</td>
-                      <td className="p-1.5 text-center font-bold text-purple-600">{fmtNum(u.so_count)}</td>
-                      <td className="p-1.5 text-center font-bold text-orange-600">{fmtCurShort(u.total_amount)}</td>
+                      <td className={`p-1.5 text-center font-bold ${kpiValue}`}>{fmtNum(u.so_count)}</td>
+                      <td className={`p-1.5 text-center font-bold ${kpiValue}`}>{fmtCurShort(u.total_amount)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -2622,19 +2315,19 @@ const App = () => {
           </div>
 
           <div className="grid gap-4 flex-1" style={{gridTemplateColumns:'3fr 2fr'}}>
-            <div className={`p-5 rounded-2xl shadow ${card}`}>
-              <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><BarChart3 className="w-4 h-4 text-orange-600"/> SO Status (Pie)</h3>
+            <div className={`p-5 rounded-2xl ${card}`}>
+              <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><BarChart3 className="w-4 h-4 text-blue-600"/> SO Status (Pie)</h3>
               <StatusPie data={stats?.so_status} darkMode={darkMode}/>
             </div>
             {(() => {
               const agingPieData = [
                 { name:'< 30 Days', value:agingData.reduce((s,v)=>s+(v.less_30||0),0), fill:'#10B981' },
-                { name:'30–90 Days', value:agingData.reduce((s,v)=>s+(v.days_30_90||0),0), fill:'#F59E0B' },
-                { name:'90–180 Days', value:agingData.reduce((s,v)=>s+(v.days_90_180||0),0), fill:'#F97316' },
+                { name:'30-90 Days', value:agingData.reduce((s,v)=>s+(v.days_30_90||0),0), fill:'#0EA5E9' },
+                { name:'90-180 Days', value:agingData.reduce((s,v)=>s+(v.days_90_180||0),0), fill:'#F43F5E' },
                 { name:'> 180 Days', value:agingData.reduce((s,v)=>s+(v.more_180||0),0), fill:'#EF4444' },
               ].filter(d=>d.value>0);
               return (
-                <div className={`p-5 rounded-2xl shadow ${card}`}>
+                <div className={`p-5 rounded-2xl ${card}`}>
                   <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><Calendar className="w-4 h-4 text-red-500"/> SO Aging (Pie)</h3>
                   <div className="w-full overflow-hidden">
                     <ResponsiveContainer width="100%" height={300}>
@@ -2673,27 +2366,28 @@ const App = () => {
               );
             })()}
           </div>
+
         </div>
       </div>
 
       {/* SO Aging Table */}
-      <div className={`p-6 rounded-2xl shadow mb-6 ${card}`}>
+      <div className={`p-5 rounded-2xl mb-4 ${card}`}>
         <h3 className={`text-base font-bold mb-4 flex items-center gap-2 ${txt}`}>
           <Calendar className="w-5 h-5 text-red-600"/> SO Aging — Open SO by Vendor
         </h3>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className={tblHd}>
-              <tr>{['Vendor (SMRO)','< 30 Days','30–90 Days','90–180 Days','> 180 Days','Total Open','Sales Amount'].map(h=>(
+              <tr>{['Vendor','< 30 Days','30–90 Days','90–180 Days','> 180 Days','Total Open','Sales Amount'].map(h=>(
                 <th key={h} className={`p-3 text-center font-bold ${darkMode?'text-gray-200':'text-gray-700'}`}>{h}</th>
               ))}</tr>
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
               {agingData.slice(0,15).map((v,i)=>{
                 const openDetail = (bucket) => {
-                  const url = bucket
+                  const url = appendDateQuery(bucket
                     ? `/api/data/aging-detail/${encodeURIComponent(v.vendor)}?bucket=${encodeURIComponent(bucket)}`
-                    : `/api/data/aging-detail/${encodeURIComponent(v.vendor)}`;
+                    : `/api/data/aging-detail/${encodeURIComponent(v.vendor)}`);
                   const label = bucket ? `${v.vendor} — ${bucket} days` : `Aging Detail: ${v.vendor}`;
                   openModal(label, url);
                 };
@@ -2705,19 +2399,19 @@ const App = () => {
                 ) : <span className={`${colorClass} opacity-40`}>0</span>;
                 return (
                   <tr key={i} className={`${trHov}`}>
-                    <td className={`p-3 font-medium text-xs cursor-pointer hover:text-purple-600 ${txt}`}
+                    <td className={`p-3 font-medium text-xs cursor-pointer hover:text-blue-600 ${txt}`}
                       onClick={()=>openDetail(null)}>{v.vendor}</td>
                     <td className="p-3 text-center">{cellBtn(v.less_30,'0-30','text-green-600')}</td>
-                    <td className="p-3 text-center">{cellBtn(v.days_30_90,'30-90','text-yellow-600')}</td>
-                    <td className="p-3 text-center">{cellBtn(v.days_90_180,'90-180','text-orange-600')}</td>
+                    <td className="p-3 text-center">{cellBtn(v.days_30_90,'30-90',txt2)}</td>
+                    <td className="p-3 text-center">{cellBtn(v.days_90_180,'90-180','text-slate-700')}</td>
                     <td className="p-3 text-center">{cellBtn(v.more_180,'180+','text-red-600')}</td>
                     <td className="p-3 text-center">
                       <button onClick={()=>openDetail(null)}
-                        className="font-bold text-purple-600 hover:underline cursor-pointer">
+                        className="font-bold text-blue-600 hover:underline cursor-pointer">
                         {fmtNum(v.total_open)}
                       </button>
                     </td>
-                    <td className="p-3 text-center font-bold text-orange-600 text-xs">{fmtCurShort(v.sales_amount)}</td>
+                    <td className={`p-3 text-center font-bold text-xs ${kpiValue}`}>{fmtCurShort(v.sales_amount)}</td>
                   </tr>
                 );
               })}
@@ -2731,7 +2425,7 @@ const App = () => {
                 }), {less_30:0,days_30_90:0,days_90_180:0,more_180:0,total_open:0,sales_amount:0});
                 const totCellBtn = (val, bucket, colorClass) => val > 0 ? (
                   <button
-                    onClick={() => openModal(`All Vendors — ${bucket} days`, `/api/data/aging-detail-all?bucket=${encodeURIComponent(bucket)}`)}
+                    onClick={() => openModal(`All Vendors — ${bucket} days`, appendDateQuery(`/api/data/aging-detail-all?bucket=${encodeURIComponent(bucket)}`))}
                     className={`font-bold underline-offset-2 hover:underline cursor-pointer ${colorClass}`}>
                     {fmtNum(val)}
                   </button>
@@ -2740,17 +2434,17 @@ const App = () => {
                   <tr>
                     <td className={`p-3 font-bold ${txt}`}>TOTAL</td>
                     <td className="p-3 text-center">{totCellBtn(tot.less_30,'0-30','text-green-700')}</td>
-                    <td className="p-3 text-center">{totCellBtn(tot.days_30_90,'30-90','text-yellow-700')}</td>
-                    <td className="p-3 text-center">{totCellBtn(tot.days_90_180,'90-180','text-orange-700')}</td>
+                    <td className="p-3 text-center">{totCellBtn(tot.days_30_90,'30-90',txt2)}</td>
+                    <td className="p-3 text-center">{totCellBtn(tot.days_90_180,'90-180','text-slate-700')}</td>
                     <td className="p-3 text-center">{totCellBtn(tot.more_180,'180+','text-red-700')}</td>
                     <td className="p-3 text-center">
                       <button
-                        onClick={() => openModal('All Vendors — All Aging', '/api/data/aging-detail-all')}
-                        className="font-bold text-purple-700 hover:underline cursor-pointer">
+                        onClick={() => openModal('All Vendors — All Aging', appendDateQuery('/api/data/aging-detail-all'))}
+                        className="font-bold text-blue-700 hover:underline cursor-pointer">
                         {fmtNum(tot.total_open)}
                       </button>
                     </td>
-                    <td className="p-3 text-center font-bold text-orange-700 text-xs">{fmtCurShort(tot.sales_amount)}</td>
+                    <td className={`p-3 text-center font-bold text-xs ${kpiValue}`}>{fmtCurShort(tot.sales_amount)}</td>
                   </tr>
                 );
               })()}
@@ -2765,34 +2459,851 @@ const App = () => {
   // ══════════════════════════════════════════════════════════════
   // RENDER ALL SO PAGE
   // ══════════════════════════════════════════════════════════════
+  const renderCompletedNegativeTables = (d = {}) => {
+    const rankBadge = (i) => darkMode ? 'bg-gray-600 text-gray-300' : 'bg-gray-200 text-gray-600';
+    return (
+      <div className="space-y-3">
+        <h3 className={`text-base font-bold ${txt} flex items-center gap-2`}>
+          <TrendingDown className="w-5 h-5 text-red-600"/> Negative Margin
+        </h3>
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+          <div className={`p-5 rounded-2xl ${card}`}>
+            <h3 className={`text-base font-bold mb-4 ${txt}`}>Vendors — Largest Negative Margin</h3>
+            <div className="space-y-3 max-h-[420px] overflow-auto pr-1">
+              {(d.worst_margin_vendors || []).map((v,i)=>(
+                <div key={i} className={`p-3 rounded-xl ${darkMode?'bg-red-900/20':'bg-red-50'}`}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className={`inline-flex h-6 w-6 items-center justify-center rounded text-xs font-bold ${rankBadge(i)}`}>#{i+1}</span>
+                        <p className={`font-semibold truncate ${txt}`} title={v.vendor}>{v.vendor}</p>
+                      </div>
+                      <p className={`text-xs mt-1 ${txt2}`}>{fmtNum(v.count)} transactions · Sales {fmtCurShort(v.total_sales)}</p>
+                    </div>
+                    <span className="text-sm font-bold text-red-600 whitespace-nowrap">{fmtCurShort(v.margin)}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className={`p-5 rounded-2xl ${card}`}>
+            <h3 className={`text-base font-bold mb-4 ${txt}`}>Top 30 Transactions — Largest Negative Margin</h3>
+            <div className="overflow-auto max-h-[420px]">
+              <table className="w-full text-xs">
+                <thead className={`sticky top-0 ${tblHd}`}><tr>{['#','SO Item','Product','Vendor','Sales','PO','Margin','%'].map(h=><th key={h} className={`px-2 py-2 text-center font-bold ${txt2}`}>{h}</th>)}</tr></thead>
+                <tbody className={`divide-y ${tblDv}`}>
+                  {(d.worst_margin_transactions || []).map((t,i)=>(
+                    <tr key={i} className={trHov}>
+                      <td className="px-2 py-2 font-bold text-red-600">{i+1}</td>
+                      <td className="px-2 py-2 font-semibold text-blue-600 whitespace-nowrap">{t.so_item || '-'}</td>
+                      <td className={`px-2 py-2 max-w-[180px] truncate ${txt2}`} title={t.product}>{t.product || '-'}</td>
+                      <td className={`px-2 py-2 max-w-[160px] truncate ${txt2}`} title={t.vendor}>{t.vendor || '-'}</td>
+                      <td className={`px-2 py-2 text-right whitespace-nowrap ${kpiValue}`}>{fmtCurShort(t.sales_amount)}</td>
+                      <td className={`px-2 py-2 text-right whitespace-nowrap ${kpiValue}`}>{fmtCurShort(t.purchase_amount)}</td>
+                      <td className="px-2 py-2 text-right font-bold text-red-600 whitespace-nowrap">{fmtCurShort(t.margin)}</td>
+                      <td className="px-2 py-2 text-right font-semibold text-red-600 whitespace-nowrap">{t.margin_pct == null ? '-' : `${t.margin_pct}%`}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderDashboardOverview = () => {
+    const d = completedData || {};
+    
+    // Create full 12-month array for current year
+    const currentYear = new Date().getFullYear();
+    const monthlyDataMap = {};
+    (d.monthly_trend || []).forEach(m => {
+      if (m.month) monthlyDataMap[m.month] = m;
+    });
+    
+    const monthlyCompleted = Array.from({ length: 12 }, (_, i) => {
+      const monthKey = `${currentYear}-${String(i + 1).padStart(2, '0')}`;
+      const monthName = format(new Date(currentYear, i, 1), 'MMMM');
+      const existing = monthlyDataMap[monthKey];
+      
+      if (existing) {
+        const margin = (existing.sales_amount || 0) - (existing.purchase_amount || 0);
+        return {
+          ...existing,
+          monthLabel: monthName,
+          margin,
+          margin_pct: existing.sales_amount ? margin / existing.sales_amount * 100 : null
+        };
+      }
+      
+      return {
+        month: monthKey,
+        monthLabel: monthName,
+        sales_amount: null,
+        purchase_amount: null,
+        margin: null,
+        margin_pct: null,
+        count: null
+      };
+    });
+    
+    const marginPct = d.total_sales ? ((d.total_margin || 0) / d.total_sales * 100) : null;
+    const fmtM = (v) => v >= 1e9 ? `${(v/1e9).toFixed(1)}B` : v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `${(v/1e3).toFixed(0)}K` : String(Math.round(v || 0));
+    const purchaseYoyYears = (d.purchase_yoy_years && d.purchase_yoy_years.length)
+      ? d.purchase_yoy_years
+      : [currentYear - 1, currentYear - 2];
+    const purchaseYoyData = (d.purchase_yoy_trend && d.purchase_yoy_trend.length)
+      ? d.purchase_yoy_trend
+      : Array.from({ length: 12 }, (_, i) => ({
+          month: i + 1,
+          month_label: format(new Date(currentYear, i, 1), 'MMMM'),
+          ...purchaseYoyYears.reduce((acc, year) => ({ ...acc, [`purchase_${year}`]: 0 }), {})
+        }));
+    const activePurchaseYoyYears = purchaseYoyYears.filter(year =>
+      purchaseYoyData.some(row => Number(row[`purchase_${year}`] || 0) > 0)
+    );
+    const completedTrendData = monthlyCompleted.map((m, i) => {
+      const yoyRow = purchaseYoyData[i] || {};
+      const yoyValues = purchaseYoyYears.reduce((acc, year) => {
+        const value = Number(yoyRow[`purchase_${year}`] || 0);
+        acc[`purchase_${year}`] = value > 0 ? value : null;
+        return acc;
+      }, {});
+      return { ...m, ...yoyValues };
+    });
+    const purchaseYoyColors = ['#14B8A6', '#0F766E'];
+    const completedTrendLegendPayload = [
+      { value: 'PO Amount', type: 'rect', color: '#93C5FD', dataKey: 'purchase_amount' },
+      { value: 'Sales Amount', type: 'rect', color: '#2563EB', dataKey: 'sales_amount' },
+      ...activePurchaseYoyYears.map((year, i) => ({
+        value: `Purchase ${year}`,
+        type: 'line',
+        color: purchaseYoyColors[i % purchaseYoyColors.length],
+        dataKey: `purchase_${year}`,
+      })),
+    ];
+    const sumRows = (rows, key) => (rows || []).reduce((sum, row) => sum + (Number(row?.[key]) || 0), 0);
+    const barList = (rows, labelKey, valueKey, label, color) => (
+      <ResponsiveContainer width="100%" height={260}>
+        <BarChart data={(rows || []).map(r => ({...r, shortLabel: String(r[labelKey] || '-').slice(0, 32)}))} layout="vertical" margin={{top: 8, right: 18, left: 8, bottom: 8}}>
+          <CartesianGrid strokeDasharray="3 3" horizontal={true} stroke={darkMode?'#374151':'#E5E7EB'}/>
+          <XAxis type="number" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={12} tickFormatter={fmtM}/>
+          <YAxis type="category" dataKey="shortLabel" width={190} stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={12} tick={{fontSize: 12, textAnchor: 'end'}} tickMargin={8}/>
+          <Tooltip formatter={(v)=>[fmtCur(v), label]} labelFormatter={(_, payload)=>payload?.[0]?.payload?.[labelKey] || '-'} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
+          <Bar dataKey={valueKey} name={label} fill={color} radius={[0,6,6,0]}/>
+        </BarChart>
+      </ResponsiveContainer>
+    );
+
+    return (
+      <div className="space-y-5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
+          {[
+            { label:'Total PO', value: fmtNum(stats?.total_po_count), sub: `${fmtNum(stats?.total_po_line_count)} line items`, icon:<FileText className="w-5 h-5"/> },
+            { label:'PO Amount', value: fmtCurShort(stats?.total_po_amount), sub: fmtCur(stats?.total_po_amount), icon:<Coins className="w-5 h-5"/> },
+            { label:'Sales Amount', value: fmtCurShort(d.total_sales), sub: fmtCur(d.total_sales), icon:<Wallet className="w-5 h-5"/> },
+            { label:'Margin', value: fmtCurShort(d.total_margin), sub: marginPct == null ? 'Avg margin -' : `Avg margin ${marginPct.toFixed(1)}%`, icon:<TrendingUp className="w-5 h-5"/> },
+            { label:'Total Pending Delivery', value: fmtNum(stats?.total_so_count), sub: 'Pending delivery records', icon:<Package className="w-5 h-5"/>, goPending:true },
+          ].map((k,i)=>{
+            const Wrapper = k.goPending ? 'button' : 'div';
+            return <Wrapper key={i} type={k.goPending ? 'button' : undefined} onClick={k.goPending ? () => { setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter); window.scrollTo({top:0, behavior:'smooth'}); } : undefined} className={`p-5 rounded-2xl text-left ${card} ${k.goPending ? 'cursor-pointer transition-all hover:border-blue-300' : ''}`}><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className={`text-sm font-medium ${txt2}`}>{k.label}</p><h3 className={`text-2xl font-bold mt-1 ${kpiValue}`}>{k.value}</h3><p className={`text-xs mt-1 ${txt2}`}>{k.sub}</p></div><div className={`p-2.5 rounded-xl ${neutralIcon}`}>{k.icon}</div></div></Wrapper>;
+          })}
+        </div>
+        <div className={`p-5 rounded-2xl ${card}`}>
+          <h3 className={`text-base font-bold mb-1 ${txt}`}>Monthly Trend Delivery Complete</h3>
+          <p className={`text-xs mb-4 ${txt2}`}>Current year sales and purchase amount, with YoY purchase amount lines.</p>
+          <ResponsiveContainer width="100%" height={320}>
+            <ComposedChart data={completedTrendData} barGap={2} margin={{ top: 8, right: 20, left: 0, bottom: 4 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={darkMode?'#374151':'#E5E7EB'}/>
+              <XAxis dataKey="monthLabel" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10}/>
+              <YAxis stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10} tickFormatter={fmtM}/>
+              <Tooltip formatter={(v,n)=>[fmtCur(v), n]} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
+              <Legend wrapperStyle={{fontSize:12}} payload={completedTrendLegendPayload}/>
+              <Bar dataKey="purchase_amount" name="PO Amount" fill="#93C5FD" radius={[4,4,0,0]}/>
+              <Bar dataKey="sales_amount" name="Sales Amount" fill="#2563EB" radius={[4,4,0,0]}/>
+              {activePurchaseYoyYears.map((year, i) => (
+                <Line
+                  key={year}
+                  type="monotone"
+                  dataKey={`purchase_${year}`}
+                  name={`Purchase ${year}`}
+                  stroke={purchaseYoyColors[i % purchaseYoyColors.length]}
+                  strokeWidth={3}
+                  dot={{ r: 3, fill: purchaseYoyColors[i % purchaseYoyColors.length] }}
+                  activeDot={{ r: 6 }}
+                />
+              ))}
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+        <div className={`p-5 rounded-2xl ${card}`}><h3 className={`text-base font-bold mb-4 ${txt}`}>Margin by Month</h3><div className="overflow-x-auto"><table className="w-full text-sm"><thead className={tblHd}><tr><th className={`px-3 py-2 text-left font-bold ${txt2}`}>Metric</th>{monthlyCompleted.map((m,i)=><th key={i} className={`px-3 py-2 text-center font-bold ${txt2}`}>{m.monthLabel}</th>)}</tr></thead><tbody className={`divide-y ${tblDv}`}><tr className={trHov}><td className={`px-3 py-2 font-semibold ${txt}`}>Sales Amount</td>{monthlyCompleted.map((m,i)=><td key={i} className={`px-3 py-2 text-center ${kpiValue}`}>{m.sales_amount != null ? fmtCurShort(m.sales_amount) : '-'}</td>)}</tr><tr className={trHov}><td className={`px-3 py-2 font-semibold ${txt}`}>PO Amount</td>{monthlyCompleted.map((m,i)=><td key={i} className={`px-3 py-2 text-center ${kpiValue}`}>{m.purchase_amount != null ? fmtCurShort(m.purchase_amount) : '-'}</td>)}</tr><tr className={trHov}><td className={`px-3 py-2 font-semibold ${txt}`}>Margin</td>{monthlyCompleted.map((m,i)=><td key={i} className={`px-3 py-2 text-center font-semibold ${m.margin != null ? (m.margin < 0 ? 'text-red-600' : 'text-green-600') : txt2}`}>{m.margin != null ? fmtCurShort(m.margin) : '-'}</td>)}</tr><tr className={trHov}><td className={`px-3 py-2 font-semibold ${txt}`}>Margin %</td>{monthlyCompleted.map((m,i)=><td key={i} className={`px-3 py-2 text-center font-semibold ${m.margin_pct != null ? (m.margin < 0 ? 'text-red-600' : 'text-green-600') : txt2}`}>{m.margin_pct != null ? `${m.margin_pct.toFixed(1)}%` : '-'}</td>)}</tr></tbody></table></div></div>
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-5"><div className={`p-5 rounded-2xl ${card}`}><h3 className={`text-base font-bold ${txt}`}>Top 5 Vendor PO Amount</h3><p className={`text-xs mb-4 ${txt2}`}>Total: {fmtCurShort(sumRows(d.top_vendors, 'purchase_amount'))}</p>{barList(d.top_vendors, 'vendor', 'purchase_amount', 'PO Amount', '#2563EB')}</div><div className={`p-5 rounded-2xl ${card}`}><h3 className={`text-base font-bold ${txt}`}>Top 5 Client Sales Amount</h3><p className={`text-xs mb-4 ${txt2}`}>Total: {fmtCurShort(sumRows(d.top_clients, 'sales_amount'))}</p>{barList(d.top_clients, 'client', 'sales_amount', 'Sales Amount', '#14B8A6')}</div></div>
+        {renderPendingDeliverySummary()}
+        {renderCompletedNegativeTables(d)}
+      </div>
+    );
+  };
+
+  const renderAllRegisteredItems = () => {
+    const totalPages = Math.max(1, Math.ceil(registeredItemsTotal / registeredItemsPerPage));
+    const columns = [
+      ['Product ID', 'prod_id'],
+      ['Category', 'category'],
+      ['PIC', 'pic'],
+      ['Product Name', 'prod_name'],
+      ['Specification', 'spec'],
+      ['Manufacturer Name', 'mfr_name'],
+      ['Order Unit', 'odr_unit'],
+      ['HUB Handling Check', 'hub_handling_check'],
+      ['Tax Type', 'tax_type'],
+      ['Registration Date', 'registration_date'],
+      ['Product Registry PIC', 'product_registry_pic'],
+    ];
+
+    const handleClear = () => {
+      setRegisteredItemsSearch('');
+      setRegisteredItemsAppliedSearch('');
+      setRegisteredItemsProdIds([]);
+      setRegisteredItemsAppliedProdIds([]);
+      setRegisteredItemsPage(1);
+      fetchRegisteredItems(1, registeredItemsPerPage, '', []);
+    };
+
+    const downloadRegisteredExcel = () => {
+      const p = new URLSearchParams();
+      if (registeredItemsAppliedSearch) p.append('search', registeredItemsAppliedSearch);
+      (registeredItemsAppliedProdIds || []).forEach(v => p.append('prod_id', v));
+      downloadBlob(`/api/export/all-registered-items?${p}`, `All_Registered_Items_${new Date().toISOString().slice(0,10)}.xlsx`, 'All Registered Items');
+    };
+
+    const fmtDateShort = (d) => {
+      if (!d) return '-';
+      try { return d.slice(0, 10); } catch { return d; }
+    };
+    const fmtProductId = (v) => {
+      if (v == null || v === '') return '-';
+      return String(v).replace(/\.0+$/, '');
+    };
+
+    return (
+      <div className={`rounded-2xl overflow-hidden ${card}`}>
+        <div className={`px-5 py-4 border-b ${darkMode ? 'border-gray-700' : 'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+          <div className="flex items-center gap-2 min-w-0">
+            <Package className="w-5 h-5 text-blue-500 flex-shrink-0" />
+            <h2 className={`text-lg font-bold ${txt}`}>All Registered Items</h2>
+            <span className={`text-sm ${txt2}`}>({fmtNum(registeredItemsTotal)} records)</span>
+          </div>
+          <DownloadButton onClick={downloadRegisteredExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
+            <Download className="w-4 h-4"/>Download Excel
+          </DownloadButton>
+        </div>
+
+        <div className={`px-5 py-3 border-b ${darkMode ? 'border-gray-700 bg-gray-800/60' : 'border-gray-100 bg-[#f6f6f4]'}`}>
+          <div className="flex flex-wrap gap-2 items-end">
+            <div className="w-full sm:w-[280px]">
+              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search</label>
+              <input
+                value={registeredItemsSearch}
+                onChange={e => setRegisteredItemsSearch(e.target.value)}
+                placeholder="Name, spec, manufacturer..."
+                className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}
+              />
+            </div>
+            <div className="w-full sm:w-[170px]">
+              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Prod ID</label>
+              <SearchInput
+                key={`registered-prod-id-${registeredItemsProdIds.join('|')}`}
+                placeholder={'8381684\n8382076'}
+                label="Prod ID"
+                darkMode={darkMode}
+                txt2={txt2}
+                onSearch={(nums) => {
+                  setRegisteredItemsProdIds(nums);
+                  setRegisteredItemsAppliedProdIds(nums);
+                  setRegisteredItemsPage(1);
+                  fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, nums);
+                }}
+              />
+            </div>
+            <button onClick={() => { setRegisteredItemsAppliedSearch(registeredItemsSearch); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsSearch, registeredItemsAppliedProdIds); }} className="w-[90px] h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">
+              Search
+            </button>
+            <button onClick={handleClear} className={`w-[110px] h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>
+              Clear Search
+            </button>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <colgroup>
+              <col style={{minWidth:'120px'}}/>
+              <col style={{minWidth:'140px'}}/>
+              <col style={{minWidth:'80px'}}/>
+              <col style={{minWidth:'160px'}}/>
+              <col style={{minWidth:'280px'}}/>
+              <col style={{minWidth:'180px'}}/>
+              <col style={{minWidth:'80px'}}/>
+              <col style={{minWidth:'100px'}}/>
+              <col style={{minWidth:'100px'}}/>
+              <col style={{minWidth:'140px'}}/>
+              <col style={{minWidth:'160px'}}/>
+            </colgroup>
+            <thead className={tblHd}>
+              <tr>
+                {columns.map(([label]) => (
+                  <th key={label} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className={`divide-y ${tblDv}`}>
+              {registeredItemsData.length === 0 ? (
+                <tr>
+                  <td colSpan={columns.length} className={`px-4 py-12 text-center ${txt2}`}>
+                    <Package className="w-10 h-10 mx-auto mb-2 opacity-40" />No registered item data
+                  </td>
+                </tr>
+              ) : registeredItemsData.map(row => (
+                <tr key={row.id} className={`${trHov} transition-colors`}>
+                  <td className="px-2 py-2 font-mono text-blue-600 whitespace-nowrap">{fmtProductId(row.prod_id)}</td>
+                  <td className={`px-2 py-2 ${txt2}`} title={row.category}>{row.category || '-'}</td>
+                  <td className="px-2 py-2 text-center whitespace-nowrap">
+                    {row.pic ? (() => {
+                      const c = getPicColor(row.pic);
+                      return <span className={`px-1.5 py-0.5 rounded-full text-xs font-semibold ${c ? `${c.bg} ${c.text}` : 'bg-gray-100 text-gray-700'}`}>{row.pic}</span>;
+                    })() : <span className={txt2}>-</span>}
+                  </td>
+                  <td className={`px-2 py-2 max-w-[160px] truncate ${txt}`} title={row.prod_name}>{row.prod_name || '-'}</td>
+                  <td className={`px-2 py-2 max-w-[280px] truncate ${txt2}`} title={row.spec}>{row.spec || '-'}</td>
+                  <td className={`px-2 py-2 max-w-[180px] truncate ${txt2}`} title={row.mfr_name}>{row.mfr_name || '-'}</td>
+                  <td className={`px-2 py-2 text-center whitespace-nowrap ${txt2}`}>{row.odr_unit || '-'}</td>
+                  <td className={`px-2 py-2 text-center whitespace-nowrap ${txt2}`}>{row.hub_handling_check || '-'}</td>
+                  <td className={`px-2 py-2 text-center whitespace-nowrap ${txt2}`}>{row.tax_type || '-'}</td>
+                  <td className={`px-2 py-2 whitespace-nowrap ${txt2}`}>{fmtDateShort(row.registration_date)}</td>
+                  <td className={`px-2 py-2 max-w-[160px] truncate ${txt2}`} title={row.product_registry_pic}>{row.product_registry_pic || '-'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className={`px-5 py-3 border-t ${darkMode ? 'border-gray-700' : 'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+          <div className="flex items-center gap-3">
+            <span className={`text-sm ${txt2}`}>Showing {registeredItemsTotal ? (registeredItemsPage - 1) * registeredItemsPerPage + 1 : 0}-{Math.min(registeredItemsPage * registeredItemsPerPage, registeredItemsTotal)} of {fmtNum(registeredItemsTotal)}</span>
+            <label className={`flex items-center gap-1 text-xs ${txt2}`}>Rows
+              <select className={`px-2 py-1 rounded-lg text-xs border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200'}`} value={registeredItemsPerPage} onChange={e => {
+                const next = Number(e.target.value);
+                setRegisteredItemsPerPage(next);
+                setRegisteredItemsPage(1);
+                fetchRegisteredItems(1, next, registeredItemsAppliedSearch, registeredItemsAppliedProdIds);
+              }}>
+                <option value={15}>15</option><option value={50}>50</option><option value={100}>100</option><option value={500}>500</option>
+              </select>
+            </label>
+          </div>
+          <div className="flex gap-1 items-center">
+            <button disabled={registeredItemsPage === 1} onClick={() => {
+              const p = registeredItemsPage - 1;
+              setRegisteredItemsPage(p);
+              fetchRegisteredItems(p, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds);
+            }} className={`p-1.5 rounded ${registeredItemsPage === 1 ? 'opacity-40' : 'hover:bg-blue-100'}`}><ChevronLeft className="w-4 h-4" /></button>
+            <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode ? 'bg-gray-700 text-white' : 'bg-blue-100 text-blue-700'}`}>{registeredItemsPage}/{totalPages}</span>
+            <button disabled={registeredItemsPage === totalPages} onClick={() => {
+              const p = registeredItemsPage + 1;
+              setRegisteredItemsPage(p);
+              fetchRegisteredItems(p, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds);
+            }} className={`p-1.5 rounded ${registeredItemsPage === totalPages ? 'opacity-40' : 'hover:bg-blue-100'}`}><ChevronRight className="w-4 h-4" /></button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderItemRegistration = () => {
+    const columns = [
+      ['Proc. Status', 'proc_status'], ['Client Nm.', 'client_name'], ['Category', 'category'], ['PIC', 'pic'],
+      ['Req. No', 'req_no'], ['Prod. ID', 'prod_id'], ['Prod. Nm.', 'prod_name'],
+      ['Spec.', 'spec'], ['Mfr. Nm.', 'mfr_name'], ['Unit', 'odr_unit'],
+      ['Prod. Price', 'prod_price'], ['Curr.', 'curr'], ['Remarks', 'remarks']
+    ];
+    const statusClass = (status) => {
+      const s = String(status || '').toLowerCase();
+      if (s.includes('complete')) return 'bg-green-100 text-green-700 border-green-200';
+      if (s.includes('waiting')) return 'bg-slate-100 text-slate-700 border-slate-200';
+      if (s.includes('receive')) return 'bg-sky-100 text-sky-700 border-sky-200';
+      if (s.includes('process') || s.includes('proc')) return 'bg-blue-100 text-blue-700 border-blue-200';
+      if (s.includes('reject') || s.includes('cancel')) return 'bg-red-100 text-red-700 border-red-200';
+      return 'bg-gray-100 text-gray-700 border-gray-200';
+    };
+    const totalMissingProdId = itemRegMissingPicKpis.reduce((sum, row) => sum + (Number(row.count) || 0), 0);
+    const itemRegPicKpis = [
+      { pic: 'Total Pending Regist.', count: totalMissingProdId, sub: 'Items Pending', isTotal: true },
+      ...itemRegMissingPicKpis.map(row => ({ pic: row.pic, count: row.count, sub: 'Items Pending' }))
+    ];
+    const colWidth = (key) => ({
+      proc_status: '9%', client_name: '10%', category: '8%', pic: '5%', req_no: 'auto', prod_id: '5%',
+      prod_name: 'auto', spec: '15%', mfr_name: '6%', odr_unit: '4%',
+      prod_price: '5%', curr: '3%', remarks: '18%'
+    }[key] || 'auto');
+
+    return (
+      <div className={`rounded-2xl overflow-hidden ${card}`}>
+        <div className={`px-5 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+          <div className="flex items-center gap-2 min-w-0">
+            <Award className="w-5 h-5 text-blue-500 flex-shrink-0"/>
+            <h2 className={`text-lg font-bold ${txt}`}>Item Registration</h2>
+            <span className={`text-sm ${txt2}`}>({fmtNum(itemRegTotal)} records)</span>
+            {itemRegLastUpdated && <span className={`text-xs ${txt2}`}>Last update: {fmtDate(itemRegLastUpdated)}</span>}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button onClick={downloadItemRegistrationTemplate} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
+              <Download className="w-4 h-4"/>Template
+            </button>
+            <label className="flex items-center gap-2 px-3 py-2.5 bg-slate-600 hover:bg-slate-700 text-white rounded-xl text-sm font-semibold shadow-sm cursor-pointer">
+              <FileSpreadsheet className="w-4 h-4"/>Batch Upload
+              <input type="file" accept=".xlsx,.xls" onChange={handleItemRegistrationBatchUpload} className="hidden"/>
+            </label>
+            <DownloadButton onClick={downloadItemRegistrationExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
+              <Download className="w-4 h-4"/>Download Excel
+            </DownloadButton>
+          </div>
+        </div>
+
+        <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-3">
+            {itemRegPicKpis.slice(0, 8).map((row) => {
+              return (
+                <div key={row.pic} className={`p-4 rounded-2xl transition-all ${row.isTotal ? (darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200') : card}`}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className={`text-xs font-semibold truncate ${row.isTotal ? (darkMode ? 'text-gray-200' : 'text-gray-700') : txt2}`} title={row.pic}>{row.pic}</p>
+                      <h3 className={`text-2xl font-bold mt-0.5 ${row.isTotal ? (darkMode ? 'text-gray-100' : 'text-gray-800') : kpiValue}`}>{fmtNum(row.count)}</h3>
+                      <p className={`text-[11px] mt-0.5 ${txt2}`}>{row.sub}</p>
+                    </div>
+                    <div className={`p-2.5 rounded-xl ${row.isTotal ? (darkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-100 text-gray-600') : neutralIcon}`}>
+                      <Package className="w-4 h-4" />
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700 bg-gray-800/60':'border-gray-100 bg-[#f6f6f4]'}`}>
+          <div className="flex flex-wrap xl:flex-nowrap gap-2 items-end">
+            <div className="w-full sm:w-[170px] xl:w-[170px]">
+              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Req No.</label>
+              <SearchInput
+                key={`item-req-no-${itemRegSearch.join('|')}`}
+                placeholder={'REQ001\nREQ002'}
+                label="Req No."
+                darkMode={darkMode}
+                txt2={txt2}
+                onSearch={(nums) => {
+                  setItemRegSearch(nums);
+                  setItemRegAppliedSearch(nums);
+                  setItemRegPage(1);
+                  fetchItemRegistration(1, itemRegPerPage, nums, itemRegFilters);
+                }}
+              />
+            </div>
+            <div className="w-full sm:w-[190px] xl:w-[190px]">
+              <MultiSelect label="Proc. Status" options={itemRegOptions.proc_statuses} selected={itemRegFilters.proc_statuses}
+                onChange={v=>{ const next={...itemRegFilters, proc_statuses:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="w-full sm:w-[190px] xl:w-[190px]">
+              <MultiSelect label="Client Name" options={itemRegOptions.clients} selected={itemRegFilters.clients}
+                onChange={v=>{ const next={...itemRegFilters, clients:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="w-full sm:w-[180px] xl:w-[180px]">
+              <MultiSelect label="Category" options={itemRegOptions.categories} selected={itemRegFilters.categories}
+                onChange={v=>{ const next={...itemRegFilters, categories:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="w-full sm:w-[160px] xl:w-[160px]">
+              <MultiSelect label="PIC" options={itemRegOptions.pics} selected={itemRegFilters.pics}
+                onChange={v=>{ const next={...itemRegFilters, pics:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <button onClick={() => { const next={ clients: [], categories: [], pics: [], proc_statuses: [] }; setItemRegSearch([]); setItemRegAppliedSearch([]); setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1, itemRegPerPage, [], next); }}
+              className={`w-[118px] h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear Filter</button>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="min-w-[1900px] table-fixed text-xs">
+            <colgroup>{columns.map(([, key]) => <col key={key} style={{ width: colWidth(key) }}/>)}</colgroup>
+            <thead className={tblHd}><tr>{columns.map(([label, key]) => <th key={label} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{label}</th>)}</tr></thead>
+            <tbody className={`divide-y ${tblDv}`}>
+              {itemRegData.length === 0 ? <tr><td colSpan={columns.length} className={`px-4 py-12 text-center ${txt2}`}><Award className="w-10 h-10 mx-auto mb-2 opacity-40"/>No Item Registration data</td></tr>
+              : itemRegData.map(row => <tr key={row.id} className={`${trHov} transition-colors`}>
+                {columns.map(([, key]) => {
+                  const value = key === 'prod_price' ? fmtNum(row[key]) : (row[key] || '-');
+                  if (key === 'proc_status') return <td key={key} className="px-2 py-2"><span className={`inline-flex max-w-full items-center px-2 py-0.5 rounded-full border text-[11px] font-semibold leading-snug truncate ${statusClass(row[key])}`}>{value}</span></td>;
+                  if (key === 'pic') {
+                    const c = getPicColor(row.pic);
+                    return <td key={key} className="px-2 py-2 text-center truncate">{row.pic ? <span className={`inline-flex max-w-full truncate px-2 py-0.5 rounded-full text-[11px] font-semibold ${c ? `${c.bg} ${c.text}` : 'bg-gray-100 text-gray-700'}`}>{row.pic}</span> : <span className={txt2}>-</span>}</td>;
+                  }
+                  if (key === 'remarks') return <td key={key} className="px-2 py-2 truncate" title={row.remarks}>{editingCell?.id===row.id && editingCell.field==='item_remarks' ? (
+                    <input type="text" defaultValue={row.remarks}
+                      className={`w-full px-2 py-1 rounded text-xs border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                      onChange={e=>setEditValue(e.target.value)}
+                      onBlur={()=>updateItemRegistrationCell(row.id,'remarks',editValue)}
+                      onKeyDown={e=>{ if(e.key==='Enter') updateItemRegistrationCell(row.id,'remarks',editValue); if(e.key==='Escape') setEditingCell(null); }}
+                      autoFocus/>
+                  ) : (
+                    <span className="cursor-pointer text-blue-600 hover:underline" onClick={()=>{setEditingCell({id:row.id,field:'item_remarks'});setEditValue(row.remarks||'');}}>{row.remarks||'✏️ Add'}</span>
+                  )}</td>;
+                  return <td key={key} className={`px-2 py-2 ${['req_no','prod_name'].includes(key) ? '' : 'truncate'} ${key === 'prod_price' ? `text-right font-semibold ${kpiValue}` : txt2} ${['req_no','prod_id','prod_name','odr_unit','curr'].includes(key) ? 'whitespace-nowrap' : ''}`} title={row[key]}>{value}</td>;
+                })}
+              </tr>)}
+            </tbody>
+          </table>
+        </div>
+
+        <div className={`px-5 py-3 border-t ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+          <div className="flex items-center gap-3">
+            <span className={`text-sm ${txt2}`}>Showing {itemRegTotal ? (itemRegPage-1)*itemRegPerPage+1 : 0}-{Math.min(itemRegPage*itemRegPerPage,itemRegTotal)} of {fmtNum(itemRegTotal)}</span>
+            <label className={`flex items-center gap-1 text-xs ${txt2}`}>Rows
+              <select className={`px-2 py-1 rounded-lg text-xs border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-200'}`} value={itemRegPerPage} onChange={e=>{ const next=Number(e.target.value); setItemRegPerPage(next); setItemRegPage(1); fetchItemRegistration(1,next,itemRegAppliedSearch,itemRegFilters); }}>
+                <option value={10}>10</option><option value={25}>25</option><option value={50}>50</option><option value={100}>100</option><option value={500}>500</option>
+              </select>
+            </label>
+          </div>
+          <div className="flex gap-1 items-center">
+            <button disabled={itemRegPage===1} onClick={()=>{ const p=itemRegPage-1; setItemRegPage(p); fetchItemRegistration(p,itemRegPerPage,itemRegAppliedSearch,itemRegFilters); }} className={`p-1.5 rounded ${itemRegPage===1?'opacity-40':'hover:bg-blue-100'}`}><ChevronLeft className="w-4 h-4"/></button>
+            <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-blue-100 text-blue-700'}`}>{itemRegPage}/{itemRegTotalPages}</span>
+            <button disabled={itemRegPage===itemRegTotalPages} onClick={()=>{ const p=itemRegPage+1; setItemRegPage(p); fetchItemRegistration(p,itemRegPerPage,itemRegAppliedSearch,itemRegFilters); }} className={`p-1.5 rounded ${itemRegPage===itemRegTotalPages?'opacity-40':'hover:bg-blue-100'}`}><ChevronRight className="w-4 h-4"/></button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderPendingDeliverySummary = () => {
+    const agingTotals = agingData.reduce((acc, v) => ({
+      less_30: acc.less_30 + (v.less_30 || 0),
+      days_30_90: acc.days_30_90 + (v.days_30_90 || 0),
+      days_90_180: acc.days_90_180 + (v.days_90_180 || 0),
+      more_180: acc.more_180 + (v.more_180 || 0),
+    }), { less_30:0, days_30_90:0, days_90_180:0, more_180:0 });
+    const pendingMonthly = (stats?.monthly_trend || []).map(m => ({...m, amount_idr: (m.amount || 0) * 1_000_000}));
+    const statusMonths = stats?.status_months || [];
+    const statusMonthlyRows = stats?.so_status_monthly || [];
+    const itemRegProcStatus = stats?.item_registration_proc_status || [];
+    const itemRegClients = stats?.item_registration_clients || [];
+    const pendingVendors = stats?.top_vendors || [];
+    const sumRows = (rows, key) => (rows || []).reduce((sum, row) => sum + (Number(row?.[key]) || 0), 0);
+    const pendingMonthlyTotal = sumRows(pendingMonthly, 'so_count');
+    const pendingMonthlyAmount = sumRows(pendingMonthly, 'amount') * 1_000_000;
+    const pendingVendorTotal = sumRows(pendingVendors, 'so_count');
+    const pendingVendorAmount = sumRows(pendingVendors, 'total_amount');
+    const pendingStatusTotal = sumRows(statusMonthlyRows, 'total');
+    const pendingStatusAmount = sumRows(statusMonthlyRows, 'amount');
+    const itemRegCategoryChart = (rows, title, color) => {
+      const data = (rows || []).map(r => ({
+        ...r,
+        shortLabel: String(r.name || '-').slice(0, 32),
+        value: Number(r.value || 0),
+      }));
+      const total = sumRows(data, 'value');
+      const height = Math.max(240, data.length * 34 + 56);
+      return (
+        <div className={`p-5 rounded-2xl ${card}`}>
+          <h3 className={`text-base font-bold ${txt}`}>{title}</h3>
+          <p className={`text-xs mb-4 ${txt2}`}>Total: {fmtNum(total)} Req. No</p>
+          {data.length === 0 ? (
+            <div className={`h-[220px] flex items-center justify-center text-sm ${txt2}`}>No Item Registration data</div>
+          ) : (
+            <ResponsiveContainer width="100%" height={height}>
+              <BarChart data={data} layout="vertical" margin={{ top: 8, right: 18, left: 8, bottom: 8 }}>
+                <CartesianGrid strokeDasharray="3 3" horizontal={true} stroke={darkMode?'#374151':'#E5E7EB'}/>
+                <XAxis type="number" allowDecimals={false} stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={12}/>
+                <YAxis type="category" dataKey="shortLabel" width={190} stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={12} tick={{fontSize: 12, textAnchor: 'end'}} tickMargin={8}/>
+                <Tooltip formatter={(v)=>[fmtNum(v), 'Req. No']} labelFormatter={(_, payload)=>payload?.[0]?.payload?.name || '-'} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
+                <Bar dataKey="value" name="Req. No" fill={color} radius={[0,6,6,0]}/>
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+      );
+    };
+    const agingCards = [
+      { label:'0-30 Days', value: agingTotals.less_30, color:'#14B8A6' },
+      { label:'30-90 Days', value: agingTotals.days_30_90, color:'#2563EB' },
+      { label:'90-180 Days', value: agingTotals.days_90_180, color:'#FCA5A5' },
+      { label:'180+ Days', value: agingTotals.more_180, color:'#DC2626' },
+    ];
+    return (
+      <div className="space-y-4 mb-5">
+        <h3 className={`text-base font-bold ${txt} flex items-center gap-2`}>
+          <Calendar className="w-5 h-5 text-blue-600"/> Pending Delivery Aging
+        </h3>
+        <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+          {agingCards.map(cardItem => (
+            <button key={cardItem.label} onClick={() => toggleAgingFilter(cardItem.label.replace(' Days','').replace('+','+'))}
+              className={`text-left p-4 rounded-2xl border transition-all ${card} hover:border-slate-300`}>
+              <p className={`text-xs font-semibold ${txt2}`}>{cardItem.label}</p>
+              <div className="mt-1 flex items-end justify-between gap-3">
+                <h3 className={`text-2xl font-bold ${kpiValue}`}>{fmtNum(cardItem.value)}</h3>
+                <span className="h-3 w-3 rounded-full" style={{backgroundColor: cardItem.color}} />
+              </div>
+            </button>
+          ))}
+        </div>
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+          <div className={`xl:col-span-2 p-5 rounded-2xl ${card}`}>
+            <h3 className={`text-base font-bold ${txt}`}>Total Pending per Month</h3>
+            <p className={`text-xs mb-4 ${txt2}`}>Total: {fmtNum(pendingMonthlyTotal)} SO | {fmtCurShort(pendingMonthlyAmount)}</p>
+            <ResponsiveContainer width="100%" height={280}>
+              <ComposedChart data={pendingMonthly}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={darkMode?'#374151':'#E5E7EB'}/>
+                <XAxis dataKey="month" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10}/>
+                <YAxis yAxisId="left" stroke="#2563EB" fontSize={10}/>
+                <YAxis yAxisId="right" orientation="right" stroke="#14B8A6" fontSize={10} tickFormatter={(v)=>fmtCurShort(v*1_000_000)}/>
+                <Tooltip formatter={(v,name)=>name==='Pending SO'?[fmtNum(v),name]:[fmtCur(v*1_000_000),name]} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
+                <Legend wrapperStyle={{fontSize:12}}/>
+                <Bar yAxisId="left" dataKey="so_count" name="Pending SO" fill="#2563EB" radius={[5,5,0,0]}/>
+                <Line yAxisId="right" type="monotone" dataKey="amount" name="Total Sales Amount" stroke="#14B8A6" strokeWidth={3} dot={{r:4,fill:'#14B8A6'}} activeDot={{r:6}}/>
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+          <div className={`p-5 rounded-2xl ${card}`}>
+            <h3 className={`text-base font-bold ${txt}`}>Top 5 Pending Vendor</h3>
+            <p className={`text-xs mb-4 ${txt2}`}>Total: {fmtNum(pendingVendorTotal)} SO | {fmtCurShort(pendingVendorAmount)}</p>
+            <div className="space-y-2">
+              {pendingVendors.map((v,i)=>(
+                <div key={v.vendor} className={`p-2.5 rounded-lg ${darkMode?'bg-gray-700':'bg-gray-100'}`}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className={`text-xs font-bold ${darkMode?'text-gray-400':'text-gray-500'}`}>#{i+1}</span>
+                      <p className={`text-sm font-semibold truncate ${darkMode?'text-white':'text-gray-900'}`} title={v.vendor}>{v.vendor}</p>
+                    </div>
+                    <span className={`text-sm font-bold whitespace-nowrap ${darkMode?'text-gray-100':'text-gray-900'}`}>{fmtCurShort(v.total_amount)}</span>
+                  </div>
+                  <p className={`text-xs mt-0.5 ${txt2}`}>{fmtNum(v.so_count)} SO</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className={`p-5 rounded-2xl ${card}`}>
+          <h3 className={`text-base font-bold ${txt}`}>Pending Delivery - Status Distribution</h3>
+          <p className={`text-xs mb-4 ${txt2}`}>Total: {fmtNum(pendingStatusTotal)} SO | {fmtCurShort(pendingStatusAmount)}</p>
+          {(() => {
+            const monthLabel = (m) => {
+              try {
+                const [y, mo] = m.split('-');
+                return format(new Date(parseInt(y), parseInt(mo) - 1, 1), 'MMM yy');
+              } catch {
+                return m;
+              }
+            };
+            const maxCell = Math.max(
+              1,
+              ...statusMonthlyRows.flatMap(s => statusMonths.map(m => s.monthly?.[m] || 0))
+            );
+            const totalByMonth = statusMonths.reduce((acc, m) => {
+              acc[m] = statusMonthlyRows.reduce((sum, s) => sum + (s.monthly?.[m] || 0), 0);
+              return acc;
+            }, {});
+            const grandTotal = statusMonthlyRows.reduce((sum, s) => sum + (s.total || 0), 0);
+            const grandAmount = statusMonthlyRows.reduce((sum, s) => sum + (s.amount || 0), 0);
+            const heatStyle = (value) => {
+              if (!value) {
+                return {
+                  backgroundColor: darkMode ? 'rgba(59,130,246,0.08)' : 'rgba(219,234,254,0.35)',
+                  color: darkMode ? '#64748B' : '#94A3B8'
+                };
+              }
+              const intensity = Math.max(0.18, Math.min(1, value / maxCell));
+              return {
+                backgroundColor: `rgba(37, 99, 235, ${0.16 + intensity * 0.74})`,
+                color: intensity > 0.55 ? '#FFFFFF' : darkMode ? '#DBEAFE' : '#1E3A8A'
+              };
+            };
+            const statusDetailUrl = (status, month) => {
+              const p = new URLSearchParams();
+              if (status) p.append('status', status);
+              if (month) p.append('month', month);
+              return appendDateQuery(`/api/dashboard/status-detail?${p}`);
+            };
+            const openStatusDetail = (status, month, titlePrefix = 'Pending Status') => {
+              const label = status ? `${titlePrefix}: ${status}` : titlePrefix;
+              openModal(month ? `${label} - ${month}` : label, statusDetailUrl(status, month));
+            };
+            return (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm" style={{minWidth: statusMonths.length > 4 ? `${210 + statusMonths.length * 82 + 240}px` : undefined}}>
+                  <thead className={tblHd}>
+                    <tr>
+                      <th className={`px-3 py-2 text-left font-bold whitespace-nowrap sticky left-0 z-10 ${txt2} ${darkMode?'bg-gray-700':'bg-[#f6f6f4]'}`}>Status</th>
+                      {statusMonths.map(m => (
+                        <th key={m} className={`px-3 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{monthLabel(m)}</th>
+                      ))}
+                      <th className={`px-3 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>Total</th>
+                      <th className={`px-3 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>%</th>
+                      <th className={`px-3 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>Sales Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody className={`divide-y ${tblDv}`}>
+                    {statusMonthlyRows.map(s => {
+                      const percentage = grandTotal > 0 ? ((s.total / grandTotal) * 100).toFixed(1) : '0.0';
+                      return (
+                        <tr key={s.name} className={trHov}>
+                          <td className={`px-3 py-2 font-semibold whitespace-nowrap sticky left-0 z-10 ${txt} ${darkMode?'bg-gray-800':'bg-white'}`}>
+                            {s.name}
+                          </td>
+                          {statusMonths.map(m => {
+                            const value = s.monthly?.[m] || 0;
+                            return (
+                              <td key={m} className="px-2 py-2 text-center font-bold rounded-sm" style={heatStyle(value)}>
+                                {value ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => openStatusDetail(s.name, m)}
+                                    className="w-full font-bold underline-offset-2 hover:underline cursor-pointer"
+                                  >
+                                    {fmtNum(value)}
+                                  </button>
+                                ) : ''}
+                              </td>
+                            );
+                          })}
+                          <td className="px-3 py-2 text-right font-bold text-blue-600">
+                            <button type="button" onClick={() => openStatusDetail(s.name, null)} className="font-bold hover:underline cursor-pointer">
+                              {fmtNum(s.total)}
+                            </button>
+                          </td>
+                          <td className={`px-3 py-2 text-right ${txt2}`}>{percentage}%</td>
+                          <td className={`px-3 py-2 text-right whitespace-nowrap ${kpiValue}`}>{fmtCurShort(s.amount)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot className={`${tblHd} font-bold`}>
+                    <tr>
+                      <td className={`px-3 py-2 sticky left-0 z-10 ${txt} ${darkMode?'bg-gray-700':'bg-[#f6f6f4]'}`}>TOTAL</td>
+                      {statusMonths.map(m => (
+                        <td key={m} className="px-2 py-2 text-center text-blue-600">
+                          {totalByMonth[m] ? (
+                            <button type="button" onClick={() => openStatusDetail(null, m, 'All Pending Status')} className="font-bold hover:underline cursor-pointer">
+                              {fmtNum(totalByMonth[m])}
+                            </button>
+                          ) : ''}
+                        </td>
+                      ))}
+                      <td className="px-3 py-2 text-right text-blue-600">
+                        <button type="button" onClick={() => openStatusDetail(null, null, 'All Pending Status')} className="font-bold hover:underline cursor-pointer">
+                          {fmtNum(grandTotal)}
+                        </button>
+                      </td>
+                      <td className={`px-3 py-2 text-right ${txt2}`}>100%</td>
+                      <td className={`px-3 py-2 text-right whitespace-nowrap ${kpiValue}`}>{fmtCurShort(grandAmount)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            );
+          })()}
+        </div>
+        <div className="space-y-3">
+          <h3 className={`text-base font-bold ${txt} flex items-center gap-2`}>
+            <Wrench className="w-5 h-5 text-blue-600"/> Pending Item Registration
+          </h3>
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            {itemRegCategoryChart(itemRegProcStatus, 'Proc. Status', '#2563EB')}
+            {itemRegCategoryChart(itemRegClients, 'Client Nm.', '#14B8A6')}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderPendingDeliveryKpis = () => {
+    const agingTotals = agingData.reduce((acc, v) => ({
+      less_30: acc.less_30 + (v.less_30 || 0),
+      days_30_90: acc.days_30_90 + (v.days_30_90 || 0),
+      days_90_180: acc.days_90_180 + (v.days_90_180 || 0),
+      more_180: acc.more_180 + (v.more_180 || 0),
+    }), { less_30: 0, days_30_90: 0, days_90_180: 0, more_180: 0 });
+
+    const agingCards = [
+      { label: '0-30 Days', filter: '0-30', value: agingTotals.less_30, color: '#10B981' },
+      { label: '30-90 Days', filter: '30-90', value: agingTotals.days_30_90, color: '#0EA5E9' },
+      { label: '90-180 Days', filter: '90-180', value: agingTotals.days_90_180, color: '#F43F5E' },
+      { label: '180+ Days', filter: '180+', value: agingTotals.more_180, color: '#EF4444' },
+    ];
+
+    // Use pic_aggregations from backend (aggregated from ALL filtered data, not just current page)
+    // Filter out Unassigned entries
+    const picKpis = (picAggregations || [])
+      .filter(p => p.pic && p.pic !== 'Unassigned')
+      .map(p => ({
+        pic: p.pic,
+        count: p.count || 0,
+        amount: p.amount || 0
+      }));
+    const totalPendingAmount = picKpis.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+    const pendingKpis = [
+      { pic: 'Total Pending', count: soTotal, amount: totalPendingAmount, isTotal: true },
+      ...picKpis
+    ];
+
+    return (
+      <div className="mb-5">
+        {pendingKpis.length > 0 ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-3">
+            {pendingKpis.map((p) => {
+              const currentPics = Array.isArray(soFilters.pics) ? soFilters.pics : [];
+              const activePic = !p.isTotal && currentPics.includes(p.pic);
+              const applyPicKpiFilter = () => {
+                const next = {...soFilters, pics: p.isTotal || activePic ? [] : [p.pic]};
+                setSoFilters(next);
+                setSoPage(1);
+                fetchSOData(next, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+              };
+              return (
+              <button key={p.pic} type="button" onClick={applyPicKpiFilter} className={`p-4 rounded-2xl text-left transition-all ${activePic ? (darkMode ? 'bg-amber-900/30 border border-amber-500 ring-2 ring-amber-400' : 'bg-amber-50 border border-amber-300 ring-2 ring-amber-200') : p.isTotal ? (darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200') : card} ${p.isTotal ? 'hover:border-slate-300' : 'hover:border-amber-300'}`}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className={`text-xs font-semibold truncate ${activePic ? 'text-amber-700' : p.isTotal ? (darkMode ? 'text-gray-200' : 'text-gray-700') : txt2}`} title={p.pic}>{p.pic}</p>
+                    <h3 className={`text-2xl font-bold mt-0.5 ${activePic ? 'text-amber-700' : p.isTotal ? (darkMode ? 'text-gray-100' : 'text-gray-800') : kpiValue}`}>{fmtNum(p.count)}</h3>
+                    <p className={`text-[11px] mt-0.5 ${txt2}`}>{fmtCurShort(p.amount)}</p>
+                  </div>
+                  <div className={`p-2.5 rounded-xl ${activePic ? 'bg-amber-100 text-amber-700' : p.isTotal ? (darkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-100 text-gray-600') : neutralIcon}`}>
+                    <Package className="w-4 h-4" />
+                  </div>
+                </div>
+              </button>
+            );})}
+          </div>
+        ) : (
+          <div className={`py-6 text-center text-sm rounded-2xl ${card} ${txt2}`}>No pending PIC data</div>
+        )}
+      </div>
+    );
+  };
+
   const renderAllSO = () => (
     <div>
-      {/* Date Range Filter */}
-      <DateRangeFilter
-        darkMode={darkMode} txt={txt} txt2={txt2} card={card}
-        value={globalDateFilter}
-        label="Filter SO Create Date"
-        onFilter={(f) => {
-          setGlobalDateFilter(f);
-          setSoPage(1);
-          fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter, f);
-        }}
-      />
+      {renderPendingDeliveryKpis()}
       <div className={`p-4 rounded-2xl shadow mb-5 ${card}`}>
         <div className="flex flex-wrap justify-between items-center gap-3 mb-3">
           <div>
-            <h2 className={`text-xl font-bold ${txt}`}>Open SO (Sales Order)</h2>
+            <h2 className={`text-xl font-bold ${txt}`}>Detail Pending Delivery</h2>
             <p className={`text-sm ${txt2}`}>{fmtNum(soTotal)} total records — page {soPage} of {soTotalPages}</p>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <label className="flex items-center gap-1 px-3 py-1.5 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg text-sm font-medium shadow-sm">
-              <Upload className="w-4 h-4"/>Batch Upload
+          <div className="flex flex-wrap items-center gap-2">
+            <DownloadButton onClick={downloadSOTemplate} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
+              <Download className="w-4 h-4"/>Template
+            </DownloadButton>
+            <label className="flex items-center gap-2 px-3 py-2.5 bg-slate-600 hover:bg-slate-700 text-white rounded-xl text-sm font-semibold shadow-sm cursor-pointer">
+              <FileSpreadsheet className="w-4 h-4"/>Batch Upload
               <input type="file" accept=".xlsx,.xls" onChange={handleBatchUpload} className="hidden"/>
             </label>
-            <DownloadButton onClick={downloadSOTemplate} className="flex items-center gap-1 px-3 py-1.5 bg-orange-500 hover:bg-orange-600 text-white rounded-lg text-sm font-medium shadow-sm">
-              <FileSpreadsheet className="w-4 h-4"/>Template
-            </DownloadButton>
-            <DownloadButton onClick={downloadSOExcel} className="flex items-center gap-1 px-3 py-1.5 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-medium shadow-sm">
+            <DownloadButton onClick={downloadSOExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
               <Download className="w-4 h-4"/>Download Excel
             </DownloadButton>
           </div>
@@ -2914,7 +3425,7 @@ const App = () => {
                 </span>
               ))}
               {soFilters.op_units.map(v=>(
-                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full text-xs">
+                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">
                   {v}<button onClick={()=>{ setSoFilters(f=>({...f,op_units:f.op_units.filter(x=>x!==v)})); setSoPage(1); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
                 </span>
               ))}
@@ -2976,11 +3487,11 @@ const App = () => {
                       </span>
                     ) : null}
                   </td>
-                  <td className={`px-3 py-2 text-center whitespace-nowrap ${workingDays !== null && workingDays > 180 ? 'text-red-600 font-bold' : workingDays !== null && workingDays > 90 ? 'text-orange-600 font-semibold' : workingDays !== null && workingDays > 30 ? 'text-yellow-600 font-semibold' : 'text-green-600 font-semibold'}`}>
+                  <td className={`px-3 py-2 text-center whitespace-nowrap ${workingDays !== null && workingDays > 180 ? 'text-red-600 font-bold' : workingDays !== null && workingDays > 30 ? 'text-slate-700 font-semibold' : 'text-green-600 font-semibold'}`}>
                     {workingDays !== null ? workingDays : '-'}
                   </td>
                   {/* SO Item first, no SO Number column */}
-                  <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{so.so_item}</td>
+                  <td className="px-3 py-2 text-blue-600 font-medium whitespace-nowrap">{so.so_item}</td>
                   <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{so.svo_po || '-'}</td>
                   <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{so.product_id || '-'}</td>
                   <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{so.category_name || '-'}</td>
@@ -3005,9 +3516,9 @@ const App = () => {
                   <td className={`px-3 py-2 max-w-[200px] truncate ${txt2}`} title={so.delivery_memo}>{so.delivery_memo || '-'}</td>
                   <td className={`px-3 py-2 text-right ${txt2}`}>{fmtNum(so.so_qty)}</td>
                   <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${txt}`}>{fmtCur(so.sales_price)}</td>
-                  <td className="px-3 py-2 text-center font-bold text-orange-600 whitespace-nowrap min-w-[130px]">{fmtCur(so.sales_amount)}</td>
+                  <td className={`px-3 py-2 text-center font-bold whitespace-nowrap min-w-[130px] ${kpiValue}`}>{fmtCur(so.sales_amount)}</td>
                   <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${txt}`}>{fmtCur(so.purchasing_price)}</td>
-                  <td className="px-3 py-2 text-center font-bold text-green-600 whitespace-nowrap min-w-[130px]">{fmtCur(poAmount)}</td>
+                  <td className={`px-3 py-2 text-center font-bold whitespace-nowrap min-w-[130px] ${kpiValue}`}>{fmtCur(poAmount)}</td>
                   <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${marginColor}`}>{fmtCur(margin)}</td>
                   <td className={`px-3 py-2 text-right whitespace-nowrap ${marginColor}`}>
                     {marginPct !== null ? `${marginPct.toFixed(1)}%` : '-'}
@@ -3032,7 +3543,7 @@ const App = () => {
                       </div>
                     ) : (
                       <div className="flex items-center justify-center gap-1 group">
-                        <span className="cursor-pointer text-purple-600 hover:underline text-xs whitespace-nowrap"
+                        <span className="cursor-pointer text-blue-600 hover:underline text-xs whitespace-nowrap"
                           onClick={()=>{setEditingCell({id:so.id,field:'delivery_plan_date'});setEditValue(so.delivery_plan_date||'');}}>
                           {so.delivery_plan_date||'✏️ Set'}
                         </span>
@@ -3052,7 +3563,7 @@ const App = () => {
                         onKeyDown={e=>e.key==='Enter'&&updateSOCell(so.id,'remarks',editValue)}
                         autoFocus/>
                     ) : (
-                      <span className={`cursor-pointer text-xs ${so.remarks?txt2:'text-orange-500 hover:underline'}`}
+                      <span className="cursor-pointer text-xs text-blue-600 hover:underline"
                         onClick={()=>{setEditingCell({id:so.id,field:'remarks'});setEditValue(so.remarks||'');}}>
                         {so.remarks||'✏️ Add'}
                       </span>
@@ -3086,26 +3597,27 @@ const App = () => {
           </div>
           <div className="flex gap-1 items-center">
             <button disabled={soPage===1} onClick={()=>{ const p=soPage-1; setSoPage(p); fetchSOData(soFilters,p,soPerPage,soSearchNums,soMarginFilter,soDateFilter); }}
-              className={`p-1.5 rounded ${soPage===1?'opacity-40':'hover:bg-purple-100'}`}><ChevronLeft className="w-4 h-4"/></button>
-            <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-purple-100 text-purple-700'}`}>{soPage}/{soTotalPages}</span>
+              className={`p-1.5 rounded ${soPage===1?'opacity-40':'hover:bg-blue-100'}`}><ChevronLeft className="w-4 h-4"/></button>
+            <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-blue-100 text-blue-700'}`}>{soPage}/{soTotalPages}</span>
             <button disabled={soPage===soTotalPages} onClick={()=>{ const p=soPage+1; setSoPage(p); fetchSOData(soFilters,p,soPerPage,soSearchNums,soMarginFilter,soDateFilter); }}
-              className={`p-1.5 rounded ${soPage===soTotalPages?'opacity-40':'hover:bg-purple-100'}`}><ChevronRight className="w-4 h-4"/></button>
+              className={`p-1.5 rounded ${soPage===soTotalPages?'opacity-40':'hover:bg-blue-100'}`}><ChevronRight className="w-4 h-4"/></button>
           </div>
         </div>
       </div>
 
-      {/* PO HLI Without SO Table */}
+      {false && (<>
+      {/* PO Without SO Table */}
       <div ref={poTableRef} className={`rounded-2xl shadow overflow-hidden ${card}`}>
         <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
           <div className="flex items-center gap-2">
-            <AlertCircle className="w-5 h-5 text-yellow-600"/>
-            <h3 className={`text-base font-bold ${txt}`}>PO HLI Without SO</h3>
+            <AlertCircle className="w-5 h-5 text-slate-600"/>
+            <h3 className={`text-base font-bold ${txt}`}>PO Without SO</h3>
             <span className={`text-sm ${txt2}`}>
               ({fmtNum(new Set(poFiltered.map(p=>p.po_no)).size)} PO · {fmtNum(poFiltered.length)} line items)
             </span>
           </div>
           <div className="flex gap-2 items-center">
-            <DownloadButton onClick={downloadPOExcel} className="flex items-center gap-1 px-4 py-1.5 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-medium shadow-sm">
+            <DownloadButton onClick={downloadPOExcel} className="flex items-center gap-1 px-4 py-1.5 bg-blue-700 hover:bg-blue-800 text-white rounded-lg text-sm font-medium shadow-sm">
               <Download className="w-4 h-4"/>Download Excel
             </DownloadButton>
           </div>
@@ -3125,7 +3637,7 @@ const App = () => {
             <div className="col-span-12 sm:col-span-3 xl:col-span-2 min-w-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Search PO Number</label>
               <SearchInput
-                label="PO HLI Number"
+                label="PO Number"
                 placeholder={"e.g.\n4502358819\n4502358819-10"}
                 onSearch={(nums) => { setPoSearchNums(nums); setPoPage(1); }}
                 darkMode={darkMode} txt2={txt2}
@@ -3170,7 +3682,7 @@ const App = () => {
               </span>
             ))}
             {poFilterOpUnit.map(v=>(
-              <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full text-xs">
+              <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">
                 {v}<button onClick={()=>setPoFilterOpUnit(prev=>prev.filter(x=>x!==v))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
               </span>
             ))}
@@ -3181,7 +3693,7 @@ const App = () => {
           <table className="w-full text-sm">
             <thead className={tblHd}>
               <tr>
-                {['PO HLI NUMBER','PO ITEM TYPE','ITEM CODE','OPERATION UNIT','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','WORKING DAYS LEFT'].map(h=>(
+                {['PO NUMBER','PO ITEM TYPE','ITEM CODE','OPERATION UNIT','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','WORKING DAYS LEFT'].map(h=>(
                   <th key={h} className={`px-4 py-3 text-center font-bold whitespace-nowrap ${txt2} ${h==='PRICE'||h==='AMOUNT'?'min-w-[140px]':''}`}>{h}</th>
                 ))}
               </tr>
@@ -3193,10 +3705,10 @@ const App = () => {
                 </td></tr>
               ) : poRows.map((row,i)=>{
                 const daysLeft = row.days_remaining;
-                const daysColor = daysLeft === null ? txt2 : daysLeft < 0 ? 'text-red-600 font-bold' : daysLeft <= 7 ? 'text-orange-600 font-semibold' : daysLeft <= 30 ? 'text-yellow-600' : 'text-green-600';
+                const daysColor = daysLeft === null ? txt2 : daysLeft < 0 ? 'text-red-600 font-bold' : daysLeft <= 30 ? 'text-slate-700 font-semibold' : 'text-green-600';
                 return (
                   <tr key={i} className={`${trHov} transition-colors`}>
-                    <td className="px-4 py-3 text-purple-600 font-medium whitespace-nowrap">
+                    <td className="px-4 py-3 text-blue-600 font-medium whitespace-nowrap">
                       {row.item_no ? `${row.po_no}-${row.item_no}` : row.po_no}
                     </td>
                     <td className={`px-4 py-3 whitespace-nowrap`}>
@@ -3213,7 +3725,7 @@ const App = () => {
                     <td className={`px-4 py-3 text-right ${txt2}`}>{fmtNum(row.qty)}</td>
                     <td className={`px-4 py-3 ${txt2}`}>{row.unit||'-'}</td>
                     <td className={`px-4 py-3 text-right whitespace-nowrap min-w-[140px] ${txt}`}>{fmtCur(row.price)}</td>
-                    <td className="px-4 py-3 text-center font-bold text-orange-600 whitespace-nowrap min-w-[140px]">{fmtCur(row.amount)}</td>
+                    <td className={`px-4 py-3 text-center font-bold whitespace-nowrap min-w-[140px] ${kpiValue}`}>{fmtCur(row.amount)}</td>
                     <td className={`px-4 py-3 ${txt2}`}>{row.currency||'IDR'}</td>
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.po_date||'-'}</td>
                     <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.purchase_member||'-'}</td>
@@ -3242,144 +3754,15 @@ const App = () => {
             </label>
           </div>
           <div className="flex gap-1 items-center">
-            <button disabled={poPage===1} onClick={()=>setPoPage(p=>p-1)} className={`p-1.5 rounded ${poPage===1?'opacity-40':'hover:bg-purple-100'}`}><ChevronLeft className="w-4 h-4"/></button>
-            <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-purple-100 text-purple-700'}`}>{poPage}/{poTotalPages}</span>
-            <button disabled={poPage===poTotalPages} onClick={()=>setPoPage(p=>p+1)} className={`p-1.5 rounded ${poPage===poTotalPages?'opacity-40':'hover:bg-purple-100'}`}><ChevronRight className="w-4 h-4"/></button>
+            <button disabled={poPage===1} onClick={()=>setPoPage(p=>p-1)} className={`p-1.5 rounded ${poPage===1?'opacity-40':'hover:bg-blue-100'}`}><ChevronLeft className="w-4 h-4"/></button>
+            <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-blue-100 text-blue-700'}`}>{poPage}/{poTotalPages}</span>
+            <button disabled={poPage===poTotalPages} onClick={()=>setPoPage(p=>p+1)} className={`p-1.5 rounded ${poPage===poTotalPages?'opacity-40':'hover:bg-blue-100'}`}><ChevronRight className="w-4 h-4"/></button>
           </div>
         </div>
       </div>
+      </>)}
 
-      {/* SO Approval Status Table */}
-      <div className={`mt-6 rounded-2xl shadow overflow-hidden ${card}`}>
-        <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
-          <div className="flex items-center gap-2">
-            <FileText className="w-5 h-5 text-blue-600"/>
-            <h3 className={`text-base font-bold ${txt}`}>SO with Approval Status</h3>
-            <span className={`text-sm ${txt2}`}>
-              ({fmtNum(sortedApprovalSOData.length)} line items · {fmtCurShort(approvalSOTotalAmount)})
-            </span>
-          </div>
-          <div className="flex flex-wrap gap-2 items-center">
-            <DownloadButton onClick={downloadApprovalSOExcel} className="flex items-center gap-1 px-4 py-1.5 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-sm font-medium shadow-sm">
-              <Download className="w-4 h-4"/>Download Excel
-            </DownloadButton>
-          </div>
-        </div>
 
-        <div className={`px-5 py-2.5 border-b ${darkMode?'border-gray-700 bg-gray-750':'border-gray-100 bg-gray-50'}`}>
-          <div className="grid grid-cols-12 gap-2 items-end">
-            <div className="col-span-12 sm:col-span-3 xl:col-span-2 min-w-0">
-              <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Search SO Item</label>
-              <SearchInput
-                label="SO Item"
-                placeholder={"e.g.\n1234-10\n1234-20"}
-                onSearch={(nums) => { setApprovalSearchNums(nums); setApprovalPage(1); }}
-                darkMode={darkMode} txt2={txt2}
-              />
-            </div>
-            <div className="col-span-12 sm:col-span-4 xl:col-span-2 min-w-0">
-              <MultiSelect label="Operation Unit" options={soFilterOptions.op_units}
-                selected={approvalFilters.op_units} onChange={v=>{ setApprovalFilters(f=>({...f, op_units: v})); setApprovalPage(1); }}
-                darkMode={darkMode} txt2={txt2}/>
-            </div>
-            <div className="col-span-12 sm:col-span-4 xl:col-span-2 min-w-0">
-              <MultiSelect label="SO Status" options={['Approval Apply','Approval Complete Step','Approval Reject']}
-                selected={approvalFilters.statuses} onChange={v=>{ setApprovalFilters(f=>({...f, statuses: v})); setApprovalPage(1); }}
-                darkMode={darkMode} txt2={txt2}/>
-            </div>
-            <div className="col-span-6 sm:col-span-3 xl:col-span-1 min-w-[110px]">
-              <button onClick={()=>{ setApprovalFilters({ op_units: [], statuses: [], aging: [] }); setApprovalSearchNums([]); setApprovalPage(1); }}
-                className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear Filter</button>
-            </div>
-          </div>
-          {(approvalSearchNums.length + approvalFilters.op_units.length + approvalFilters.statuses.length) > 0 && (
-            <div className="mt-3 flex flex-wrap gap-1.5">
-              {approvalSearchNums.map(v=>(
-                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-xs">
-                  SO: {v}<button onClick={()=>{ setApprovalSearchNums(prev=>prev.filter(x=>x!==v)); setApprovalPage(1); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
-                </span>
-              ))}
-              {approvalFilters.op_units.map(v=>(
-                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full text-xs">
-                  {v}<button onClick={()=>{ setApprovalFilters(f=>({...f,op_units:f.op_units.filter(x=>x!==v)})); setApprovalPage(1); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
-                </span>
-              ))}
-              {approvalFilters.statuses.map(v=>(
-                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs">
-                  {v}<button onClick={()=>{ setApprovalFilters(f=>({...f,statuses:f.statuses.filter(x=>x!==v)})); setApprovalPage(1); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className={tblHd}>
-              <tr>
-                {['SO ITEM','ITEM NAME','STATUS','OPERATION UNIT','VENDOR','QTY','SALES AMOUNT','PO PRICE','PO AMOUNT','MARGIN','SO CREATE DATE','POSSIBLE DELIVERY','PLAN DATE','REMARKS'].map(h=>(
-                  <th key={h} className={`px-4 py-3 text-center font-bold whitespace-nowrap ${txt2} ${h==='REMARKS'?'min-w-[360px]':''}`}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className={`divide-y ${tblDv}`}>
-              {approvalRows.length === 0 ? (
-                <tr><td colSpan={14} className={`px-4 py-10 text-center ${txt2}`}>
-                  <FileText className="w-10 h-10 mx-auto mb-2 opacity-40"/>No SO approval data
-                </td></tr>
-              ) : approvalRows.map((so) => {
-                const poAmount = (so.purchasing_price || 0) * (so.so_qty || 0);
-                const margin = (so.sales_amount || 0) - poAmount;
-                const marginColor = margin < 0 ? 'text-red-600 font-semibold' : margin > 0 ? 'text-green-600 font-semibold' : txt2;
-                return (
-                  <tr key={so.id} className={`${trHov} transition-colors`}>
-                    <td className="px-4 py-3 text-purple-600 font-medium whitespace-nowrap">{so.so_item||'-'}</td>
-                    <td className={`px-4 py-3 max-w-[220px] truncate ${txt2}`} title={so.product_name}>{so.product_name||'-'}</td>
-                    <td className="px-4 py-3 whitespace-nowrap">
-                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                        so.so_status==='Approval Reject'?'bg-red-100 text-red-700':
-                        so.so_status==='Approval Complete Step'?'bg-green-100 text-green-700':'bg-blue-100 text-blue-700'}`}>
-                        {so.so_status||'-'}
-                      </span>
-                    </td>
-                    <td className={`px-4 py-3 min-w-[180px] truncate ${txt2}`} title={so.operation_unit_name}>{so.operation_unit_name||'-'}</td>
-                    <td className={`px-4 py-3 max-w-[140px] truncate ${txt2}`} title={so.vendor_name}>{so.vendor_name||'-'}</td>
-                    <td className={`px-4 py-3 text-right ${txt2}`}>{fmtNum(so.so_qty)}</td>
-                    <td className="px-4 py-3 text-center font-bold text-orange-600 whitespace-nowrap min-w-[130px]">{fmtCur(so.sales_amount)}</td>
-                    <td className={`px-4 py-3 text-right whitespace-nowrap min-w-[130px] ${txt}`}>{fmtCur(so.purchasing_price)}</td>
-                    <td className="px-4 py-3 text-center font-bold text-green-600 whitespace-nowrap min-w-[130px]">{fmtCur(poAmount)}</td>
-                    <td className={`px-4 py-3 text-right whitespace-nowrap min-w-[130px] ${marginColor}`}>{fmtCur(margin)}</td>
-                    <td className={`px-4 py-3 text-center text-xs ${txt2} whitespace-nowrap`}>{so.so_create_date||'-'}</td>
-                    <td className={`px-4 py-3 text-center text-xs ${txt2} whitespace-nowrap`}>{so.delivery_possible_date||'-'}</td>
-                    <td className={`px-4 py-3 text-center text-xs ${txt2} whitespace-nowrap`}>{so.delivery_plan_date||'-'}</td>
-                    <td className={`px-4 py-3 min-w-[360px] text-xs ${txt2}`}>{so.remarks||'-'}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-        <div className={`px-4 py-3 border-t ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
-          <div className="flex items-center gap-3">
-            <span className={`text-sm ${txt2}`}>Showing {sortedApprovalSOData.length ? (approvalPage-1)*approvalPerPage+1 : 0}–{Math.min(approvalPage*approvalPerPage,sortedApprovalSOData.length)} of {fmtNum(sortedApprovalSOData.length)}</span>
-            <label className={`flex items-center gap-1 text-xs ${txt2}`}>
-              Rows
-              <select className={`px-2 py-1 rounded-lg text-xs border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-300'}`}
-                value={approvalPerPage} onChange={e=>{ setApprovalPerPage(Number(e.target.value)); setApprovalPage(1); }}>
-                <option value={10}>10</option>
-                <option value={20}>20</option>
-                <option value={50}>50</option>
-                <option value={100}>100</option>
-                <option value={500}>500</option>
-              </select>
-            </label>
-          </div>
-          <div className="flex gap-1 items-center">
-            <button disabled={approvalPage===1} onClick={()=>setApprovalPage(p=>p-1)} className={`p-1.5 rounded ${approvalPage===1?'opacity-40':'hover:bg-purple-100'}`}><ChevronLeft className="w-4 h-4"/></button>
-            <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-purple-100 text-purple-700'}`}>{approvalPage}/{approvalTotalPages}</span>
-            <button disabled={approvalPage===approvalTotalPages} onClick={()=>setApprovalPage(p=>p+1)} className={`p-1.5 rounded ${approvalPage===approvalTotalPages?'opacity-40':'hover:bg-purple-100'}`}><ChevronRight className="w-4 h-4"/></button>
-          </div>
-        </div>
-      </div>
     </div>
   );
 
@@ -3387,7 +3770,7 @@ const App = () => {
   // MAIN RENDER
   // ══════════════════════════════════════════════════════════════
   return (
-    <div className={`min-h-screen font-sans ${darkMode?'bg-gray-900':'bg-gray-50'}`}>
+    <div className={`min-h-screen font-sans ${darkMode?'bg-gray-900':'bg-[#edf2f1]'} ${darkMode?'':'text-[#1f2937]'}`} style={{fontFamily: "'Inter', 'Plus Jakarta Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"}}>
     <style>{`
         @keyframes slide-in {
           from { transform: translateX(100%); opacity: 0; }
@@ -3400,6 +3783,10 @@ const App = () => {
           cursor: pointer !important;
         }
         button:disabled { cursor: not-allowed !important; opacity: 0.5; }
+        .reference-card {
+          border-radius: 24px;
+          box-shadow: 0 18px 45px rgba(15, 23, 42, 0.06);
+        }
       `}</style>
 
       <div className="fixed top-5 right-5 z-[100] flex flex-col gap-2">
@@ -3411,158 +3798,65 @@ const App = () => {
 
       {/* Sidebar */}
       <aside
-        className={`fixed left-0 top-0 h-full flex flex-col shadow-2xl z-40 transition-all duration-300 ease-in-out
-          ${sidebarOpen ? 'w-56' : 'w-14'}
-          ${darkMode ? 'bg-gray-800 border-r border-gray-700' : 'bg-gradient-to-b from-purple-700 to-purple-800'}`}
-        onMouseEnter={()=>!sidebarOpen && setSidebarOpen(true)}
-        onMouseLeave={()=>setSidebarOpen(false)}
+        onMouseEnter={() => setSidebarExpanded(true)}
+        onMouseLeave={() => setSidebarExpanded(false)}
+        onFocusCapture={() => setSidebarExpanded(true)}
+        onBlurCapture={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setSidebarExpanded(false); }}
+        className={`fixed left-0 top-0 h-full ${sidebarExpanded?'lg:w-60':'lg:w-16'} w-16 flex flex-col items-stretch py-5 shadow-[0_8px_24px_rgba(15,23,42,0.08)] z-40 overflow-hidden transition-[width,background-color,border-color] duration-200 ease-out ${darkMode?'bg-gray-800 border-r border-gray-700':'bg-white/95 border-r border-gray-200/80 backdrop-blur-xl'}`}
       >
-        {/* Logo / Toggle */}
-        <div className={`flex items-center gap-2 px-3 py-4 border-b ${darkMode?'border-gray-700':'border-purple-600/50'}`}>
-          <button onClick={()=>setSidebarOpen(o=>!o)} className="flex-shrink-0 p-1.5 rounded-lg text-white hover:bg-white/20 transition-all">
-            {sidebarOpen ? <ChevronLeft className="w-4 h-4"/> : <ChevronRight className="w-4 h-4"/>}
+        <nav className={`flex-1 flex flex-col gap-2 w-full ${sidebarExpanded?'lg:px-3':'lg:px-2'} px-2 pt-0`}>
+          <button onClick={()=>setActivePage('dashboard')}
+            className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='dashboard'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="Summary">
+            <BarChart3 className="w-5 h-5 flex-shrink-0"/>
+            <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-40 opacity-100':'max-w-0 opacity-0'}`}>Summary</span>
           </button>
-          {sidebarOpen && <span className="text-white font-bold text-sm truncate">Serveone Dashboard</span>}
-        </div>
-
-        {/* Nav */}
-        <nav className="flex-1 overflow-y-auto py-3 px-2 flex flex-col gap-1">
-
-          {/* ── PO Monitoring (collapsible group) ── */}
-          <div>
-            <button
-              onClick={()=>setPoMenuOpen(o=>!o)}
-              className="w-full flex items-center gap-2.5 px-2 py-2 rounded-lg transition-all text-left text-purple-100 hover:bg-white/10"
-            >
-              <BarChart3 className="w-4 h-4 flex-shrink-0"/>
-              {sidebarOpen && <>
-                <span className="text-sm flex-1 truncate text-left">PO Monitoring</span>
-                {poMenuOpen ? <ChevronUp className="w-3.5 h-3.5 opacity-70"/> : <ChevronDown className="w-3.5 h-3.5 opacity-70"/>}
-              </>}
-            </button>
-
-            {/* Sub-menu items */}
-            {(sidebarOpen && poMenuOpen) && (
-              <div className="mt-1 ml-3 pl-3 border-l border-white/25 flex flex-col gap-0.5">
-
-                {/* All Client — placeholder */}
-                <button
-                  disabled
-                  title="All Client (coming soon)"
-                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm text-left text-purple-200/50 cursor-not-allowed"
-                >
-                  <Building2 className="w-3.5 h-3.5 flex-shrink-0"/>
-                  <span className="truncate flex-1 text-left">All Client</span>
-                  <span className="ml-auto text-[10px] bg-purple-400/20 text-purple-200/60 px-1.5 py-0.5 rounded-full">soon</span>
-                </button>
-
-                {/* HLI — active client */}
-                <div>
-                  <button
-                    onClick={()=>{ setActiveClient('hli'); setHliMenuOpen(o=>!o); }}
-                    className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm text-left transition-all text-purple-100 hover:bg-white/10"
-                  >
-                    <Building2 className="w-3.5 h-3.5 flex-shrink-0"/>
-                    <span className="truncate flex-1 text-left">HLI</span>
-                    {hliMenuOpen ? <ChevronUp className="w-3 h-3 opacity-70"/> : <ChevronDown className="w-3 h-3 opacity-70"/>}
-                  </button>
-
-                  {/* HLI sub-pages */}
-                  {hliMenuOpen && (
-                    <div className="mt-0.5 ml-3 pl-3 border-l border-white/20 flex flex-col gap-0.5">
-                      <button
-                        onClick={()=>{ setActivePage('dashboard'); window.scrollTo({top:0,behavior:'smooth'}); }}
-                        className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-left transition-all
-                          ${activePage==='dashboard'?'bg-white/35 text-white font-semibold shadow-sm':'text-purple-100 hover:bg-white/10'}`}
-                      >
-                        <BarChart3 className="w-3 h-3 flex-shrink-0"/>
-                        <span className="truncate flex-1 text-left">Dashboard</span>
-                      </button>
-                      <button
-                        onClick={()=>{ setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums,soMarginFilter,soDateFilter); window.scrollTo({top:0,behavior:'smooth'}); }}
-                        className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-left transition-all
-                          ${activePage==='all-so'?'bg-white/35 text-white font-semibold shadow-sm':'text-purple-100 hover:bg-white/10'}`}
-                      >
-                        <FileText className="w-3 h-3 flex-shrink-0"/>
-                        <span className="truncate flex-1 text-left">Need to Follow Up</span>
-                      </button>
-                      <button
-                        onClick={()=>{ setActivePage('completed'); fetchCompletedData(completedYear, completedDateFilter); window.scrollTo({top:0,behavior:'smooth'}); }}
-                        className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-left transition-all
-                          ${activePage==='completed'?'bg-white/35 text-white font-semibold shadow-sm':'text-purple-100 hover:bg-white/10'}`}
-                      >
-                        <Coins className="w-3 h-3 flex-shrink-0"/>
-                        <span className="truncate flex-1 text-left">Delivery Completed</span>
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Divider */}
-          <div className={`my-1 mx-1 border-t ${darkMode?'border-gray-600':'border-purple-600/40'}`}/>
-
-          {/* ── Delivery Monitoring ── */}
-          <button
-            onClick={()=>{ setActivePage('delivery-monitoring'); fetchDlvSummary(); fetchDlvData(1,'','',''); }}
-            className={`w-full flex items-center gap-2.5 px-2 py-2 rounded-lg text-left transition-colors
-              ${activePage==='delivery-monitoring'
-                ? 'bg-white/35 text-white font-semibold shadow-sm'
-                : 'text-purple-100 hover:bg-white/10'}`}
-          >
-            <Package className="w-4 h-4 flex-shrink-0"/>
-            {sidebarOpen && <span className="text-sm flex-1 truncate text-left">Delivery Monitoring</span>}
+          <button data-tour="open-so-nav" onClick={()=>{ setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums,soMarginFilter,soDateFilter); window.scrollTo({top:0, behavior:'smooth'}); }}
+            className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='all-so'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="Pending Delivery">
+            <Clock className="w-5 h-5 flex-shrink-0"/>
+            <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-40 opacity-100':'max-w-0 opacity-0'}`}>Pending Delivery</span>
           </button>
-
-          {/* ── Registration Monitoring ── */}
-          <button
-            disabled
-            title="Registration Monitoring (coming soon)"
-            className="w-full flex items-center gap-2.5 px-2 py-2 rounded-lg text-left text-purple-200/50 cursor-not-allowed"
-          >
-            <Award className="w-4 h-4 flex-shrink-0"/>
-            {sidebarOpen && <>
-              <span className="text-sm flex-1 truncate text-left">Registration Monitoring</span>
-              <span className="text-[10px] bg-purple-400/20 text-purple-200/60 px-1.5 py-0.5 rounded-full">soon</span>
-            </>}
+          <button onClick={()=>{ setActivePage('item-registration'); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,itemRegFilters); window.scrollTo({top:0,behavior:'smooth'}); }}
+            className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='item-registration'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="Item Registration">
+            <Wrench className="w-5 h-5 flex-shrink-0"/>
+            <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-44 opacity-100':'max-w-0 opacity-0'}`}>Item Registration</span>
           </button>
-
+          <button onClick={()=>{ setActivePage('all-registered-items'); setRegisteredItemsPage(1); fetchRegisteredItems(1,registeredItemsPerPage,registeredItemsAppliedSearch,registeredItemsAppliedProdIds); window.scrollTo({top:0,behavior:'smooth'}); }}
+            className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='all-registered-items'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="All Registered Items">
+            <FileText className="w-5 h-5 flex-shrink-0"/>
+            <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-44 opacity-100':'max-w-0 opacity-0'}`}>All Registered Items</span>
+          </button>
         </nav>
-
-        {/* Dark mode toggle at bottom */}
-        <div className={`px-2 py-3 border-t ${darkMode?'border-gray-700':'border-purple-600/50'}`}>
-          <button
-            onClick={()=>setDarkMode(d=>!d)}
-            className="w-full flex items-center gap-2.5 px-2 py-2 rounded-lg text-white hover:bg-white/20 transition-all"
-          >
-            {darkMode ? <Sun className="w-4 h-4 flex-shrink-0"/> : <Moon className="w-4 h-4 flex-shrink-0"/>}
-            {sidebarOpen && <span className="text-sm">{darkMode ? 'Light Mode' : 'Dark Mode'}</span>}
+        <div className={`flex flex-col gap-2 w-full ${sidebarExpanded?'lg:px-3':'lg:px-2'} px-2`}>
+          <button onClick={()=>setDarkMode(d=>!d)} className={`p-3 rounded-xl transition-all flex items-center gap-3 justify-start whitespace-nowrap ${darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`}>
+            {darkMode?<Sun className="w-5 h-5 flex-shrink-0"/>:<Moon className="w-5 h-5 flex-shrink-0"/>}
+            <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-40 opacity-100':'max-w-0 opacity-0'}`}>{darkMode?'Light Mode':'Dark Mode'}</span>
           </button>
         </div>
       </aside>
 
-      {/* Main — margin mengikuti lebar sidebar */}
-      <main className={`transition-all duration-300 ease-in-out p-6 ${sidebarOpen ? 'ml-56' : 'ml-14'}`}>
-        <header className="mb-6 flex flex-wrap justify-between items-center gap-4">
-          <div>
-            <h1 className={`text-2xl font-bold tracking-tight ${txt}`}>
-              {activePage==='delivery-monitoring' ? <><span className="text-emerald-600">Delivery Monitoring</span></> : <>HLI PO Monitoring <span className="text-purple-600">Dashboard</span></>}
+      {/* Main */}
+      <main className={`ml-16 ${sidebarExpanded?'lg:ml-60':'lg:ml-16'} p-4 lg:p-6 transition-[margin-left] duration-200 ease-out`}>
+        <div className={`${darkMode?'bg-gray-900 border-gray-800':'bg-[#fbfbfa] border-gray-200/70'} min-h-[calc(100vh-32px)] lg:min-h-[calc(100vh-48px)] rounded-2xl border shadow-[0_12px_36px_rgba(15,23,42,0.07)] p-4 lg:p-6`}>
+        <header className="mb-7 flex flex-wrap justify-between items-center gap-4">
+          <div data-tour="page-title">
+            <h1 className={`text-[28px] leading-tight font-bold tracking-[-0.02em] ${txt}`}>
+              Serveone <span className="text-[#2563EB]">Summary</span>
             </h1>
             <p className={`mt-0.5 text-sm ${txt2}`}>
-              {activePage==='dashboard'?'Purchase Orders & Sales Orders Overview'
-               :activePage==='completed'?'Delivery Completed Analytics'
-               :activePage==='delivery-monitoring'?'Track leadtime & pending status per process stage'
-               :'Manage Open SO (Sales Order) & PO Without SO'}
+              {activePage==='dashboard'?'Purchase Orders & Sales Orders Summary'
+               :activePage==='all-so'?'Pending Delivery monitoring and detail records'
+               :activePage==='item-registration'?'Process Purchase Info Registration data'
+               :activePage==='all-registered-items'?'All registered product master data'
+               :'Manage Pending Delivery records'}
             </p>
           </div>
           <div className="flex flex-col items-end gap-1">
             <div className="flex flex-wrap gap-2 justify-end">
               <div className="relative" ref={uploadDropdownRef}>
               <button
+                data-tour="manual-update"
                 onClick={() => setShowUploadDropdown(v => !v)}
-                className="flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all bg-purple-700 hover:bg-purple-800 text-white"
+                className="flex items-center gap-2 px-4 py-2.5 rounded-xl shadow-sm transition-all bg-blue-600 hover:bg-blue-700 text-white"
               >
                 <Upload className="w-4 h-4"/>
                 <span className="text-sm font-medium">Manual Update</span>
@@ -3570,23 +3864,17 @@ const App = () => {
               </button>
               {showUploadDropdown && (
                 <div className={`absolute right-0 mt-2 z-50 rounded-xl shadow-2xl border min-w-[280px] overflow-hidden ${darkMode?'bg-gray-800 border-gray-700 text-white':'bg-white border-gray-200'}`}>
-                  <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-purple-50'}`}>
-                    <Upload className="w-4 h-4 text-purple-500"/>
-                    <span className={`text-sm font-medium ${txt}`}>Upload HLI PO List (Item)</span>
-                    <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUpload(e,'po'); setShowUploadDropdown(false);}} className="hidden"/>
-                  </label>
-                  <div className={`${darkMode?'border-t border-gray-700':'border-t border-gray-100'}`}></div>
-                  <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-purple-50'}`}>
+                  <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-blue-50'}`}>
                     <Upload className="w-4 h-4 text-blue-500"/>
-                    <span className={`text-sm font-medium ${txt}`}>Upload SMRO - Search Client Odr</span>
-                    <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUpload(e,'smro'); setShowUploadDropdown(false);}} className="hidden"/>
+                    <span className={`text-sm font-medium ${txt}`}>Upload SO - Search Client Odr</span>
+                    <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUpload(e,'scor'); setShowUploadDropdown(false);}} className="hidden"/>
                   </label>
                   <div className={`${darkMode?'border-t border-gray-700':'border-t border-gray-100'}`}></div>
                   <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-sky-50'}`}>
                     <Upload className="w-4 h-4 text-sky-500"/>
                     <div>
                       <span className={`text-sm font-medium ${txt}`}>Upload Prod ID (SAP)</span>
-                      <p className={`text-xs ${txt2}`}>Update database Product ID → Kategori</p>
+                      <p className={`text-xs ${txt2}`}>Update Product ID to category mapping</p>
                     </div>
                     <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUploadProductID(e); setShowUploadDropdown(false);}} className="hidden"/>
                   </label>
@@ -3595,30 +3883,30 @@ const App = () => {
                     <Upload className="w-4 h-4 text-indigo-500"/>
                     <div>
                       <span className={`text-sm font-medium ${txt}`}>Update PIC</span>
-                      <p className={`text-xs ${txt2}`}>Update nama PIC per kategori</p>
+                      <p className={`text-xs ${txt2}`}>Update PIC by category</p>
                     </div>
                     <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUpdatePIC(e); setShowUploadDropdown(false);}} className="hidden"/>
                   </label>
                   <div className={`${darkMode?'border-t border-gray-700':'border-t border-gray-100'}`}></div>
-                  <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-emerald-50'}`}>
-                    <Upload className="w-4 h-4 text-emerald-500"/>
+                  <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-blue-50'}`}>
+                    <Upload className="w-4 h-4 text-blue-500"/>
                     <div>
-                      <span className={`text-sm font-medium ${txt}`}>Upload Search PO Details</span>
-                      <p className={`text-xs ${txt2}`}>Update Delivery Monitoring (leadtime & pending)</p>
+                      <span className={`text-sm font-medium ${txt}`}>Upload Item Registration</span>
+                      <p className={`text-xs ${txt2}`}>Update Process Purchase Info Registration</p>
                     </div>
-                    <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUploadDelivery(e); setShowUploadDropdown(false);}} className="hidden"/>
+                    <input type="file" accept=".xlsx,.xls" onChange={e=>{handleUploadItemRegistration(e); setShowUploadDropdown(false);}} className="hidden"/>
                   </label>
                 </div>
               )}
               </div>
 
               <div className="relative" ref={hideMenuRef}>
-              <button onClick={()=>setShowHideMenu(o=>!o)}
-                className="flex items-center gap-2 px-4 py-2 rounded-xl shadow hover:shadow-md transition-all bg-orange-600 hover:bg-orange-700 text-white">
+              <button data-tour="hide-menu" onClick={()=>setShowHideMenu(o=>!o)}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-xl shadow-sm transition-all bg-slate-600 hover:bg-slate-700 text-white">
                 <EyeOff className="w-4 h-4"/><span className="text-sm font-medium">Hide</span>
                 <ChevronDown className="w-3.5 h-3.5"/>
                 {deleteRequests.filter(r=>r.is_hidden).length > 0 && (
-                  <span className="px-1.5 py-0.5 bg-white text-orange-600 rounded-full text-xs font-bold">
+                  <span className="px-1.5 py-0.5 bg-white text-slate-700 rounded-full text-xs font-bold">
                     {deleteRequests.filter(r=>r.is_hidden).length}
                   </span>
                 )}
@@ -3628,10 +3916,10 @@ const App = () => {
                   {/* View Hidden History */}
                   <button onClick={()=>{ setShowHideMenu(false); fetchDeleteRequests(); setShowHiddenPanel(true); }}
                     className={`w-full flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold mb-3 ${darkMode?'bg-gray-700 hover:bg-gray-600 text-white':'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>
-                    <Eye className="w-4 h-4 text-purple-500"/>
+                    <Eye className="w-4 h-4 text-blue-500"/>
                     View Hide History
                     {deleteRequests.filter(r=>r.is_hidden).length > 0 && (
-                      <span className="ml-auto px-2 py-0.5 bg-orange-500 text-white rounded-full text-xs font-bold">
+                      <span className="ml-auto px-2 py-0.5 bg-slate-600 text-white rounded-full text-xs font-bold">
                         {deleteRequests.filter(r=>r.is_hidden).length}
                       </span>
                     )}
@@ -3639,16 +3927,16 @@ const App = () => {
                   <p className={`text-xs font-semibold mb-2 px-1 ${darkMode?'text-gray-300':'text-gray-600'}`}>
                     Hide data from dashboard via Excel template
                   </p>
-                  {/* PO HLI */}
-                  <div className={`mb-2 p-3 rounded-lg ${darkMode?'bg-gray-700':'bg-orange-50'}`}>
-                    <p className="text-xs font-bold mb-1 text-orange-700">🔵 PO HLI (from PO List)</p>
+                  {/* PO */}
+                  <div className={`mb-2 p-3 rounded-lg ${darkMode?'bg-gray-700':'bg-slate-50'}`}>
+                    <p className="text-xs font-bold mb-1 text-slate-700 flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-slate-700"/><span>PO HLI</span></p>
                     <p className={`text-xs mb-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>Format: PO Number-Item No (e.g. 4502358819-10)</p>
                     <div className="flex gap-2">
                       <button onClick={()=>downloadHideTemplate('PO')}
-                        className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-orange-600 hover:bg-orange-700 text-white rounded-lg text-xs font-semibold">
+                        className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-slate-600 hover:bg-slate-700 text-white rounded-lg text-xs font-semibold">
                         <Download className="w-3 h-3"/>Download Template
                       </button>
-                      <label className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-semibold cursor-pointer">
+                      <label className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold cursor-pointer">
                         <Upload className="w-3 h-3"/>Upload Filled
                         <input type="file" accept=".xlsx,.xls" onChange={e=>handleHideBatchUpload(e,'PO')} className="hidden"/>
                       </label>
@@ -3656,14 +3944,14 @@ const App = () => {
                   </div>
                   {/* SO */}
                   <div className={`p-3 rounded-lg ${darkMode?'bg-gray-700':'bg-blue-50'}`}>
-                    <p className="text-xs font-bold mb-1 text-blue-700">🟠 SO (from SMRO)</p>
+                    <p className="text-xs font-bold mb-1 text-blue-700 flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-blue-600"/><span>SO</span></p>
                     <p className={`text-xs mb-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>Format: SO Number or SO Number-Item No</p>
                     <div className="flex gap-2">
                       <button onClick={()=>downloadHideTemplate('SO')}
                         className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold">
                         <Download className="w-3 h-3"/>Download Template
                       </button>
-                      <label className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-semibold cursor-pointer">
+                      <label className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold cursor-pointer">
                         <Upload className="w-3 h-3"/>Upload Filled
                         <input type="file" accept=".xlsx,.xls" onChange={e=>handleHideBatchUpload(e,'SO')} className="hidden"/>
                       </label>
@@ -3673,35 +3961,164 @@ const App = () => {
               )}
               </div>
             </div>
-            {activePage !== 'delivery-monitoring' && (
-              <div className={`text-xs leading-relaxed text-right ${txt2}`}>
-                <>
-                <div>
-                  <span>Last Update HLI PO List: </span>
-                  <span className={`font-semibold ${txt}`}>
-                    {stats?.last_updated_po
-                      ? (() => { try { return new Date(stats.last_updated_po).toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); } catch { return stats.last_updated_po; } })()
-                      : '-'}
-                  </span>
-                </div>
-                <div>
-                  <span>Last Update SMRO: </span>
-                  <span className={`font-semibold ${txt}`}>
-                    {stats?.last_updated_smro
-                      ? (() => { try { return new Date(stats.last_updated_smro).toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); } catch { return stats.last_updated_smro; } })()
-                      : '-'}
-                  </span>
-                </div>
-                </>
+            <div className={`text-xs leading-relaxed text-right ${txt2}`}>
+              <div>
+                <span>Last Update SO: </span>
+                <span className={`font-semibold ${txt}`}>
+                  {stats?.last_updated_scor
+                    ? (() => { try { return new Date(stats.last_updated_scor).toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); } catch { return stats.last_updated_scor; } })()
+                    : '-'}
+                </span>
               </div>
-            )}
+            </div>
           </div>
         </header>
 
-        {activePage==='dashboard' ? renderDashboard() : activePage==='completed' ? renderCompleted() : activePage==='delivery-monitoring' ? renderDeliveryMonitoring() : renderAllSO()}
+        {renderGlobalSlicer()}
+
+        {activePage==='dashboard' ? renderDashboardOverview()
+          : activePage==='item-registration' ? renderItemRegistration()
+          : activePage==='all-registered-items' ? renderAllRegisteredItems()
+          : renderAllSO()}
+        </div>
       </main>
 
       {modal && <SOModal title={modal.title} data={modal.data} darkMode={darkMode} onClose={()=>setModal(null)}/>}
+
+      {showAboutModal && (
+        <div className="fixed inset-0 bg-[#edf2f1]/85 z-[70] flex items-center justify-center p-4 backdrop-blur-md" onClick={()=>setShowAboutModal(false)}>
+          <div className="relative w-full max-w-lg overflow-hidden rounded-[28px] border border-white/80 bg-[#fbfbfa] text-[#090909] shadow-[0_24px_80px_rgba(15,23,42,0.16)]" style={{fontFamily: "'Inter', 'Plus Jakarta Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"}} onClick={e=>e.stopPropagation()}>
+            <div className="absolute -top-24 -right-20 h-56 w-56 rounded-full bg-blue-500/10 blur-3xl"/>
+            <div className="absolute -bottom-28 -left-20 h-56 w-56 rounded-full bg-slate-400/10 blur-3xl"/>
+            <button onClick={()=>setShowAboutModal(false)} className="absolute top-5 right-5 z-10 p-3 rounded-full bg-white text-gray-700 shadow-[0_10px_30px_rgba(15,23,42,0.08)] hover:bg-gray-50 transition-all" aria-label="Close About popup">
+              <X className="w-5 h-5"/>
+            </button>
+
+            <div className="relative px-7 py-7">
+              <div className="mb-8">
+                <p className="text-[34px] leading-[1.05] font-black tracking-[-0.04em]">Hello!</p>
+              </div>
+
+              <div className="mb-5">
+                <p className="text-[13px] font-semibold text-gray-500 mb-2">About Summary</p>
+                <h2 className="text-[34px] leading-[1.05] font-black tracking-[-0.04em] text-[#050505]">Purchase Monitoring Summary</h2>
+              </div>
+
+              <div className="rounded-[24px] bg-white p-5 shadow-[0_18px_50px_rgba(15,23,42,0.08)] border border-gray-100">
+                <p className="text-[15px] leading-relaxed text-gray-600 mb-5">
+                  This dashboard was created by <span className="font-extrabold text-black">ADITYA NUR IKHSAN</span> to help monitor Purchase Order (PO), Sales Order (SO), margins and transaction status more efficiently.
+                </p>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={() => { setShowAboutModal(false); setTourStep(0); setShowTour(true); }}
+                    className="col-span-2 flex items-center justify-center gap-2 rounded-full bg-gradient-to-r from-emerald-500 to-green-700 px-4 py-3.5 text-white shadow-[0_14px_35px_rgba(16,185,129,0.28)] hover:-translate-y-0.5 hover:shadow-[0_18px_45px_rgba(16,185,129,0.34)] transition-all"
+                  >
+                    <Search className="w-5 h-5"/>
+                    <span className="text-sm font-semibold">Take a Tour</span>
+                  </button>
+                  <a href="https://linkedin.com/in/ikhsanaditya" target="_blank" rel="noreferrer" className="group flex items-center justify-center gap-2 rounded-full bg-[#0b0b0b] px-4 py-3.5 text-white shadow-[0_14px_35px_rgba(0,0,0,0.16)] hover:-translate-y-0.5 hover:shadow-[0_18px_45px_rgba(0,0,0,0.22)] transition-all">
+                    <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                      <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.447-2.136 2.942v5.664H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.266 2.371 4.266 5.455v6.286zM5.337 7.433a2.064 2.064 0 1 1 0-4.128 2.064 2.064 0 0 1 0 4.128zM7.119 20.452H3.554V9h3.565v11.452z"/>
+                    </svg>
+                    <span className="text-sm font-semibold">LinkedIn</span>
+                  </a>
+                  <a href="mailto:ikhsanadityainfo@gmail.com" className="group flex items-center justify-center gap-2 rounded-full bg-gradient-to-r from-blue-500 to-blue-700 px-4 py-3.5 text-white shadow-[0_14px_35px_rgba(37,99,235,0.28)] hover:-translate-y-0.5 hover:shadow-[0_18px_45px_rgba(37,99,235,0.34)] transition-all">
+                    <Mail className="w-5 h-5"/>
+                    <span className="text-sm font-semibold">Email</span>
+                  </a>
+                </div>
+
+                <p className="mt-5 text-center text-xs font-medium text-gray-400">
+                  Use the contact buttons if needed.
+                </p>
+                <p className="mt-2 text-center text-xs font-medium text-gray-400">
+                  Please close this pop-up to view the dashboard. Thank you!
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showTour && (() => {
+        const r = tourTarget || { top: 120, left: 120, width: 320, height: 120 };
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        const popupWidth = Math.min(420, vw - 32);
+        const popupHeight = 306;
+        const canPlaceRight = r.left + r.width + 18 + popupWidth <= vw - 16;
+        const canPlaceLeft = r.left - 18 - popupWidth >= 16;
+        const popupLeft = canPlaceRight
+          ? r.left + r.width + 18
+          : canPlaceLeft
+          ? r.left - popupWidth - 18
+          : Math.min(Math.max(16, r.left), vw - popupWidth - 16);
+        const popupBelow = r.top + r.height + 18;
+        const popupTop = (canPlaceRight || canPlaceLeft)
+          ? Math.min(Math.max(16, r.top), vh - popupHeight - 16)
+          : popupBelow + popupHeight < vh
+          ? popupBelow
+          : Math.max(16, r.top - popupHeight - 18);
+        return (
+          <div className="fixed inset-0 z-[80] pointer-events-none">
+            <div className="fixed left-0 top-0 right-0 bg-black/58 backdrop-blur-[1px]" style={{height:r.top}}/>
+            <div className="fixed left-0 bg-black/58 backdrop-blur-[1px]" style={{top:r.top, width:r.left, height:r.height}}/>
+            <div className="fixed bg-black/58 backdrop-blur-[1px]" style={{top:r.top, left:r.left+r.width, right:0, height:r.height}}/>
+            <div className="fixed left-0 right-0 bottom-0 bg-black/58 backdrop-blur-[1px]" style={{top:r.top+r.height}}/>
+            <div
+              className="fixed rounded-2xl border-2 border-emerald-400 shadow-[0_0_0_4px_rgba(16,185,129,0.18),0_20px_70px_rgba(16,185,129,0.30)] pointer-events-none"
+              style={{top:r.top, left:r.left, width:r.width, height:r.height}}
+            />
+            <div
+              className={`fixed pointer-events-auto w-full rounded-2xl shadow-2xl border ${darkMode?'bg-gray-800 border-gray-700 text-white':'bg-white border-gray-100 text-gray-900'}`}
+              style={{top:popupTop, left:popupLeft, maxWidth:popupWidth}}
+              onClick={e=>e.stopPropagation()}
+            >
+              <div className={`flex items-center justify-between px-5 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-[0.16em] text-emerald-600">Summary Tour</p>
+                  <h3 className="text-lg font-black mt-1">{currentTour.title}</h3>
+                </div>
+                <button onClick={()=>setShowTour(false)} className={`p-2 rounded-full ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`} aria-label="Close tour">
+                  <X className="w-5 h-5"/>
+                </button>
+              </div>
+              <div className="px-5 py-4">
+                <div className={`mb-4 h-2 rounded-full ${darkMode?'bg-gray-700':'bg-gray-100'}`}>
+                  <div
+                    className="h-2 rounded-full bg-gradient-to-r from-emerald-500 to-green-700 transition-all"
+                    style={{width: `${((tourStep + 1) / tourSteps.length) * 100}%`}}
+                  />
+                </div>
+                <p className={`text-sm leading-relaxed ${darkMode?'text-gray-300':'text-gray-600'}`}>{currentTour.body}</p>
+                <p className={`mt-4 text-xs font-semibold ${darkMode?'text-gray-400':'text-gray-500'}`}>Step {tourStep + 1} of {tourSteps.length}</p>
+              </div>
+              <div className={`flex items-center justify-between gap-3 px-5 py-4 border-t ${darkMode?'border-gray-700':'border-gray-100'}`}>
+                <button
+                  onClick={()=>setTourStep(s=>Math.max(0, s-1))}
+                  disabled={tourStep === 0}
+                  className={`px-4 py-2 rounded-full text-sm font-semibold ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
+                >
+                  Back
+                </button>
+                <div className="flex items-center gap-2">
+                  <button onClick={()=>setShowTour(false)} className={`px-4 py-2 rounded-full text-sm font-semibold ${darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-500 hover:bg-gray-100'}`}>Skip</button>
+                  <button
+                    onClick={() => {
+                      if (tourStep >= tourSteps.length - 1) setShowTour(false);
+                      else setTourStep(s=>s+1);
+                    }}
+                    className="px-5 py-2 rounded-full text-sm font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-[0_12px_28px_rgba(16,185,129,0.25)]"
+                  >
+                    {tourStep >= tourSteps.length - 1 ? 'Finish' : 'Next'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {marginDetailModal && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={()=>setMarginDetailModal(null)}>
@@ -3714,19 +4131,19 @@ const App = () => {
             </div>
             <div className="overflow-auto flex-1">
               <table className="w-full text-xs">
-                <thead className={`sticky top-0 ${darkMode?'bg-gray-700':'bg-purple-50'}`}>
+                <thead className={`sticky top-0 ${darkMode?'bg-gray-700':'bg-blue-50'}`}>
                   <tr>{['SO Item','Product','Vendor','Sales','Purchase','Margin','%','Date'].map(h=>(
                     <th key={h} className={`px-3 py-2 text-center font-bold ${darkMode?'text-gray-200':'text-gray-700'}`}>{h}</th>
                   ))}</tr>
                 </thead>
                 <tbody className={`divide-y ${darkMode?'divide-gray-700':'divide-gray-100'}`}>
                   {(marginDetailModal.data||[]).map((t,i)=>(
-                    <tr key={i} className={darkMode?'hover:bg-gray-700':'hover:bg-purple-50'}>
-                      <td className="px-3 py-2 text-purple-600 font-medium whitespace-nowrap">{t.so_item||'-'}</td>
+                    <tr key={i} className={darkMode?'hover:bg-gray-700':'hover:bg-blue-50'}>
+                      <td className="px-3 py-2 text-blue-600 font-medium whitespace-nowrap">{t.so_item||'-'}</td>
                       <td className={`px-3 py-2 max-w-[160px] truncate ${txt}`}>{t.product||'-'}</td>
                       <td className={`px-3 py-2 max-w-[120px] truncate ${txt2}`}>{t.vendor||'-'}</td>
                       <td className="px-3 py-2 text-right text-blue-600 whitespace-nowrap">{fmtCur(t.sales_amount)}</td>
-                      <td className="px-3 py-2 text-right text-orange-600 whitespace-nowrap">{fmtCur(t.purchase_amount)}</td>
+                      <td className="px-3 py-2 text-right text-slate-700 whitespace-nowrap">{fmtCur(t.purchase_amount)}</td>
                       <td className={`px-3 py-2 text-right font-bold whitespace-nowrap ${t.margin<0?'text-red-600':t.margin>0?'text-green-600':'text-gray-400'}`}>{fmtCur(t.margin)}</td>
                       <td className={`px-3 py-2 text-right whitespace-nowrap ${t.margin<0?'text-red-500':t.margin>0?'text-green-500':'text-gray-400'}`}>{t.margin_pct!=null?`${t.margin_pct}%`:'—'}</td>
                       <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{t.date?fmtDate(t.date):'-'}</td>
@@ -3751,14 +4168,14 @@ const App = () => {
       {uploadProgress && (
         <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center backdrop-blur-sm">
           <div className={`${darkMode?'bg-gray-800':'bg-white'} p-8 rounded-2xl shadow-2xl flex flex-col items-center gap-4 w-80`}>
-            <div className="w-14 h-14 border-4 border-purple-600 border-t-transparent rounded-full animate-spin"/>
+            <div className="w-14 h-14 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"/>
             <div className="w-full text-center">
               <p className={`font-bold text-lg mb-1 ${txt}`}>Uploading {uploadProgress.label}...</p>
               <p className={`text-xs mb-3 ${txt2}`}>Please wait, do not close the browser</p>
               <div className={`w-full rounded-full h-3 ${darkMode?'bg-gray-700':'bg-gray-200'}`}>
-                <div className="bg-gradient-to-r from-purple-600 to-purple-400 h-3 rounded-full transition-all duration-300" style={{width:`${uploadProgress.pct}%`}}/>
+                <div className="bg-gradient-to-r from-blue-600 to-blue-400 h-3 rounded-full transition-all duration-300" style={{width:`${uploadProgress.pct}%`}}/>
               </div>
-              <p className="text-purple-600 font-semibold mt-2">{uploadProgress.pct}%</p>
+              <p className="text-blue-600 font-semibold mt-2">{uploadProgress.pct}%</p>
             </div>
           </div>
         </div>
@@ -3767,7 +4184,7 @@ const App = () => {
       {loading && !uploadProgress && (
         <div className="fixed inset-0 bg-black/30 z-[55] flex items-center justify-center">
           <div className={`${darkMode?'bg-gray-800':'bg-white'} px-6 py-4 rounded-xl shadow-xl flex items-center gap-3`}>
-            <div className="w-6 h-6 border-3 border-purple-600 border-t-transparent rounded-full animate-spin"/>
+            <div className="w-6 h-6 border-3 border-blue-600 border-t-transparent rounded-full animate-spin"/>
             <p className={`text-sm font-semibold ${txt}`}>Loading data...</p>
           </div>
         </div>
