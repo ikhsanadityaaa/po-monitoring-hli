@@ -1097,38 +1097,61 @@ const App = () => {
   useEffect(() => {
     const rowsNeedingSimilarity = itemRegData.filter(row => !row.prod_id && row.req_no);
     if (rowsNeedingSimilarity.length === 0) return;
-    // Batch load in sequence with small delays to avoid hammering the backend
     let cancelled = false;
+
     const loadAll = async () => {
+      // Mark all uncached rows as loading immediately (single state update)
+      setSimilarityCache(prev => {
+        const next = { ...prev };
+        let dirty = false;
+        for (const row of rowsNeedingSimilarity) {
+          if (!next[row.req_no]) {
+            next[row.req_no] = { loading: true, result: null };
+            dirty = true;
+          }
+        }
+        return dirty ? next : prev;
+      });
+
+      // Fetch sequentially — only rows not already in cache
       for (const row of rowsNeedingSimilarity) {
         if (cancelled) break;
-        const reqNo = row.req_no;
-        setSimilarityCache(prev => {
-          if (prev[reqNo]) return prev; // already loading or loaded
-          return { ...prev, [reqNo]: { loading: true, result: null } };
-        });
-      }
-      for (const row of rowsNeedingSimilarity) {
-        if (cancelled) break;
-        const reqNo = row.req_no;
-        setSimilarityCache(prev => {
-          if (prev[reqNo] && !prev[reqNo].loading) return prev; // already done
-          return prev;
-        });
+        // Read current cache snapshot synchronously via functional updater peek
+        // Skip rows already fetched (result set, even if null)
+        // We track this via a local set built from the initial scan
         try {
-          const res = await api.get(`/api/item-registration/similarity/${encodeURIComponent(reqNo)}`);
+          const res = await api.get(`/api/item-registration/similarity/${encodeURIComponent(row.req_no)}`);
           if (!cancelled) {
-            setSimilarityCache(prev => ({ ...prev, [reqNo]: { loading: false, result: res.data.similar_items } }));
+            setSimilarityCache(prev => {
+              // Only update if still in loading state (not already set by another trigger)
+              if (prev[row.req_no]?.loading === false) return prev;
+              return { ...prev, [row.req_no]: { loading: false, result: res.data.similar_items } };
+            });
           }
         } catch {
           if (!cancelled) {
-            setSimilarityCache(prev => ({ ...prev, [reqNo]: { loading: false, result: null } }));
+            setSimilarityCache(prev => {
+              if (prev[row.req_no]?.loading === false) return prev;
+              return { ...prev, [row.req_no]: { loading: false, result: null } };
+            });
           }
         }
       }
     };
-    loadAll();
+
+    // Filter to only rows not already in cache before starting
+    // Use a ref snapshot to avoid reading stale closure
+    setSimilarityCache(prev => {
+      const uncached = rowsNeedingSimilarity.filter(row => !prev[row.req_no]);
+      if (uncached.length > 0 && !cancelled) {
+        // Kick off async load after state settles
+        setTimeout(() => { if (!cancelled) loadAll(); }, 0);
+      }
+      return prev; // no state change here, just a peek
+    });
+
     return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemRegData]);
 
   const fetchRegisteredItems = useCallback(async (
@@ -2961,8 +2984,8 @@ const App = () => {
     ];
     const colWidth = (key) => ({
       proc_status: '9%', client_name: '10%', category: '8%', pic: '5%', req_no: 'auto', prod_id: '5%',
-      prod_name: 'auto', spec: '15%', mfr_name: '6%', odr_unit: '4%',
-      prod_price: '5%', curr: '3%', similar_item: '18%', remarks: '14%'
+      prod_name: 'auto', spec: '12%', mfr_name: '6%', odr_unit: '4%',
+      prod_price: '5%', curr: '3%', similar_item: '22%', remarks: '12%'
     }[key] || 'auto');
 
     const loadSimilarity = (reqNo) => {
@@ -3087,17 +3110,31 @@ const App = () => {
                     }
                     const sim = cached.result;
                     if (!sim) return <td key={key} className={`px-2 py-2 text-center ${txt2}`}><span className="text-[10px] opacity-40">Tidak ada</span></td>;
+                    const simColor = sim.similarity >= 95 ? 'text-green-600' : sim.similarity >= 85 ? 'text-amber-500' : 'text-orange-500';
+                    const pidList = String(sim.product_ids || '').split(',').map(s => s.trim()).filter(Boolean);
                     return (
-                      <td key={key} className="px-2 py-2">
-                        <div className="flex flex-col gap-0.5">
+                      <td key={key} className="px-2 py-1.5">
+                        <div className="flex flex-col gap-0.5 min-w-0">
+                          {/* Row 1: similarity badge + prod IDs */}
                           <div className="flex items-center gap-1 flex-wrap">
-                            {String(sim.product_ids || '').split(',').map(pid => (
-                              <span key={pid.trim()} className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${darkMode ? 'bg-blue-900 text-blue-200' : 'bg-blue-50 text-blue-700'}`}>{pid.trim()}</span>
+                            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${darkMode ? 'bg-gray-700' : 'bg-gray-100'} ${simColor}`}>{sim.similarity}%</span>
+                            {pidList.map(pid => (
+                              <span key={pid} className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${darkMode ? 'bg-blue-900 text-blue-200' : 'bg-blue-50 text-blue-700'}`}>{pid}</span>
                             ))}
-                            <span className={`ml-1 text-[10px] font-semibold ${sim.similarity >= 90 ? 'text-green-600' : 'text-amber-500'}`}>{sim.similarity}%</span>
+                            {sim.count > 1 && <span className={`text-[10px] ${txt2}`}>({sim.count} match)</span>}
                           </div>
-                          <span className={`text-[10px] ${txt2} truncate`} title={sim.product_name}>{sim.product_name || ''}</span>
-                          {sim.specification && <span className={`text-[10px] ${txt2} truncate opacity-70`} title={sim.specification}>{sim.specification}</span>}
+                          {/* Row 2: Product Name */}
+                          {sim.product_name && <span className={`text-[10px] font-semibold truncate ${darkMode ? 'text-gray-200' : 'text-gray-700'}`} title={sim.product_name}>{sim.product_name}</span>}
+                          {/* Row 3: Specification */}
+                          {sim.specification && <span className={`text-[10px] truncate ${txt2}`} title={sim.specification}><span className="opacity-50">Spec: </span>{sim.specification}</span>}
+                          {/* Row 4: Mfr + Unit */}
+                          {(sim.manufacturer_name || sim.order_unit) && (
+                            <span className={`text-[10px] truncate ${txt2}`}>
+                              {sim.manufacturer_name && <span title={sim.manufacturer_name}><span className="opacity-50">Mfr: </span>{sim.manufacturer_name}</span>}
+                              {sim.manufacturer_name && sim.order_unit && <span className="opacity-40 mx-1">·</span>}
+                              {sim.order_unit && <span><span className="opacity-50">Unit: </span>{sim.order_unit}</span>}
+                            </span>
+                          )}
                         </div>
                       </td>
                     );
