@@ -176,11 +176,13 @@ class SOData(db.Model):
     so_item = db.Column(db.String(100))
     so_status = db.Column(db.String(50))
     operation_unit_name = db.Column(db.String(200))
+    vendor_id = db.Column(db.String(100))
     vendor_name = db.Column(db.String(200))
     customer_po_number = db.Column(db.String(200))
     delivery_memo = db.Column(db.Text)
     product_name = db.Column(db.Text)
     specification = db.Column(db.Text)
+    manufacturer_name = db.Column(db.String(300))
     product_id = db.Column(db.String(100))
     so_qty = db.Column(db.Float)
     sales_unit = db.Column(db.String(20))
@@ -303,6 +305,7 @@ class ItemRegistration(db.Model):
     __tablename__ = 'item_registration'
     id              = db.Column(db.Integer, primary_key=True)
     proc_status     = db.Column(db.String(100))
+    existing_owner  = db.Column(db.String(100))
     client_name     = db.Column(db.String(300), index=True)
     category        = db.Column(db.String(255))
     category_id     = db.Column(db.String(100))
@@ -325,6 +328,15 @@ class ItemRegistration(db.Model):
     product_registry_pic = db.Column(db.String(200))
     remarks         = db.Column(db.Text)
     uploaded_at     = db.Column(db.DateTime, default=datetime.utcnow)
+
+class RFQCellEdit(db.Model):
+    __tablename__ = 'rfq_cell_edit'
+    id         = db.Column(db.Integer, primary_key=True)
+    row_key    = db.Column(db.String(200), nullable=False, index=True)
+    field      = db.Column(db.String(100), nullable=False)
+    value      = db.Column(db.Text)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+    __table_args__ = (db.UniqueConstraint('row_key', 'field', name='uq_rfq_cell_edit_row_field'),)
 
 
 # ─── Exchange rate helpers ─────────────────────────────────────────────────
@@ -605,6 +617,8 @@ def _ensure_extra_columns():
         'so_data': [
             ('specification',                      'TEXT'),
             ('product_id',                         'VARCHAR(100)'),
+            ('vendor_id',                          'VARCHAR(100)'),
+            ('manufacturer_name',                  'VARCHAR(300)'),
             ('purchasing_currency',                'VARCHAR(10)'),
             ('purchasing_amount_idr',              'DOUBLE PRECISION'),
             ('purchasing_amount_idr_cached_at',    'TIMESTAMP'),
@@ -620,6 +634,7 @@ def _ensure_extra_columns():
             ('pur_curr',             'VARCHAR(10)'),
         ],
         'item_registration': [
+            ('existing_owner',       'VARCHAR(100)'),
             ('category_id',          'VARCHAR(100)'),
             ('pic_name',             'VARCHAR(200)'),
             ('product_status',       'VARCHAR(100)'),
@@ -705,7 +720,8 @@ with app.app_context():
 
 CLOSED_STATUSES = {
     'Delivery Completed', 'SO Cancel',
-    'Approval Apply', 'Approval Complete Step', 'Approval Reject'
+    'Approval Apply', 'Approval Complete Step', 'Approval Reject',
+    'Return Complete(Vendor)', 'Customer PO Reject'
 }
 
 EXCLUDED_OP_UNITS = {'HLI GREEN POWER (CONSUMABLE)'}
@@ -919,6 +935,193 @@ def clean_product_id(val):
         pass
     return re.sub(r'\.0+$', '', s)
 
+RFQ_SHEET_ID = '1JrdsYWhv1mzeXB-jbukDxDYxBgaeISzpiVKEKdgfQvw'
+RFQ_SHEET_NAME = 'Sales Submit-RFQ'
+RFQ_CACHE = {'expires_at': None, 'rows': [], 'fetched_at': None}
+RFQ_TEMPLATE_COLUMNS = [
+    ('status', 'Status'),
+    ('days_left', 'Days Left'),
+    ('no', 'No'),
+    ('client_name', 'Nama Client'),
+    ('rfq_date', 'RFQ Date'),
+    ('closing_date', 'Closing Date'),
+    ('sales_pic', 'Sales PIC'),
+    ('item_name', 'Item Name'),
+    ('detail_spec', 'Detail Spec (Mod'),
+    ('brand_manufacturer', 'Brand/Manufaktur'),
+    ('qty', 'Qty'),
+    ('unit', 'Unit'),
+    ('remark', 'Remark'),
+    ('category_name', 'Category Name'),
+    ('product_id', 'Product ID'),
+    ('request_number', 'Request Number'),
+    ('purchase_pic', 'Purchase PIC'),
+    ('same_replacement', 'Same/Replacement'),
+    ('vendor_name', 'Vendor Name'),
+    ('unit_price_idr', 'Unit Price (IDR)'),
+    ('amt_idr', 'Amt (IDR)'),
+    ('quoted_item_name', 'Item Name'),
+    ('quoted_spec', 'Spec'),
+    ('quoted_brand', 'Brand'),
+    ('quoted_unit', 'Unit'),
+    ('moq', 'MOQ'),
+    ('lead_time_days', 'Lead Time (Days)'),
+    ('valid_period', 'Valid period'),
+    ('photo_url', 'Photo URL (optional)'),
+    ('remarks', 'Remarks'),
+]
+RFQ_EDITABLE_FIELDS = {
+    'same_replacement', 'vendor_name', 'unit_price_idr', 'quoted_item_name',
+    'quoted_spec', 'quoted_brand', 'quoted_unit', 'moq', 'lead_time_days', 'valid_period',
+    'photo_url', 'remarks'
+}
+RFQ_BATCH_FIELDS = [
+    'same_replacement', 'vendor_name', 'unit_price_idr', 'quoted_item_name',
+    'quoted_spec', 'quoted_brand', 'quoted_unit', 'moq', 'lead_time_days', 'valid_period',
+    'photo_url', 'remarks'
+]
+
+def rfq_label(field):
+    return dict(RFQ_TEMPLATE_COLUMNS).get(field, field)
+
+def parse_rfq_number(value):
+    raw = clean(value)
+    if not raw:
+        return None
+    s = re.sub(r'[^0-9.\-]', '', str(raw))
+    if not s or s in ('-', '.', '-.'):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+def fmt_rfq_amount(value):
+    if value is None:
+        return None
+    if abs(value - round(value)) < 0.000001:
+        return f'{int(round(value)):,}'
+    return f'{value:,.2f}'
+
+def rfq_days_left(closing_date):
+    raw = clean(closing_date)
+    if not raw:
+        return None
+    d = None
+    for fmt in ('%d/%m/%Y', '%Y/%m/%d', '%Y-%m-%d'):
+        try:
+            d = datetime.strptime(str(raw).strip(), fmt).date()
+            break
+        except ValueError:
+            pass
+    if d is None:
+        d = parse_date(raw)
+    if not d:
+        return None
+    days = (d - date.today()).days
+    return days if days >= 0 else None
+
+def apply_rfq_computed_fields(item):
+    item['category_name'] = (clean(item.get('category_name')) or '').split('>')[0].strip() or None
+    qty = parse_rfq_number(item.get('qty'))
+    unit_price = parse_rfq_number(item.get('unit_price_idr'))
+    item['amt_idr'] = fmt_rfq_amount(qty * unit_price) if qty is not None and unit_price is not None else None
+    item['days_left'] = rfq_days_left(item.get('closing_date'))
+    item['unit_price_missing'] = unit_price is None
+    return item
+
+def rfq_cell(row, idx):
+    try:
+        return clean(row.iloc[idx])
+    except Exception:
+        return None
+
+def rfq_row_key(data, sheet_row):
+    code = clean(data.get('source_code'))
+    if code:
+        return code
+    parts = [data.get('no'), data.get('client_name'), data.get('rfq_date'), data.get('item_name')]
+    key = '|'.join(str(clean(x) or '') for x in parts).strip('|')
+    return key or f'row-{sheet_row}'
+
+def fetch_rfq_rows(force=False):
+    now = datetime.utcnow()
+    if not force and RFQ_CACHE['expires_at'] and RFQ_CACHE['expires_at'] > now:
+        return RFQ_CACHE['rows'], RFQ_CACHE['fetched_at']
+
+    from urllib.parse import quote
+    url = f'https://docs.google.com/spreadsheets/d/{RFQ_SHEET_ID}/gviz/tq?tqx=out:csv&sheet={quote(RFQ_SHEET_NAME)}'
+    df = pd.read_csv(url, header=None, dtype=str, keep_default_na=False)
+    rows = []
+    # Google CSV rows 1-3 are title/header rows; data starts at sheet row 4.
+    for idx in range(3, len(df)):
+        src = df.iloc[idx]
+        product_id = clean_product_id(rfq_cell(src, 16))
+        data = {
+            'sheet_row': idx + 1,
+            'no': rfq_cell(src, 1),
+            'client_name': rfq_cell(src, 2),
+            'rfq_date': rfq_cell(src, 4),
+            'closing_date': rfq_cell(src, 5),
+            'sales_pic': rfq_cell(src, 6),
+            'item_name': rfq_cell(src, 8),
+            'detail_spec': rfq_cell(src, 9),
+            'brand_manufacturer': rfq_cell(src, 10),
+            'qty': rfq_cell(src, 11),
+            'unit': rfq_cell(src, 12),
+            'remark': rfq_cell(src, 13),
+            'category_id': rfq_cell(src, 14),
+            'category_name': rfq_cell(src, 15),
+            'product_id': product_id,
+            'request_number': rfq_cell(src, 7),
+            'purchase_pic': rfq_cell(src, 18),
+            'same_replacement': rfq_cell(src, 21),
+            'vendor_name': rfq_cell(src, 22),
+            'unit_price_idr': rfq_cell(src, 23),
+            'amt_idr': rfq_cell(src, 24),
+            'quoted_item_name': rfq_cell(src, 25),
+            'quoted_spec': rfq_cell(src, 26),
+            'quoted_brand': rfq_cell(src, 27),
+            'quoted_unit': rfq_cell(src, 28),
+            'moq': rfq_cell(src, 29),
+            'lead_time_days': rfq_cell(src, 30),
+            'valid_period': rfq_cell(src, 31),
+            'photo_url': rfq_cell(src, 32),
+            'remarks': rfq_cell(src, 33),
+            'source_code': rfq_cell(src, 38),
+        }
+        data['purchase_pic'] = canonical_rfq_pic(data)
+        if not any(data.get(field) for field, _ in RFQ_TEMPLATE_COLUMNS if field != 'status'):
+            continue
+        data['status'] = bool(product_id)
+        data['row_key'] = rfq_row_key(data, idx + 1)
+        rows.append(data)
+
+    fetched_at = datetime.utcnow()
+    RFQ_CACHE.update({
+        'rows': rows,
+        'fetched_at': fetched_at,
+        'expires_at': fetched_at + timedelta(seconds=60),
+    })
+    return rows, fetched_at
+
+def rfq_rows_with_edits(force=False):
+    rows, fetched_at = fetch_rfq_rows(force=force)
+    edits = RFQCellEdit.query.all()
+    edit_map = {}
+    for edit in edits:
+        edit_map.setdefault(edit.row_key, {})[edit.field] = edit.value
+    merged = []
+    for row in rows:
+        item = dict(row)
+        for field, value in edit_map.get(item['row_key'], {}).items():
+            if field in RFQ_EDITABLE_FIELDS:
+                item[field] = value
+        item['status'] = bool(clean_product_id(item.get('product_id')))
+        apply_rfq_computed_fields(item)
+        merged.append(item)
+    return merged, fetched_at
+
 def parse_date(val):
     if val is None: return None
     try:
@@ -1026,24 +1229,30 @@ def apply_so_pic_filter(query, pics):
         return query
     if '__NONE_PLACEHOLDER__' in pics:
         return query.filter(SOData.id.is_(None))
+    non_yupi_op_unit = db.or_(SOData.operation_unit_name.is_(None), db.not_(SOData.operation_unit_name.ilike('%YUPI%')))
     if 'ANDRE' in pics:
         others = [p for p in pics if p != 'ANDRE']
         andre_filter = db.or_(SOData.pic_name == 'ANDRE', SOData.operation_unit_name.ilike('%YUPI%'))
         if others:
-            return query.filter(db.or_(SOData.pic_name.in_(others), andre_filter))
+            others_filter = db.and_(SOData.pic_name.in_(others), non_yupi_op_unit)
+            return query.filter(db.or_(others_filter, andre_filter))
         return query.filter(andre_filter)
     if '(Kosong)' in pics:
         others = [p for p in pics if p != '(Kosong)']
-        empty_pic = db.or_(SOData.pic_name.is_(None), SOData.pic_name == '')
+        empty_pic = db.and_(db.or_(SOData.pic_name.is_(None), SOData.pic_name == ''), non_yupi_op_unit)
         if others:
-            return query.filter(db.or_(SOData.pic_name.in_(others), empty_pic))
+            others_filter = db.and_(SOData.pic_name.in_(others), non_yupi_op_unit)
+            return query.filter(db.or_(others_filter, empty_pic))
         return query.filter(empty_pic)
-    return query.filter(SOData.pic_name.in_(pics))
+    return query.filter(SOData.pic_name.in_(pics), non_yupi_op_unit)
 
 def canonical_pending_pic(pic, client_or_op_unit=None):
     if client_or_op_unit and 'YUPI' in str(client_or_op_unit).upper():
         return 'ANDRE'
     return pic or 'Unassigned'
+
+def canonical_rfq_pic(row):
+    return canonical_pending_pic(clean(row.get('purchase_pic')), row.get('client_name'))
 
 def sort_pic_kpis(rows):
     return sorted(rows, key=lambda x: (0 if x.get('pic') == 'ANDRE' else 1, -x.get('count', 0), x.get('pic') or ''))
@@ -1051,20 +1260,23 @@ def sort_pic_kpis(rows):
 def apply_item_registration_pic_filter(query, pics):
     if not pics:
         return query
+    non_yupi_client = db.or_(ItemRegistration.client_name.is_(None), db.not_(ItemRegistration.client_name.ilike('%YUPI%')))
     if 'ANDRE' in pics:
         others = [p for p in pics if p != 'ANDRE']
         andre_filter = db.or_(ItemRegistration.pic == 'ANDRE', ItemRegistration.client_name.ilike('%YUPI%'))
         if others:
-            return query.filter(db.or_(ItemRegistration.pic.in_(others), andre_filter))
+            others_filter = db.and_(ItemRegistration.pic.in_(others), non_yupi_client)
+            return query.filter(db.or_(others_filter, andre_filter))
         return query.filter(andre_filter)
-    return query.filter(ItemRegistration.pic.in_(pics))
+    return query.filter(ItemRegistration.pic.in_(pics), non_yupi_client)
 
-def item_registration_dict(row, registered_items=None):
+def item_registration_dict(row, registered_items=None, include_similarity=True):
     pic = resolve_item_registration_pic(row)
-    similar_items = find_similar_registered_items(row, registered_items)
+    similar_items = find_similar_registered_items(row, registered_items) if include_similarity else None
     return {
         'id': row.id,
         'proc_status': row.proc_status or '',
+        'existing_owner': row.existing_owner or '',
         'client_name': row.client_name or '',
         'category': source_category_level1(row.category),
         'pic': pic,
@@ -1128,10 +1340,11 @@ def invalidate_master_pic_cache():
     _MASTER_PIC_CACHE['by_name'] = {}
 
 def master_pic_maps():
+    if _MASTER_PIC_CACHE.get('signature') is not None:
+        return _MASTER_PIC_CACHE['by_id'], _MASTER_PIC_CACHE['by_name']
+
     signature = db.session.query(func.count(MasterPIC.id), func.max(MasterPIC.updated_at)).one()
     signature = tuple(signature)
-    if _MASTER_PIC_CACHE.get('signature') == signature:
-        return _MASTER_PIC_CACHE['by_id'], _MASTER_PIC_CACHE['by_name']
 
     by_id = {}
     by_name = {}
@@ -1164,6 +1377,9 @@ def resolve_item_registration_pic(row):
     mapped = _lookup_pic_by_category(row.category_id, row.category)
     return canonical_pending_pic(mapped or row.pic or '', row.client_name)
 
+def is_existing_owner_pur_pic(value):
+    return (clean(value) or '').strip().lower() == 'pur. pic'
+
 def refresh_item_registration_mappings():
     rows = ItemRegistration.query.all()
     changed = False
@@ -1186,6 +1402,7 @@ def refresh_item_registration_mappings():
 def _item_registration_columns(df):
     return {
         'proc_status':  find_column(df, ['Proc. Status', 'Proc Status', 'Process Status']),
+        'existing_owner': find_column(df, ['Existing Owner', 'Existing Owner.', 'Owner']),
         'client_name':  find_column(df, ['Client Nm.', 'Client Nm', 'Client Name']),
         'category':     find_column(df, ['Cat. Nm.', 'Cat. Nm', 'Category', 'Cate. Nm.', 'Category Name']),
         'category_id':  find_column(df, ['Cat. ID', 'Cat. ID.', 'Category ID', 'Category Id', 'CategoryID']),
@@ -1245,6 +1462,7 @@ def import_item_registration_dataframe(df, filename='Item Registration'):
         category = source_category_level1(df_val(row, col['category']))
         incoming[req_no] = {
             'proc_status': clean(df_val(row, col['proc_status'])),
+            'existing_owner': clean(df_val(row, col['existing_owner'])),
             'client_name': clean(df_val(row, col['client_name'])),
             'category': category,
             'category_id': category_id,
@@ -1338,19 +1556,23 @@ def so_dict(s):
     return {
         'id': s.id, 'so_number': s.so_number, 'so_item': s.so_item,
         'so_status': s.so_status, 'operation_unit_name': s.operation_unit_name,
-        'vendor_name': s.vendor_name, 'customer_po_number': s.customer_po_number,
+        'vendor_id': s.vendor_id or '', 'vendor_name': s.vendor_name,
+        'customer_po_number': s.customer_po_number,
         'delivery_memo': s.delivery_memo, 'product_name': s.product_name,
-        'specification': s.specification, 'product_id': s.product_id,
+        'specification': s.specification, 'manufacturer_name': s.manufacturer_name or '',
+        'product_id': s.product_id,
         'category_name': category_name,
         'svo_po': s.matched_po_number or '',
-        'so_qty': s.so_qty, 'sales_price': s.sales_price, 'sales_amount': s.sales_amount,
+        'so_qty': s.so_qty, 'sales_unit': s.sales_unit or '',
+        'sales_price': s.sales_price, 'sales_amount': s.sales_amount,
+        'currency': s.currency or '',
         'purchasing_price': s.purchasing_price, 'purchasing_amount': s.purchasing_amount,
         'purchasing_currency': s.purchasing_currency,
         'so_create_date': s.so_create_date.isoformat() if s.so_create_date else '',
         'delivery_possible_date': s.delivery_possible_date.isoformat() if s.delivery_possible_date else '',
         'delivery_plan_date': s.delivery_plan_date.isoformat() if s.delivery_plan_date else '',
         'remarks': s.remarks or '',
-        'pic_name': s.pic_name or '',
+        'pic_name': canonical_pending_pic(s.pic_name, s.operation_unit_name),
         'aging_days': age_days,
         'aging_label': get_aging_label(age_days)
     }
@@ -1610,6 +1832,7 @@ def get_dashboard_stats():
 
         item_registration_proc_status = item_registration_distribution(ItemRegistration.proc_status)
         item_registration_clients = item_registration_distribution(ItemRegistration.client_name, limit=10)
+        item_registration_existing_owners = item_registration_distribution(ItemRegistration.existing_owner)
 
         options_q = apply_so_create_date_filter(
             db.session.query(SOData).filter(open_so_filter()),
@@ -1630,6 +1853,7 @@ def get_dashboard_stats():
         # Last updated: latest successful upload timestamp per source file.
         last_po_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'PO').scalar()
         last_so_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'SO').scalar()
+        last_item_reg_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'ITEM_REG').scalar()
         if not last_po_upload:
             last_po_upload = db.session.query(func.max(POData.uploaded_at)).scalar()
         if not last_so_upload:
@@ -1653,6 +1877,7 @@ def get_dashboard_stats():
             'status_months': sorted_months,
             'item_registration_proc_status': item_registration_proc_status,
             'item_registration_clients': item_registration_clients,
+            'item_registration_existing_owners': item_registration_existing_owners,
             'filters': {
                 'clients': client_options,
                 'pics': pic_options,
@@ -1660,6 +1885,7 @@ def get_dashboard_stats():
             'last_updated': utc_isoformat(last_upload),
             'last_updated_po': utc_isoformat(last_po_upload),
             'last_updated_smro': utc_isoformat(last_so_upload),
+            'last_updated_item_registration': utc_isoformat(last_item_reg_upload),
             'po_date_range': {
                 'min': po_date_range[0].isoformat() if po_date_range and po_date_range[0] else None,
                 'max': po_date_range[1].isoformat() if po_date_range and po_date_range[1] else None,
@@ -2080,10 +2306,12 @@ def get_all_so():
         per_page = int(request.args.get('per_page', 10))
         op_units = request.args.getlist('op_unit')
         vendors = request.args.getlist('vendor')
+        manufacturers = request.args.getlist('manufacturer')
         statuses = request.args.getlist('status')
         aging_list = request.args.getlist('aging')
         so_items = request.args.getlist('so_item')
         pics = request.args.getlist('pic')
+        kpi_pic = (request.args.get('kpi_pic') or '').strip()
         global_pics = request.args.getlist('global_pic')
         clients = selected_clients()
         margin_filter = request.args.get('margin_filter', 'all')
@@ -2095,17 +2323,10 @@ def get_all_so():
         q = apply_so_pic_filter(q, global_pics)
         if op_units: q = q.filter(SOData.operation_unit_name.in_(op_units))
         if vendors: q = q.filter(SOData.vendor_name.in_(vendors))
+        if manufacturers: q = q.filter(SOData.manufacturer_name.in_(manufacturers))
         if statuses: q = q.filter(SOData.so_status.in_(statuses))
         if so_items: q = q.filter(SOData.so_item.in_(so_items))
-        if pics:
-            if '(Kosong)' in pics:
-                others = [p for p in pics if p != '(Kosong)']
-                if others:
-                    q = q.filter(db.or_(SOData.pic_name.in_(others), SOData.pic_name.is_(None), SOData.pic_name == ''))
-                else:
-                    q = q.filter(db.or_(SOData.pic_name.is_(None), SOData.pic_name == ''))
-            else:
-                q = q.filter(SOData.pic_name.in_(pics))
+        q = apply_so_pic_filter(q, pics)
 
         # SO Create Date filter
         is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
@@ -2166,10 +2387,13 @@ def get_all_so():
         approval_statuses = {'Approval Apply', 'Approval Complete Step', 'Approval Reject'}
         approval_q = SOData.query.filter(SOData.so_status.in_(list(approval_statuses)))
         approval_q = apply_so_client_filter(approval_q, clients)
+        approval_q = apply_so_pic_filter(approval_q, global_pics)
         if op_units: approval_q = approval_q.filter(SOData.operation_unit_name.in_(op_units))
         if vendors: approval_q = approval_q.filter(SOData.vendor_name.in_(vendors))
+        if manufacturers: approval_q = approval_q.filter(SOData.manufacturer_name.in_(manufacturers))
         if statuses: approval_q = approval_q.filter(SOData.so_status.in_(statuses))
         if so_items: approval_q = approval_q.filter(SOData.so_item.in_(so_items))
+        approval_q = apply_so_pic_filter(approval_q, pics)
         approval_q = apply_so_create_date_filter(approval_q, date_year, date_from, date_to, is_sqlite)
         if sort_order == 'oldest':
             approval_sos = approval_q.order_by(SOData.so_create_date.asc(), SOData.so_item.asc()).all()
@@ -2186,18 +2410,25 @@ def get_all_so():
             )
         ]
 
+        kpi_source_sos = list(all_sos)
+
+        if kpi_pic:
+            all_sos = [s for s in all_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) == kpi_pic]
+            approval_sos = [s for s in approval_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) == kpi_pic]
+
         total = len(all_sos)
         subtotal_amount = sum(float(s.sales_amount or 0) for s in all_sos)
         paged = all_sos[(page-1)*per_page : page*per_page]
 
-        op_units_opts = sorted({s.operation_unit_name for s in all_sos if s.operation_unit_name})
-        vendors_opts  = sorted({s.vendor_name for s in all_sos if s.vendor_name})
-        statuses_opts = sorted({s.so_status for s in all_sos if s.so_status})
-        pics_opts     = sorted({canonical_pending_pic(s.pic_name, s.operation_unit_name) for s in all_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) != 'Unassigned'})
+        op_units_opts = sorted({s.operation_unit_name for s in kpi_source_sos if s.operation_unit_name})
+        vendors_opts  = sorted({s.vendor_name for s in kpi_source_sos if s.vendor_name})
+        manufacturers_opts = sorted({s.manufacturer_name for s in kpi_source_sos if s.manufacturer_name})
+        statuses_opts = sorted({s.so_status for s in kpi_source_sos if s.so_status})
+        pics_opts     = sorted({canonical_pending_pic(s.pic_name, s.operation_unit_name) for s in kpi_source_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) != 'Unassigned'})
 
         # Calculate PIC aggregations from ALL filtered records (not just current page)
         pic_aggregations = {}
-        for s in all_sos:
+        for s in kpi_source_sos:
             pic = canonical_pending_pic(s.pic_name, s.operation_unit_name)
             if pic not in pic_aggregations:
                 pic_aggregations[pic] = {'pic': pic, 'count': 0, 'amount': 0}
@@ -2211,7 +2442,7 @@ def get_all_so():
             'data': [so_dict(s) for s in paged],
             'approval_data': [so_dict(s) for s in approval_sos],
             'total': total, 'subtotal_amount': round(subtotal_amount, 2), 'page': page, 'per_page': per_page,
-            'filters': {'op_units': list(op_units_opts), 'vendors': list(vendors_opts), 'statuses': list(statuses_opts), 'pics': list(pics_opts)},
+            'filters': {'op_units': list(op_units_opts), 'vendors': list(vendors_opts), 'manufacturers': list(manufacturers_opts), 'statuses': list(statuses_opts), 'pics': list(pics_opts)},
             'pic_aggregations': pic_aggs_list
         })
     except Exception as e:
@@ -2585,223 +2816,202 @@ def upload_po_list():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/upload/scor', methods=['POST'])
 @app.route('/api/upload/smro', methods=['POST'])
 def upload_smro():
-    """
-    SMRO upload — upsert only.
-    - Records with SO Item matching new file → updated (remarks & delivery_plan_date preserved)
-    - Records with SO Item NOT in new file → KEPT as-is (not deleted)
-    - New SO Items in file not in DB → inserted
-    """
+    """SMRO upload: upsert by SO Item and preserve manual remarks/plan date."""
     try:
-        if 'file' not in request.files: return jsonify({'error': 'No file'}), 400
-        file = request.files['file']
-        df = pd.read_excel(file, engine='openpyxl')
-        df.columns = [str(c).strip() for c in df.columns]
+        files = uploaded_files()
+        if not files:
+            return jsonify({'error': 'No file'}), 400
 
-        REQUIRED_SMRO_COLS = {
-            'SO Number':       ['SO Number','SO No','SO No.','SO','Sales Order','Sales Order Number','No SO','Nomor SO'],
-            'SO Item':         ['SO Item No','Item No','Line','SO Line','SO Item'],
-            'SO Status':       ['SO Status','Status','Order Status'],
-            'Operation Unit':  ['Operation Unit Name','Op Unit','Client Name','Client','Operation Unit'],
-            'Vendor Name':     ['Vendor Name','Vendor','Supplier'],
-            'Customer PO':     ['Customer PO Number','Customer PO','PO Ref','PO Reference'],
-            'Sales Amount':    ['Sales Amount(Exclude Tax)','Sales Amount','Amount','Total'],
-            'SO Create Date':  ['SO Create Date','Order Date','SO Date','Create Date'],
+        required_smro_cols = {
+            'SO Number': ['SO Number','SO No','SO No.','SO','Sales Order','Sales Order Number','No SO','Nomor SO'],
+            'SO Item': ['SO Item No','Item No','Line','SO Line','SO Item'],
+            'SO Status': ['SO Status','Status','Order Status'],
+            'Operation Unit': ['Operation Unit Name','Op Unit','Client Name','Client','Operation Unit'],
+            'Vendor Name': ['Vendor Name','Vendor','Supplier'],
+            'Customer PO': ['Customer PO Number','Customer PO','PO Ref','PO Reference'],
+            'Sales Amount': ['Sales Amount(Exclude Tax)','Sales Amount','Amount','Total'],
+            'SO Create Date': ['SO Create Date','Order Date','SO Date','Create Date'],
         }
-        missing_required = []
-        for friendly_name, aliases in REQUIRED_SMRO_COLS.items():
-            if not find_column(df, aliases):
-                missing_required.append(friendly_name)
-        if len(missing_required) >= 3:
-            return jsonify({
-                'error': (
-                    f'❌ Invalid file — {len(missing_required)} required columns not found: '
-                    f'{", ".join(missing_required)}. '
-                    f'Please make sure you are uploading the correct SMRO file and try again.'
-                )
-            }), 400
 
-        col_so = find_column(df, ['SO Number','SO No','SO No.','SO','SO Item',
-                                   'Sales Order','Sales Order Number','No SO','Nomor SO'])
-        if not col_so:
-            return jsonify({'error': f'SO Number column not found. Available columns: {df.columns.tolist()}'}), 400
+        existing_so = {s.so_item: s for s in SOData.query.all() if s.so_item}
+        total_count = total_updated = total_inserted = 0
+        diagnostics_by_file = []
 
-        col_soitem  = find_column(df, ['SO Item No','Item No','Line','SO Line','SO Item'])
-        col_status  = find_column(df, ['SO Status','Status','Order Status'])
-        col_opunit  = find_column(df, ['Operation Unit Name','Op Unit','Client Name','Client','Operation Unit'])
-        col_vendor  = find_column(df, ['Vendor Name','Vendor','Supplier'])
-        col_custpo  = find_column(df, ['Customer PO Number','Customer PO','PO Ref','PO Reference'])
-        col_memo    = find_column(df, ['Delivery Memo','Memo','Delivery Note'])
-        col_prod    = find_column(df, ['Product Name','Item Name','Description','Product'])
-        col_spec    = find_column(df, ['Specification','Spec','Specifications','Product Specification','Material Description','Material Desc','Short Text'])
-        col_pid     = find_column(df, ['Product ID','Product Id','Product Code','Material','Material No','Material Number','Material Code','SKU','Article','Article Number'])
-        col_qty     = find_column(df, ['SO Quantity','SO Qty','Qty','Quantity'])
-        col_sunit   = find_column(df, ['Sales Unit','Unit','UOM'])
-        col_sprice  = find_column(df, ['Sales Price(Exclude Tax)','Sales Price','Price','Unit Price'])
-        col_samt    = find_column(df, ['Sales Amount(Exclude Tax)','Sales Amount','Amount','Total'])
-        col_cur     = find_column(df, ['Currency','Curr'])
-        col_pprice  = find_column(df, ['Purchasing Price','Purchase Price','PO Price'])
-        col_pamt    = find_column(df, ['Purchasing Amount','Purchase Amount','PO Amount'])
-        col_pcur    = find_column(df, ['Purchasing Currency','Purchase Currency','PO Currency','Purchasing Curr','Purchase Curr'])
-        col_sodate  = find_column(df, ['SO Create Date','Order Date','SO Date','Create Date'])
-        col_delposs = find_column(df, ['Delivery Possible Date','Possible Delivery Date','Est Delivery'])
-        col_matchpo = find_column(df, ['Matched PO Number','Matched PO','PO HLI','PO HLI Number','Purchasing Order Number','PO Number'])
+        for file in files:
+            df = read_upload_excel(file)
+            df.columns = [str(c).strip() for c in df.columns]
 
-        # Build lookup of existing SO records by so_item
-        existing_so = {}
-        for s in SOData.query.all():
-            if s.so_item:
-                existing_so[s.so_item] = s
+            missing_required = [name for name, aliases in required_smro_cols.items() if not find_column(df, aliases)]
+            if len(missing_required) > 3:
+                return jsonify({
+                    'error': (
+                        f'Invalid file "{file.filename}" - {len(missing_required)} required columns not found: '
+                        f'{", ".join(missing_required)}. Please make sure you are uploading the correct SMRO file.'
+                    )
+                }), 400
 
-        count = 0
-        updated = 0
-        inserted = 0
+            col_so = find_column(df, ['SO Number','SO No','SO No.','SO','SO Item','Sales Order','Sales Order Number','No SO','Nomor SO'])
+            if not col_so:
+                return jsonify({'error': f'SO Number column not found in "{file.filename}". Available columns: {df.columns.tolist()}'}), 400
 
-        # Track how many rows had non-empty Specification / Product ID values
-        # so the user can see whether the upload actually carried that data.
-        spec_filled = 0
-        pid_filled  = 0
+            col_soitem = find_column(df, ['SO Item No','Item No','Line','SO Line','SO Item'])
+            col_status = find_column(df, ['SO Status','Status','Order Status'])
+            col_opunit = find_column(df, ['Operation Unit Name','Op Unit','Client Name','Client','Operation Unit'])
+            col_vendor_id = find_column(df, ['Vendor ID','Vendor Id','Vendor Code','Supplier ID','Supplier Code'])
+            col_vendor = find_column(df, ['Vendor Name','Vendor','Supplier'])
+            col_custpo = find_column(df, ['Customer PO Number','Customer PO','PO Ref','PO Reference'])
+            col_memo = find_column(df, ['Delivery Memo','Memo','Delivery Note'])
+            col_prod = find_column(df, ['Product Name','Item Name','Description','Product'])
+            col_spec = find_column(df, ['Specification','Spec','Specifications','Product Specification','Material Description','Material Desc','Short Text'])
+            col_mfr = find_column(df, ['Manufacturer Name','Mfr. Nm.','Mfr. Nm','Maker Nm.','Manufacturer'])
+            col_pid = find_column(df, ['Product ID','Product Id','Product Code','Material','Material No','Material Number','Material Code','SKU','Article','Article Number'])
+            col_qty = find_column(df, ['SO Quantity','SO Qty','Qty','Quantity'])
+            col_sunit = find_column(df, ['Sales Unit','Unit','UOM'])
+            col_sprice = find_column(df, ['Sales Price(Exclude Tax)','Sales Price','Price','Unit Price'])
+            col_samt = find_column(df, ['Sales Amount(Exclude Tax)','Sales Amount','Amount','Total'])
+            col_cur = find_column(df, ['Currency','Curr'])
+            col_pprice = find_column(df, ['Purchasing Price','Purchase Price','PO Price'])
+            col_pamt = find_column(df, ['Purchasing Amount','Purchase Amount','PO Amount'])
+            col_pcur = find_column(df, ['Purchasing Currency','Purchase Currency','PO Currency','Purchasing Curr','Purchase Curr'])
+            col_sodate = find_column(df, ['SO Create Date','Order Date','SO Date','Create Date'])
+            col_delposs = find_column(df, ['Delivery Possible Date','Possible Delivery Date','Est Delivery'])
+            col_matchpo = find_column(df, ['Matched PO Number','Matched PO','PO HLI','PO HLI Number','Purchasing Order Number','PO Number'])
 
-        for _, row in df.iterrows():
-            so_val = clean(df_val(row, col_so))
-            if not so_val: continue
-            so_item_val = clean(df_val(row, col_soitem))
+            count = updated = inserted = spec_filled = pid_filled = 0
 
-            spec_val = clean(df_val(row, col_spec)) if col_spec else None
-            pid_val  = clean(df_val(row, col_pid))  if col_pid  else None
-            if spec_val: spec_filled += 1
-            if pid_val:  pid_filled  += 1
+            for _, row in df.iterrows():
+                so_val = clean(df_val(row, col_so))
+                if not so_val:
+                    continue
+                so_item_val = clean(df_val(row, col_soitem))
+                spec_val = clean(df_val(row, col_spec)) if col_spec else None
+                pid_val = clean(df_val(row, col_pid)) if col_pid else None
+                if spec_val:
+                    spec_filled += 1
+                if pid_val:
+                    pid_filled += 1
 
-            new_data = {
-                'so_number': so_val,
-                'so_item': so_item_val,
-                'so_status': clean(df_val(row, col_status)),
-                'operation_unit_name': clean(df_val(row, col_opunit)),
-                'vendor_name': clean(df_val(row, col_vendor)),
-                'customer_po_number': clean(df_val(row, col_custpo)),
-                'delivery_memo': clean(df_val(row, col_memo)),
-                'product_name': clean(df_val(row, col_prod)),
-                'specification': spec_val,
-                'product_id': pid_val,
-                'so_qty': safe_float(df_val(row, col_qty)),
-                'sales_unit': clean(df_val(row, col_sunit)),
-                'sales_price': safe_float(df_val(row, col_sprice)),
-                'sales_amount': safe_float(df_val(row, col_samt)),
-                'currency': clean(df_val(row, col_cur)) or 'IDR',
-                'purchasing_price': safe_float(df_val(row, col_pprice)),
-                'purchasing_amount': safe_float(df_val(row, col_pamt)),
-                'purchasing_currency': clean(df_val(row, col_pcur)) if col_pcur else None,
-                'purchasing_amount_idr': None,
-                'purchasing_amount_idr_cached_at': None,
-                'so_create_date': parse_date(df_val(row, col_sodate)),
-                'delivery_possible_date': parse_date(df_val(row, col_delposs)),
-                'matched_po_number': clean(df_val(row, col_matchpo)),
-                'uploaded_at': datetime.utcnow()
+                new_data = {
+                    'so_number': so_val,
+                    'so_item': so_item_val,
+                    'so_status': clean(df_val(row, col_status)),
+                    'operation_unit_name': clean(df_val(row, col_opunit)),
+                    'vendor_id': clean(df_val(row, col_vendor_id)),
+                    'vendor_name': clean(df_val(row, col_vendor)),
+                    'customer_po_number': clean(df_val(row, col_custpo)),
+                    'delivery_memo': clean(df_val(row, col_memo)),
+                    'product_name': clean(df_val(row, col_prod)),
+                    'specification': spec_val,
+                    'manufacturer_name': clean(df_val(row, col_mfr)),
+                    'product_id': pid_val,
+                    'so_qty': safe_float(df_val(row, col_qty)),
+                    'sales_unit': clean(df_val(row, col_sunit)),
+                    'sales_price': safe_float(df_val(row, col_sprice)),
+                    'sales_amount': safe_float(df_val(row, col_samt)),
+                    'currency': clean(df_val(row, col_cur)) or 'IDR',
+                    'purchasing_price': safe_float(df_val(row, col_pprice)),
+                    'purchasing_amount': safe_float(df_val(row, col_pamt)),
+                    'purchasing_currency': clean(df_val(row, col_pcur)) if col_pcur else None,
+                    'purchasing_amount_idr': None,
+                    'purchasing_amount_idr_cached_at': None,
+                    'so_create_date': parse_date(df_val(row, col_sodate)),
+                    'delivery_possible_date': parse_date(df_val(row, col_delposs)),
+                    'matched_po_number': clean(df_val(row, col_matchpo)),
+                    'uploaded_at': datetime.utcnow(),
+                }
+
+                if so_item_val and so_item_val in existing_so:
+                    existing = existing_so[so_item_val]
+                    preserved_remarks = existing.remarks
+                    preserved_plan_date = existing.delivery_plan_date
+                    preserved_spec = existing.specification
+                    preserved_pid = existing.product_id
+                    preserved_amount_idr = existing.purchasing_amount_idr
+                    preserved_amount_idr_cached_at = existing.purchasing_amount_idr_cached_at
+                    old_purchase_signature = (
+                        float(existing.purchasing_amount or 0),
+                        float(existing.purchasing_price or 0),
+                        float(existing.so_qty or 0),
+                        (existing.purchasing_currency or 'IDR').strip().upper(),
+                        existing.so_create_date,
+                    )
+                    new_purchase_signature = (
+                        float(new_data.get('purchasing_amount') or 0),
+                        float(new_data.get('purchasing_price') or 0),
+                        float(new_data.get('so_qty') or 0),
+                        (new_data.get('purchasing_currency') or 'IDR').strip().upper(),
+                        new_data.get('so_create_date'),
+                    )
+                    purchase_inputs_changed = old_purchase_signature != new_purchase_signature
+                    for field, val in new_data.items():
+                        setattr(existing, field, val)
+                    existing.remarks = preserved_remarks
+                    existing.delivery_plan_date = preserved_plan_date
+                    if not purchase_inputs_changed:
+                        existing.purchasing_amount_idr = preserved_amount_idr
+                        existing.purchasing_amount_idr_cached_at = preserved_amount_idr_cached_at
+                    if not col_spec or spec_val is None:
+                        existing.specification = preserved_spec
+                    if not col_pid or pid_val is None:
+                        existing.product_id = preserved_pid
+                    if existing.product_id:
+                        existing.pic_name = _lookup_pic(existing.product_id)
+                    updated += 1
+                else:
+                    new_rec = SOData(**new_data)
+                    if new_rec.product_id:
+                        new_rec.pic_name = _lookup_pic(new_rec.product_id)
+                    db.session.add(new_rec)
+                    if so_item_val:
+                        existing_so[so_item_val] = new_rec
+                    inserted += 1
+
+                count += 1
+                if count % CHUNK_SIZE == 0:
+                    db.session.flush()
+
+            db.session.add(UploadLog(file_type='SO', filename=file.filename, records_count=count))
+            total_count += count
+            total_updated += updated
+            total_inserted += inserted
+
+            diagnostics = {
+                'filename': file.filename,
+                'columns_detected': {'specification': col_spec, 'product_id': col_pid},
+                'rows_with_specification': spec_filled,
+                'rows_with_product_id': pid_filled,
+                'all_file_columns': df.columns.tolist(),
             }
-
-            if so_item_val and so_item_val in existing_so:
-                # Update existing record — preserve remarks & delivery_plan_date.
-                # Also preserve specification / product_id if either:
-                #  (a) the uploaded file doesn't have that column at all, or
-                #  (b) the row's value is blank in the file.
-                # This protects spec/pid that was previously populated via the
-                # SMRO upload itself or via the backfill endpoint.
-                existing = existing_so[so_item_val]
-                preserved_remarks   = existing.remarks
-                preserved_plan_date = existing.delivery_plan_date
-                preserved_spec      = existing.specification
-                preserved_pid       = existing.product_id
-                preserved_amount_idr = existing.purchasing_amount_idr
-                preserved_amount_idr_cached_at = existing.purchasing_amount_idr_cached_at
-                old_purchase_signature = (
-                    float(existing.purchasing_amount or 0),
-                    float(existing.purchasing_price or 0),
-                    float(existing.so_qty or 0),
-                    (existing.purchasing_currency or 'IDR').strip().upper(),
-                    existing.so_create_date,
-                )
-                new_purchase_signature = (
-                    float(new_data.get('purchasing_amount') or 0),
-                    float(new_data.get('purchasing_price') or 0),
-                    float(new_data.get('so_qty') or 0),
-                    (new_data.get('purchasing_currency') or 'IDR').strip().upper(),
-                    new_data.get('so_create_date'),
-                )
-                purchase_inputs_changed = old_purchase_signature != new_purchase_signature
-                for field, val in new_data.items():
-                    setattr(existing, field, val)
-                existing.remarks = preserved_remarks
-                existing.delivery_plan_date = preserved_plan_date
-                if not purchase_inputs_changed:
-                    existing.purchasing_amount_idr = preserved_amount_idr
-                    existing.purchasing_amount_idr_cached_at = preserved_amount_idr_cached_at
-                if not col_spec or spec_val is None:
-                    existing.specification = preserved_spec
-                if not col_pid or pid_val is None:
-                    existing.product_id = preserved_pid
-                # Auto-fill pic_name from ProductIDDB + MasterPIC
-                _pid_for_pic = existing.product_id
-                if _pid_for_pic:
-                    existing.pic_name = _lookup_pic(_pid_for_pic)
-                updated += 1
+            warnings = []
+            if not col_spec and not col_pid:
+                warnings.append("File ini tidak mengandung kolom 'Specification' maupun 'Product ID'. Spec/Product ID di DB tidak diubah.")
             else:
-                new_rec = SOData(**new_data)
-                # Auto-fill pic_name on insert
-                _pid_for_pic = new_data.get('product_id')
-                if _pid_for_pic:
-                    new_rec.pic_name = _lookup_pic(_pid_for_pic)
-                db.session.add(new_rec)
-                inserted += 1
+                if not col_spec:
+                    warnings.append("Kolom 'Specification' tidak ditemukan di file ini - Specification di DB dipertahankan.")
+                elif spec_filled == 0:
+                    warnings.append(f"Kolom '{col_spec}' terdeteksi tapi semua baris kosong.")
+                if not col_pid:
+                    warnings.append("Kolom 'Product ID' tidak ditemukan di file ini - Product ID di DB dipertahankan.")
+                elif pid_filled == 0:
+                    warnings.append(f"Kolom '{col_pid}' terdeteksi tapi semua baris kosong.")
+            if warnings:
+                diagnostics['warning'] = ' '.join(warnings)
+            diagnostics_by_file.append(diagnostics)
 
-            count += 1
-            if count % CHUNK_SIZE == 0:
-                db.session.flush()
-
-        # ── KEY CHANGE: Do NOT delete records not in this file ──
-        # Old records with different SO Items are preserved as-is.
-
-        db.session.add(UploadLog(file_type='SO', filename=file.filename, records_count=count))
         db.session.commit()
-
-        # Diagnostic block — surfaces which Spec / Product ID columns were
-        # detected so the user can immediately tell whether the upload
-        # carried those values.  Returned even on success.
-        diagnostics = {
-            'columns_detected': {
-                'specification': col_spec,
-                'product_id':    col_pid,
-            },
-            'rows_with_specification': spec_filled,
-            'rows_with_product_id':    pid_filled,
-            'all_file_columns':        df.columns.tolist(),
-        }
-        # Build the warning by *accumulating* every condition that applies,
-        # so we never silently drop a Product ID warning when Specification
-        # also has an issue (or vice versa).
-        warnings = []
-        if not col_spec and not col_pid:
-            warnings.append(
-                "File ini tidak mengandung kolom 'Specification' maupun 'Product ID' "
-                "(atau alias yang dikenal). Spec/Product ID di DB tidak diubah."
-            )
-        else:
-            if not col_spec:
-                warnings.append("Kolom 'Specification' tidak ditemukan di file ini — Specification di DB dipertahankan.")
-            elif spec_filled == 0:
-                warnings.append(f"Kolom '{col_spec}' terdeteksi tapi semua baris kosong.")
-            if not col_pid:
-                warnings.append("Kolom 'Product ID' tidak ditemukan di file ini — Product ID di DB dipertahankan.")
-            elif pid_filled == 0:
-                warnings.append(f"Kolom '{col_pid}' terdeteksi tapi semua baris kosong.")
-        if warnings:
-            diagnostics['warning'] = ' '.join(warnings)
+        diagnostics = diagnostics_by_file[-1] if diagnostics_by_file else {}
+        if len(diagnostics_by_file) > 1:
+            diagnostics = {**diagnostics, 'files': diagnostics_by_file}
 
         return jsonify({
-            'message': f'Berhasil: {inserted} SO baru ditambahkan, {updated} SO diperbarui. Data lama yang tidak ada di file ini tetap dipertahankan.',
-            'uploaded': count,
-            'inserted': inserted,
-            'updated': updated,
+            'message': f'Berhasil upload {len(files)} file: {total_inserted} SO baru ditambahkan, {total_updated} SO diperbarui. Data lama yang tidak ada di file ini tetap dipertahankan.',
+            'uploaded': total_count,
+            'files': len(files),
+            'inserted': total_inserted,
+            'updated': total_updated,
             'diagnostics': diagnostics,
         })
     except Exception as e:
@@ -3092,10 +3302,12 @@ def download_so_batch_template():
         # ── Apply same filters as fetchSOData ──────────────────────────────
         op_units   = request.args.getlist('op_unit')
         vendors    = request.args.getlist('vendor')
+        manufacturers = request.args.getlist('manufacturer')
         statuses   = request.args.getlist('status')
         aging_list = request.args.getlist('aging')
         so_items   = request.args.getlist('so_item')
         pics       = request.args.getlist('pic')
+        kpi_pic = (request.args.get('kpi_pic') or '').strip()
         global_pics = request.args.getlist('global_pic')
         clients = selected_clients()
         margin_filter = request.args.get('margin_filter', 'all')
@@ -3106,6 +3318,7 @@ def download_so_batch_template():
         q = apply_so_pic_filter(q, global_pics)
         if op_units:  q = q.filter(SOData.operation_unit_name.in_(op_units))
         if vendors:   q = q.filter(SOData.vendor_name.in_(vendors))
+        if manufacturers: q = q.filter(SOData.manufacturer_name.in_(manufacturers))
         if statuses:  q = q.filter(SOData.so_status.in_(statuses))
         if so_items:  q = q.filter(SOData.so_item.in_(so_items))
         q = apply_so_pic_filter(q, pics)
@@ -3132,6 +3345,9 @@ def download_so_batch_template():
             else:
                 all_sos = [s for s in all_sos if calc_margin(s) >= 0]
 
+        if kpi_pic:
+            all_sos = [s for s in all_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) == kpi_pic]
+
         # ── Build workbook ─────────────────────────────────────────────────
         wb = Workbook()
         ws = wb.active
@@ -3139,6 +3355,7 @@ def download_so_batch_template():
 
         headers = ['SO Item', 'Delivery Plan Date', 'Remarks']
         ws.append(headers)
+        ws.freeze_panes = 'A2'
 
         # Row 1: header — yellow, bold, centered
         header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
@@ -3216,7 +3433,8 @@ def batch_upload_so():
 
 def _style_wb(ws, headers, num_cols=None):
     ws.append(headers)
-    fill = PatternFill(start_color="8B5CF6", end_color="8B5CF6", fill_type="solid")
+    ws.freeze_panes = 'A2'
+    fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
     for i, cell in enumerate(ws[1], 1):
         cell.fill = fill
         cell.font = Font(bold=True, color="FFFFFF")
@@ -3231,38 +3449,103 @@ def _style_wb(ws, headers, num_cols=None):
 @app.route('/api/export/all-so', methods=['GET'])
 def export_all_so():
     try:
-        q = SOData.query
+        q = SOData.query.filter(open_so_filter())
         op_units = request.args.getlist('op_unit')
         vendors  = request.args.getlist('vendor')
+        manufacturers = request.args.getlist('manufacturer')
         statuses = request.args.getlist('status')
+        aging_list = request.args.getlist('aging')
+        so_items = request.args.getlist('so_item')
         pics = request.args.getlist('pic')
+        kpi_pic = (request.args.get('kpi_pic') or '').strip()
         global_pics = request.args.getlist('global_pic')
         clients = selected_clients()
+        margin_filter = request.args.get('margin_filter', 'all')
+        sort_order = request.args.get('sort_order', 'oldest')
+        date_year, date_from, date_to = parse_so_date_args()
         q = apply_so_client_filter(q, clients)
         q = apply_so_pic_filter(q, global_pics)
         if op_units: q = q.filter(SOData.operation_unit_name.in_(op_units))
         if vendors:  q = q.filter(SOData.vendor_name.in_(vendors))
+        if manufacturers: q = q.filter(SOData.manufacturer_name.in_(manufacturers))
         if statuses: q = q.filter(SOData.so_status.in_(statuses))
+        if so_items: q = q.filter(SOData.so_item.in_(so_items))
         q = apply_so_pic_filter(q, pics)
-        sos = q.all()
+        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
+        if sort_order == 'newest':
+            sos = q.order_by(SOData.so_create_date.desc(), SOData.so_item.asc()).all()
+        else:
+            sos = q.order_by(SOData.so_create_date.asc(), SOData.so_item.asc()).all()
+
         today = date.today()
+        hidden_so = get_hidden_so_items()
+        sos = [
+            s for s in sos
+            if s.so_item not in hidden_so
+            and s.so_number not in hidden_so
+            and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)
+        ]
+        if aging_list:
+            sos = [s for s in sos if get_aging_label(workdays_since(s.so_create_date, today)) in aging_list]
+        if margin_filter in ('positive', 'negative'):
+            def calc_margin(s):
+                po_amt = raw_purchase_amount(s)
+                return float(s.sales_amount or 0) - po_amt
+            if margin_filter == 'negative':
+                sos = [s for s in sos if calc_margin(s) < 0]
+            else:
+                sos = [s for s in sos if calc_margin(s) >= 0]
+        if kpi_pic:
+            sos = [s for s in sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) == kpi_pic]
+
         wb = Workbook(); ws = wb.active; ws.title = "SO List"
-        _style_wb(ws, ['Aging','SO Number','SO Item','Status','Op Unit','Vendor','Product','PIC',
-                       'SO Qty','Sales Price','Sales Amount','PO Price','PO Amount',
-                       'SO Date','Delivery Possible','Customer PO','Delivery Memo',
-                       'Delivery Plan Date','Remarks'], num_cols=[9,10,11,12,13])
+        headers = [
+            'Aging', 'Day', 'SO Create Date', 'SO Item', 'PO No.', 'SO Status',
+            'Category', 'PIC', 'Product ID', 'Product Name', 'Specification',
+            'Manufacturer Name', 'SO Quantity', 'Sales Unit', 'Operation Unit Name',
+            'Vendor ID', 'Vendor Name', 'Currency', 'Sales Price(Exclude Tax)',
+            'Sales Amount(Exclude Tax)', 'Purchasing Currency', 'Purchasing Price',
+            'Margin', '%Margin', 'Delivery Memo', 'Plan Date', 'Remarks'
+        ]
+        _style_wb(ws, headers, num_cols=[2,13,19,20,22,23,24])
+        widths = [14, 10, 16, 22, 22, 24, 22, 16, 18, 30, 44, 28, 14, 14, 30, 16, 28, 12, 22, 24, 20, 18, 18, 12, 30, 16, 70]
+        for i, width in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = width
         for s in sos:
-            age = (today - s.so_create_date).days if s.so_create_date else None
-            ws.append([get_aging_label(age), s.so_number, s.so_item, s.so_status,
-                s.operation_unit_name, s.vendor_name, s.product_name,
-                s.pic_name or '',
-                s.so_qty or 0, s.sales_price or 0, s.sales_amount or 0,
-                s.purchasing_price or 0, s.purchasing_amount or 0,
+            day = workdays_since(s.so_create_date, today)
+            po_amount = raw_purchase_amount(s)
+            sales_amount = float(s.sales_amount or 0)
+            margin = sales_amount - po_amount
+            margin_pct = (margin / po_amount * 100) if po_amount else None
+            ws.append([
+                get_aging_label(day),
+                day if day is not None else '',
                 s.so_create_date.isoformat() if s.so_create_date else '',
-                s.delivery_possible_date.isoformat() if s.delivery_possible_date else '',
-                s.customer_po_number or '', s.delivery_memo or '',
+                s.so_item or '',
+                s.matched_po_number or '',
+                s.so_status or '',
+                product_category_level1(s.product_id),
+                canonical_pending_pic(s.pic_name, s.operation_unit_name),
+                s.product_id or '',
+                s.product_name or '',
+                s.specification or '',
+                s.manufacturer_name or '',
+                s.so_qty or 0,
+                s.sales_unit or '',
+                s.operation_unit_name or '',
+                s.vendor_id or '',
+                s.vendor_name or '',
+                s.currency or '',
+                s.sales_price or 0,
+                sales_amount,
+                s.purchasing_currency or '',
+                s.purchasing_price or 0,
+                margin,
+                margin_pct if margin_pct is not None else '',
+                s.delivery_memo or '',
                 s.delivery_plan_date.isoformat() if s.delivery_plan_date else '',
-                s.remarks or ''])
+                s.remarks or '',
+            ])
         output = io.BytesIO(); wb.save(output); output.seek(0)
         return send_file(output,
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -3856,7 +4139,7 @@ def save_similarity_cache():
     try:
         os.makedirs(os.path.dirname(_SIMILARITY_CACHE_FILE), exist_ok=True)
         with open(_SIMILARITY_CACHE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(_SIMILARITY_CACHE, f, ensure_ascii=False, indent=2)
+            json.dump(_SIMILARITY_CACHE, f, ensure_ascii=False, separators=(',', ':'))
     except Exception as e:
         print(f"Error saving similarity cache: {e}")
 
@@ -3911,9 +4194,12 @@ def _candidate_registered_items_for_similarity(item, registered_items=None, limi
                 continue
             reg_mfr = (clean(reg.manufacturer_name) or '').lower()
             reg_name = (clean(reg.product_name) or '').lower()
-            if mfr_token and mfr_token not in reg_mfr:
-                continue
-            if name_token and name_token not in reg_name:
+            token_matches = []
+            if mfr_token:
+                token_matches.append(mfr_token in reg_mfr)
+            if name_token:
+                token_matches.append(name_token in reg_name)
+            if token_matches and not any(token_matches):
                 continue
             candidates.append(reg)
             if len(candidates) >= limit:
@@ -3932,10 +4218,20 @@ def _candidate_registered_items_for_similarity(item, registered_items=None, limi
     if name_token:
         token_filters.append(ProductIDDB.product_name.ilike(f'%{name_token}%'))
     if token_filters:
-        q = q.filter(*token_filters)
+        q = q.filter(db.or_(*token_filters))
     elif not unit:
         return []
     return q.limit(limit).all()
+
+
+def _similarity_score(values):
+    scores = []
+    for left, right in values:
+        if clean(left) and clean(right):
+            scores.append(calculate_similarity(left, right))
+    if not scores:
+        return 0.0
+    return sum(scores) / len(scores)
 
 
 def find_similar_registered_items(item, registered_items=None):
@@ -3953,7 +4249,7 @@ def find_similar_registered_items(item, registered_items=None):
 
         current_prod_id = clean_product_id(item.prod_id)
         cache_key = '|'.join([
-            'similar_v3',
+            'similar_v4',
             clean(item.req_no),
             current_prod_id,
             clean(item.prod_name).lower(),
@@ -3972,11 +4268,23 @@ def find_similar_registered_items(item, registered_items=None):
             if not reg_prod_id or (current_prod_id and reg_prod_id == current_prod_id):
                 continue
 
-            name_sim = calculate_similarity(item.prod_name, reg.product_name)
-            spec_sim = calculate_similarity(item.spec, reg.specification)
-            mfr_sim = calculate_similarity(item.mfr_name, reg.manufacturer_name)
-            unit_sim = calculate_similarity(item.odr_unit, reg.order_unit)
-            total_sim = (name_sim + spec_sim + mfr_sim + unit_sim) / 4.0
+            has_descriptive_pair = any(
+                clean(left) and clean(right)
+                for left, right in [
+                    (item.prod_name, reg.product_name),
+                    (item.spec, reg.specification),
+                    (item.mfr_name, reg.manufacturer_name),
+                ]
+            )
+            if not has_descriptive_pair:
+                continue
+
+            total_sim = _similarity_score([
+                (item.prod_name, reg.product_name),
+                (item.spec, reg.specification),
+                (item.mfr_name, reg.manufacturer_name),
+                (item.odr_unit, reg.order_unit),
+            ])
 
             if total_sim > 80.0:
                 similar_items.append({
@@ -4024,7 +4332,10 @@ def get_item_registration_data():
         item_clients = [c.strip() for c in request.args.getlist('item_client') if c.strip()]
         categories = [c.strip() for c in request.args.getlist('category') if c.strip()]
         pics = [p.strip() for p in request.args.getlist('pic') if p.strip()]
+        kpi_pic = (request.args.get('kpi_pic') or '').strip()
         proc_statuses = [s.strip() for s in request.args.getlist('proc_status') if s.strip()]
+        mfr_names = [s.strip() for s in request.args.getlist('mfr_name') if s.strip()]
+        existing_owners = [s.strip() for s in request.args.getlist('existing_owner') if s.strip()]
 
         q = ItemRegistration.query
         if clients:
@@ -4036,6 +4347,10 @@ def get_item_registration_data():
         q = apply_item_registration_pic_filter(q, pics)
         if proc_statuses:
             q = q.filter(ItemRegistration.proc_status.in_(proc_statuses))
+        if mfr_names:
+            q = q.filter(ItemRegistration.mfr_name.in_(mfr_names))
+        if existing_owners:
+            q = q.filter(ItemRegistration.existing_owner.in_(existing_owners))
         if req_numbers:
             q = q.filter(ItemRegistration.req_no.in_(req_numbers))
         if search:
@@ -4049,16 +4364,34 @@ def get_item_registration_data():
                 ItemRegistration.remarks.ilike(pattern),
             ))
 
-        total = q.count()
-        missing_prod_rows = q.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-')).all()
+        owner_has_data = q.filter(
+            ItemRegistration.existing_owner.isnot(None),
+            func.trim(ItemRegistration.existing_owner) != ''
+        ).count() > 0
+        missing_q = q.filter(
+            db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-')
+        )
+        if owner_has_data:
+            missing_q = missing_q.filter(func.lower(func.trim(ItemRegistration.existing_owner)).in_(['pur. pic', 'pur.pic', 'pur pic']))
+        missing_prod_rows = missing_q.all()
         missing_by_pic = {}
         for r in missing_prod_rows:
             pic = resolve_item_registration_pic(r)
+            if not pic or pic == 'Unassigned':
+                continue
             missing_by_pic[pic] = missing_by_pic.get(pic, 0) + 1
         missing_prod_id_by_pic = [
             {'pic': pic, 'count': count}
             for pic, count in [(row['pic'], row['count']) for row in sort_pic_kpis([{'pic': pic, 'count': count} for pic, count in missing_by_pic.items()])]
         ]
+
+        if kpi_pic:
+            q = apply_item_registration_pic_filter(q, [kpi_pic])
+            q = q.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-'))
+            if owner_has_data:
+                q = q.filter(func.lower(func.trim(ItemRegistration.existing_owner)).in_(['pur. pic', 'pur.pic', 'pur pic']))
+
+        total = q.count()
         rows = q.order_by(ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()).offset((page-1)*per_page).limit(per_page).all()
         option_q = ItemRegistration.query
         if clients:
@@ -4069,15 +4402,21 @@ def get_item_registration_data():
             ItemRegistration.category_id,
             ItemRegistration.pic,
             ItemRegistration.proc_status,
+            ItemRegistration.mfr_name,
+            ItemRegistration.existing_owner,
         ).all()
         all_clients = sorted({r.client_name for r in option_rows if r.client_name})
         all_categories = sorted({r.category for r in option_rows if r.category})
         all_pics = sorted({resolve_item_registration_pic(r) for r in option_rows if resolve_item_registration_pic(r) != 'Unassigned'})
         all_proc_statuses = sorted({r.proc_status for r in option_rows if r.proc_status})
+        all_mfr_names = sorted({r.mfr_name for r in option_rows if r.mfr_name})
+        all_existing_owners = sorted({r.existing_owner for r in option_rows if r.existing_owner})
         last_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'ITEM_REG').scalar()
 
+        response_rows = [item_registration_dict(r, include_similarity=False) for r in rows]
+
         return jsonify({
-            'data': [item_registration_dict(r) for r in rows],
+            'data': response_rows,
             'total': total,
             'page': page,
             'per_page': per_page,
@@ -4085,12 +4424,15 @@ def get_item_registration_data():
             'category_options': all_categories,
             'pic_options': all_pics,
             'proc_status_options': all_proc_statuses,
+            'mfr_name_options': all_mfr_names,
+            'existing_owner_options': all_existing_owners,
             'missing_prod_id_by_pic': missing_prod_id_by_pic,
             'last_updated': utc_isoformat(last_upload),
         })
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
 
 
 @app.route('/api/upload/item-registration', methods=['POST'])
@@ -4148,7 +4490,10 @@ def apply_item_registration_request_filters(query):
     item_clients = [c.strip() for c in request.args.getlist('item_client') if c.strip()]
     categories = [c.strip() for c in request.args.getlist('category') if c.strip()]
     pics = [p.strip() for p in request.args.getlist('pic') if p.strip()]
+    kpi_pic = (request.args.get('kpi_pic') or '').strip()
     proc_statuses = [s.strip() for s in request.args.getlist('proc_status') if s.strip()]
+    mfr_names = [s.strip() for s in request.args.getlist('mfr_name') if s.strip()]
+    existing_owners = [s.strip() for s in request.args.getlist('existing_owner') if s.strip()]
     if clients:
         query = query.filter(ItemRegistration.client_name.in_(clients))
     if item_clients:
@@ -4158,6 +4503,10 @@ def apply_item_registration_request_filters(query):
     query = apply_item_registration_pic_filter(query, pics)
     if proc_statuses:
         query = query.filter(ItemRegistration.proc_status.in_(proc_statuses))
+    if mfr_names:
+        query = query.filter(ItemRegistration.mfr_name.in_(mfr_names))
+    if existing_owners:
+        query = query.filter(ItemRegistration.existing_owner.in_(existing_owners))
     if req_numbers:
         query = query.filter(ItemRegistration.req_no.in_(req_numbers))
     if search:
@@ -4170,6 +4519,15 @@ def apply_item_registration_request_filters(query):
             ItemRegistration.mfr_name.ilike(pattern),
             ItemRegistration.remarks.ilike(pattern),
         ))
+    if kpi_pic:
+        owner_has_data = query.filter(
+            ItemRegistration.existing_owner.isnot(None),
+            func.trim(ItemRegistration.existing_owner) != ''
+        ).count() > 0
+        query = apply_item_registration_pic_filter(query, [kpi_pic])
+        query = query.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-'))
+        if owner_has_data:
+            query = query.filter(func.lower(func.trim(ItemRegistration.existing_owner)).in_(['pur. pic', 'pur.pic', 'pur pic']))
     return query
 
 
@@ -4187,6 +4545,7 @@ def download_item_registration_batch_template():
         ws.title = "Item Reg Batch Upload"
         headers = ['Req. No', 'Remarks']
         ws.append(headers)
+        ws.freeze_panes = 'A2'
 
         header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
         col_widths = [28, 70]
@@ -4236,24 +4595,17 @@ def export_item_registration():
         ws = wb.active
         ws.title = "Item Registration"
         headers = [
-            'Proc. Status', 'Client Nm.', 'Category', 'PIC', 'Req. No', 'Prod. ID',
-            'Prod. Nm.', 'Spec.', 'Mfr. Nm.', 'Odr. Unit', 'Prod. Price', 'Curr.',
-            'Similar Product ID', 'Similar Product Name', 'Similar Specification',
-            'Similar Manufacturer Name', 'Similar Order Unit', 'Remarks'
+            'Proc. Status', 'Existing Owner', 'Client Nm.', 'Category', 'PIC', 'Req. No', 'Prod. ID',
+            'Prod. Nm.', 'Spec.', 'Mfr. Nm.', 'Odr. Unit', 'Prod. Price', 'Curr.', 'Remarks'
         ]
-        _style_wb(ws, headers, num_cols=[11])
-        widths = [26, 34, 24, 16, 18, 18, 28, 48, 24, 14, 16, 12, 34, 34, 48, 28, 16, 60]
+        _style_wb(ws, headers, num_cols=[12])
+        widths = [26, 18, 34, 24, 16, 18, 18, 28, 48, 24, 14, 16, 12, 60]
         for i, width in enumerate(widths, 1):
             ws.column_dimensions[get_column_letter(i)].width = width
-
-        registered_products = ProductIDDB.query.filter(
-            ProductIDDB.product_id.isnot(None),
-            ProductIDDB.product_id != ''
-        ).all()
         for row in rows:
-            row_data = item_registration_dict(row, registered_products)
             ws.append([
                 row.proc_status or '',
+                row.existing_owner or '',
                 row.client_name or '',
                 source_category_level1(row.category),
                 row.pic or '',
@@ -4265,11 +4617,6 @@ def export_item_registration():
                 row.odr_unit or '',
                 row.prod_price or 0,
                 row.curr or '',
-                row_data['similar_prod_ids'],
-                row_data['similar_prod_name'],
-                row_data['similar_spec'],
-                row_data['similar_mfr_name'],
-                row_data['similar_odr_unit'],
                 row.remarks or '',
             ])
 
@@ -4527,6 +4874,229 @@ def master_pic_status():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+@app.route('/api/rfq/data', methods=['GET'])
+def get_rfq_data():
+    try:
+        page = max(int(request.args.get('page', 1)), 1)
+        per_page = min(max(int(request.args.get('per_page', 10)), 1), 500)
+        search = clean(request.args.get('search')) or ''
+        pic = clean(request.args.get('pic')) or ''
+        clients = [clean(v) for v in request.args.getlist('client_name') if clean(v)]
+        brands = [clean(v) for v in request.args.getlist('brand_manufacturer') if clean(v)]
+        purchase_pics = [clean(v) for v in request.args.getlist('purchase_pic') if clean(v)]
+        vendors = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
+        force = str(request.args.get('refresh', '')).lower() in ('1', 'true', 'yes')
+
+        rows, fetched_at = rfq_rows_with_edits(force=force)
+        if search:
+            needle = search.lower()
+            fields = [field for field, _ in RFQ_TEMPLATE_COLUMNS if field != 'status']
+            rows = [row for row in rows if any(needle in str(row.get(field) or '').lower() for field in fields)]
+
+        option_rows = rows
+        if clients:
+            rows = [row for row in rows if clean(row.get('client_name')) in clients]
+        if brands:
+            rows = [row for row in rows if clean(row.get('brand_manufacturer')) in brands]
+        if purchase_pics:
+            rows = [row for row in rows if clean(row.get('purchase_pic')) in purchase_pics]
+        if vendors:
+            rows = [row for row in rows if clean(row.get('vendor_name')) in vendors]
+
+        pending_by_pic = {}
+        for row in rows:
+            if clean_product_id(row.get('product_id')):
+                continue
+            if not row.get('unit_price_missing'):
+                continue
+            row_pic = clean(row.get('purchase_pic'))
+            if not row_pic:
+                continue
+            pending_by_pic[row_pic] = pending_by_pic.get(row_pic, 0) + 1
+        pic_kpis = [{'pic': key, 'count': val} for key, val in sorted(pending_by_pic.items(), key=lambda item: (-item[1], item[0]))]
+
+        if pic:
+            rows = [row for row in rows if clean(row.get('purchase_pic')) == pic and row.get('unit_price_missing') and not clean_product_id(row.get('product_id'))]
+
+        total = len(rows)
+        start = (page - 1) * per_page
+        return jsonify({
+            'data': rows[start:start + per_page],
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'columns': [{'field': field, 'label': label} for field, label in RFQ_TEMPLATE_COLUMNS],
+            'editable_fields': sorted(RFQ_EDITABLE_FIELDS),
+            'pic_kpis': pic_kpis,
+            'filters': {
+                'clients': sorted({clean(row.get('client_name')) for row in option_rows if clean(row.get('client_name'))}),
+                'brands': sorted({clean(row.get('brand_manufacturer')) for row in option_rows if clean(row.get('brand_manufacturer'))}),
+                'purchase_pics': sorted({clean(row.get('purchase_pic')) for row in option_rows if clean(row.get('purchase_pic'))}),
+                'vendors': sorted({clean(row.get('vendor_name')) for row in option_rows if clean(row.get('vendor_name'))}),
+            },
+            'last_updated': utc_isoformat(fetched_at),
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+def rfq_filtered_rows_from_request(force=False):
+    search = clean(request.args.get('search')) or ''
+    pic = clean(request.args.get('pic')) or ''
+    clients = [clean(v) for v in request.args.getlist('client_name') if clean(v)]
+    brands = [clean(v) for v in request.args.getlist('brand_manufacturer') if clean(v)]
+    purchase_pics = [clean(v) for v in request.args.getlist('purchase_pic') if clean(v)]
+    vendors = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
+    rows, fetched_at = rfq_rows_with_edits(force=force)
+    if search:
+        needle = search.lower()
+        fields = [field for field, _ in RFQ_TEMPLATE_COLUMNS if field != 'status']
+        rows = [row for row in rows if any(needle in str(row.get(field) or '').lower() for field in fields)]
+    if clients:
+        rows = [row for row in rows if clean(row.get('client_name')) in clients]
+    if brands:
+        rows = [row for row in rows if clean(row.get('brand_manufacturer')) in brands]
+    if purchase_pics:
+        rows = [row for row in rows if clean(row.get('purchase_pic')) in purchase_pics]
+    if vendors:
+        rows = [row for row in rows if clean(row.get('vendor_name')) in vendors]
+    if pic:
+        rows = [row for row in rows if clean(row.get('purchase_pic')) == pic and row.get('unit_price_missing') and not clean_product_id(row.get('product_id'))]
+    return rows, fetched_at
+
+@app.route('/api/rfq/template', methods=['GET'])
+def download_rfq_batch_template():
+    try:
+        rows, _ = rfq_filtered_rows_from_request(force=False)
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'RFQ Batch Upload'
+        headers = ['No'] + [rfq_label(field) for field in RFQ_BATCH_FIELDS]
+        _style_wb(ws, headers)
+        widths = [12, 20, 28, 18, 28, 42, 18, 14, 14, 18, 20, 28, 50]
+        for i, width in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = width
+        seen = set()
+        for row in rows:
+            no = clean(row.get('no'))
+            if not no or no in seen:
+                continue
+            seen.add(no)
+            ws.append([no] + [row.get(field) or '' for field in RFQ_BATCH_FIELDS])
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return send_file(output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f'Template_RFQ_BatchUpload_{datetime.now().strftime("%Y%m%d")}.xlsx')
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/rfq/batch-upload', methods=['POST'])
+def batch_upload_rfq():
+    try:
+        files = uploaded_files()
+        if not files:
+            return jsonify({'error': 'No file uploaded'}), 400
+        rows, _ = rfq_rows_with_edits(force=True)
+        no_map = {}
+        for row in rows:
+            no = clean(row.get('no'))
+            if no:
+                no_map.setdefault(no, []).append(row['row_key'])
+
+        updated = 0
+        not_found = 0
+        for file in files:
+            df = read_upload_excel(file)
+            df.columns = [str(c).strip() for c in df.columns]
+            col_no = find_column(df, ['No'])
+            if not col_no:
+                return jsonify({'error': f'Column "No" not found. Available: {df.columns.tolist()}'}), 400
+            col_map = {field: find_column(df, [rfq_label(field), field]) for field in RFQ_BATCH_FIELDS}
+            for _, src in df.iterrows():
+                no = clean(df_val(src, col_no))
+                if not no or no.lower().startswith('example'):
+                    continue
+                keys = no_map.get(no, [])
+                if not keys:
+                    not_found += 1
+                    continue
+                for field, col in col_map.items():
+                    if not col:
+                        continue
+                    value = clean(df_val(src, col)) or ''
+                    for row_key in keys:
+                        edit = RFQCellEdit.query.filter_by(row_key=row_key, field=field).first()
+                        if not edit:
+                            edit = RFQCellEdit(row_key=row_key, field=field)
+                            db.session.add(edit)
+                        edit.value = str(value)
+                        edit.updated_at = datetime.utcnow()
+                        updated += 1
+        db.session.commit()
+        return jsonify({'updated': updated, 'not_found': not_found, 'files': len(files)})
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/export/rfq', methods=['GET'])
+def export_rfq():
+    try:
+        rows, _ = rfq_filtered_rows_from_request(force=False)
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'RFQ'
+        headers = [label for _, label in RFQ_TEMPLATE_COLUMNS]
+        _style_wb(ws, headers, num_cols=[19, 20])
+        widths = [10, 10, 10, 28, 14, 14, 18, 24, 42, 22, 10, 10, 24, 28, 18, 18, 18, 20, 28, 18, 18, 24, 42, 18, 14, 14, 18, 18, 28, 50]
+        for i, width in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = width
+        for row in rows:
+            values = []
+            for field, _label in RFQ_TEMPLATE_COLUMNS:
+                if field == 'status':
+                    values.append('OK' if row.get('status') else '')
+                elif field == 'days_left':
+                    values.append(row.get('days_left') if row.get('days_left') is not None else '-')
+                else:
+                    values.append(row.get(field) or '')
+            ws.append(values)
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return send_file(output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f'RFQ_{datetime.now().strftime("%Y%m%d")}.xlsx')
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/rfq/<path:row_key>', methods=['PUT'])
+def update_rfq_cell(row_key):
+    try:
+        payload = request.get_json(silent=True) or {}
+        field = clean(payload.get('field'))
+        value = payload.get('value')
+        if field not in RFQ_EDITABLE_FIELDS:
+            return jsonify({'error': 'Field is not editable'}), 400
+        edit = RFQCellEdit.query.filter_by(row_key=row_key, field=field).first()
+        if not edit:
+            edit = RFQCellEdit(row_key=row_key, field=field)
+            db.session.add(edit)
+        edit.value = '' if value is None else str(value)
+        edit.updated_at = datetime.utcnow()
+        db.session.commit()
+        return jsonify({'success': True, 'row_key': row_key, 'field': field, 'value': edit.value})
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/all-registered-items', methods=['GET'])
 def get_all_registered_items():
