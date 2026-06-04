@@ -14,11 +14,13 @@
     "axios": "^1.15.1",
     "date-fns": "^4.1.0",
     "file-saver": "^2.0.5",
+    "jszip": "^3.10.1",
     "lucide-react": "^1.8.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "recharts": "^3.8.1",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "xlsx-js-style": "^1.2.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
