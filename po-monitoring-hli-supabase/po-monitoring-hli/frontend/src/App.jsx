@@ -9,7 +9,7 @@ import {
   ChevronRight, Moon, Sun, FileText, BarChart3, FileSpreadsheet,
   Filter, X, ChevronDown, ChevronUp, Building2, Search, Loader2,
   EyeOff, Eye, Trash2, RotateCcw, Plus, Coins, Wallet, Mail, Minus,
-  Clock, Wrench, Pencil
+  Clock, Wrench, Check, Link as LinkIcon, Pin, PinOff
 } from 'lucide-react';
 import axios from 'axios';
 import { format, parseISO } from 'date-fns';
@@ -96,6 +96,88 @@ const fmtDateTime = (d) => {
     return d || '-';
   }
 };
+const sanitizeFilename = (name) => String(name || 'Export')
+  .replace(/[\\/:*?"<>|]+/g, '_')
+  .replace(/\s+/g, '_')
+  .slice(0, 160);
+const downloadStyledExcel = async ({ columns, rows, filename, sheetName = 'Detail' }) => {
+  const XLSXStyleModule = await import('xlsx-js-style');
+  const XLSXStyle = XLSXStyleModule.default || XLSXStyleModule;
+  const JSZipModule = await import('jszip');
+  const JSZip = JSZipModule.default || JSZipModule;
+  const headers = columns.map(c => c.header);
+  const body = (rows || []).map(row => columns.map(col => {
+    const raw = typeof col.value === 'function' ? col.value(row) : row?.[col.key];
+    return raw == null || raw === '' ? '' : raw;
+  }));
+  const ws = XLSXStyle.utils.aoa_to_sheet([headers, ...body]);
+  const range = XLSXStyle.utils.decode_range(ws['!ref'] || 'A1:A1');
+  const border = {
+    top: { style: 'thin', color: { rgb: 'D9E2EF' } },
+    bottom: { style: 'thin', color: { rgb: 'D9E2EF' } },
+    left: { style: 'thin', color: { rgb: 'D9E2EF' } },
+    right: { style: 'thin', color: { rgb: 'D9E2EF' } },
+  };
+  for (let c = range.s.c; c <= range.e.c; c += 1) {
+    const addr = XLSXStyle.utils.encode_cell({ r: 0, c });
+    if (ws[addr]) {
+      ws[addr].s = {
+        fill: { patternType: 'solid', fgColor: { rgb: '1D4ED8' } },
+        font: { bold: true, color: { rgb: 'FFFFFF' } },
+        alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+        border,
+      };
+    }
+  }
+  for (let r = 1; r <= range.e.r; r += 1) {
+    for (let c = range.s.c; c <= range.e.c; c += 1) {
+      const addr = XLSXStyle.utils.encode_cell({ r, c });
+      if (ws[addr]) {
+        ws[addr].s = {
+          alignment: { vertical: 'center', wrapText: true },
+          border,
+        };
+      }
+    }
+  }
+  ws['!cols'] = columns.map(col => ({ wch: col.width || 16 }));
+  ws['!rows'] = [{ hpt: 24 }];
+  ws['!autofilter'] = { ref: XLSXStyle.utils.encode_range(range) };
+  ws['!freeze'] = { xSplit: 0, ySplit: 1, topLeftCell: 'A2', activePane: 'bottomLeft', state: 'frozen' };
+  const wb = XLSXStyle.utils.book_new();
+  XLSXStyle.utils.book_append_sheet(wb, ws, sheetName.slice(0, 31));
+  const xlsxArray = XLSXStyle.write(wb, { bookType: 'xlsx', type: 'array', cellStyles: true });
+  const zip = await JSZip.loadAsync(xlsxArray);
+  const sheetPath = 'xl/worksheets/sheet1.xml';
+  const sheetFile = zip.file(sheetPath);
+  if (sheetFile) {
+    const freezeSheetView = '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>';
+    const xml = await sheetFile.async('string');
+    zip.file(sheetPath, xml.replace(/<sheetViews>[\s\S]*?<\/sheetViews>/, freezeSheetView));
+  }
+  const blob = await zip.generateAsync({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  saveAs(blob, `${sanitizeFilename(filename)}.xlsx`);
+};
+const MARGIN_DETAIL_COLUMNS = [
+  { header: 'SO Item', value: r => r.so_item || '', width: 18 },
+  { header: 'Product', value: r => r.product || '', width: 34 },
+  { header: 'Vendor', value: r => r.vendor || '', width: 28 },
+  { header: 'Op Unit', value: r => r.operation_unit_name || '', width: 30 },
+  { header: 'Sales', value: r => r.sales_amount ?? '', width: 18 },
+  { header: 'Purchase', value: r => r.purchase_amount ?? '', width: 18 },
+  { header: 'Margin', value: r => r.margin ?? '', width: 18 },
+  { header: '% Margin', value: r => r.margin_pct == null ? '' : `${r.margin_pct}%`, width: 12 },
+  { header: 'Date', value: r => r.date || '', width: 16 },
+  { header: 'Status', value: r => r.so_status || '', width: 20 },
+];
+const fmtUpdateShort = (d) => {
+  if (!d) return '-';
+  try {
+    return new Date(d).toLocaleString('en-GB', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' });
+  } catch {
+    return d || '-';
+  }
+};
 
 const workingDaysUntilToday = (dateValue) => {
   if (!dateValue) return null;
@@ -167,26 +249,28 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
 
   // Determine if SO Item column exists in data (show SO Number only when SO Item is absent)
   const hasSoItem = (data || []).some(s => s.so_item);
+  const columns = [
+    { header: 'SO Item', value: s => s.so_item || '', width: 18 },
+    ...(!hasSoItem ? [{ header: 'SO Number', value: s => s.so_number || '', width: 18 }] : []),
+    { header: 'Status', value: s => s.so_status || '', width: 24 },
+    { header: 'Op Unit', value: s => s.operation_unit_name || '', width: 30 },
+    { header: 'Vendor', value: s => s.vendor_name || '', width: 24 },
+    { header: 'Product', value: s => s.product_name || '', width: 34 },
+    { header: 'Qty', value: s => s.so_qty ?? '', width: 10 },
+    { header: 'Sales Amount', value: s => s.sales_amount ?? '', width: 18 },
+    { header: 'Cust PO', value: s => s.customer_po_number || '', width: 18 },
+    { header: 'Delivery Memo', value: s => s.delivery_memo || '', width: 28 },
+    { header: 'SO Date', value: s => s.so_create_date || '', width: 16 },
+    { header: 'Plan Date', value: s => s.delivery_plan_date || '', width: 16 },
+    { header: 'Remarks', value: s => s.remarks || '', width: 46 },
+  ];
 
   const downloadExcel = () => {
-    const ws = XLSX.utils.json_to_sheet(data.map(s => ({
-      'SO Item': s.so_item,
-      ...(!hasSoItem ? { 'SO Number': s.so_number } : {}),
-      'Status': s.so_status,
-      'Op Unit': s.operation_unit_name, 'Vendor': s.vendor_name, 'Product': s.product_name,
-      'SO Qty': s.so_qty, 'Sales Price': s.sales_price, 'Sales Amount': s.sales_amount,
-      'Customer PO': s.customer_po_number, 'Delivery Memo': s.delivery_memo,
-      'SO Date': s.so_create_date, 'Delivery Plan Date': s.delivery_plan_date, 'Remarks': s.remarks
-    })));
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Detail');
-    saveAs(new Blob([XLSX.write(wb,{bookType:'xlsx',type:'array'})],
-      {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),
-      `${title.replace(/\s+/g,'_')}.xlsx`);
+    downloadStyledExcel({ columns, rows: data || [], filename: title, sheetName: 'Detail' });
   };
   return (
     <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
-      <div role="dialog" aria-modal="true" aria-label={title} className={`rounded-2xl shadow-2xl w-full max-w-6xl max-h-[85vh] flex flex-col ${darkMode?'bg-gray-800 text-white':'bg-white'}`} onClick={e=>e.stopPropagation()}>
+      <div role="dialog" aria-modal="true" aria-label={title} className={`rounded-2xl overflow-hidden shadow-2xl w-full max-w-6xl max-h-[85vh] flex flex-col ${darkMode?'bg-gray-800 text-white':'bg-white'}`} onClick={e=>e.stopPropagation()}>
         <div className={`flex justify-between items-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
           <h3 className="font-bold text-lg">{title} <span className={`text-sm font-normal ml-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>({fmtNum(data?.length)} records)</span></h3>
           <div className="flex gap-2">
@@ -194,10 +278,10 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
             <button onClick={onClose} className={`p-1.5 rounded-lg ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`}><X className="w-5 h-5"/></button>
           </div>
         </div>
-        <div className="overflow-auto flex-1">
+        <div className="overflow-auto flex-1 rounded-b-2xl">
           <table className="w-full text-sm">
             <thead className={`sticky top-0 ${darkMode?'bg-gray-700':'bg-blue-50'}`}>
-              <tr>{['SO Item', ...(!hasSoItem ? ['SO Number'] : []), 'Status','Op Unit','Vendor','Product','Qty','Sales Amount','Cust PO','Delivery Memo','SO Date','Plan Date','Remarks'].map(h=>(
+              <tr>{columns.map(({ header: h })=>(
                 <th key={h} className={`px-3 py-2 text-center font-bold whitespace-nowrap ${darkMode?'text-gray-200':'text-gray-700'}`}>{h}</th>
               ))}</tr>
             </thead>
@@ -277,6 +361,16 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, hideL
   }, [open, selected]);
 
   const applySelection = () => {
+    if (searchText.trim()) {
+      const next = filteredOptions.length === 0
+        ? '__NONE__'
+        : filteredOptions.length === options.length
+        ? []
+        : filteredOptions;
+      onChange(next);
+      closeDropdown();
+      return;
+    }
     onChange(currentNone ? '__NONE__' : currentSelected);
     closeDropdown();
   };
@@ -350,6 +444,8 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, hideL
     ? `0 selected`
     : noneSelected
     ? `All ${label}`
+    : safeSelected.length === 1
+    ? String(safeSelected[0])
     : `${safeSelected.length} selected`;
   const hasActiveFilter = noSelection || !noneSelected;
 
@@ -496,11 +592,43 @@ const SearchInput = ({ placeholder, onSearch, darkMode, txt2, label }) => {
             </button>
             <button onClick={handleClear}
               className={`px-3 py-1.5 rounded-lg text-xs font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>
-              Reset
+              Clear
             </button>
           </div>
         </div>
       )}
+    </div>
+  );
+};
+
+const FilterPanel = ({ children, darkMode, className = '' }) => (
+  <div className={`mx-5 my-3 rounded-xl border p-3 ${darkMode ? 'border-gray-700 bg-gray-800/70' : 'border-gray-100 bg-[#f6f6f4]'} ${className}`}>
+    {children}
+  </div>
+);
+
+const PagePagination = ({ darkMode, txt2, page, totalPages, total, perPage, onPageChange, onPerPageChange }) => {
+  const from = total ? (page - 1) * perPage + 1 : 0;
+  const to = Math.min(page * perPage, total);
+  return (
+    <div className={`px-5 py-3 border-t ${darkMode ? 'border-gray-700' : 'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+      <div className="flex items-center gap-3">
+        <span className={`text-sm ${txt2}`}>Showing {from}-{to} of {fmtNum(total)}</span>
+        <label className={`flex items-center gap-1 text-xs ${txt2}`}>Rows
+          <select
+            className={`px-2 py-1 rounded-lg text-xs border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200'}`}
+            value={perPage}
+            onChange={e => onPerPageChange(Number(e.target.value))}
+          >
+            <option value={10}>10</option><option value={25}>25</option><option value={50}>50</option><option value={100}>100</option><option value={500}>500</option>
+          </select>
+        </label>
+      </div>
+      <div className="flex gap-1 items-center">
+        <button disabled={page === 1} onClick={() => onPageChange(page - 1)} className={`p-1.5 rounded ${page === 1 ? 'opacity-40' : 'hover:bg-blue-100'}`}><ChevronLeft className="w-4 h-4" /></button>
+        <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode ? 'bg-gray-700 text-white' : 'bg-blue-100 text-blue-700'}`}>{page}/{totalPages}</span>
+        <button disabled={page === totalPages} onClick={() => onPageChange(page + 1)} className={`p-1.5 rounded ${page === totalPages ? 'opacity-40' : 'hover:bg-blue-100'}`}><ChevronRight className="w-4 h-4" /></button>
+      </div>
     </div>
   );
 };
@@ -520,7 +648,7 @@ const StatusPie = ({ data, darkMode }) => {
     <div style={{position:'relative'}}>
       <ResponsiveContainer width="100%" height={300}>
         <PieChart>
-          <Pie data={pieData} cx="50%" cy="42%" innerRadius={52} outerRadius={88}
+          <Pie data={pieData} cx="50%" cy="42%" innerRadius={52} outerRadius={88} isAnimationActive={false}
             paddingAngle={0} dataKey="value" labelLine={false} label={renderPctLabel}>
             {pieData.map((d,i)=>(
               <Cell key={i} fill={d.isEtc ? '#9CA3AF' : PIE_COLORS[i % PIE_COLORS.length]}/>
@@ -766,6 +894,7 @@ const App = () => {
   const [showAboutModal, setShowAboutModal] = useState(false);
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
   const uploadDropdownRef = useRef(null);
+  const [frozenColumns, setFrozenColumns] = useState({});
 
   const [stats, setStats] = useState(null);
   const [poWithoutSO, setPoWithoutSO] = useState([]);
@@ -775,6 +904,7 @@ const App = () => {
   const [approvalSOData, setApprovalSOData] = useState([]);
   const [picAggregations, setPicAggregations] = useState([]); // PIC aggregations from backend (all filtered data)
   const [soTotal, setSoTotal] = useState(0);
+  const [soSubtotalAmount, setSoSubtotalAmount] = useState(0);
   const [soFilterOptions, setSoFilterOptions] = useState({ op_units: [], vendors: [], manufacturers: [], statuses: [], pics: [] });
 
   // SO filters
@@ -820,14 +950,18 @@ const App = () => {
   const [rfqTotal, setRfqTotal] = useState(0);
   const [rfqPage, setRfqPage] = useState(1);
   const [rfqPerPage, setRfqPerPage] = useState(10);
+  const [rfqSortOrder, setRfqSortOrder] = useState('newest');
   const [rfqSearch, setRfqSearch] = useState('');
   const [rfqAppliedSearch, setRfqAppliedSearch] = useState('');
   const [rfqColumns, setRfqColumns] = useState([]);
+  const [rfqSimilarityColumns, setRfqSimilarityColumns] = useState([]);
+  const [rfqShowSimilarity, setRfqShowSimilarity] = useState(false);
   const [rfqEditableFields, setRfqEditableFields] = useState([]);
   const [rfqPicKpis, setRfqPicKpis] = useState([]);
   const [rfqPicFilter, setRfqPicFilter] = useState('');
-  const [rfqFilters, setRfqFilters] = useState({ clients: [], brands: [], purchase_pics: [], vendors: [] });
-  const [rfqOptions, setRfqOptions] = useState({ clients: [], brands: [], purchase_pics: [], vendors: [] });
+  const [rfqFilters, setRfqFilters] = useState({ checks: [], clients: [], brands: [], purchase_pics: [], vendors: [] });
+  const [rfqOptions, setRfqOptions] = useState({ checks: [], clients: [], brands: [], purchase_pics: [], vendors: [] });
+  const [rfqSelectedCell, setRfqSelectedCell] = useState(null);
   const [rfqLastUpdated, setRfqLastUpdated] = useState(null);
 
   // All Registered Items
@@ -893,6 +1027,69 @@ const App = () => {
     }
     return picColorMap.current[name];
   };
+  const getFrozenIndex = (value) => (typeof value === 'object' && value ? value.index : value);
+  const getFreezeLeft = (event) => {
+    const headerCell = event?.currentTarget?.closest?.('th');
+    const scrollBox = event?.currentTarget?.closest?.('.overflow-x-auto');
+    if (!headerCell || !scrollBox) return 0;
+    const headerRect = headerCell.getBoundingClientRect();
+    const scrollRect = scrollBox.getBoundingClientRect();
+    const maxLeft = Math.max(0, scrollBox.clientWidth - headerRect.width);
+    return Math.max(0, Math.min(Math.round(headerRect.left - scrollRect.left), maxLeft));
+  };
+  const toggleFrozenColumn = useCallback((tableKey, colIndex, event) => {
+    const left = getFreezeLeft(event);
+    setFrozenColumns(prev => {
+      const activeIndex = getFrozenIndex(prev[tableKey]);
+      return { ...prev, [tableKey]: activeIndex === colIndex ? null : { index: colIndex, left } };
+    });
+  }, []);
+  const renderFreezeHeader = (tableKey, colIndex, label) => {
+    const active = getFrozenIndex(frozenColumns[tableKey]) === colIndex;
+    return (
+      <div className="freeze-header group relative flex min-h-8 w-full min-w-0 items-center justify-center">
+        <span className="freeze-header-label max-w-full text-center leading-tight">{label}</span>
+        <button
+          type="button"
+          aria-label={active ? `Unfreeze ${label}` : `Freeze ${label}`}
+          title={active ? `Unfreeze ${label}` : `Freeze ${label}`}
+          onClick={(e) => { e.stopPropagation(); toggleFrozenColumn(tableKey, colIndex, e); }}
+          className={`absolute right-0 top-1/2 inline-flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-md border opacity-0 shadow-sm transition-all group-hover:opacity-100 group-focus-within:opacity-100 ${active ? 'border-amber-300 bg-amber-100 text-amber-700' : darkMode ? 'border-gray-600 bg-gray-700/90 text-gray-300 hover:bg-gray-600' : 'border-slate-200 bg-white/95 text-slate-500 hover:bg-slate-100'}`}
+        >
+          {active ? <PinOff className="h-3 w-3" /> : <Pin className="h-3 w-3" />}
+        </button>
+      </div>
+    );
+  };
+  const frozenColumnCss = useMemo(() => Object.entries(frozenColumns)
+    .map(([tableKey, spec]) => ({ tableKey, idx: getFrozenIndex(spec), left: (typeof spec === 'object' && spec ? spec.left : 0) }))
+    .filter(({ idx }) => Number(idx) > 0)
+    .map(({ tableKey, idx, left }) => `
+      .freeze-table-${tableKey} th:nth-child(${idx}),
+      .freeze-table-${tableKey} td:nth-child(${idx}) {
+        position: sticky;
+        left: ${Number(left) || 0}px;
+        z-index: 25;
+        box-shadow: 10px 0 14px -14px rgba(15, 23, 42, 0.85);
+        background-clip: padding-box;
+      }
+      .freeze-table-${tableKey} thead th:nth-child(${idx}) {
+        z-index: 45;
+      }
+      .data-table-page:not(.data-table-page-dark) .freeze-table-${tableKey} td:nth-child(${idx}):not([class*="bg-"]) {
+        background: #ffffff;
+      }
+      .data-table-page:not(.data-table-page-dark) .freeze-table-${tableKey} thead th:nth-child(${idx}):not([class*="bg-"]) {
+        background: #e2e8f0;
+      }
+      .data-table-page-dark .freeze-table-${tableKey} td:nth-child(${idx}):not([class*="bg-"]) {
+        background: #1f2937;
+      }
+      .data-table-page-dark .freeze-table-${tableKey} thead th:nth-child(${idx}):not([class*="bg-"]) {
+        background: #374151;
+      }
+    `)
+    .join('\n'), [frozenColumns]);
   const hideMenuRef = useRef(null);
 
   // ── Global SO Create Date filter (shared across Dashboard / All SO / Delivery Completed)
@@ -1051,7 +1248,8 @@ const App = () => {
       appendMultiParam(params, 'client', globalClientFilter);
       appendMultiParam(params, 'pic', globalPicFilter);
       const qs = params.toString() ? `?${params}` : '';
-      const completedParams = new URLSearchParams({ year: 'all' });
+      const completedParams = new URLSearchParams();
+      if (!f || f.mode === 'all') completedParams.set('date_year', String(new Date().getFullYear()));
       params.forEach((value, key) => completedParams.append(key, value));
       const completedQs = completedParams.toString();
       const [sRes, aRes, cRes] = await Promise.all([
@@ -1099,6 +1297,20 @@ const App = () => {
     return `${url}${url.includes('?') ? '&' : '?'}${qs}`;
   };
 
+  const openNegativeVendorDetail = async (vendor) => {
+    try {
+      const params = new URLSearchParams({ category: 'negative' });
+      Object.entries(dateFilterParams(completedDateFilter)).forEach(([key, value]) => { if (value) params.append(key, value); });
+      appendMultiParam(params, 'client', globalClientFilter);
+      appendMultiParam(params, 'pic', globalPicFilter);
+      const res = await api.get(`/api/completed/margin-detail?${params}`);
+      const rows = (Array.isArray(res.data) ? res.data : []).filter(row => String(row.vendor || '-') === String(vendor || '-'));
+      setMarginDetailModal({ category: `Vendor: ${vendor || '-'}`, data: rows });
+    } catch(e) {
+      addToast(`Failed to load vendor margin detail: ${e.response?.data?.error || e.message}`, 'error');
+    }
+  };
+
   // Helper: resolve filter array
   const resolveFilter = (val) => {
     if (val === '__NONE__') return ['__NONE_PLACEHOLDER__']; // backend will return 0 rows
@@ -1128,6 +1340,7 @@ const App = () => {
       setApprovalSOData(Array.isArray(res.data.approval_data) ? res.data.approval_data : []);
       setPicAggregations(Array.isArray(res.data.pic_aggregations) ? res.data.pic_aggregations : []);
       setSoTotal(res.data.total || 0);
+      setSoSubtotalAmount(Number(res.data.subtotal_amount) || 0);
       setSoFilterOptions(res.data.filters || { op_units: [], vendors: [], manufacturers: [], statuses: [], pics: [] });
     } catch (e) {
       addToast(`Failed to load SO: ${e.message}`, 'error');
@@ -1191,29 +1404,39 @@ const App = () => {
     registeredItemsAppliedProdIds
   ]);
 
-  const fetchRFQData = useCallback(async (page = rfqPage, perPage = rfqPerPage, search = rfqAppliedSearch, refresh = false, filters = rfqFilters, pic = rfqPicFilter) => {
+  const fetchRFQData = useCallback(async (page = rfqPage, perPage = rfqPerPage, search = rfqAppliedSearch, refresh = false, filters = rfqFilters, pic = rfqPicFilter, showSimilarity = rfqShowSimilarity, sortOrder = rfqSortOrder) => {
     setLoading(true);
     try {
       const params = new URLSearchParams({ page, per_page: perPage });
       if (search) params.append('search', search);
+      if (sortOrder) params.append('sort_order', sortOrder);
       if (refresh) params.append('refresh', '1');
       if (pic) params.append('pic', pic);
+      if (showSimilarity) params.append('similarity', '1');
+      resolveFilter(filters.checks).forEach(v => params.append('check', v));
       resolveFilter(filters.clients).forEach(v => params.append('client_name', v));
       resolveFilter(filters.brands).forEach(v => params.append('brand_manufacturer', v));
-      resolveFilter(filters.purchase_pics).forEach(v => params.append('purchase_pic', v));
+      resolveFilter(filters.purchase_pics)
+        .filter(v => String(v || '').trim().toLowerCase() !== 'unassigned')
+        .forEach(v => params.append('purchase_pic', v));
       resolveFilter(filters.vendors).forEach(v => params.append('vendor_name', v));
       const res = await api.get(`/api/rfq/data?${params}`);
       setRfqData(Array.isArray(res.data.data) ? res.data.data : []);
       setRfqTotal(res.data.total || 0);
       setRfqColumns(Array.isArray(res.data.columns) ? res.data.columns : []);
+      setRfqSimilarityColumns(Array.isArray(res.data.similarity_columns) ? res.data.similarity_columns : []);
       setRfqEditableFields(Array.isArray(res.data.editable_fields) ? res.data.editable_fields : []);
       setRfqPicKpis(Array.isArray(res.data.pic_kpis) ? res.data.pic_kpis : []);
-      setRfqOptions(res.data.filters || { clients: [], brands: [], purchase_pics: [], vendors: [] });
+      const nextOptions = res.data.filters || { checks: [], clients: [], brands: [], purchase_pics: [], vendors: [] };
+      setRfqOptions({
+        ...nextOptions,
+        purchase_pics: (nextOptions.purchase_pics || []).filter(v => String(v || '').trim().toLowerCase() !== 'unassigned')
+      });
       setRfqLastUpdated(res.data.last_updated || null);
     } catch (e) {
       addToast(`Failed to load RFQ: ${e.response?.data?.error || e.message}`, 'error');
     } finally { setLoading(false); }
-  }, [addToast, rfqPage, rfqPerPage, rfqAppliedSearch, rfqFilters, rfqPicFilter]);
+  }, [addToast, rfqPage, rfqPerPage, rfqAppliedSearch, rfqFilters, rfqPicFilter, rfqShowSimilarity, rfqSortOrder]);
 
   // ─── Delete Request API functions ────────────────────────────────────────
   const fetchDeleteRequests = useCallback(async () => {
@@ -1285,7 +1508,7 @@ const App = () => {
     setPoPage(1);
   }, [poWithoutSO, poSearchNums, poFilterItemType, poFilterOpUnit, poSortOrder]);
 
-  useEffect(() => { fetchDashboard(); fetchDeleteRequests(); }, []);
+  useEffect(() => { fetchDashboard(); fetchDeleteRequests(); fetchPicDbStatus(); }, []);
   useEffect(() => {
     if (activePage === 'all-so') {
       fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter, soSortOrder);
@@ -1300,9 +1523,9 @@ const App = () => {
 
   useEffect(() => {
     if (activePage === 'rfq') {
-      fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter);
+      fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter, rfqShowSimilarity);
     }
-  }, [activePage, rfqPage, rfqPerPage, rfqAppliedSearch, rfqFilters, rfqPicFilter, fetchRFQData]);
+  }, [activePage, rfqPage, rfqPerPage, rfqAppliedSearch, rfqFilters, rfqPicFilter, rfqShowSimilarity, fetchRFQData]);
 
   useEffect(() => {
     if (activePage === 'all-registered-items') {
@@ -1689,10 +1912,49 @@ const App = () => {
     } catch (e) { addToast(`Failed to update Item Registration: ${e.response?.data?.error || e.message}`, 'error'); }
   };
 
-  const updateRFQCell = async (rowKey, field, value) => {
-    setEditingCell(null);
+  const applyRFQLocalUpdates = (updates) => {
+    const parseNumber = (v) => {
+      const s = String(v ?? '').replace(/[^0-9.-]/g, '');
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    };
+    const formatAmount = (n) => Number.isFinite(n) ? Math.round(n).toLocaleString('en-US') : null;
+    setRfqData(prev => prev.map(row => {
+      const rowUpdates = updates.filter(item => item.row_key === row.row_key);
+      if (!rowUpdates.length) return row;
+      const next = { ...row };
+      rowUpdates.forEach(({ field, value }) => {
+        next[field] = value;
+        if (field === 'product_id') {
+          next.product_id = value;
+          next.status = Boolean(value);
+          next.check = value ? 'complete' : next.check;
+          next.similar_prod_ids = '';
+          next.similar_prod_name = '';
+          next.similar_spec = '';
+          next.similar_mfr_name = '';
+          next.similar_odr_unit = '';
+          next.similar_score = null;
+        }
+      });
+      if (rowUpdates.some(({ field }) => field === 'unit_price_idr' || field === 'qty')) {
+        const qty = parseNumber(next.qty);
+        const unitPrice = parseNumber(next.unit_price_idr);
+        next.amt_idr = qty != null && unitPrice != null ? formatAmount(qty * unitPrice) : null;
+        next.unit_price_missing = unitPrice == null;
+      }
+      return next;
+    }).filter(row => !rfqPicFilter || (row.purchase_pic === rfqPicFilter && row.check === 'open' && row.unit_price_missing && !row.product_id)));
+  };
+
+  const updateRFQCell = async (rowKey, field, value, options = {}) => {
+    const quiet = Boolean(options.quiet);
+    if (!quiet) setEditingCell(null);
     try {
-      await api.put(`/api/rfq/${encodeURIComponent(rowKey)}`, { field, value });
+      const res = await api.put(`/api/rfq/${encodeURIComponent(rowKey)}`, { field, value });
+      if (!quiet && res.data?.sheet_sync && res.data.sheet_sync.synced === false) {
+        addToast(`RFQ updated locally. Sheet sync not active: ${res.data.sheet_sync.reason}`, 'warning');
+      }
       const parseNumber = (v) => {
         const s = String(v ?? '').replace(/[^0-9.-]/g, '');
         const n = Number(s);
@@ -1704,7 +1966,7 @@ const App = () => {
         const oldMissing = current?.unit_price_missing;
         const newMissing = parseNumber(value) == null;
         const pic = current?.purchase_pic;
-        if (pic && !current?.product_id && oldMissing !== newMissing) {
+        if (pic && current?.check === 'open' && !current?.product_id && oldMissing !== newMissing) {
           setRfqPicKpis(prev => {
             const next = prev.map(row => row.pic === pic ? { ...row, count: Math.max(0, (Number(row.count) || 0) + (newMissing ? 1 : -1)) } : row)
               .filter(row => Number(row.count) > 0);
@@ -1713,18 +1975,58 @@ const App = () => {
           });
         }
       }
+      if (field === 'product_id') {
+        const current = rfqData.find(row => row.row_key === rowKey);
+        if (value && current?.check === 'open' && current?.unit_price_missing && !current?.product_id && current?.purchase_pic) {
+          setRfqPicKpis(prev => prev.map(kpi => kpi.pic === current.purchase_pic ? { ...kpi, count: Math.max(0, (Number(kpi.count) || 0) - 1) } : kpi).filter(kpi => Number(kpi.count) > 0));
+        }
+      }
       setRfqData(prev => prev.map(row => {
         if (row.row_key !== rowKey) return row;
         const next = { ...row, [field]: value };
-        if (field === 'unit_price_idr') {
+        if (field === 'product_id') {
+          next.product_id = value;
+          next.status = Boolean(value);
+          next.check = value ? 'complete' : next.check;
+          next.similar_prod_ids = '';
+          next.similar_prod_name = '';
+          next.similar_spec = '';
+          next.similar_mfr_name = '';
+          next.similar_odr_unit = '';
+          next.similar_score = null;
+        }
+        if (field === 'unit_price_idr' || field === 'qty') {
           const qty = parseNumber(next.qty);
-          const unitPrice = parseNumber(value);
+          const unitPrice = parseNumber(next.unit_price_idr);
           next.amt_idr = qty != null && unitPrice != null ? formatAmount(qty * unitPrice) : null;
-          next.unit_price_missing = unitPrice == null;
+          if (field === 'unit_price_idr') next.unit_price_missing = unitPrice == null;
         }
         return next;
-      }).filter(row => !rfqPicFilter || (row.purchase_pic === rfqPicFilter && row.unit_price_missing && !row.product_id)));
-    } catch (e) { addToast(`Failed to update RFQ: ${e.response?.data?.error || e.message}`, 'error'); }
+      }).filter(row => !rfqPicFilter || (row.purchase_pic === rfqPicFilter && row.check === 'open' && row.unit_price_missing && !row.product_id)));
+      return true;
+    } catch (e) {
+      if (!quiet) addToast(`Failed to update RFQ: ${e.response?.data?.error || e.message}`, 'error');
+      return false;
+    }
+  };
+
+  const updateRFQCellsBatch = async (updates) => {
+    const cleanUpdates = (updates || []).filter(item => item?.row_key && item?.field);
+    if (!cleanUpdates.length) return false;
+    try {
+      const res = await api.put('/api/rfq/batch-cells', { updates: cleanUpdates });
+      applyRFQLocalUpdates(cleanUpdates);
+      if (res.data?.sheet_sync && res.data.sheet_sync.synced === false) {
+        addToast(`RFQ batch updated locally. Sheet sync not active: ${res.data.sheet_sync.reason}`, 'warning');
+      }
+      if (res.data?.skipped?.length) {
+        addToast(`RFQ batch skipped ${res.data.skipped.length} cells`, 'warning');
+      }
+      return true;
+    } catch (e) {
+      addToast(`Failed to update RFQ batch: ${e.response?.data?.error || e.message}`, 'error');
+      return false;
+    }
   };
 
   const openModal = async (title, endpointOrData) => {
@@ -1789,7 +2091,7 @@ const App = () => {
   const card  = darkMode ? 'bg-gray-800 border border-gray-700 shadow-sm' : 'bg-white border border-gray-200/80 shadow-[0_8px_24px_rgba(15,23,42,0.05)]';
   const txt   = darkMode ? 'text-white' : 'text-[#1f2937]';
   const txt2  = darkMode ? 'text-gray-400' : 'text-[#55585d]';
-  const tblHd = darkMode ? 'bg-gray-700' : 'bg-[#f6f6f4]';
+  const tblHd = darkMode ? 'bg-gray-800/60' : 'bg-slate-50';
   const tblDv = darkMode ? 'divide-gray-700' : 'divide-gray-100';
   const trHov = darkMode ? 'hover:bg-gray-700' : 'hover:bg-[#f7f7f5]';
   const kpiValue = darkMode ? 'text-gray-100' : 'text-[#334155]';
@@ -1920,9 +2222,9 @@ const App = () => {
                 labelStyle={{color:darkMode?'#F3F4F6':'#111827'}}
                 itemStyle={{color:darkMode?'#F3F4F6':'#111827'}}/>
               <Legend wrapperStyle={{fontSize:12,color:darkMode?'#F3F4F6':'#111827'}} iconType="rect"/>
-              <Bar yAxisId="amt" dataKey="sales_amount" name="Sales Amount" fill="url(#cgSales)" radius={[4,4,0,0]}/>
-              <Bar yAxisId="amt" dataKey="purchase_amount" name="Purchase Amount" fill="url(#cgPurchase)" radius={[4,4,0,0]}/>
-              <Line yAxisId="cnt" type="monotone" dataKey="count" name="Transactions" stroke="#64748B" strokeWidth={3} dot={{r:3,fill:'#64748B'}} activeDot={{r:5, fill:'#64748B'}} z={10}/>
+              <Bar yAxisId="amt" dataKey="sales_amount" name="Sales Amount" fill="url(#cgSales)" radius={[4,4,0,0]} isAnimationActive={false}/>
+              <Bar yAxisId="amt" dataKey="purchase_amount" name="Purchase Amount" fill="url(#cgPurchase)" radius={[4,4,0,0]} isAnimationActive={false}/>
+              <Line yAxisId="cnt" type="monotone" dataKey="count" name="Transactions" stroke="#64748B" strokeWidth={3} dot={{r:3,fill:'#64748B'}} activeDot={{r:5, fill:'#64748B'}} z={10} isAnimationActive={false}/>
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -1997,7 +2299,7 @@ const App = () => {
               <div className="w-full">
                 <ResponsiveContainer width="100%" height={220}>
                   <PieChart>
-                    <Pie data={marginPieData} cx="50%" cy="50%" innerRadius={55} outerRadius={88}
+                    <Pie data={marginPieData} cx="50%" cy="50%" innerRadius={55} outerRadius={88} isAnimationActive={false}
                       dataKey="value" labelLine={false} label={renderPctLabel}>
                       {marginPieData.map((_,i)=><Cell key={i} fill={CPIE[i]}/>)}
                     </Pie>
@@ -2054,7 +2356,7 @@ const App = () => {
                                   formatter={(v)=>[fmtCurShort(v), 'Price']}
                                   contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}
                                 />
-                                <Line type="monotone" dataKey="price" stroke={isDown?'#EF4444':'#10B981'} strokeWidth={2.5} dot={false}/>
+                                <Line type="monotone" dataKey="price" stroke={isDown?'#EF4444':'#10B981'} strokeWidth={2.5} dot={false} isAnimationActive={false}/>
                               </LineChart>
                             </ResponsiveContainer>
                           ) : <div className={`h-full flex items-center justify-center ${txt2}`}>—</div>}
@@ -2088,7 +2390,7 @@ const App = () => {
                     const maxAbs = Math.abs(d.worst_margin_vendors[0]?.margin || 1);
                     const barPct = Math.round(Math.abs(v.margin) / maxAbs * 100);
                     return (
-                      <div key={i} className={`p-3 rounded-xl ${mcBg(v.margin)}`}>
+                      <button type="button" key={i} onClick={() => openNegativeVendorDetail(v.vendor)} className={`block w-full text-left p-3 rounded-xl ${mcBg(v.margin)} transition-all hover:shadow-md hover:-translate-y-0.5`}>
                         <div className="flex items-center justify-between mb-1">
                           <div className="flex items-center gap-2 min-w-0">
                             <span className={`text-xs font-bold flex-shrink-0 ${darkMode?'text-gray-400':'text-gray-500'}`}>#{i+1}</span>
@@ -2103,7 +2405,7 @@ const App = () => {
                           <span className={txt2}>{fmtNum(v.count)} negative txn{v.count!==1?'s':''}</span>
                           <span className={txt2}>Sales: {fmtCurShort(v.total_sales||0)} · PO: {fmtCurShort(v.total_purchase||0)}</span>
                         </div>
-                      </div>
+                      </button>
                     );
                   })}
                 </div>
@@ -2196,7 +2498,7 @@ const App = () => {
             onClick={() => { setGlobalDateFilter({ mode: 'all' }); setGlobalClientFilter([]); setGlobalPicFilter([]); }}
             className={`h-10 w-full px-4 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}
           >
-            Clear Filter
+            Clear
           </button>
         </div>
       </div>
@@ -2334,7 +2636,7 @@ const App = () => {
               <Legend iconSize={8} wrapperStyle={{fontSize:'11px'}}/>
               <Area yAxisId="left" type="monotone" dataKey="so_count" name="SO Count" stroke="#2563EB" strokeWidth={2} fill="url(#cSO)"/>
               <Area yAxisId="right" type="monotone" dataKey="amount" name="Value (IDR Mil)" stroke="#14B8A6" strokeWidth={2} fill="url(#cAmt)"/>
-              <Line yAxisId="right" type="monotone" dataKey="amount" name="Total Sales Amount" stroke="#14B8A6" strokeWidth={3} dot={{r:4,fill:'#14B8A6'}} activeDot={{r:6, fill:'#14B8A6'}} z={10}/>
+              <Line yAxisId="right" type="monotone" dataKey="amount" name="Total Sales Amount" stroke="#14B8A6" strokeWidth={3} dot={{r:4,fill:'#14B8A6'}} activeDot={{r:6, fill:'#14B8A6'}} z={10} isAnimationActive={false}/>
             </ComposedChart>
           </ResponsiveContainer>
           </div>
@@ -2646,7 +2948,7 @@ const App = () => {
             <h3 className={`text-base font-bold mb-4 ${txt}`}>Vendors — Largest Negative Margin</h3>
             <div className="space-y-3 max-h-[420px] overflow-auto pr-1">
               {(d.worst_margin_vendors || []).map((v,i)=>(
-                <div key={i} className={`p-3 rounded-xl ${darkMode?'bg-red-900/20':'bg-red-50'}`}>
+                <button type="button" key={i} onClick={() => openNegativeVendorDetail(v.vendor)} className={`block w-full text-left p-3 rounded-xl ${darkMode?'bg-red-900/20 hover:bg-red-900/30':'bg-red-50 hover:bg-red-100'} transition-all hover:shadow-md hover:-translate-y-0.5`}>
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
@@ -2657,7 +2959,7 @@ const App = () => {
                     </div>
                     <span className="text-sm font-bold text-red-600 whitespace-nowrap">{fmtCurShort(v.margin)}</span>
                   </div>
-                </div>
+                </button>
               ))}
             </div>
           </div>
@@ -2750,7 +3052,7 @@ const App = () => {
       }, {});
       return { ...m, ...yoyValues };
     });
-    const purchaseYoyColors = ['#14B8A6', '#CBD5E1'];
+    const purchaseYoyColors = ['#14B8A6', '#94A3B8'];
     const completedTrendLegendPayload = [
       { value: 'PO Amount', type: 'rect', color: '#93C5FD', dataKey: 'purchase_amount' },
       { value: 'Sales Amount', type: 'rect', color: '#2563EB', dataKey: 'sales_amount' },
@@ -2769,7 +3071,7 @@ const App = () => {
           <XAxis type="number" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={12} tickFormatter={fmtM}/>
           <YAxis type="category" dataKey="shortLabel" width={190} stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={12} tick={{fontSize: 12, textAnchor: 'end'}} tickMargin={8}/>
           <Tooltip formatter={(v)=>[fmtCur(v), label]} labelFormatter={(_, payload)=>payload?.[0]?.payload?.[labelKey] || '-'} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
-          <Bar dataKey={valueKey} name={label} fill={color} radius={[0,6,6,0]}/>
+          <Bar dataKey={valueKey} name={label} fill={color} radius={[0,6,6,0]} isAnimationActive={false}/>
         </BarChart>
       </ResponsiveContainer>
     );
@@ -2798,8 +3100,8 @@ const App = () => {
               <YAxis stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10} tickFormatter={fmtM}/>
               <Tooltip formatter={(v,n)=>[fmtCur(v), n]} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
               <Legend wrapperStyle={{fontSize:12}} payload={completedTrendLegendPayload}/>
-              <Bar dataKey="purchase_amount" name="PO Amount" fill="#93C5FD" radius={[4,4,0,0]}/>
-              <Bar dataKey="sales_amount" name="Sales Amount" fill="#2563EB" radius={[4,4,0,0]}/>
+              <Bar dataKey="purchase_amount" name="PO Amount" fill="#93C5FD" radius={[4,4,0,0]} isAnimationActive={false}/>
+              <Bar dataKey="sales_amount" name="Sales Amount" fill="#2563EB" radius={[4,4,0,0]} isAnimationActive={false}/>
               {activePurchaseYoyYears.map((year, i) => (
                 <Line
                   key={year}
@@ -2807,10 +3109,11 @@ const App = () => {
                   dataKey={`purchase_${year}`}
                   name={`PO ${year}`}
                   stroke={purchaseYoyColors[i % purchaseYoyColors.length]}
-                  strokeOpacity={0.24}
+                  strokeOpacity={0.34}
                   strokeWidth={1.5}
-                  dot={{ r: 2, fill: purchaseYoyColors[i % purchaseYoyColors.length], opacity: 0.28 }}
+                  dot={{ r: 2, fill: purchaseYoyColors[i % purchaseYoyColors.length], opacity: 0.38 }}
                   activeDot={{ r: 4, opacity: 0.55 }}
+                  isAnimationActive={false}
                 />
               ))}
             </ComposedChart>
@@ -2896,7 +3199,7 @@ const App = () => {
           </DownloadButton>
         </div>
 
-        <div className={`px-5 py-3 border-b ${darkMode ? 'border-gray-700 bg-gray-800/60' : 'border-gray-100 bg-[#f6f6f4]'}`}>
+        <FilterPanel darkMode={darkMode}>
           <div className="flex flex-wrap gap-2 items-end">
             <div className="w-full sm:w-[280px]">
               <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search</label>
@@ -2927,13 +3230,13 @@ const App = () => {
               Search
             </button>
             <button onClick={handleClear} className={`w-[110px] h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>
-              Clear Search
+              Clear
             </button>
           </div>
-        </div>
+        </FilterPanel>
 
         <div className="overflow-x-auto">
-          <table className="w-full text-xs">
+          <table className="freeze-table-all-registered-items w-full text-xs">
             <colgroup>
               <col style={{minWidth:'120px'}}/>
               <col style={{minWidth:'140px'}}/>
@@ -2949,8 +3252,8 @@ const App = () => {
             </colgroup>
             <thead className={tblHd}>
               <tr>
-                {columns.map(([label]) => (
-                  <th key={label} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{label}</th>
+                {columns.map(([label], index) => (
+                  <th key={label} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{renderFreezeHeader('all-registered-items', index + 1, label)}</th>
                 ))}
               </tr>
             </thead>
@@ -2963,7 +3266,7 @@ const App = () => {
                 </tr>
               ) : registeredItemsData.map(row => (
                 <tr key={row.id} className={`${trHov} transition-colors`}>
-                  <td className="px-2 py-2 font-mono text-blue-600 whitespace-nowrap">{fmtProductId(row.prod_id)}</td>
+                  <td className="px-2 py-2 font-mono text-blue-600 whitespace-nowrap text-center">{fmtProductId(row.prod_id)}</td>
                   <td className={`px-2 py-2 ${txt2}`} title={row.category}>{row.category || '-'}</td>
                   <td className="px-2 py-2 text-center whitespace-nowrap">
                     {row.pic ? (() => {
@@ -2985,34 +3288,16 @@ const App = () => {
           </table>
         </div>
 
-        <div className={`px-5 py-3 border-t ${darkMode ? 'border-gray-700' : 'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
-          <div className="flex items-center gap-3">
-            <span className={`text-sm ${txt2}`}>Showing {registeredItemsTotal ? (registeredItemsPage - 1) * registeredItemsPerPage + 1 : 0}-{Math.min(registeredItemsPage * registeredItemsPerPage, registeredItemsTotal)} of {fmtNum(registeredItemsTotal)}</span>
-            <label className={`flex items-center gap-1 text-xs ${txt2}`}>Rows
-              <select className={`px-2 py-1 rounded-lg text-xs border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200'}`} value={registeredItemsPerPage} onChange={e => {
-                const next = Number(e.target.value);
-                setRegisteredItemsPerPage(next);
-                setRegisteredItemsPage(1);
-                fetchRegisteredItems(1, next, registeredItemsAppliedSearch, registeredItemsAppliedProdIds);
-              }}>
-                <option value={10}>10</option><option value={25}>25</option><option value={50}>50</option><option value={100}>100</option><option value={500}>500</option>
-              </select>
-            </label>
-          </div>
-          <div className="flex gap-1 items-center">
-            <button disabled={registeredItemsPage === 1} onClick={() => {
-              const p = registeredItemsPage - 1;
-              setRegisteredItemsPage(p);
-              fetchRegisteredItems(p, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds);
-            }} className={`p-1.5 rounded ${registeredItemsPage === 1 ? 'opacity-40' : 'hover:bg-blue-100'}`}><ChevronLeft className="w-4 h-4" /></button>
-            <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode ? 'bg-gray-700 text-white' : 'bg-blue-100 text-blue-700'}`}>{registeredItemsPage}/{totalPages}</span>
-            <button disabled={registeredItemsPage === totalPages} onClick={() => {
-              const p = registeredItemsPage + 1;
-              setRegisteredItemsPage(p);
-              fetchRegisteredItems(p, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds);
-            }} className={`p-1.5 rounded ${registeredItemsPage === totalPages ? 'opacity-40' : 'hover:bg-blue-100'}`}><ChevronRight className="w-4 h-4" /></button>
-          </div>
-        </div>
+        <PagePagination
+          darkMode={darkMode}
+          txt2={txt2}
+          page={registeredItemsPage}
+          totalPages={totalPages}
+          total={registeredItemsTotal}
+          perPage={registeredItemsPerPage}
+          onPageChange={(p) => { setRegisteredItemsPage(p); fetchRegisteredItems(p, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds); }}
+          onPerPageChange={(next) => { setRegisteredItemsPerPage(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, next, registeredItemsAppliedSearch, registeredItemsAppliedProdIds); }}
+        />
       </div>
     );
   };
@@ -3020,11 +3305,11 @@ const App = () => {
   const renderRFQ = () => {
     const totalPages = Math.max(1, Math.ceil(rfqTotal / rfqPerPage));
     const editableSet = new Set(rfqEditableFields || []);
-    const columns = (rfqColumns.length ? rfqColumns : [
-      { field: 'status', label: 'Status' }, { field: 'days_left', label: 'Days Left' }, { field: 'no', label: 'No' }, { field: 'client_name', label: 'Nama Client' },
+    const baseColumns = (rfqColumns.length ? rfqColumns : [
+      { field: 'check', label: 'Check' }, { field: 'sheet_status', label: 'Status' }, { field: 'days_left', label: 'Days Left' }, { field: 'no', label: 'No' }, { field: 'client_name', label: 'Nama Client' },
       { field: 'rfq_date', label: 'RFQ Date' }, { field: 'closing_date', label: 'Closing Date' }, { field: 'sales_pic', label: 'Sales PIC' },
       { field: 'category_name', label: 'Category Name' }, { field: 'purchase_pic', label: 'Purchase PIC' },
-      { field: 'item_name', label: 'Item Name' }, { field: 'detail_spec', label: 'Detail Spec (Mod' }, { field: 'brand_manufacturer', label: 'Brand/Manufaktur' },
+      { field: 'item_name', label: 'Item Name' }, { field: 'detail_spec', label: 'Detail Spec' }, { field: 'brand_manufacturer', label: 'Brand/Manufaktur' },
       { field: 'qty', label: 'Qty' }, { field: 'unit', label: 'Unit' }, { field: 'remark', label: 'Remark' },
       { field: 'product_id', label: 'Product ID' }, { field: 'request_number', label: 'Request Number' },
       { field: 'same_replacement', label: 'Same/Replacement' }, { field: 'vendor_name', label: 'Vendor Name' },
@@ -3033,14 +3318,34 @@ const App = () => {
       { field: 'lead_time_days', label: 'Lead Time (Days)' }, { field: 'valid_period', label: 'Valid period' }, { field: 'photo_url', label: 'Photo URL (optional)' },
       { field: 'remarks', label: 'Remarks' },
     ]).filter(col => col.field !== 'category_id');
+    const similarityColumns = rfqSimilarityColumns.length ? rfqSimilarityColumns : [
+      { field: 'similar_prod_ids', label: 'Similar Product ID' },
+      { field: 'similar_prod_name', label: 'Similar Product Name' },
+      { field: 'similar_spec', label: 'Similar Specification' },
+      { field: 'similar_mfr_name', label: 'Similar Manufacturer' },
+      { field: 'similar_odr_unit', label: 'Similar Unit' },
+      { field: 'similar_score', label: '%Similarity' },
+    ];
+    const columns = rfqShowSimilarity ? [...baseColumns, ...similarityColumns] : baseColumns;
+    const rfqSourceStyleFields = new Set([
+      'check', 'sheet_status', 'days_left', 'no', 'client_name', 'rfq_date', 'closing_date', 'sales_pic',
+      'category_name', 'purchase_pic', 'item_name', 'detail_spec', 'brand_manufacturer', 'qty', 'unit', 'remark',
+      'similar_prod_ids', 'similar_prod_name', 'similar_spec', 'similar_mfr_name', 'similar_odr_unit', 'similar_score'
+    ]);
     const colWidth = (field) => ({
-      status: '70px', days_left: '90px', no: '70px', client_name: '220px', rfq_date: '110px', closing_date: '110px', sales_pic: '120px',
-      item_name: '180px', detail_spec: '280px', brand_manufacturer: '160px', qty: '80px', unit: '80px', remark: '180px',
-      category_id: '180px', category_name: '260px', product_id: '120px', request_number: '150px', purchase_pic: '120px',
-      same_replacement: '150px', vendor_name: '200px', unit_price_idr: '130px', amt_idr: '130px', quoted_item_name: '180px',
-      quoted_spec: '260px', quoted_brand: '140px', quoted_unit: '90px', moq: '90px', lead_time_days: '130px',
-      valid_period: '130px', photo_url: '180px', remarks: '240px'
-    }[field] || '140px');
+      check: 64, sheet_status: 90, days_left: 76, no: 70, client_name: 160, rfq_date: 110, closing_date: 110, sales_pic: 120,
+      item_name: 180, detail_spec: 620, brand_manufacturer: 160, qty: 80, unit: 80, remark: 380,
+      category_id: 180, category_name: 150, product_id: 120, request_number: 150, purchase_pic: 120,
+      same_replacement: 92, vendor_name: 200, unit_price_idr: 130, amt_idr: 130, quoted_item_name: 180,
+      quoted_spec: 150, quoted_brand: 130, quoted_unit: 58, moq: 62, lead_time_days: 78,
+      valid_period: 82, photo_url: 92, remarks: 360,
+      similar_prod_ids: 150, similar_prod_name: 220, similar_spec: 280, similar_mfr_name: 140, similar_odr_unit: 78, similar_score: 96
+    }[field] || 140);
+    const colStyle = (field) => {
+      const width = `${colWidth(field)}px`;
+      return { width, minWidth: width, maxWidth: width };
+    };
+    const rfqTableWidth = columns.reduce((sum, col) => sum + colWidth(col.field), 0);
     const linkInfo = (value) => {
       const text = String(value || '').trim();
       const match = text.match(/https?:\/\/[^\s]+/i);
@@ -3064,19 +3369,47 @@ const App = () => {
       const display = value === 0 || value ? value : '-';
       return <span className={extraClass} title={String(value || '')}>{display}</span>;
     };
+    const toDateInputValue = (value) => {
+      const raw = String(value || '').trim();
+      if (!raw) return '';
+      const dmy = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (dmy) return `${dmy[3]}-${String(dmy[2]).padStart(2, '0')}-${String(dmy[1]).padStart(2, '0')}`;
+      const ymd = raw.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+      if (ymd) return `${ymd[1]}-${String(ymd[2]).padStart(2, '0')}-${String(ymd[3]).padStart(2, '0')}`;
+      return raw;
+    };
+    const isRFQClosingPast = (value) => {
+      const raw = String(value || '').trim();
+      if (!raw) return false;
+      let d = null;
+      const m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (m) d = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+      else {
+        const parsed = new Date(raw);
+        if (!Number.isNaN(parsed.getTime())) d = parsed;
+      }
+      if (!d || Number.isNaN(d.getTime())) return false;
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      d.setHours(0, 0, 0, 0);
+      return d < today;
+    };
     const handleClear = () => {
       setRfqSearch('');
       setRfqAppliedSearch('');
       setRfqPicFilter('');
-      const nextFilters = { clients: [], brands: [], purchase_pics: [], vendors: [] };
+      setRfqSortOrder('newest');
+      const nextFilters = { checks: [], clients: [], brands: [], purchase_pics: [], vendors: [] };
       setRfqFilters(nextFilters);
       setRfqPage(1);
-      fetchRFQData(1, rfqPerPage, '', false, nextFilters, '');
+      fetchRFQData(1, rfqPerPage, '', false, nextFilters, '', rfqShowSimilarity, 'newest');
     };
     const rfqParams = () => {
       const p = new URLSearchParams();
       if (rfqAppliedSearch) p.append('search', rfqAppliedSearch);
       if (rfqPicFilter) p.append('pic', rfqPicFilter);
+      if (rfqSortOrder) p.append('sort_order', rfqSortOrder);
+      resolveFilter(rfqFilters.checks).forEach(v => p.append('check', v));
       resolveFilter(rfqFilters.clients).forEach(v => p.append('client_name', v));
       resolveFilter(rfqFilters.brands).forEach(v => p.append('brand_manufacturer', v));
       resolveFilter(rfqFilters.purchase_pics).forEach(v => p.append('purchase_pic', v));
@@ -3108,6 +3441,53 @@ const App = () => {
     const totalPendingRFQ = visibleRfqPicKpis.reduce((sum, row) => sum + (Number(row.count) || 0), 0);
     const rfqKpis = [{ pic: 'Total Pending RFQ', count: totalPendingRFQ, isTotal: true }, ...visibleRfqPicKpis];
     const rfqKpiCols = Math.max(1, rfqKpis.length);
+    const editableColumns = columns.filter(col => editableSet.has(col.field));
+    const editableFieldOrder = editableColumns.map(col => col.field);
+    const applyRFQPaste = async (startRowIndex, startField, text) => {
+      const rows = String(text || '').replace(/\r/g, '').split('\n').filter((line, idx, arr) => line !== '' || idx < arr.length - 1);
+      if (!rows.length) return;
+      const startColIndex = editableFieldOrder.indexOf(startField);
+      if (startColIndex < 0) return;
+      const batchUpdates = [];
+      for (let r = 0; r < rows.length; r += 1) {
+        const targetRow = rfqData[startRowIndex + r];
+        if (!targetRow) break;
+        const values = rows[r].split('\t');
+        for (let c = 0; c < values.length; c += 1) {
+          const field = editableFieldOrder[startColIndex + c];
+          if (!field) break;
+          batchUpdates.push({ row_key: targetRow.row_key, field, value: values[c] });
+        }
+      }
+      if (batchUpdates.length && await updateRFQCellsBatch(batchUpdates)) {
+        addToast(`RFQ paste: ${batchUpdates.length} cells updated`, 'success');
+      }
+    };
+    const fillRFQDown = async (startRowIndex, field, endRowIndex) => {
+      if (endRowIndex <= startRowIndex) return;
+      const source = rfqData[startRowIndex];
+      if (!source) return;
+      const value = source[field] ?? '';
+      const batchUpdates = [];
+      for (let i = startRowIndex + 1; i <= endRowIndex && i < rfqData.length; i += 1) {
+        batchUpdates.push({ row_key: rfqData[i].row_key, field, value });
+      }
+      if (batchUpdates.length && await updateRFQCellsBatch(batchUpdates)) {
+        addToast(`RFQ fill down: ${batchUpdates.length} cells updated`, 'success');
+      }
+    };
+    const startRFQFill = (event, rowIndex, field) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const onUp = (upEvent) => {
+        document.removeEventListener('mouseup', onUp);
+        const target = document.elementFromPoint(upEvent.clientX, upEvent.clientY)?.closest('[data-rfq-cell="true"]');
+        const endRowIndex = Number(target?.getAttribute('data-row-index'));
+        const targetField = target?.getAttribute('data-field');
+        if (Number.isFinite(endRowIndex) && targetField === field) fillRFQDown(rowIndex, field, endRowIndex);
+      };
+      document.addEventListener('mouseup', onUp);
+    };
 
     return (
       <div className={`rounded-2xl overflow-hidden ${card}`}>
@@ -3129,6 +3509,9 @@ const App = () => {
             <DownloadButton onClick={downloadRFQExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
               <Download className="w-4 h-4"/>Download Excel
             </DownloadButton>
+            <button onClick={() => { const next = !rfqShowSimilarity; setRfqShowSimilarity(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter, next); }} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${rfqShowSimilarity ? 'bg-amber-100 text-amber-700 border border-amber-200 hover:bg-amber-200' : darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
+              {rfqShowSimilarity ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}{rfqShowSimilarity ? 'Hide Similarity' : 'Show Similarity'}
+            </button>
             <button onClick={() => fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, true, rfqFilters, rfqPicFilter)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
               <RotateCcw className="w-4 h-4"/>Refresh Sheet
             </button>
@@ -3142,9 +3525,11 @@ const App = () => {
               const activePicColor = activePic ? getPicColor(row.pic) : null;
               const applyRFQPicFilter = () => {
                 const nextPic = row.isTotal || activePic ? '' : row.pic;
+                const nextFilters = { ...rfqFilters, purchase_pics: nextPic ? [nextPic] : [] };
                 setRfqPicFilter(nextPic);
+                setRfqFilters(nextFilters);
                 setRfqPage(1);
-                fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, rfqFilters, nextPic);
+                fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, nextFilters, nextPic, rfqShowSimilarity);
               };
               return (
                 <button key={row.pic} type="button" onClick={applyRFQPicFilter} className={`min-w-0 p-3 rounded-xl text-left transition-all ${activePic ? (darkMode ? 'bg-amber-900/30 border border-amber-500 ring-2 ring-amber-400' : 'bg-amber-50 border border-amber-300 ring-2 ring-amber-200') : row.isTotal ? (darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200') : card} ${row.isTotal ? 'hover:border-slate-300' : 'hover:border-amber-300'}`}>
@@ -3164,8 +3549,20 @@ const App = () => {
           </div>
         </div>
 
-        <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700 bg-gray-800/60':'border-gray-100 bg-[#f6f6f4]'}`}>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[240px_repeat(4,minmax(150px,1fr))_90px_110px] items-end">
+        <FilterPanel darkMode={darkMode}>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[110px_minmax(170px,1fr)_115px_repeat(4,minmax(120px,1fr))_84px_84px] items-end">
+            <div className="min-w-0">
+              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>↕ RFQ Date</label>
+              <select
+                value={rfqSortOrder}
+                onChange={e => { const next = e.target.value; setRfqSortOrder(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter, rfqShowSimilarity, next); }}
+                title="Sort RFQ Date"
+                className={`w-full h-10 px-2 py-2 rounded-xl text-sm border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-200 text-gray-800'}`}
+              >
+                <option value="newest">Newest ↓</option>
+                <option value="oldest">Oldest ↑</option>
+              </select>
+            </div>
             <div className="min-w-0">
               <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search RFQ</label>
               <input
@@ -3176,65 +3573,127 @@ const App = () => {
               />
             </div>
             <div className="min-w-0">
+              <MultiSelect label="Check" options={rfqOptions.checks || []} selected={rfqFilters.checks}
+                onChange={v=>{ const next={...rfqFilters, checks:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="min-w-0">
               <MultiSelect label="Nama Client" options={rfqOptions.clients || []} selected={rfqFilters.clients}
-                onChange={v=>{ const next={...rfqFilters, clients:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter); }} darkMode={darkMode} txt2={txt2}/>
+                onChange={v=>{ const next={...rfqFilters, clients:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
             <div className="min-w-0">
               <MultiSelect label="Brand/Manufaktur" options={rfqOptions.brands || []} selected={rfqFilters.brands}
-                onChange={v=>{ const next={...rfqFilters, brands:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter); }} darkMode={darkMode} txt2={txt2}/>
+                onChange={v=>{ const next={...rfqFilters, brands:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
             <div className="min-w-0">
               <MultiSelect label="Purchase PIC" options={rfqOptions.purchase_pics || []} selected={rfqFilters.purchase_pics}
-                onChange={v=>{ const next={...rfqFilters, purchase_pics:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter); }} darkMode={darkMode} txt2={txt2}/>
+                onChange={v=>{ const next={...rfqFilters, purchase_pics:v}; setRfqPicFilter(''); setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, '', rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
             <div className="min-w-0">
               <MultiSelect label="Vendor Name" options={rfqOptions.vendors || []} selected={rfqFilters.vendors}
-                onChange={v=>{ const next={...rfqFilters, vendors:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter); }} darkMode={darkMode} txt2={txt2}/>
+                onChange={v=>{ const next={...rfqFilters, vendors:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <button onClick={() => { setRfqAppliedSearch(rfqSearch); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqSearch, false, rfqFilters, rfqPicFilter); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">
+            <button onClick={() => { setRfqAppliedSearch(rfqSearch); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqSearch, false, rfqFilters, rfqPicFilter, rfqShowSimilarity); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">
               Search
             </button>
-            <button onClick={handleClear} className={`w-[110px] h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>
-              Clear Search
+            <button onClick={handleClear} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>
+              Clear
             </button>
           </div>
-        </div>
+        </FilterPanel>
 
         <div className="overflow-x-auto">
-          <table className="table-fixed text-xs" style={{ minWidth: '4200px' }}>
-            <colgroup>{columns.map(col => <col key={col.field} style={{ width: colWidth(col.field) }}/>)}</colgroup>
+          <table className="freeze-table-rfq table-fixed text-xs border-collapse" style={{ width: `${rfqTableWidth}px`, minWidth: `${rfqTableWidth}px` }}>
+            <colgroup>{columns.map(col => <col key={col.field} style={colStyle(col.field)}/>)}</colgroup>
             <thead className={tblHd}>
-              <tr>{columns.map(col => <th key={col.field} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{col.label}</th>)}</tr>
+              <tr>{columns.map((col, index) => {
+                const darkHeaderCols = ['check', 'sheet_status', 'days_left', 'no', 'client_name', 'rfq_date', 'closing_date', 'sales_pic', 'category_name', 'purchase_pic', 'item_name', 'detail_spec', 'brand_manufacturer', 'qty', 'unit', 'remark', 'similar_prod_ids', 'similar_prod_name', 'similar_spec', 'similar_mfr_name', 'similar_odr_unit', 'similar_score'];
+                const isDarkHeader = darkHeaderCols.includes(col.field);
+                return <th key={col.field} className={`px-2 py-2 text-center font-bold whitespace-nowrap border-r ${isDarkHeader ? 'bg-slate-200 text-slate-700' : darkMode ? 'bg-gray-800/60 border-gray-700 text-gray-200' : 'bg-slate-50 border-gray-200 text-gray-700'} ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>{renderFreezeHeader('rfq', index + 1, col.label)}</th>;
+              })}</tr>
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
               {rfqData.length === 0 ? (
                 <tr><td colSpan={columns.length} className={`px-4 py-12 text-center ${txt2}`}><Mail className="w-10 h-10 mx-auto mb-2 opacity-40"/>No RFQ data</td></tr>
-              ) : rfqData.map(row => {
+              ) : rfqData.map((row, rowIndex) => {
                 return (
                 <tr key={row.row_key} className={`${trHov} transition-colors`}>
-                  {columns.map(col => {
+                  {columns.map((col) => {
                     const field = col.field;
                     const value = row[field] ?? '';
                     const isEditable = editableSet.has(field);
                     const isEditing = editingCell?.id === row.row_key && editingCell.field === `rfq_${field}`;
-                    if (field === 'status') {
-                      return <td key={field} className="px-2 py-2 text-center">{row.status ? <CheckCircle className="w-5 h-5 mx-auto text-green-600"/> : <span className={txt2}>-</span>}</td>;
+                    if (field === 'check') {
+                      const checkValue = String(row.check || '').toLowerCase();
+                      if (checkValue === 'complete') {
+                        return <td key={field} className={`px-2 py-2 text-center border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'}`} title="Complete"><span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#20B71F]"><Check className="w-4 h-4 text-white stroke-[4]"/></span></td>;
+                      }
+                      if (checkValue === 'reject') {
+                        return <td key={field} className={`px-2 py-2 text-center border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'}`} title="Reject"><span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#EA0D0D]"><X className="w-4 h-4 text-white stroke-[4]"/></span></td>;
+                      }
+                      const closed = checkValue === 'closed' || (!row.product_id && isRFQClosingPast(row.closing_date));
+                      return <td key={field} className={`px-2 py-2 text-center border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'}`} title={closed ? 'Closed' : 'Open'}><span className={`inline-flex h-6 w-6 rounded-full border ${closed ? (darkMode ? 'bg-gray-500 border-gray-400' : 'bg-gray-300 border-gray-400') : darkMode ? 'bg-gray-700 border-gray-500' : 'bg-white border-gray-300'}`}/></td>;
                     }
                     if (field === 'days_left') {
-                      return <td key={field} className={`px-2 py-2 text-center font-semibold ${row.days_left === 0 || row.days_left ? kpiValue : txt2}`}>{row.days_left === 0 || row.days_left ? fmtNum(row.days_left) : '-'}</td>;
+                      return <td key={field} className={`px-2 py-2 text-center border-r ${darkMode ? 'bg-gray-800/60 border-gray-700 text-gray-100' : 'bg-slate-50 border-gray-200 text-black'}`}>{row.days_left === 0 || row.days_left ? fmtNum(row.days_left) : '-'}</td>;
                     }
                     if (isEditable && isEditing) {
                       const tall = ['quoted_spec', 'remarks', 'photo_url'].includes(field);
                       const Control = tall ? 'textarea' : 'input';
-                      return <td key={field} className="px-2 py-2 align-top">
+                      if (['rfq_date', 'closing_date'].includes(field)) {
+                        return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={`relative p-0 align-top border-r ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
+                          <input
+                            type="date"
+                            value={toDateInputValue(editValue)}
+                            className={`block w-full min-h-8 px-1.5 py-1 text-xs border-0 rounded-none outline outline-2 outline-blue-500 outline-offset-[-2px] ${darkMode?'bg-gray-700 text-white':'bg-white text-gray-900'}`}
+                            onChange={e => setEditValue(e.target.value)}
+                            onBlur={() => updateRFQCell(row.row_key, field, editValue)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                updateRFQCell(row.row_key, field, editValue);
+                              }
+                              if (e.key === 'Escape') setEditingCell(null);
+                            }}
+                            autoFocus
+                          />
+                        </td>;
+                      }
+                      if (field === 'same_replacement') {
+                        return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={`relative p-0 align-top border-r ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
+                          <select
+                            value={editValue}
+                            className={`block w-full min-h-8 px-1.5 py-1 text-xs border-0 rounded-none outline outline-2 outline-blue-500 outline-offset-[-2px] ${darkMode?'bg-gray-700 text-white':'bg-white text-gray-900'}`}
+                            onChange={e => { setEditValue(e.target.value); updateRFQCell(row.row_key, field, e.target.value); }}
+                            onBlur={() => setEditingCell(null)}
+                            onKeyDown={e => { if (e.key === 'Escape') setEditingCell(null); }}
+                            autoFocus
+                          >
+                            <option value=""></option>
+                            <option value="Same">Same</option>
+                            <option value="Replacement">Replacement</option>
+                          </select>
+                        </td>;
+                      }
+                      return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={`relative p-0 align-top border-r ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
                         <Control
-                          defaultValue={value}
+                          value={editValue}
                           rows={tall ? 3 : undefined}
-                          className={`w-full px-2 py-1 rounded text-xs border ${tall ? 'resize-y' : ''} ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                          className={`block w-full min-h-8 px-2 py-1 text-xs border-0 rounded-none outline outline-2 outline-blue-500 outline-offset-[-2px] ${tall ? 'resize-y' : ''} ${darkMode?'bg-gray-700 text-white':'bg-white text-gray-900'}`}
                           onChange={e => setEditValue(e.target.value)}
                           onBlur={() => updateRFQCell(row.row_key, field, editValue)}
+                          onPaste={e => {
+                            const text = e.clipboardData.getData('text/plain');
+                            if (text.includes('\t') || text.includes('\n')) {
+                              e.preventDefault();
+                              setEditingCell(null);
+                              applyRFQPaste(rowIndex, field, text);
+                            }
+                          }}
                           onKeyDown={e => {
-                            if (e.key === 'Enter' && !tall) updateRFQCell(row.row_key, field, editValue);
+                            if (e.key === 'Enter' && !tall) {
+                              e.preventDefault();
+                              updateRFQCell(row.row_key, field, editValue);
+                            }
                             if (e.key === 'Escape') setEditingCell(null);
                           }}
                           autoFocus
@@ -3242,20 +3701,66 @@ const App = () => {
                       </td>;
                     }
                     if (isEditable) {
-                      return <td key={field} className={`group px-2 py-2 align-top ${darkMode ? 'bg-gray-800' : 'bg-white'} ${['unit_price_idr','moq','lead_time_days'].includes(field) ? 'text-right font-semibold' : ''}`}>
-                        <div className="flex items-start gap-1 min-w-0 text-blue-600">
-                          <div className="min-w-0 flex-1 truncate">{renderValue(value, 'text-blue-600')}</div>
-                          <button type="button" title="Ubah" onClick={() => { setEditingCell({ id: row.row_key, field: `rfq_${field}` }); setEditValue(value); }} className="opacity-0 group-hover:opacity-100 focus:opacity-100 text-blue-600 hover:text-blue-800 flex-shrink-0 transition-opacity">
-                            <Pencil className="w-3.5 h-3.5" />
-                          </button>
+                      const hasValue = value === 0 || value;
+                      const selected = rfqSelectedCell?.rowKey === row.row_key && rfqSelectedCell?.field === field;
+                      const sourceStyle = rfqSourceStyleFields.has(field);
+                      return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field}
+                        tabIndex={0}
+                        onFocus={() => setRfqSelectedCell({ rowKey: row.row_key, field })}
+                        onClick={() => { setRfqSelectedCell({ rowKey: row.row_key, field }); setEditingCell({ id: row.row_key, field: `rfq_${field}` }); setEditValue(value ?? ''); }}
+                        onPaste={e => { e.preventDefault(); applyRFQPaste(rowIndex, field, e.clipboardData.getData('text/plain')); }}
+                        className={`group relative px-2 py-1 align-top border-r ${sourceStyle ? (darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200') : (darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200')} ${selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : ''} ${['qty','unit_price_idr','moq','lead_time_days'].includes(field) ? 'text-right font-semibold' : ''}`}>
+                        <div className={`min-h-7 min-w-0 truncate ${sourceStyle ? txt2 : 'text-blue-600'} ${field === 'photo_url' ? 'flex items-center gap-1 justify-center' : ''} ${field === 'purchase_pic' ? 'text-center' : ''}`}>
+                          {field === 'photo_url' && <LinkIcon className={`w-3.5 h-3.5 flex-shrink-0 ${hasValue ? 'text-blue-600' : 'text-blue-400'}`} />}
+                          {hasValue && field === 'purchase_pic' ? (() => {
+                            const c = getPicColor(value);
+                            return <span className={`inline-flex max-w-full truncate px-2 py-0.5 rounded-full text-[11px] font-semibold ${c ? `${c.bg} ${c.text}` : 'bg-gray-100 text-gray-700'}`}>{value}</span>;
+                          })() : hasValue ? renderValue(value, sourceStyle ? txt2 : 'text-blue-600') : <span>{field === 'photo_url' ? '' : '\u00a0'}</span>}
                         </div>
+                        <button type="button" aria-label="Fill down" title="Drag down to copy" onMouseDown={e => startRFQFill(e, rowIndex, field)} className="absolute bottom-0 right-0 h-2.5 w-2.5 translate-x-1/2 translate-y-1/2 border border-blue-600 bg-blue-600 opacity-0 group-hover:opacity-100 focus:opacity-100" />
                       </td>;
+                    }
+                    if (field === 'amt_idr') {
+                      return <td key={field} className={`px-2 py-1 align-top text-right font-semibold border-r ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'} ${txt2}`}>
+                        <div className="min-h-7 min-w-0 truncate">{renderValue(value)}</div>
+                      </td>;
+                    }
+                    if (field === 'similar_prod_ids') {
+                      const ids = String(value || '').split(',').map(v => v.trim()).filter(Boolean);
+                      const noSimilar = ids.length === 1 && ids[0].toLowerCase() === 'no similar item';
+                      return <td key={field} className={`px-2 py-1 align-top border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'} ${txt2}`} title={String(value || '')}>
+                        {ids.length ? (
+                          <div className="flex flex-col gap-1">
+                            {ids.map(id => (
+                              <div key={id} className="flex items-center gap-1 min-w-0">
+                                <span className={`min-w-0 flex-1 truncate ${noSimilar ? 'font-semibold text-slate-500' : 'font-mono text-blue-600'}`}>{id}</span>
+                                {!row.product_id && !noSimilar && (
+                                  <button
+                                    type="button"
+                                    onClick={() => updateRFQCell(row.row_key, 'product_id', id)}
+                                    className={`flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold ${darkMode ? 'bg-blue-900/50 text-blue-200 hover:bg-blue-800' : 'bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200'}`}
+                                  >
+                                    Use this ID
+                                  </button>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        ) : <span>-</span>}
+                      </td>;
+                    }
+                    if (field === 'similar_score') {
+                      const score = value === 0 || value ? String(value).trim() : '';
+                      const displayScore = score ? `${score.replace(/%$/, '')}%` : '-';
+                      return <td key={field} className={`px-2 py-2 align-top text-right font-semibold border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'} ${txt2}`}>{displayScore}</td>;
                     }
                     if (field === 'purchase_pic') {
                       const c = getPicColor(value);
-                      return <td key={field} className="px-2 py-2 text-center truncate">{value ? <span className={`inline-flex max-w-full truncate px-2 py-0.5 rounded-full text-[11px] font-semibold ${c ? `${c.bg} ${c.text}` : 'bg-gray-100 text-gray-700'}`}>{value}</span> : <span className={txt2}>-</span>}</td>;
+                      return <td key={field} className={`px-2 py-2 text-center truncate border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'}`}>{value ? <span className={`inline-flex max-w-full truncate px-2 py-0.5 rounded-full text-[11px] font-semibold ${c ? `${c.bg} ${c.text}` : 'bg-gray-100 text-gray-700'}`}>{value}</span> : <span className={txt2}>-</span>}</td>;
                     }
-                    return <td key={field} className={`px-2 py-2 align-top ${['detail_spec','remark','category_name'].includes(field) ? '' : 'truncate'} ${['qty','amt_idr'].includes(field) ? 'text-right font-semibold' : ''} ${txt2}`}>
+                    const darkDataCols = ['sheet_status', 'no', 'client_name', 'rfq_date', 'closing_date', 'sales_pic', 'category_name', 'purchase_pic', 'item_name', 'detail_spec', 'brand_manufacturer', 'qty', 'unit', 'remark', 'similar_prod_ids', 'similar_prod_name', 'similar_spec', 'similar_mfr_name', 'similar_odr_unit', 'similar_score'];
+                    const isDarkDataCol = darkDataCols.includes(field);
+                    return <td key={field} className={`px-2 py-2 align-top border-r ${isDarkDataCol ? (darkMode ? 'bg-gray-800/60 border-gray-700 text-gray-100' : 'bg-slate-50 border-gray-200 text-black') : (darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-white border-gray-200')} ${['detail_spec','remark','category_name','similar_spec'].includes(field) ? '' : 'truncate'} ${['qty','amt_idr','similar_score'].includes(field) ? 'text-right font-semibold' : ''} ${isDarkDataCol ? '' : txt2}`}>
                       {renderValue(value)}
                     </td>;
                   })}
@@ -3265,26 +3770,16 @@ const App = () => {
           </table>
         </div>
 
-        <div className={`px-5 py-3 border-t ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
-          <div className="flex items-center gap-3">
-            <span className={`text-sm ${txt2}`}>Showing {rfqTotal ? (rfqPage - 1) * rfqPerPage + 1 : 0}-{Math.min(rfqPage * rfqPerPage, rfqTotal)} of {fmtNum(rfqTotal)}</span>
-            <label className={`flex items-center gap-1 text-xs ${txt2}`}>Rows
-              <select className={`px-2 py-1 rounded-lg text-xs border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-200'}`} value={rfqPerPage} onChange={e => {
-                const next = Number(e.target.value);
-                setRfqPerPage(next);
-                setRfqPage(1);
-                fetchRFQData(1, next, rfqAppliedSearch, false, rfqFilters, rfqPicFilter);
-              }}>
-                <option value={10}>10</option><option value={25}>25</option><option value={50}>50</option><option value={100}>100</option><option value={500}>500</option>
-              </select>
-            </label>
-          </div>
-          <div className="flex gap-1 items-center">
-            <button disabled={rfqPage === 1} onClick={() => { const p = rfqPage - 1; setRfqPage(p); fetchRFQData(p, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter); }} className={`p-1.5 rounded ${rfqPage === 1 ? 'opacity-40' : 'hover:bg-blue-100'}`}><ChevronLeft className="w-4 h-4" /></button>
-            <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-blue-100 text-blue-700'}`}>{rfqPage}/{totalPages}</span>
-            <button disabled={rfqPage === totalPages} onClick={() => { const p = rfqPage + 1; setRfqPage(p); fetchRFQData(p, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter); }} className={`p-1.5 rounded ${rfqPage === totalPages ? 'opacity-40' : 'hover:bg-blue-100'}`}><ChevronRight className="w-4 h-4" /></button>
-          </div>
-        </div>
+        <PagePagination
+          darkMode={darkMode}
+          txt2={txt2}
+          page={rfqPage}
+          totalPages={totalPages}
+          total={rfqTotal}
+          perPage={rfqPerPage}
+          onPageChange={(p) => { setRfqPage(p); fetchRFQData(p, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter); }}
+          onPerPageChange={(next) => { setRfqPerPage(next); setRfqPage(1); fetchRFQData(1, next, rfqAppliedSearch, false, rfqFilters, rfqPicFilter); }}
+        />
       </div>
     );
   };
@@ -3314,10 +3809,15 @@ const App = () => {
     ];
     const itemRegKpiCols = Math.max(1, itemRegPicKpis.length);
     const colWidth = (key) => ({
-      proc_status: '9%', existing_owner: '6%', client_name: '10%', category: '8%', pic: '5%', req_no: 'auto', prod_id: '5%',
-      prod_name: 'auto', spec: '9%', mfr_name: '6%', odr_unit: '4%',
-      prod_price: '5%', curr: '3%', remarks: '18%'
-    }[key] || 'auto');
+      proc_status: 150, existing_owner: 120, client_name: 180, category: 170, pic: 90, req_no: 150, prod_id: 110,
+      prod_name: 240, spec: 220, mfr_name: 150, odr_unit: 80,
+      prod_price: 120, curr: 70, remarks: 560
+    }[key] || 140);
+    const colStyle = (key) => {
+      const width = `${colWidth(key)}px`;
+      return { width, minWidth: width, maxWidth: width };
+    };
+    const itemRegTableWidth = columns.reduce((sum, [, key]) => sum + colWidth(key), 0);
 
     return (
       <div className={`rounded-2xl overflow-hidden ${card}`}>
@@ -3348,9 +3848,11 @@ const App = () => {
               const activePic = !row.isTotal && itemRegPicHighlight === row.pic;
               const applyItemRegPicFilter = () => {
                 const nextHighlight = row.isTotal || activePic ? '' : row.pic;
+                const nextFilters = { ...itemRegFilters, pics: nextHighlight ? [nextHighlight] : [] };
                 setItemRegPicHighlight(nextHighlight);
+                setItemRegFilters(nextFilters);
                 setItemRegPage(1);
-                fetchItemRegistration(1, itemRegPerPage, itemRegAppliedSearch, itemRegFilters, nextHighlight);
+                fetchItemRegistration(1, itemRegPerPage, itemRegAppliedSearch, nextFilters, nextHighlight);
               };
               return (
                 <button key={row.pic} type="button" onClick={applyItemRegPicFilter} className={`min-w-0 p-3 rounded-xl text-left transition-all ${activePic ? (darkMode ? 'bg-amber-900/30 border border-amber-500 ring-2 ring-amber-400' : 'bg-amber-50 border border-amber-300 ring-2 ring-amber-200') : row.isTotal ? (darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200') : card} ${row.isTotal ? 'hover:border-slate-300' : 'hover:border-amber-300'}`}>
@@ -3370,7 +3872,7 @@ const App = () => {
           </div>
         </div>
 
-        <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700 bg-gray-800/60':'border-gray-100 bg-[#f6f6f4]'}`}>
+        <FilterPanel darkMode={darkMode}>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[170px_repeat(6,minmax(150px,1fr))_120px] items-end">
             <div className="min-w-0">
               <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Req No.</label>
@@ -3413,14 +3915,14 @@ const App = () => {
                 onChange={v=>{ const next={...itemRegFilters, mfr_names:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
             <button onClick={() => { const next={ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [], existing_owners: [] }; setItemRegSearch([]); setItemRegAppliedSearch([]); setItemRegPicHighlight(''); setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1, itemRegPerPage, [], next, ''); }}
-              className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear Filter</button>
+              className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
-        </div>
+        </FilterPanel>
 
         <div className="overflow-x-auto">
-          <table className="min-w-[1800px] table-fixed text-xs">
-            <colgroup>{columns.map(([, key]) => <col key={key} style={{ width: colWidth(key) }}/>)}</colgroup>
-            <thead className={tblHd}><tr>{columns.map(([label, key]) => <th key={label} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{label}</th>)}</tr></thead>
+          <table className="freeze-table-item-registration table-fixed text-xs" style={{ width: `${itemRegTableWidth}px`, minWidth: `${itemRegTableWidth}px` }}>
+            <colgroup>{columns.map(([, key]) => <col key={key} style={colStyle(key)}/>)}</colgroup>
+            <thead className={tblHd}><tr>{columns.map(([label], index) => <th key={label} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{renderFreezeHeader('item-registration', index + 1, label)}</th>)}</tr></thead>
             <tbody className={`divide-y ${tblDv}`}>
               {itemRegData.length === 0 ? <tr><td colSpan={columns.length} className={`px-4 py-12 text-center ${txt2}`}><Wrench className="w-10 h-10 mx-auto mb-2 opacity-40"/>No Item Registration data</td></tr>
               : itemRegData.map(row => {
@@ -3440,7 +3942,7 @@ const App = () => {
                       onKeyDown={e=>{ if(e.key==='Enter') updateItemRegistrationCell(row.id,'remarks',editValue); if(e.key==='Escape') setEditingCell(null); }}
                       autoFocus/>
                   ) : (
-                    <span className="cursor-pointer text-blue-600 hover:underline" onClick={()=>{setEditingCell({id:row.id,field:'item_remarks'});setEditValue(row.remarks||'');}}>{row.remarks||'✏️ Add'}</span>
+                    <span className="cursor-pointer text-blue-600 hover:underline" onClick={()=>{setEditingCell({id:row.id,field:'item_remarks'});setEditValue(row.remarks||'');}}>{row.remarks||'Add'}</span>
                   )}</td>;
                   return <td key={key} className={`px-2 py-2 ${['req_no','prod_name'].includes(key) ? '' : 'truncate'} ${key === 'prod_price' ? `text-right font-semibold ${kpiValue}` : txt2} ${['req_no','prod_id','prod_name','odr_unit','curr'].includes(key) ? 'whitespace-nowrap' : ''}`} title={row[key]}>{value}</td>;
                 })}
@@ -3449,21 +3951,16 @@ const App = () => {
           </table>
         </div>
 
-        <div className={`px-5 py-3 border-t ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
-          <div className="flex items-center gap-3">
-            <span className={`text-sm ${txt2}`}>Showing {itemRegTotal ? (itemRegPage-1)*itemRegPerPage+1 : 0}-{Math.min(itemRegPage*itemRegPerPage,itemRegTotal)} of {fmtNum(itemRegTotal)}</span>
-            <label className={`flex items-center gap-1 text-xs ${txt2}`}>Rows
-              <select className={`px-2 py-1 rounded-lg text-xs border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-200'}`} value={itemRegPerPage} onChange={e=>{ const next=Number(e.target.value); setItemRegPerPage(next); setItemRegPage(1); fetchItemRegistration(1,next,itemRegAppliedSearch,itemRegFilters); }}>
-                <option value={10}>10</option><option value={25}>25</option><option value={50}>50</option><option value={100}>100</option><option value={500}>500</option>
-              </select>
-            </label>
-          </div>
-          <div className="flex gap-1 items-center">
-            <button disabled={itemRegPage===1} onClick={()=>{ const p=itemRegPage-1; setItemRegPage(p); fetchItemRegistration(p,itemRegPerPage,itemRegAppliedSearch,itemRegFilters); }} className={`p-1.5 rounded ${itemRegPage===1?'opacity-40':'hover:bg-blue-100'}`}><ChevronLeft className="w-4 h-4"/></button>
-            <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-blue-100 text-blue-700'}`}>{itemRegPage}/{itemRegTotalPages}</span>
-            <button disabled={itemRegPage===itemRegTotalPages} onClick={()=>{ const p=itemRegPage+1; setItemRegPage(p); fetchItemRegistration(p,itemRegPerPage,itemRegAppliedSearch,itemRegFilters); }} className={`p-1.5 rounded ${itemRegPage===itemRegTotalPages?'opacity-40':'hover:bg-blue-100'}`}><ChevronRight className="w-4 h-4"/></button>
-          </div>
-        </div>
+        <PagePagination
+          darkMode={darkMode}
+          txt2={txt2}
+          page={itemRegPage}
+          totalPages={itemRegTotalPages}
+          total={itemRegTotal}
+          perPage={itemRegPerPage}
+          onPageChange={(p) => { setItemRegPage(p); fetchItemRegistration(p, itemRegPerPage, itemRegAppliedSearch, itemRegFilters); }}
+          onPerPageChange={(next) => { setItemRegPerPage(next); setItemRegPage(1); fetchItemRegistration(1, next, itemRegAppliedSearch, itemRegFilters); }}
+        />
       </div>
     );
   };
@@ -3511,7 +4008,7 @@ const App = () => {
               <div className="h-[200px] w-full min-w-0 pt-5 md:w-[210px] md:flex-none">
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart margin={{ top: 4, right: 4, bottom: 4, left: 4 }}>
-                    <Pie data={data} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={38} outerRadius={72} labelLine={false} label={renderPctLabel}>
+                    <Pie data={data} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={38} outerRadius={72} labelLine={false} label={renderPctLabel} isAnimationActive={false}>
                       {data.map((_, i) => <Cell key={i} fill={pieColors[i % pieColors.length]} />)}
                     </Pie>
                     <Tooltip formatter={(v, n) => [`${fmtNum(v)} Req. No`, n]} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
@@ -3569,8 +4066,8 @@ const App = () => {
                 <YAxis yAxisId="right" orientation="right" stroke="#14B8A6" fontSize={10} tickFormatter={(v)=>fmtCurShort(v*1_000_000)}/>
                 <Tooltip formatter={(v,name)=>name==='Pending SO'?[fmtNum(v),name]:[fmtCur(v*1_000_000),name]} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
                 <Legend wrapperStyle={{fontSize:12}}/>
-                <Bar yAxisId="left" dataKey="so_count" name="Pending SO" fill="#2563EB" radius={[5,5,0,0]}/>
-                <Line yAxisId="right" type="monotone" dataKey="amount" name="Total Sales Amount" stroke="#14B8A6" strokeOpacity={0.45} strokeWidth={1.5} dot={{r:2.5,fill:'#14B8A6',opacity:0.45}} activeDot={{r:4,opacity:0.65}}/>
+                <Bar yAxisId="left" dataKey="so_count" name="Pending SO" fill="#2563EB" radius={[5,5,0,0]} isAnimationActive={false}/>
+                <Line yAxisId="right" type="monotone" dataKey="amount" name="Total Sales Amount" stroke="#14B8A6" strokeOpacity={0.45} strokeWidth={1.5} dot={{r:2.5,fill:'#14B8A6',opacity:0.45}} activeDot={{r:4,opacity:0.65}} isAnimationActive={false}/>
               </ComposedChart>
             </ResponsiveContainer>
           </div>
@@ -3754,9 +4251,10 @@ const App = () => {
         count: p.count || 0,
         amount: p.amount || 0
       }));
-    const totalPendingAmount = picKpis.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+    const totalPendingCount = soTotal;
+    const totalPendingAmount = soSubtotalAmount;
     const pendingKpis = [
-      { pic: 'Total Pending', count: soTotal, amount: totalPendingAmount, isTotal: true },
+      { pic: 'Total Pending', count: totalPendingCount, amount: totalPendingAmount, isTotal: true },
       ...picKpis
     ];
     const pendingKpiCols = Math.max(1, pendingKpis.length);
@@ -3769,9 +4267,11 @@ const App = () => {
               const activePic = !p.isTotal && pendingPicHighlight === p.pic;
               const applyPicKpiFilter = () => {
                 const nextHighlight = p.isTotal || activePic ? '' : p.pic;
+                const nextFilters = { ...soFilters, pics: nextHighlight ? [nextHighlight] : [] };
                 setPendingPicHighlight(nextHighlight);
+                setSoFilters(nextFilters);
                 setSoPage(1);
-                fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter, soSortOrder, nextHighlight);
+                fetchSOData(nextFilters, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter, soSortOrder, nextHighlight);
               };
               return (
               <button key={p.pic} type="button" onClick={applyPicKpiFilter} className={`min-w-0 p-3 rounded-xl text-left transition-all ${activePic ? (darkMode ? 'bg-amber-900/30 border border-amber-500 ring-2 ring-amber-400' : 'bg-amber-50 border border-amber-300 ring-2 ring-amber-200') : p.isTotal ? (darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200') : card} ${p.isTotal ? 'hover:border-slate-300' : 'hover:border-amber-300'}`}>
@@ -3843,7 +4343,7 @@ const App = () => {
         </div>
 
         {/* Multi-select filters */}
-        <div className={`px-4 py-3 rounded-xl mb-3 ${darkMode?'bg-gray-700':'bg-gray-50'}`}>
+        <FilterPanel darkMode={darkMode} className="mx-0 my-3">
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[105px_150px_repeat(6,minmax(105px,1fr))_105px] items-end">
             <div className="min-w-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ SO Date</label>
@@ -3932,7 +4432,7 @@ const App = () => {
                 setSoFilters(f); setPendingPicHighlight(''); setSoSearchNums([]); setSoMarginFilter('all'); setSoPage(1);
                 fetchSOData(f,1,soPerPage,[],'all',soDateFilter,soSortOrder,'');
               }}
-                className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear Filter</button>
+                className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
             </div>
           </div>
           {/* Active filter tags */}
@@ -3973,15 +4473,44 @@ const App = () => {
               })}
             </div>
           )}
-        </div>
+        </FilterPanel>
 
         {/* Detail Pending Delivery table follows the downloadable Excel layout. */}
         <div className="overflow-x-auto rounded-lg border border-gray-200">
-          <table className="w-full text-sm">
+          <table className="freeze-table-pending-delivery w-full text-sm">
+            <colgroup>
+              <col style={{minWidth:'110px'}}/>
+              <col style={{minWidth:'60px'}}/>
+              <col style={{minWidth:'110px'}}/>
+              <col style={{minWidth:'100px'}}/>
+              <col style={{minWidth:'100px'}}/>
+              <col style={{minWidth:'130px'}}/>
+              <col style={{minWidth:'120px'}}/>
+              <col style={{minWidth:'80px'}}/>
+              <col style={{minWidth:'100px'}}/>
+              <col style={{minWidth:'180px'}}/>
+              <col style={{minWidth:'260px'}}/>
+              <col style={{minWidth:'140px'}}/>
+              <col style={{minWidth:'100px'}}/>
+              <col style={{minWidth:'90px'}}/>
+              <col style={{minWidth:'140px'}}/>
+              <col style={{minWidth:'100px'}}/>
+              <col style={{minWidth:'160px'}}/>
+              <col style={{minWidth:'80px'}}/>
+              <col style={{minWidth:'140px'}}/>
+              <col style={{minWidth:'140px'}}/>
+              <col style={{minWidth:'130px'}}/>
+              <col style={{minWidth:'130px'}}/>
+              <col style={{minWidth:'100px'}}/>
+              <col style={{minWidth:'90px'}}/>
+              <col style={{minWidth:'200px'}}/>
+              <col style={{minWidth:'100px'}}/>
+              <col style={{minWidth:'560px'}}/>
+            </colgroup>
             <thead className={tblHd}>
               <tr>
-                {['Aging','Day','SO Create Date','SO Item','PO No.','SO Status','Category','PIC','Product ID','Product Name','Specification','Manufacturer Name','SO Quantity','Sales Unit','Operation Unit Name','Vendor ID','Vendor Name','Currency','Sales Price(Exclude Tax)','Sales Amount(Exclude Tax)','Purchasing Currency','Purchasing Price','Margin','%Margin','Delivery Memo','Plan Date','Remarks'].map(h=>(
-                  <th key={h} className={`px-3 py-2.5 text-center font-bold whitespace-nowrap ${txt2} ${h==='Remarks'?'min-w-[560px]':h==='Delivery Memo'?'min-w-[200px]':h==='Specification'?'min-w-[260px]':h==='Product Name'?'min-w-[180px]':''}`}>{h}</th>
+                {['Aging','Day','SO Create Date','SO Item','PO No.','SO Status','Category','PIC','Product ID','Product Name','Specification','Manufacturer Name','SO Quantity','Sales Unit','Operation Unit Name','Vendor ID','Vendor Name','Currency','Sales Price (Exclude Tax)','Sales Amount (Exclude Tax)','Purchasing Currency','Purchasing Price','Margin','%Margin','Delivery Memo','Plan Date','Remarks'].map((h, index)=>(
+                  <th key={h} className={`px-3 py-2.5 text-center font-bold ${txt2}`}>{renderFreezeHeader('pending-delivery', index + 1, h)}</th>
                 ))}
               </tr>
             </thead>
@@ -3997,7 +4526,7 @@ const App = () => {
                 const poAmount = Number(so.purchasing_amount) || ((Number(so.purchasing_price) || 0) * (Number(so.so_qty) || 0));
                 const margin = (so.sales_amount || 0) - poAmount;
                 const marginPct = poAmount !== 0 ? (margin / poAmount) * 100 : null;
-                const workingDays = workingDaysUntilToday(so.so_create_date);
+                const workingDays = Number.isFinite(Number(so.aging_days)) ? Number(so.aging_days) : workingDaysUntilToday(so.so_create_date);
                 const marginColor = margin < 0 ? 'text-red-600 font-semibold' : margin > 0 ? 'text-green-600 font-semibold' : txt2;
                 return (
                 <tr key={so.id} className={`${trHov} transition-colors`}>
@@ -4069,7 +4598,7 @@ const App = () => {
                       <div className="flex items-center justify-center gap-1 group">
                         <span className="cursor-pointer text-blue-600 hover:underline text-xs whitespace-nowrap"
                           onClick={()=>{setEditingCell({id:so.id,field:'delivery_plan_date'});setEditValue(so.delivery_plan_date||'');}}>
-                          {so.delivery_plan_date||'✏️ Set'}
+                          {so.delivery_plan_date||'Set'}
                         </span>
                         {so.delivery_plan_date && (
                           <button onClick={e=>{e.stopPropagation();updateSOCell(so.id,'delivery_plan_date','');}}
@@ -4089,7 +4618,7 @@ const App = () => {
                     ) : (
                       <span className="cursor-pointer text-xs text-blue-600 hover:underline"
                         onClick={()=>{setEditingCell({id:so.id,field:'remarks'});setEditValue(so.remarks||'');}}>
-                        {so.remarks||'✏️ Add'}
+                        {so.remarks||'Add'}
                       </span>
                     )}
                   </td>
@@ -4101,32 +4630,16 @@ const App = () => {
           </table>
         </div>
 
-        {/* Pagination */}
-        <div className={`px-5 py-3 border-t ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
-          <div className="flex items-center gap-3">
-            <span className={`text-sm ${txt2}`}>
-              Showing {((soPage-1)*soPerPage)+1}–{Math.min(soPage*soPerPage,soTotal)} of {fmtNum(soTotal)}
-            </span>
-            <label className={`flex items-center gap-1 text-xs ${txt2}`}>
-              Rows
-              <select className={`px-2 py-1 rounded-lg text-xs border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-200'}`}
-                value={soPerPage} onChange={e=>{ setSoPerPage(Number(e.target.value)); setSoPage(1); fetchSOData(soFilters,1,Number(e.target.value),soSearchNums,soMarginFilter,soDateFilter); }}>
-                <option value={10}>10</option>
-                <option value={25}>25</option>
-                <option value={50}>50</option>
-                <option value={100}>100</option>
-                <option value={500}>500</option>
-              </select>
-            </label>
-          </div>
-          <div className="flex gap-1 items-center">
-            <button disabled={soPage===1} onClick={()=>{ const p=soPage-1; setSoPage(p); fetchSOData(soFilters,p,soPerPage,soSearchNums,soMarginFilter,soDateFilter); }}
-              className={`p-1.5 rounded ${soPage===1?'opacity-40':'hover:bg-blue-100'}`}><ChevronLeft className="w-4 h-4"/></button>
-            <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-blue-100 text-blue-700'}`}>{soPage}/{soTotalPages}</span>
-            <button disabled={soPage===soTotalPages} onClick={()=>{ const p=soPage+1; setSoPage(p); fetchSOData(soFilters,p,soPerPage,soSearchNums,soMarginFilter,soDateFilter); }}
-              className={`p-1.5 rounded ${soPage===soTotalPages?'opacity-40':'hover:bg-blue-100'}`}><ChevronRight className="w-4 h-4"/></button>
-          </div>
-        </div>
+        <PagePagination
+          darkMode={darkMode}
+          txt2={txt2}
+          page={soPage}
+          totalPages={soTotalPages}
+          total={soTotal}
+          perPage={soPerPage}
+          onPageChange={(p) => { setSoPage(p); fetchSOData(soFilters, p, soPerPage, soSearchNums, soMarginFilter, soDateFilter); }}
+          onPerPageChange={(next) => { setSoPerPage(next); setSoPage(1); fetchSOData(soFilters, 1, next, soSearchNums, soMarginFilter, soDateFilter); }}
+        />
       </div>
 
       {false && (<>
@@ -4187,7 +4700,7 @@ const App = () => {
             </div>
             <div className="col-span-12 sm:col-span-4 xl:col-span-1 min-w-[110px]">
               <button onClick={()=>{ setPoSearchNums([]); setPoFilterItemType([]); setPoFilterOpUnit([]); setPoPage(1); }}
-                className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear Filter</button>
+                className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
             </div>
           </div>
         </div>
@@ -4311,6 +4824,43 @@ const App = () => {
           border-radius: 24px;
           box-shadow: 0 18px 45px rgba(15, 23, 42, 0.06);
         }
+        .data-table-page table {
+          border-collapse: collapse;
+        }
+        .data-table-page table th,
+        .data-table-page table td {
+          border-right: 1px solid rgba(148, 163, 184, 0.28);
+        }
+        .data-table-page table th {
+          white-space: normal !important;
+          overflow-wrap: anywhere;
+          word-break: normal;
+          line-height: 1.15;
+          vertical-align: middle;
+        }
+        .data-table-page .freeze-header-label {
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: normal;
+          word-break: normal;
+          overflow-wrap: normal;
+          hyphens: none;
+        }
+        .data-table-page .freeze-header button {
+          pointer-events: auto;
+        }
+        .data-table-page-dark table th,
+        .data-table-page-dark table td {
+          border-right-color: rgba(75, 85, 99, 0.85);
+        }
+        .data-table-page table th:last-child,
+        .data-table-page table td:last-child {
+          border-right: 0;
+        }
+        ${frozenColumnCss}
       `}</style>
 
       <div className="fixed top-5 right-5 z-[100] flex flex-col gap-2">
@@ -4365,7 +4915,7 @@ const App = () => {
 
       {/* Main */}
       <main className={`ml-16 ${sidebarExpanded?'lg:ml-60':'lg:ml-16'} p-4 lg:p-6 transition-[margin-left] duration-200 ease-out`}>
-        <div className={`${darkMode?'bg-gray-900 border-gray-800':'bg-[#fbfbfa] border-gray-200/70'} min-h-[calc(100vh-32px)] lg:min-h-[calc(100vh-48px)] rounded-2xl border shadow-[0_12px_36px_rgba(15,23,42,0.07)] p-4 lg:p-6`}>
+        <div className={`${darkMode?'bg-gray-900 border-gray-800':'bg-[#fbfbfa] border-gray-200/70'} ${activePage === 'dashboard' ? '' : darkMode ? 'data-table-page data-table-page-dark' : 'data-table-page'} min-h-[calc(100vh-32px)] lg:min-h-[calc(100vh-48px)] rounded-2xl border shadow-[0_12px_36px_rgba(15,23,42,0.07)] p-4 lg:p-6`}>
         <header className="mb-7 flex flex-wrap justify-between items-center gap-4">
           <div data-tour="page-title">
             <h1 className={`text-[28px] leading-tight font-bold tracking-[-0.02em] ${txt}`}>
@@ -4491,19 +5041,13 @@ const App = () => {
               )}
               </div>
             </div>
-            <div className={`text-xs leading-relaxed text-right ${txt2}`}>
-              <div>
-                <span>Last Update SO: </span>
-                <span className={`font-semibold ${txt}`}>
-                  {fmtDateTime(stats?.last_updated_smro)}
-                </span>
-              </div>
-              <div>
-                <span>Last Update Regist.: </span>
-                <span className={`font-semibold ${txt}`}>
-                  {fmtDateTime(stats?.last_updated_item_registration)}
-                </span>
-              </div>
+            <div className={`max-w-full text-right text-xs ${txt2}`}>
+              <span className="font-semibold">Updates:</span>{' '}
+              <span title={`Last Update SO: ${fmtDateTime(stats?.last_updated_smro)}`}>SO {fmtUpdateShort(stats?.last_updated_smro)}</span>
+              <span className="mx-1.5 opacity-50">·</span>
+              <span title={`Last Update Regist.: ${fmtDateTime(stats?.last_updated_item_registration)}`}>Reg {fmtUpdateShort(stats?.last_updated_item_registration)}</span>
+              <span className="mx-1.5 opacity-50">·</span>
+              <span title={`Last Update Prod ID: ${fmtDateTime(picDbStatus?.last_product_id_upload)}`}>Prod ID {fmtUpdateShort(picDbStatus?.last_product_id_upload)}</span>
             </div>
           </div>
         </header>
@@ -4657,14 +5201,22 @@ const App = () => {
 
       {marginDetailModal && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={()=>setMarginDetailModal(null)}>
-          <div className={`rounded-2xl shadow-2xl w-full max-w-5xl max-h-[85vh] flex flex-col ${darkMode?'bg-gray-800 text-white':'bg-white'}`} onClick={e=>e.stopPropagation()}>
+          <div className={`rounded-2xl overflow-hidden shadow-2xl w-full max-w-5xl max-h-[85vh] flex flex-col ${darkMode?'bg-gray-800 text-white':'bg-white'}`} onClick={e=>e.stopPropagation()}>
             <div className={`flex justify-between items-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
               <h3 className="font-bold text-lg">Margin Detail — {marginDetailModal.category}
                 <span className={`text-sm font-normal ml-2 ${txt2}`}>({fmtNum(marginDetailModal.data?.length)} records)</span>
               </h3>
-              <button onClick={()=>setMarginDetailModal(null)} className={`p-1.5 rounded-lg ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`}><X className="w-5 h-5"/></button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => downloadStyledExcel({ columns: MARGIN_DETAIL_COLUMNS, rows: marginDetailModal.data || [], filename: `Margin Detail - ${marginDetailModal.category}`, sheetName: 'Margin Detail' })}
+                  className="flex items-center gap-1 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm"
+                >
+                  <FileSpreadsheet className="w-4 h-4"/>Excel
+                </button>
+                <button onClick={()=>setMarginDetailModal(null)} className={`p-1.5 rounded-lg ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`}><X className="w-5 h-5"/></button>
+              </div>
             </div>
-            <div className="overflow-auto flex-1">
+            <div className="overflow-auto flex-1 rounded-b-2xl">
               <table className="w-full text-xs">
                 <thead className={`sticky top-0 ${darkMode?'bg-gray-700':'bg-blue-50'}`}>
                   <tr>{['SO Item','Product','Vendor','Sales','Purchase','Margin','%','Date'].map(h=>(
