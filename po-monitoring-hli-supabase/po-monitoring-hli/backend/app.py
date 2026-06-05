@@ -8,7 +8,9 @@ import json
 import html
 from datetime import datetime, date, timedelta
 import io
-from sqlalchemy import func, text
+import threading
+from sqlalchemy import func, text, event
+from sqlalchemy.engine import Engine
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
@@ -25,17 +27,105 @@ app = Flask(__name__)
 _HOLIDAY_CACHE = None
 _HOLIDAY_CACHE_KEY = None
 
+# Thread locks for in-memory caches — required for concurrent Gunicorn threads.
+_HOLIDAY_LOCK = threading.Lock()
+_READ_CACHE_LOCK = threading.Lock()
+_COMPLETED_CACHE_LOCK = threading.Lock()
+_RATE_CACHE_LOCK = threading.Lock()
+_SIMILARITY_LOCK = threading.Lock()
+_MASTER_PIC_LOCK = threading.Lock()
+
 # Short-lived in-memory response cache for heavy Delivery Completed analytics.
 # Keyed by request filters + cheap DB signature, so repeated page opens return
 # immediately while uploads/changed rows naturally invalidate the cache.
 _COMPLETED_SUMMARY_CACHE = {}
 _COMPLETED_SUMMARY_CACHE_TTL_SECONDS = 300
 
+# ─── Matched-set cache — avoids full SO table scan on every PO-without-SO request ─
+# Invalidated automatically when SO data is uploaded (clear_runtime_caches covers this).
+_MATCHED_SET_CACHE: dict = {'expires_at': None, 'value': None}
+_MATCHED_SET_LOCK = threading.Lock()
+_MATCHED_SET_TTL_SECONDS = 60
+
 # Similarity check cache for Item Registration
 # Stores similarity results keyed by (req_no, line_no) to avoid recalculating
 _SIMILARITY_CACHE = {}
 _SIMILARITY_CACHE_FILE = os.path.join(os.path.dirname(__file__), 'instance', 'similarity_cache.json')
 _MASTER_PIC_CACHE = {'signature': None, 'by_id': {}, 'by_name': {}}
+
+# ─── ProductIDDB category_name cache — eliminates N+1 query in so_dict() ─
+# Maps product_id → level-1 category_name string.  Rebuilt whenever
+# ProductIDDB is uploaded (invalidated via _pid_category_cache_invalidate()).
+# Thread-safe: protected by _MASTER_PIC_LOCK (reuses existing lock).
+_PID_CATEGORY_CACHE: dict = {}   # {product_id: "Category Level 1"}
+_PID_CATEGORY_CACHE_LOADED = False
+
+def _pid_category_cache_load():
+    """Load (or reload) the product_id → level-1 category_name mapping."""
+    global _PID_CATEGORY_CACHE, _PID_CATEGORY_CACHE_LOADED
+    mapping = {}
+    try:
+        for pid, cat in db.session.query(
+            ProductIDDB.product_id, ProductIDDB.category_name
+        ).all():
+            if not pid:
+                continue
+            raw = (cat or '').strip()
+            level1 = raw.split('>')[0].strip() if '>' in raw else raw
+            mapping[pid.strip()] = level1
+    except Exception:
+        pass
+    with _MASTER_PIC_LOCK:
+        _PID_CATEGORY_CACHE.clear()
+        _PID_CATEGORY_CACHE.update(mapping)
+        _PID_CATEGORY_CACHE_LOADED = True
+
+def _pid_category_lookup(product_id: str) -> str:
+    """Return level-1 category name for product_id using the in-memory cache."""
+    global _PID_CATEGORY_CACHE_LOADED
+    with _MASTER_PIC_LOCK:
+        loaded = _PID_CATEGORY_CACHE_LOADED
+    if not loaded:
+        _pid_category_cache_load()
+    pid = (product_id or '').strip()
+    with _MASTER_PIC_LOCK:
+        return _PID_CATEGORY_CACHE.get(pid, '')
+
+def _pid_category_cache_invalidate():
+    """Invalidate the cache after a ProductIDDB upload."""
+    global _PID_CATEGORY_CACHE_LOADED
+    with _MASTER_PIC_LOCK:
+        _PID_CATEGORY_CACHE_LOADED = False
+_READ_RESPONSE_CACHE = {}
+
+def runtime_cache_get(key):
+    with _READ_CACHE_LOCK:
+        item = _READ_RESPONSE_CACHE.get(key)
+        if not item:
+            return None
+        expires_at, payload = item
+        if expires_at <= datetime.utcnow():
+            _READ_RESPONSE_CACHE.pop(key, None)
+            return None
+        return payload
+
+def runtime_cache_set(key, payload, ttl_seconds=20):
+    with _READ_CACHE_LOCK:
+        _READ_RESPONSE_CACHE[key] = (datetime.utcnow() + timedelta(seconds=ttl_seconds), payload)
+
+def runtime_cache_key(namespace):
+    return (namespace, request.query_string.decode('utf-8', errors='ignore'))
+
+def clear_runtime_caches():
+    with _READ_CACHE_LOCK:
+        _READ_RESPONSE_CACHE.clear()
+    with _COMPLETED_CACHE_LOCK:
+        _COMPLETED_SUMMARY_CACHE.clear()
+    with _MATCHED_SET_LOCK:
+        _MATCHED_SET_CACHE['expires_at'] = None
+        _MATCHED_SET_CACHE['value'] = None
+    RFQ_CACHE['expires_at'] = None
+    VENDOR_CONTROL_CACHE['expires_at'] = None
 
 def _holiday_set():
     """Return cached set of Indonesian non-working public holidays.
@@ -47,37 +137,35 @@ def _holiday_set():
     global _HOLIDAY_CACHE, _HOLIDAY_CACHE_KEY
     today_year = date.today().year
     cache_key = today_year
-    if _HOLIDAY_CACHE is not None and _HOLIDAY_CACHE_KEY == cache_key:
+    with _HOLIDAY_LOCK:
+        if _HOLIDAY_CACHE is not None and _HOLIDAY_CACHE_KEY == cache_key:
+            return _HOLIDAY_CACHE
+
+        years = list(range(today_year - 2, today_year + 2))
+        try:
+            import holidays as _holidays_pkg
+            s = set(_holidays_pkg.country_holidays('ID', years=years).keys())
+        except Exception:
+            s = set()
+
+        extras_path = os.path.join(os.path.dirname(__file__), 'holiday_extras.json')
+        try:
+            with open(extras_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            items = data.get('dates', []) if isinstance(data, dict) else data
+            for ds in items or []:
+                try:
+                    s.add(date.fromisoformat(str(ds).strip()))
+                except (ValueError, TypeError):
+                    pass
+        except FileNotFoundError:
+            pass
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        _HOLIDAY_CACHE = s
+        _HOLIDAY_CACHE_KEY = cache_key
         return _HOLIDAY_CACHE
-
-    years = list(range(today_year - 2, today_year + 2))
-    try:
-        import holidays as _holidays_pkg
-        s = set(_holidays_pkg.country_holidays('ID', years=years).keys())
-    except Exception:
-        # If the package fails to import (e.g. dependency not installed),
-        # fall back to weekends-only — the extras JSON still applies below.
-        s = set()
-
-    extras_path = os.path.join(os.path.dirname(__file__), 'holiday_extras.json')
-    try:
-        with open(extras_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        # Accept either {"dates": [...]} or a bare list for forward-compat.
-        items = data.get('dates', []) if isinstance(data, dict) else data
-        for ds in items or []:
-            try:
-                s.add(date.fromisoformat(str(ds).strip()))
-            except (ValueError, TypeError):
-                pass
-    except FileNotFoundError:
-        pass
-    except (OSError, json.JSONDecodeError):
-        pass
-
-    _HOLIDAY_CACHE = s
-    _HOLIDAY_CACHE_KEY = cache_key
-    return s
 
 def is_workday(d):
     """Return True if date is a working day (Mon–Fri, not a public holiday)."""
@@ -138,16 +226,48 @@ if _db_url:
         _db_url = _db_url.replace('postgres://', 'postgresql://', 1)
     app.config['SQLALCHEMY_DATABASE_URI'] = _db_url
     app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-        'pool_pre_ping': True, 'pool_recycle': 300, 'pool_size': 5, 'max_overflow': 10,
+        'pool_pre_ping': True,
+        'pool_recycle': 300,
+        # Sized for 20 concurrent users: 10 permanent + 10 overflow
+        'pool_size': 10,
+        'max_overflow': 10,
+        # Wait up to 10s for a connection before raising OperationalError
+        'pool_timeout': 10,
     }
 else:
     _inst = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance')
     os.makedirs(_inst, exist_ok=True)
     app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{_inst}/po_database.db'
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+        'pool_pre_ping': True,
+        # SQLite with WAL is single-writer / multi-reader; one connection per
+        # thread is the correct pool strategy — StaticPool or NullPool both
+        # cause "database is locked" under concurrent Gunicorn threads.
+        # connect_args passes PRAGMA settings on every new connection via the
+        # event listener below.
+        'connect_args': {'timeout': 30},
+    }
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 db = SQLAlchemy(app)
+
+@event.listens_for(Engine, 'connect')
+def _set_sqlite_pragmas(dbapi_connection, connection_record):
+    if 'sqlite' in app.config.get('SQLALCHEMY_DATABASE_URI', ''):
+        cursor = dbapi_connection.cursor()
+        # WAL mode: allows concurrent reads while one writer is active
+        cursor.execute('PRAGMA journal_mode=WAL')
+        # NORMAL sync is safe with WAL and much faster than FULL
+        cursor.execute('PRAGMA synchronous=NORMAL')
+        # Wait up to 30s before "database is locked" error under high concurrency
+        cursor.execute('PRAGMA busy_timeout=30000')
+        cursor.execute('PRAGMA temp_store=MEMORY')
+        # 64 MB page cache per connection (reduces I/O under concurrent reads)
+        cursor.execute('PRAGMA cache_size=-65536')
+        # Allow WAL checkpoint to run automatically
+        cursor.execute('PRAGMA wal_autocheckpoint=1000')
+        cursor.close()
 
 class POData(db.Model):
     __tablename__ = 'po_data'
@@ -370,11 +490,13 @@ def get_usd_to_idr(d, cache_only=False):
     entirely, relying on the already-warmed in-memory cache and DB."""
     if d is None:
         return _get_fallback_rate()
-    if d in _RATE_CACHE:
-        return _RATE_CACHE[d]
+    with _RATE_CACHE_LOCK:
+        if d in _RATE_CACHE:
+            return _RATE_CACHE[d]
     rec = ExchangeRate.query.filter_by(rate_date=d).first()
     if rec:
-        _RATE_CACHE[d] = rec.usd_to_idr
+        with _RATE_CACHE_LOCK:
+            _RATE_CACHE[d] = rec.usd_to_idr
         return rec.usd_to_idr
     if not cache_only and d <= date.today():
         rate = _fetch_rate_from_api(d)
@@ -384,14 +506,16 @@ def get_usd_to_idr(d, cache_only=False):
                 db.session.commit()
             except Exception:
                 db.session.rollback()
-            _RATE_CACHE[d] = rate
+            with _RATE_CACHE_LOCK:
+                _RATE_CACHE[d] = rate
             return rate
     # Nearest known rate (no HTTP call)
     nearest = ExchangeRate.query.order_by(
         func.abs(func.julianday(ExchangeRate.rate_date) - func.julianday(str(d)))
     ).first()
     if nearest:
-        _RATE_CACHE[d] = nearest.usd_to_idr
+        with _RATE_CACHE_LOCK:
+            _RATE_CACHE[d] = nearest.usd_to_idr
         return nearest.usd_to_idr
     return _get_fallback_rate()
 
@@ -406,23 +530,28 @@ def get_currency_to_idr(currency, d, cache_only=False):
     if d is None:
         d = date.today()
     key = (cur, d)
-    if key in _FX_RATE_CACHE:
-        return _FX_RATE_CACHE[key]
+    with _RATE_CACHE_LOCK:
+        if key in _FX_RATE_CACHE:
+            return _FX_RATE_CACHE[key]
     if not cache_only and d <= date.today():
         rate = _fetch_rate_from_api(d, cur)
         if rate:
-            _FX_RATE_CACHE[key] = rate
+            with _RATE_CACHE_LOCK:
+                _FX_RATE_CACHE[key] = rate
             return rate
 
-    same_currency_rates = [(rate_date, rate) for (fx_cur, rate_date), rate in _FX_RATE_CACHE.items() if fx_cur == cur]
+    with _RATE_CACHE_LOCK:
+        same_currency_rates = [(rate_date, rate) for (fx_cur, rate_date), rate in _FX_RATE_CACHE.items() if fx_cur == cur]
     if same_currency_rates:
         _nearest_date, nearest_rate = min(same_currency_rates, key=lambda r: abs((r[0] - d).days))
-        _FX_RATE_CACHE[key] = nearest_rate
+        with _RATE_CACHE_LOCK:
+            _FX_RATE_CACHE[key] = nearest_rate
         return nearest_rate
 
     fallback_rate = _fetch_rate_from_api(date.today(), cur) if not cache_only else None
     if fallback_rate:
-        _FX_RATE_CACHE[key] = fallback_rate
+        with _RATE_CACHE_LOCK:
+            _FX_RATE_CACHE[key] = fallback_rate
         return fallback_rate
     return _get_fallback_rate()
 
@@ -715,9 +844,45 @@ def _ensure_so_extra_columns():
                 print(f'DB migration warning (so_data.{col_name}): {exc}')
 
 
+def _ensure_performance_indexes():
+    """Create lightweight indexes used by dashboard filters and pagination."""
+    if 'sqlite' not in app.config['SQLALCHEMY_DATABASE_URI']:
+        return
+    statements = [
+        "CREATE INDEX IF NOT EXISTS idx_so_status_date ON so_data (so_status, so_create_date)",
+        "CREATE INDEX IF NOT EXISTS idx_so_op_unit ON so_data (operation_unit_name)",
+        "CREATE INDEX IF NOT EXISTS idx_so_pic_name ON so_data (pic_name)",
+        "CREATE INDEX IF NOT EXISTS idx_so_vendor_name ON so_data (vendor_name)",
+        "CREATE INDEX IF NOT EXISTS idx_so_item ON so_data (so_item)",
+        "CREATE INDEX IF NOT EXISTS idx_so_number ON so_data (so_number)",
+        "CREATE INDEX IF NOT EXISTS idx_so_product_id ON so_data (product_id)",
+        "CREATE INDEX IF NOT EXISTS idx_so_customer_po ON so_data (customer_po_number)",
+        "CREATE INDEX IF NOT EXISTS idx_upload_log_type_date ON upload_log (file_type, uploaded_at)",
+        "CREATE INDEX IF NOT EXISTS idx_delete_ref_hidden ON delete_request (ref_type, is_hidden, ref_number)",
+        "CREATE INDEX IF NOT EXISTS idx_item_reg_proc_client ON item_registration (proc_status, client_name)",
+        "CREATE INDEX IF NOT EXISTS idx_item_reg_pic ON item_registration (pic)",
+        "CREATE INDEX IF NOT EXISTS idx_item_reg_req_no ON item_registration (req_no)",
+        "CREATE INDEX IF NOT EXISTS idx_item_reg_mfr ON item_registration (mfr_name)",
+        "CREATE INDEX IF NOT EXISTS idx_item_reg_owner ON item_registration (existing_owner)",
+        "CREATE INDEX IF NOT EXISTS idx_product_status_unit ON product_id_db (product_status, order_unit)",
+        "CREATE INDEX IF NOT EXISTS idx_delivery_status_date ON delivery_monitoring (so_status, dlv_compl_date)",
+        "CREATE INDEX IF NOT EXISTS idx_delivery_vendor ON delivery_monitoring (vendor_name)",
+    ]
+    for stmt in statements:
+        try:
+            db.session.execute(text(stmt))
+        except Exception as exc:
+            db.session.rollback()
+            print(f'DB index warning: {exc}')
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+
 with app.app_context():
     db.create_all()
     _ensure_extra_columns()
+    _ensure_performance_indexes()
     print('DB schema ready.')
 
 CLOSED_STATUSES = {
@@ -1265,8 +1430,10 @@ def find_similar_rfq_registered_items(row):
             (clean(row.get('detail_spec')) or '').lower(),
             (clean(row.get('unit')) or '').lower(),
         ])
-        if cache_key in _SIMILARITY_CACHE:
-            return _SIMILARITY_CACHE[cache_key]
+        with _SIMILARITY_LOCK:
+            cached = _SIMILARITY_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
 
         similar_items = []
         for reg in _candidate_registered_items_for_rfq_similarity(row):
@@ -1302,7 +1469,8 @@ def find_similar_rfq_registered_items(row):
                 'similarity': '\n'.join(f"{x['similarity']:.0f}%" for x in similar_items),
                 'count': len(similar_items),
             }
-        _SIMILARITY_CACHE[cache_key] = result
+        with _SIMILARITY_LOCK:
+            _SIMILARITY_CACHE[cache_key] = result
         return result
     except Exception as e:
         print(f"Error finding RFQ similar items: {e}")
@@ -1761,13 +1929,15 @@ def normalize_category_name(value):
     return re.sub(r'\s+', ' ', category).strip().lower()
 
 def invalidate_master_pic_cache():
-    _MASTER_PIC_CACHE['signature'] = None
-    _MASTER_PIC_CACHE['by_id'] = {}
-    _MASTER_PIC_CACHE['by_name'] = {}
+    with _MASTER_PIC_LOCK:
+        _MASTER_PIC_CACHE['signature'] = None
+        _MASTER_PIC_CACHE['by_id'] = {}
+        _MASTER_PIC_CACHE['by_name'] = {}
 
 def master_pic_maps():
-    if _MASTER_PIC_CACHE.get('signature') is not None:
-        return _MASTER_PIC_CACHE['by_id'], _MASTER_PIC_CACHE['by_name']
+    with _MASTER_PIC_LOCK:
+        if _MASTER_PIC_CACHE.get('signature') is not None:
+            return _MASTER_PIC_CACHE['by_id'], _MASTER_PIC_CACHE['by_name']
 
     signature = db.session.query(func.count(MasterPIC.id), func.max(MasterPIC.updated_at)).one()
     signature = tuple(signature)
@@ -1784,9 +1954,10 @@ def master_pic_maps():
         cat_name = normalize_category_name(m.category_name)
         if cat_name and cat_name not in by_name:
             by_name[cat_name] = pic
-    _MASTER_PIC_CACHE['signature'] = signature
-    _MASTER_PIC_CACHE['by_id'] = by_id
-    _MASTER_PIC_CACHE['by_name'] = by_name
+    with _MASTER_PIC_LOCK:
+        _MASTER_PIC_CACHE['signature'] = signature
+        _MASTER_PIC_CACHE['by_id'] = by_id
+        _MASTER_PIC_CACHE['by_name'] = by_name
     return by_id, by_name
 
 def _lookup_pic_by_category(category_id=None, category_name=None):
@@ -1969,15 +2140,9 @@ def get_aging_label(workday_count):
 def so_dict(s):
     today = date.today()
     age_days = workdays_since(s.so_create_date, today)
-    
-    # Get category from ProductIDDB (level 1 only — before first >)
-    category_name = ''
-    if s.product_id:
-        prod = db.session.query(ProductIDDB).filter_by(product_id=str(s.product_id).strip()).first()
-        if prod and prod.category_name:
-            # Extract level 1 category only (before first >)
-            full_category = prod.category_name.strip()
-            category_name = full_category.split('>')[0].strip() if '>' in full_category else full_category
+
+    # Get category from in-memory cache (no DB query per row — see _pid_category_lookup)
+    category_name = _pid_category_lookup(s.product_id) if s.product_id else ''
     
     return {
         'id': s.id, 'so_number': s.so_number, 'so_item': s.so_item,
@@ -2050,7 +2215,11 @@ def is_po_hidden(po_number, item_no, hidden_keys):
 @app.route('/api/dashboard/stats', methods=['GET'])
 def get_dashboard_stats():
     try:
-        hidden_po = get_hidden_po_numbers()
+        cache_key = runtime_cache_key('dashboard_stats')
+        cached = runtime_cache_get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
         hidden_so = get_hidden_so_items()
 
         # SO Create Date filter (applied to every SO-based aggregate below).
@@ -2066,37 +2235,14 @@ def get_dashboard_stats():
             q = apply_so_pic_filter(q, pics)
             return apply_so_create_date_filter(q, date_year, date_from, date_to)
 
-        po_rows_for_amount = POData.query.all()
-        if clients:
-            po_rows_for_amount = [p for p in po_rows_for_amount if matches_selected_client(get_operation_unit(p.po_item_type, p.item_code), clients)]
-        po_rows_for_amount = [
-            p for p in po_rows_for_amount
-            if not is_po_hidden(p.po_number, p.item_no, hidden_po)
-            and get_operation_unit(p.po_item_type, p.item_code) not in EXCLUDED_OP_UNITS
-        ]
-        total_po_count = len({p.po_number for p in po_rows_for_amount if p.po_number})
-        po_count = len(po_rows_for_amount)
-        total_po_amount = sum(float(p.amount or 0) for p in po_rows_for_amount)
-
-        po_numbers = get_po_hli_key_set()
-
-        matched_set = build_matched_set()
-
+        # PO List upload is deprecated. Summary PO KPIs now come from Delivery
+        # Complete, so dashboard stats no longer scans POData or builds PO/SO
+        # matching sets on every page load.
+        total_po_count = 0
+        po_count = 0
+        total_po_amount = 0.0
         po_without_so_count = 0
-        for p in POData.query.with_entities(
-            POData.po_number, POData.item_no, POData.po_item_type, POData.item_code
-        ).all():
-            if is_po_hidden(p.po_number, p.item_no, hidden_po):
-                continue
-            op_unit = get_operation_unit(p.po_item_type, p.item_code)
-            if not matches_selected_client(op_unit, clients):
-                continue
-            if op_unit in EXCLUDED_OP_UNITS:
-                continue
-            if not po_is_matched(p.po_number, p.item_no, matched_set):
-                po_without_so_count += 1
-
-        po_suffix_index = build_po_suffix_index(po_numbers)
+        so_without_po_count = 0
 
         # Single pass over open SO rows — compute total_so_count AND so_without_po_count
         # together instead of two separate full-table scans.
@@ -2105,24 +2251,12 @@ def get_dashboard_stats():
         ).all()
 
         total_so_count = 0
-        so_without_po_count = 0
         for s in open_so_rows:
             if s.so_item in hidden_so or s.so_number in hidden_so:
                 continue
             if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
                 continue
             total_so_count += 1
-            # KPI SO without PO HLI excludes:
-            # - return statuses
-            # - HLI Consumable operation unit
-            # - SOs created before 2024
-            if (
-                not is_return_so_status(s.so_status)
-                and s.operation_unit_name not in EXCLUDED_OP_UNITS
-                and s.so_create_date and s.so_create_date.year >= 2024
-                and not so_has_matching_po_hli(s, po_numbers, po_suffix_index)
-            ):
-                so_without_po_count += 1
 
         # All SO-based dashboard aggregates below must use exactly the same
         # canonical Open SO dataset as the KPI above:
@@ -2273,21 +2407,19 @@ def get_dashboard_stats():
         client_options = sorted({s.operation_unit_name for s in option_rows if s.operation_unit_name})
         pic_options = sorted({s.pic_name for s in option_rows if s.pic_name})
 
-        po_date_range = db.session.query(func.min(POData.po_date), func.max(POData.po_date)).first()
+        po_date_range = (None, None)
         so_date_range = db.session.query(func.min(SOData.so_create_date), func.max(SOData.so_create_date)).first()
 
         # Last updated: latest successful upload timestamp per source file.
-        last_po_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'PO').scalar()
+        last_po_upload = None
         last_so_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'SO').scalar()
         last_item_reg_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'ITEM_REG').scalar()
-        if not last_po_upload:
-            last_po_upload = db.session.query(func.max(POData.uploaded_at)).scalar()
         if not last_so_upload:
             last_so_upload = db.session.query(func.max(SOData.uploaded_at)).scalar()
-        candidates = [x for x in [last_po_upload, last_so_upload] if x]
+        candidates = [x for x in [last_so_upload] if x]
         last_upload = max(candidates) if candidates else None
 
-        return jsonify({
+        payload = {
             'po_without_so': po_without_so_count,
             'so_without_po': so_without_po_count,
             'total_po_count': total_po_count,
@@ -2320,7 +2452,9 @@ def get_dashboard_stats():
                 'min': so_date_range[0].isoformat() if so_date_range and so_date_range[0] else None,
                 'max': so_date_range[1].isoformat() if so_date_range and so_date_range[1] else None,
             },
-        })
+        }
+        runtime_cache_set(cache_key, payload, ttl_seconds=20)
+        return jsonify(payload)
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
@@ -2345,10 +2479,21 @@ def build_matched_set():
     """Build set of PO references that appear in ANY SO record (open or closed).
     We use ALL statuses here because a PO that has ever been linked to an SO
     (even if Delivery Completed or SO Cancel) should NOT appear as 'PO without SO'.
-    
+
     Checks both Customer PO Number (primary) and Delivery Memo (secondary) fields.
     Any PO HLI number found in either field counts as matched.
+
+    Result is cached for _MATCHED_SET_TTL_SECONDS seconds and invalidated on SO upload.
     """
+    now = datetime.utcnow()
+    with _MATCHED_SET_LOCK:
+        if (
+            _MATCHED_SET_CACHE['value'] is not None
+            and _MATCHED_SET_CACHE['expires_at']
+            and _MATCHED_SET_CACHE['expires_at'] > now
+        ):
+            return _MATCHED_SET_CACHE['value']
+
     matched = set()
     # Only load the four columns we actually need — avoids fetching every field
     for row in db.session.query(
@@ -2364,6 +2509,10 @@ def build_matched_set():
         # Extract PO references from BOTH Customer PO Number and Delivery Memo
         for ref in extract_po_hli(cust_po) + extract_po_hli(memo):
             matched.add(ref)
+
+    with _MATCHED_SET_LOCK:
+        _MATCHED_SET_CACHE['value'] = matched
+        _MATCHED_SET_CACHE['expires_at'] = now + timedelta(seconds=_MATCHED_SET_TTL_SECONDS)
     return matched
 
 
@@ -3151,116 +3300,6 @@ def delete_request_permanently(req_id):
 # ═══════════════════════════════════════════════════════════════════
 
 CHUNK_SIZE = 200
-
-# Legacy PO List upload is intentionally no longer exposed from Manual Update.
-def upload_po_list():
-    try:
-        if 'file' not in request.files: return jsonify({'error': 'No file'}), 400
-        file = request.files['file']
-        df = pd.read_excel(file, engine='openpyxl')
-        df.columns = [str(c).strip() for c in df.columns]
-
-        REQUIRED_PO_COLS = {
-            'PO Number':        ['PO No.','PO No','PO Number','PO'],
-            'Item No':          ['Item No.','Item No','Item Number','No. Item'],
-            'PO Item Type':     ['PO Item Type','Item Type','Type','PO Type'],
-            'Supplier':         ['Supplier','Vendor','Supplier Name'],
-            'Qty':              ['Qty.','Qty','Quantity'],
-            'Amount':           ['Amount','Total Amount','Total'],
-            'PO Date':          ['PO Date','Order Date','Tanggal PO'],
-            'Request Delivery': ['Request Delivery Date','Delivery Date','Req Delivery'],
-        }
-        missing_required = []
-        for friendly_name, aliases in REQUIRED_PO_COLS.items():
-            if not find_column(df, aliases):
-                missing_required.append(friendly_name)
-        if len(missing_required) >= 3:
-            return jsonify({
-                'error': (
-                    f'❌ Invalid file — {len(missing_required)} required columns not found: '
-                    f'{", ".join(missing_required)}. '
-                    f'Please make sure you are uploading the correct HLI PO List file and try again.'
-                )
-            }), 400
-
-        col_po   = find_column(df, ['PO No.','PO No','PO Number','PO'])
-        if not col_po:
-            return jsonify({'error': f'PO Number column not found. Available columns: {df.columns.tolist()}'}), 400
-
-        col_itemno = find_column(df, ['Item No.','Item No','Item Number','No. Item'])
-        col_desc = find_column(df, ['PO Item Detail','Description','Item Description','Deskripsi'])
-        col_item = find_column(df, ['Item Code','Material','Item No','Item'])
-        col_itype = find_column(df, ['PO Item Type','Item Type','Type','PO Type'])
-        col_supp = find_column(df, ['Supplier','Vendor','Supplier Name'])
-        col_vndr = find_column(df, ['Vendor Name SMRO','Vendor Name'])
-        col_qty  = find_column(df, ['Qty.','Qty','Quantity'])
-        col_unit = find_column(df, ['Unit','UOM'])
-        col_price= find_column(df, ['Price','Unit Price'])
-        col_amt  = find_column(df, ['Amount','Total Amount','Total'])
-        col_cur  = find_column(df, ['Currency','Curr'])
-        col_pdt  = find_column(df, ['PO Date','Order Date','Tanggal PO'])
-        col_pm   = find_column(df, ['Purchase Member','Purchasing Member','PIC','Buyer'])
-        col_rdd  = find_column(df, ['Request Delivery Date','Delivery Date','Req Delivery'])
-
-        existing_po = {}
-        for p in POData.query.all():
-            key = (p.po_number, p.item_no)
-            existing_po[key] = p
-
-        new_keys_in_file = set()
-        count = 0
-        for _, row in df.iterrows():
-            po_num = clean(df_val(row, col_po))
-            if not po_num: continue
-            item_no = clean(df_val(row, col_itemno))
-            key = (po_num, item_no)
-            new_keys_in_file.add(key)
-
-            new_data = {
-                'po_number': po_num,
-                'item_no': item_no,
-                'po_item_detail': clean(df_val(row, col_desc)),
-                'item_code': clean(df_val(row, col_item)),
-                'po_item_type': clean(df_val(row, col_itype)),
-                'supplier': clean(df_val(row, col_supp)),
-                'vendor_name_smro': clean(df_val(row, col_vndr)),
-                'qty': safe_float(df_val(row, col_qty)),
-                'unit': clean(df_val(row, col_unit)),
-                'price': safe_float(df_val(row, col_price)),
-                'amount': safe_float(df_val(row, col_amt)),
-                'currency': clean(df_val(row, col_cur)) or 'IDR',
-                'po_date': parse_date(df_val(row, col_pdt)),
-                'purchase_member': clean(df_val(row, col_pm)),
-                'request_delivery': parse_date(df_val(row, col_rdd)),
-                'uploaded_at': datetime.utcnow()
-            }
-
-            if key in existing_po:
-                existing = existing_po[key]
-                preserved_plan_date = existing.delivery_plan_date
-                preserved_remarks = existing.remarks
-                for field, val in new_data.items():
-                    setattr(existing, field, val)
-                existing.delivery_plan_date = preserved_plan_date
-                existing.remarks = preserved_remarks
-            else:
-                new_rec = POData(**new_data)
-                db.session.add(new_rec)
-
-            count += 1
-            if count % CHUNK_SIZE == 0:
-                db.session.flush()
-
-        # FIX: Do not delete old PO data (preserve history)
-        # keys_to_delete logic removed
-
-        db.session.add(UploadLog(file_type='PO', filename=file.filename, records_count=count))
-        db.session.commit()
-        return jsonify({'message': f'Berhasil upload {count} PO items', 'uploaded': count})
-    except Exception as e:
-        db.session.rollback(); import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
 
 @app.route('/api/upload/scor', methods=['POST'])
 @app.route('/api/upload/smro', methods=['POST'])
@@ -4260,8 +4299,9 @@ def completed_summary():
             func.max(SOData.id),
             func.max(SOData.purchasing_amount_idr_cached_at),
         ).one()
-        cache_entry = _COMPLETED_SUMMARY_CACHE.get(cache_key)
         now_ts = datetime.utcnow().timestamp()
+        with _COMPLETED_CACHE_LOCK:
+            cache_entry = _COMPLETED_SUMMARY_CACHE.get(cache_key)
         if (
             cache_entry
             and cache_entry.get('signature') == (tuple(db_signature), tuple(yoy_signature))
@@ -4486,11 +4526,12 @@ def completed_summary():
                 )
             }
         }
-        _COMPLETED_SUMMARY_CACHE[cache_key] = {
-            'signature': (tuple(db_signature), tuple(yoy_signature)),
-            'created_at': now_ts,
-            'payload': payload,
-        }
+        with _COMPLETED_CACHE_LOCK:
+            _COMPLETED_SUMMARY_CACHE[cache_key] = {
+                'signature': (tuple(db_signature), tuple(yoy_signature)),
+                'created_at': now_ts,
+                'payload': payload,
+            }
         return jsonify(payload)
 
     except Exception as e:
@@ -4606,20 +4647,31 @@ def load_similarity_cache():
     try:
         if os.path.exists(_SIMILARITY_CACHE_FILE):
             with open(_SIMILARITY_CACHE_FILE, 'r', encoding='utf-8') as f:
-                _SIMILARITY_CACHE = json.load(f)
+                data = json.load(f)
+            with _SIMILARITY_LOCK:
+                _SIMILARITY_CACHE = data
     except Exception as e:
         print(f"Error loading similarity cache: {e}")
-        _SIMILARITY_CACHE = {}
+        with _SIMILARITY_LOCK:
+            _SIMILARITY_CACHE = {}
 
 
 def save_similarity_cache():
-    """Save similarity cache to file."""
+    """Save similarity cache to file (runs in background thread — never call from a request)."""
     try:
         os.makedirs(os.path.dirname(_SIMILARITY_CACHE_FILE), exist_ok=True)
+        with _SIMILARITY_LOCK:
+            snapshot = dict(_SIMILARITY_CACHE)
         with open(_SIMILARITY_CACHE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(_SIMILARITY_CACHE, f, ensure_ascii=False, separators=(',', ':'))
+            json.dump(snapshot, f, ensure_ascii=False, separators=(',', ':'))
     except Exception as e:
         print(f"Error saving similarity cache: {e}")
+
+
+def save_similarity_cache_async():
+    """Trigger a background save without blocking the request thread."""
+    t = threading.Thread(target=save_similarity_cache, daemon=True)
+    t.start()
 
 
 def calculate_similarity(str1, str2):
@@ -4735,8 +4787,10 @@ def find_similar_registered_items(item, registered_items=None):
             clean(item.mfr_name).lower(),
             clean(item.odr_unit).lower(),
         ])
-        if cache_key in _SIMILARITY_CACHE:
-            return _SIMILARITY_CACHE[cache_key]
+        with _SIMILARITY_LOCK:
+            cached = _SIMILARITY_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
 
         registered_items = _candidate_registered_items_for_similarity(item, registered_items)
 
@@ -4789,7 +4843,8 @@ def find_similar_registered_items(item, registered_items=None):
                 'count': len(similar_items)
             }
 
-        _SIMILARITY_CACHE[cache_key] = result
+        with _SIMILARITY_LOCK:
+            _SIMILARITY_CACHE[cache_key] = result
         return result
     except Exception as e:
         print(f"Error finding similar items: {e}")
@@ -5230,6 +5285,7 @@ def upload_product_id():
 
         global _SIMILARITY_CACHE
         _SIMILARITY_CACHE = {}
+        _pid_category_cache_invalidate()  # rebuild category cache on next so_dict() call
 
         # After upserting ProductIDDB, refresh pic_name on SO rows that have a product_id
         so_rows = db.session.query(SOData).filter(
@@ -5526,7 +5582,7 @@ def get_rfq_data():
         page_rows = [dict(row) for row in rows[start:start + per_page]]
         if include_similarity:
             page_rows = [apply_rfq_similarity(row) for row in page_rows]
-            save_similarity_cache()
+            save_similarity_cache_async()  # non-blocking disk write
         return jsonify({
             'data': page_rows,
             'total': total,
@@ -6813,30 +6869,6 @@ def get_delivery_monitoring_summary():
 
 
 # ═══════════════════════════════════════════════════════════════════
-# VISITOR TRACKING ENDPOINTS
-# ═══════════════════════════════════════════════════════════════════
-
-@app.route('/api/visitor/track', methods=['POST'])
-def track_visitor():
-    """Track visitor for analytics. Returns unique visitor count."""
-    try:
-        # Simple implementation - just return a placeholder count
-        # In production, you'd store visitor_id in a database table
-        return jsonify({'success': True, 'unique_visitors': 0})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/visitor/stats', methods=['GET'])
-def get_visitor_stats():
-    """Get visitor statistics."""
-    try:
-        # Simple implementation - return placeholder stats
-        return jsonify({'unique_visitors': 0})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
 if __name__ == '__main__':
     load_similarity_cache()
     print("Backend: http://127.0.0.1:5001")
