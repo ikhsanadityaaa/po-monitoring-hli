@@ -214,18 +214,63 @@ def workdays_until(future_date, today=None):
     return count_workdays(today, future_date)
 
 
+ALLOWED_ORIGINS = {
+    "https://svodashboard.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+}
+
 CORS(app, resources={r"/api/*": {
-    "origins": [
-        "https://svodashboard.vercel.app",
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:3000",
-    ],
+    "origins": list(ALLOWED_ORIGINS),
     "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     "allow_headers": ["Content-Type", "Authorization", "Accept"],
     "supports_credentials": False,
 }})
+
+# ─── Guarantee CORS headers are present on EVERY response, including 500 ──
+# flask-cors only injects headers when Flask handles the response normally.
+# An unhandled exception that produces a 500 can bypass flask-cors, so the
+# browser sees a missing Access-Control-Allow-Origin and reports TWO errors:
+# the CORS block and the underlying 500.  This after_request hook closes that
+# gap: it mirrors the origin back (if allowed) on all responses unconditionally.
+@app.after_request
+def inject_cors_headers(response):
+    origin = request.headers.get('Origin', '')
+    if origin in ALLOWED_ORIGINS:
+        response.headers['Access-Control-Allow-Origin'] = origin
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, Accept'
+    return response
+
+# ─── Handle OPTIONS pre-flight requests explicitly ────────────────────────
+@app.before_request
+def handle_preflight():
+    if request.method == 'OPTIONS':
+        from flask import make_response
+        resp = make_response('', 204)
+        origin = request.headers.get('Origin', '')
+        if origin in ALLOWED_ORIGINS:
+            resp.headers['Access-Control-Allow-Origin'] = origin
+        resp.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+        resp.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, Accept'
+        resp.headers['Access-Control-Max-Age'] = '86400'
+        return resp
+
+# ─── Global error handler — returns JSON + CORS headers for all crashes ───
+@app.errorhandler(Exception)
+def handle_unhandled_exception(e):
+    import traceback
+    traceback.print_exc()
+    from flask import make_response
+    resp = make_response(jsonify({'error': str(e), 'type': type(e).__name__}), 500)
+    origin = request.headers.get('Origin', '')
+    if origin in ALLOWED_ORIGINS:
+        resp.headers['Access-Control-Allow-Origin'] = origin
+    resp.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    resp.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, Accept'
+    return resp
 
 _db_url = os.environ.get('DATABASE_URL', '')
 if _db_url:
@@ -887,9 +932,19 @@ def _ensure_performance_indexes():
         db.session.rollback()
 
 with app.app_context():
-    db.create_all()
-    _ensure_extra_columns()
-    _ensure_performance_indexes()
+    try:
+        db.create_all()
+        print('DB tables created/verified.')
+    except Exception as _e:
+        print(f'WARNING: db.create_all() failed: {_e}')
+    try:
+        _ensure_extra_columns()
+    except Exception as _e:
+        print(f'WARNING: _ensure_extra_columns() failed: {_e}')
+    try:
+        _ensure_performance_indexes()
+    except Exception as _e:
+        print(f'WARNING: _ensure_performance_indexes() failed: {_e}')
     print('DB schema ready.')
 
 CLOSED_STATUSES = {
