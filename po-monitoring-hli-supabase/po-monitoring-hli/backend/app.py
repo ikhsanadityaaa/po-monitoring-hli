@@ -1490,7 +1490,7 @@ def sync_rfq_cell_to_google_sheet(row, field, value):
 
     scopes = ['https://www.googleapis.com/auth/spreadsheets']
     creds = Credentials.from_service_account_info(credentials_info, scopes=scopes)
-    service = build('sheets', 'v4', credentials=creds, cache_discovery=False)
+    service = build('sheets', 'v4', credentials=creds, cache_discovery=False, static_discovery=False)
     range_name = f"'{RFQ_SHEET_NAME}'!{column}{sheet_row}"
     service.spreadsheets().values().update(
         spreadsheetId=RFQ_SHEET_ID,
@@ -1529,7 +1529,7 @@ def sync_rfq_cells_to_google_sheet(updates):
 
     scopes = ['https://www.googleapis.com/auth/spreadsheets']
     creds = Credentials.from_service_account_info(credentials_info, scopes=scopes)
-    service = build('sheets', 'v4', credentials=creds, cache_discovery=False)
+    service = build('sheets', 'v4', credentials=creds, cache_discovery=False, static_discovery=False)
     service.spreadsheets().values().batchUpdate(
         spreadsheetId=RFQ_SHEET_ID,
         body={
@@ -1551,7 +1551,7 @@ def google_sheets_service():
         raise RuntimeError('google-api-python-client/google-auth is not installed') from e
     scopes = ['https://www.googleapis.com/auth/spreadsheets']
     creds = Credentials.from_service_account_info(credentials_info, scopes=scopes)
-    return build('sheets', 'v4', credentials=creds, cache_discovery=False)
+    return build('sheets', 'v4', credentials=creds, cache_discovery=False, static_discovery=False)
 
 def column_letter_from_index(index):
     result = ''
@@ -5468,6 +5468,49 @@ def master_pic_status():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/vendor-control/debug', methods=['GET'])
+def vendor_control_debug():
+    """Small production diagnostic for Google Sheet access. Does not return passwords."""
+    try:
+        raw_file = os.environ.get('GOOGLE_SERVICE_ACCOUNT_FILE') or os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+        raw_json = bool(os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON') or os.environ.get('GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON'))
+        info = {
+            'credential_file': raw_file or '',
+            'credential_file_exists': bool(raw_file and os.path.exists(raw_file)),
+            'credential_json_env_set': raw_json,
+            'sheet_id': VENDOR_CONTROL_SHEET_ID,
+            'sheet_gid': VENDOR_CONTROL_SHEET_GID,
+        }
+        service = google_sheets_service()
+        sheet_name = vendor_control_sheet_name(service)
+        info['sheet_name'] = sheet_name
+        result = service.spreadsheets().values().get(
+            spreadsheetId=VENDOR_CONTROL_SHEET_ID,
+            range=f"'{sheet_name}'!A1:Z20",
+            valueRenderOption='UNFORMATTED_VALUE'
+        ).execute()
+        values = result.get('values', [])
+        info['sample_rows'] = len(values)
+        info['header_candidates'] = []
+        matched = None
+        for idx, candidate_headers in enumerate(values[:20]):
+            candidate_columns = find_vendor_control_columns(candidate_headers)
+            looks_like_header = all(candidate_columns.get(name) for name in ('vendor_name', 'vendor_id', 'password'))
+            info['header_candidates'].append({
+                'row': idx + 1,
+                'non_empty_cells': sum(1 for cell in candidate_headers if clean(cell)),
+                'detected_columns': candidate_columns,
+                'looks_like_header': looks_like_header,
+            })
+            if looks_like_header:
+                matched = {'header_row': idx + 1, 'columns': candidate_columns, 'headers': candidate_headers}
+                break
+        info['matched_header'] = matched
+        return jsonify(info)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/vendor-control/data', methods=['GET'])
 def get_vendor_control_data():
     try:
@@ -5501,7 +5544,10 @@ def get_vendor_control_data():
         })
     except Exception as e:
         import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        return jsonify({
+            'error': str(e),
+            'hint': 'Check PythonAnywhere WSGI credential path, google-api-python-client/google-auth installation, service account sheet permission, and Vendor Control sheet headers.'
+        }), 500
 
 @app.route('/api/vendor-control/<path:row_key>', methods=['PUT'])
 def update_vendor_control(row_key):
