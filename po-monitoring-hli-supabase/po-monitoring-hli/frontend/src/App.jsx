@@ -241,14 +241,18 @@ const DownloadButton = ({ onClick, className, children, disabled }) => {
   );
 };
 
-const SOModal = ({ title, data, onClose, darkMode }) => {
+const SOModal = ({ title, data, onClose, darkMode, onUpdateCell }) => {
   const [dlPage, setDlPage] = useState(1);
+  const [editing, setEditing] = useState(null);
+  const [editValue, setEditValue] = useState('');
   const PER = 50;
-  const pages = Math.ceil((data?.length || 0) / PER);
-  const rows = (data || []).slice((dlPage-1)*PER, dlPage*PER);
+  const safeData = Array.isArray(data) ? data.filter(row => row && typeof row === 'object') : [];
+  const rowKey = (row) => row?.id || row?.so_item || row?.so_number || '';
+  const pages = Math.ceil((safeData.length || 0) / PER);
+  const rows = safeData.slice((dlPage-1)*PER, dlPage*PER);
 
   // Determine if SO Item column exists in data (show SO Number only when SO Item is absent)
-  const hasSoItem = (data || []).some(s => s.so_item);
+  const hasSoItem = safeData.some(s => s.so_item);
   const columns = [
     { header: 'SO Item', value: s => s.so_item || '', width: 18 },
     ...(!hasSoItem ? [{ header: 'SO Number', value: s => s.so_number || '', width: 18 }] : []),
@@ -266,13 +270,27 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
   ];
 
   const downloadExcel = () => {
-    downloadStyledExcel({ columns, rows: data || [], filename: title, sheetName: 'Detail' });
+    downloadStyledExcel({ columns, rows: safeData, filename: title, sheetName: 'Detail' });
+  };
+  const startEdit = (row, field) => {
+    const key = rowKey(row);
+    if (!key || !onUpdateCell) {
+      console.warn('SO detail row is missing id/SO Item; cannot edit from modal', row);
+      return;
+    }
+    setEditing({ id: key, field });
+    setEditValue(row[field] || '');
+  };
+  const saveEdit = async () => {
+    if (!editing || !onUpdateCell) return;
+    await onUpdateCell(editing.id, editing.field, editValue);
+    setEditing(null);
   };
   return (
     <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
       <div role="dialog" aria-modal="true" aria-label={title} className={`rounded-2xl overflow-hidden shadow-2xl w-full max-w-6xl max-h-[85vh] flex flex-col ${darkMode?'bg-gray-800 text-white':'bg-white'}`} onClick={e=>e.stopPropagation()}>
         <div className={`flex justify-between items-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
-          <h3 className="font-bold text-lg">{title} <span className={`text-sm font-normal ml-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>({fmtNum(data?.length)} records)</span></h3>
+          <h3 className="font-bold text-lg">{title} <span className={`text-sm font-normal ml-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>({fmtNum(safeData.length)} records)</span></h3>
           <div className="flex gap-2">
             <button onClick={downloadExcel} className="flex items-center gap-1 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm"><FileSpreadsheet className="w-4 h-4"/>Excel</button>
             <button onClick={onClose} className={`p-1.5 rounded-lg ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`}><X className="w-5 h-5"/></button>
@@ -299,8 +317,40 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
                   <td className="px-3 py-2 whitespace-nowrap">{s.customer_po_number||'-'}</td>
                   <td className="px-3 py-2 max-w-[160px] truncate">{s.delivery_memo||'-'}</td>
                   <td className="px-3 py-2 whitespace-nowrap">{s.so_create_date||'-'}</td>
-                  <td className="px-3 py-2 whitespace-nowrap text-blue-600">{s.delivery_plan_date||'-'}</td>
-                  <td className="px-3 py-2 min-w-[560px] max-w-[560px] truncate">{s.remarks||'-'}</td>
+                  <td className="px-3 py-2 whitespace-nowrap text-blue-600">
+                    {editing?.id === rowKey(s) && editing.field === 'delivery_plan_date' ? (
+                      <input
+                        type="date"
+                        value={editValue || ''}
+                        onChange={e=>setEditValue(e.target.value)}
+                        onBlur={saveEdit}
+                        onKeyDown={e=>{ if(e.key==='Enter') saveEdit(); if(e.key==='Escape') setEditing(null); }}
+                        className={`w-36 px-2 py-1 rounded text-xs border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-300 text-gray-900'}`}
+                        autoFocus
+                      />
+                    ) : (
+                      <button type="button" onClick={()=>startEdit(s, 'delivery_plan_date')} className="text-blue-600 hover:underline text-xs whitespace-nowrap">
+                        {s.delivery_plan_date||'Set'}
+                      </button>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 min-w-[560px] max-w-[560px] truncate">
+                    {editing?.id === rowKey(s) && editing.field === 'remarks' ? (
+                      <input
+                        type="text"
+                        value={editValue || ''}
+                        onChange={e=>setEditValue(e.target.value)}
+                        onBlur={saveEdit}
+                        onKeyDown={e=>{ if(e.key==='Enter') saveEdit(); if(e.key==='Escape') setEditing(null); }}
+                        className={`w-full px-2 py-1 rounded text-xs border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-300 text-gray-900'}`}
+                        autoFocus
+                      />
+                    ) : (
+                      <button type="button" onClick={()=>startEdit(s, 'remarks')} className="block max-w-full truncate text-left text-blue-600 hover:underline text-xs">
+                        {s.remarks||'Add'}
+                      </button>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -308,7 +358,7 @@ const SOModal = ({ title, data, onClose, darkMode }) => {
         </div>
         {pages > 1 && (
           <div className={`flex justify-between items-center px-6 py-3 border-t ${darkMode?'border-gray-700':'border-gray-100'}`}>
-            <span className={`text-sm ${darkMode?'text-gray-400':'text-gray-600'}`}>{(dlPage-1)*PER+1}–{Math.min(dlPage*PER,data.length)} / {fmtNum(data.length)}</span>
+            <span className={`text-sm ${darkMode?'text-gray-400':'text-gray-600'}`}>{(dlPage-1)*PER+1}–{Math.min(dlPage*PER,safeData.length)} / {fmtNum(safeData.length)}</span>
             <div className="flex gap-2">
               <button disabled={dlPage===1} onClick={()=>setDlPage(p=>p-1)} className={`p-1.5 rounded ${dlPage===1?'opacity-40':'hover:bg-gray-200'}`}><ChevronLeft className="w-4 h-4"/></button>
               <span className="px-3 py-1 bg-blue-100 rounded text-sm text-blue-700">{dlPage}/{pages}</span>
@@ -897,6 +947,7 @@ const App = () => {
   const [frozenColumns, setFrozenColumns] = useState({});
 
   const [stats, setStats] = useState(null);
+  const [summaryPendingTotal, setSummaryPendingTotal] = useState(null);
   const [poWithoutSO, setPoWithoutSO] = useState([]);
   const [poFiltered, setPoFiltered] = useState([]); // after local filters
   const [agingData, setAgingData] = useState([]);
@@ -962,6 +1013,7 @@ const App = () => {
   const [rfqFilters, setRfqFilters] = useState({ checks: [], clients: [], brands: [], purchase_pics: [], vendors: [] });
   const [rfqOptions, setRfqOptions] = useState({ checks: [], clients: [], brands: [], purchase_pics: [], vendors: [] });
   const [rfqSelectedCell, setRfqSelectedCell] = useState(null);
+  const [rfqSimilarAction, setRfqSimilarAction] = useState(null);
   const [rfqLastUpdated, setRfqLastUpdated] = useState(null);
 
   // All Registered Items
@@ -973,6 +1025,20 @@ const App = () => {
   const [registeredItemsAppliedSearch, setRegisteredItemsAppliedSearch] = useState('');
   const [registeredItemsProdIds, setRegisteredItemsProdIds] = useState([]);
   const [registeredItemsAppliedProdIds, setRegisteredItemsAppliedProdIds] = useState([]);
+
+  // Vendor Control
+  const [vendorControlData, setVendorControlData] = useState([]);
+  const [vendorControlTotal, setVendorControlTotal] = useState(0);
+  const [vendorControlPage, setVendorControlPage] = useState(1);
+  const [vendorControlPerPage, setVendorControlPerPage] = useState(10);
+  const [vendorControlSearch, setVendorControlSearch] = useState('');
+  const [vendorControlAppliedSearch, setVendorControlAppliedSearch] = useState('');
+  const [vendorControlSelectedVendors, setVendorControlSelectedVendors] = useState([]);
+  const [vendorControlAppliedVendors, setVendorControlAppliedVendors] = useState([]);
+  const [vendorControlSuggestions, setVendorControlSuggestions] = useState([]);
+  const [vendorControlSuggestOpen, setVendorControlSuggestOpen] = useState(false);
+  const [vendorControlLastUpdated, setVendorControlLastUpdated] = useState(null);
+  const [vendorPasswordVisible, setVendorPasswordVisible] = useState({});
 
   const [loading, setLoading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(null);
@@ -1252,12 +1318,20 @@ const App = () => {
       if (!f || f.mode === 'all') completedParams.set('date_year', String(new Date().getFullYear()));
       params.forEach((value, key) => completedParams.append(key, value));
       const completedQs = completedParams.toString();
-      const [sRes, aRes, cRes] = await Promise.all([
+      const pendingParams = new URLSearchParams();
+      Object.entries(dateFilterParams(f)).forEach(([key, value]) => { if (value) pendingParams.append(key, value); });
+      appendMultiParam(pendingParams, 'client', globalClientFilter);
+      appendMultiParam(pendingParams, 'global_pic', globalPicFilter);
+      pendingParams.set('page', '1');
+      pendingParams.set('per_page', '1');
+      const [sRes, aRes, cRes, pendingRes] = await Promise.all([
         api.get(`/api/dashboard/stats${qs}`),
         api.get(`/api/data/aging${qs}`),
-        api.get(`/api/completed/summary?${completedQs}`)
+        api.get(`/api/completed/summary?${completedQs}`),
+        api.get(`/api/data/all-so?${pendingParams}`)
       ]);
       setStats(sRes.data);
+      setSummaryPendingTotal(Number(pendingRes.data?.total) || 0);
       setDashboardFilterOptions(sRes.data?.filters || { clients: [], pics: [] });
       setAgingData(Array.isArray(aRes.data) ? aRes.data : []);
       setCompletedData(cRes.data);
@@ -1438,6 +1512,43 @@ const App = () => {
     } finally { setLoading(false); }
   }, [addToast, rfqPage, rfqPerPage, rfqAppliedSearch, rfqFilters, rfqPicFilter, rfqShowSimilarity, rfqSortOrder]);
 
+  const fetchVendorControl = useCallback(async (page = vendorControlPage, perPage = vendorControlPerPage, search = vendorControlAppliedSearch, refresh = false, vendors = vendorControlAppliedVendors) => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ page, per_page: perPage });
+      if (search) params.append('search', search);
+      (vendors || []).forEach(v => params.append('vendor', v));
+      if (refresh) params.append('refresh', '1');
+      const res = await api.get(`/api/vendor-control/data?${params}`);
+      setVendorControlData(Array.isArray(res.data.data) ? res.data.data : []);
+      setVendorControlTotal(res.data.total || 0);
+      setVendorControlSuggestions(Array.isArray(res.data.suggestions) ? res.data.suggestions : []);
+      setVendorControlLastUpdated(res.data.last_updated || null);
+    } catch (e) {
+      addToast(`Failed to load Vendor Control: ${e.response?.data?.error || e.message}`, 'error');
+    } finally { setLoading(false); }
+  }, [addToast, vendorControlPage, vendorControlPerPage, vendorControlAppliedSearch, vendorControlAppliedVendors]);
+
+  const updateVendorControlCell = async (rowKey, field, value) => {
+    setEditingCell(null);
+    const previousRows = vendorControlData;
+    setVendorControlData(prev => prev.map(row => row.row_key === rowKey ? { ...row, [field]: value } : row));
+    try {
+      const res = await api.put(`/api/vendor-control/${encodeURIComponent(rowKey)}`, { field, value });
+      if (res.data?.sheet_sync && res.data.sheet_sync.synced === false) {
+        addToast(`Vendor updated locally. Sheet sync not active: ${res.data.sheet_sync.reason}`, 'warning');
+      }
+    } catch (e) {
+      setVendorControlData(previousRows);
+      addToast(`Failed to update Vendor Control: ${e.response?.data?.error || e.message}`, 'error');
+    }
+  };
+
+  const openVendorLogin = (row) => {
+    if (!row?.row_key) return;
+    window.open(`${BACKEND}/api/vendor-control/login/${encodeURIComponent(row.row_key)}`, '_blank', 'noopener,noreferrer');
+  };
+
   // ─── Delete Request API functions ────────────────────────────────────────
   const fetchDeleteRequests = useCallback(async () => {
     try {
@@ -1525,7 +1636,39 @@ const App = () => {
     if (activePage === 'rfq') {
       fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter, rfqShowSimilarity);
     }
-  }, [activePage, rfqPage, rfqPerPage, rfqAppliedSearch, rfqFilters, rfqPicFilter, rfqShowSimilarity, fetchRFQData]);
+  }, [activePage]);
+
+  useEffect(() => {
+    if (activePage === 'vendor-control') {
+      fetchVendorControl(vendorControlPage, vendorControlPerPage, vendorControlAppliedSearch, false, vendorControlAppliedVendors);
+    }
+  }, [activePage, vendorControlPage, vendorControlPerPage, vendorControlAppliedSearch, vendorControlAppliedVendors, fetchVendorControl]);
+
+  useEffect(() => {
+    const q = vendorControlSearch.trim();
+    if (activePage !== 'vendor-control' || q.length < 2) {
+      setVendorControlSuggestions([]);
+      setVendorControlSuggestOpen(false);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ page: 1, per_page: 1, search: q });
+        const res = await api.get(`/api/vendor-control/data?${params}`);
+        if (cancelled) return;
+        const suggestions = Array.isArray(res.data.suggestions) ? res.data.suggestions : [];
+        setVendorControlSuggestions(suggestions);
+        setVendorControlSuggestOpen(suggestions.length > 0);
+      } catch {
+        if (!cancelled) {
+          setVendorControlSuggestions([]);
+          setVendorControlSuggestOpen(false);
+        }
+      }
+    }, 220);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [activePage, vendorControlSearch]);
 
   useEffect(() => {
     if (activePage === 'all-registered-items') {
@@ -1899,8 +2042,12 @@ const App = () => {
   const updateSOCell = async (soId, field, value) => {
     setEditingCell(null);
     try {
-      await api.put(`/api/data/so/${soId}`, { [field]: value });
-      setAllSOData(prev => prev.map(s => s.id === soId ? { ...s, [field]: value } : s));
+      const isNumericId = typeof soId === 'number' || /^\d+$/.test(String(soId));
+      const endpoint = isNumericId ? `/api/data/so/${soId}` : `/api/data/so/by-item/${encodeURIComponent(soId)}`;
+      await api.put(endpoint, { [field]: value });
+      const matches = (s) => (isNumericId ? String(s.id) === String(soId) : String(s.so_item) === String(soId));
+      setAllSOData(prev => prev.map(s => matches(s) ? { ...s, [field]: value } : s));
+      setModal(prev => prev ? { ...prev, data: (prev.data || []).map(s => matches(s) ? { ...s, [field]: value } : s) } : prev);
     } catch (e) { addToast(`❌ Failed to update: ${e.message}`, 'error'); }
   };
 
@@ -1950,6 +2097,9 @@ const App = () => {
   const updateRFQCell = async (rowKey, field, value, options = {}) => {
     const quiet = Boolean(options.quiet);
     if (!quiet) setEditingCell(null);
+    if (field === 'product_id') setRfqSimilarAction(null);
+    const previousRows = rfqData;
+    applyRFQLocalUpdates([{ row_key: rowKey, field, value }]);
     try {
       const res = await api.put(`/api/rfq/${encodeURIComponent(rowKey)}`, { field, value });
       if (!quiet && res.data?.sheet_sync && res.data.sheet_sync.synced === false) {
@@ -2005,6 +2155,7 @@ const App = () => {
       }).filter(row => !rfqPicFilter || (row.purchase_pic === rfqPicFilter && row.check === 'open' && row.unit_price_missing && !row.product_id)));
       return true;
     } catch (e) {
+      setRfqData(previousRows);
       if (!quiet) addToast(`Failed to update RFQ: ${e.response?.data?.error || e.message}`, 'error');
       return false;
     }
@@ -2013,9 +2164,10 @@ const App = () => {
   const updateRFQCellsBatch = async (updates) => {
     const cleanUpdates = (updates || []).filter(item => item?.row_key && item?.field);
     if (!cleanUpdates.length) return false;
+    const previousRows = rfqData;
+    applyRFQLocalUpdates(cleanUpdates);
     try {
       const res = await api.put('/api/rfq/batch-cells', { updates: cleanUpdates });
-      applyRFQLocalUpdates(cleanUpdates);
       if (res.data?.sheet_sync && res.data.sheet_sync.synced === false) {
         addToast(`RFQ batch updated locally. Sheet sync not active: ${res.data.sheet_sync.reason}`, 'warning');
       }
@@ -2024,6 +2176,7 @@ const App = () => {
       }
       return true;
     } catch (e) {
+      setRfqData(previousRows);
       addToast(`Failed to update RFQ batch: ${e.response?.data?.error || e.message}`, 'error');
       return false;
     }
@@ -2033,7 +2186,8 @@ const App = () => {
     if (Array.isArray(endpointOrData)) { setModal({ title, data: endpointOrData }); return; }
     try {
       const res = await api.get(endpointOrData);
-      setModal({ title, data: Array.isArray(res.data) ? res.data : [] });
+      const detailRows = Array.isArray(res.data) ? res.data.filter(row => row && typeof row === 'object') : [];
+      setModal({ title, data: detailRows });
     } catch (e) { addToast(`❌ Failed to load details: ${e.message}`, 'error'); }
   };
 
@@ -3084,7 +3238,7 @@ const App = () => {
             { label:'PO Amount', value: fmtCurShort(completedPoAmountThisYear), sub: fmtCur(completedPoAmountThisYear), icon:<Coins className="w-5 h-5"/> },
             { label:'Sales Amount', value: fmtCurShort(d.total_sales), sub: fmtCur(d.total_sales), icon:<Wallet className="w-5 h-5"/> },
             { label:'Margin', value: fmtCurShort(d.total_margin), sub: marginPct == null ? 'Avg margin -' : `Avg margin ${marginPct.toFixed(1)}%`, icon:<TrendingUp className="w-5 h-5"/> },
-            { label:'Total Pending Delivery', value: fmtNum(stats?.total_so_count), sub: 'Pending delivery records', icon:<Clock className="w-5 h-5"/>, goPending:true },
+            { label:'Total Pending Delivery', value: fmtNum(summaryPendingTotal ?? stats?.total_so_count), sub: 'Pending delivery records', icon:<Clock className="w-5 h-5"/>, goPending:true },
           ].map((k,i)=>{
             const Wrapper = k.goPending ? 'button' : 'div';
             return <Wrapper key={i} type={k.goPending ? 'button' : undefined} onClick={k.goPending ? () => { setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter); window.scrollTo({top:0, behavior:'smooth'}); } : undefined} className={`p-5 rounded-2xl text-left ${card} ${k.goPending ? 'cursor-pointer transition-all hover:border-blue-300' : ''}`}><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className={`text-sm font-medium ${txt2}`}>{k.label}</p><h3 className={`text-2xl font-bold mt-1 ${kpiValue}`}>{k.value}</h3><p className={`text-xs mt-1 ${txt2}`}>{k.sub}</p></div><div className={`p-2.5 rounded-xl ${neutralIcon}`}>{k.icon}</div></div></Wrapper>;
@@ -3141,6 +3295,210 @@ const App = () => {
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-5"><div className={`p-5 rounded-2xl ${card}`}><h3 className={`text-base font-bold ${txt}`}>Top 5 Vendor PO Amount</h3><p className={`text-xs mb-4 ${txt2}`}>Total: {fmtCurShort(sumRows(d.top_vendors, 'purchase_amount'))}</p>{barList(d.top_vendors, 'vendor', 'purchase_amount', 'PO Amount', '#2563EB')}</div><div className={`p-5 rounded-2xl ${card}`}><h3 className={`text-base font-bold ${txt}`}>Top 5 Client Sales Amount</h3><p className={`text-xs mb-4 ${txt2}`}>Total: {fmtCurShort(sumRows(d.top_clients, 'sales_amount'))}</p>{barList(d.top_clients, 'client', 'sales_amount', 'Sales Amount', '#14B8A6')}</div></div>
         {renderPendingDeliverySummary()}
         {renderCompletedNegativeTables(d)}
+      </div>
+    );
+  };
+
+  const renderVendorControl = () => {
+    const totalPages = Math.max(1, Math.ceil(vendorControlTotal / vendorControlPerPage));
+    const applyVendorFilters = (vendors) => {
+      const unique = [...new Set((vendors || []).map(v => String(v || '').trim()).filter(Boolean))];
+      setVendorControlSelectedVendors(unique);
+      setVendorControlAppliedVendors(unique);
+      setVendorControlAppliedSearch('');
+      setVendorControlSearch('');
+      setVendorControlSuggestions([]);
+      setVendorControlSuggestOpen(false);
+      setVendorControlPage(1);
+      fetchVendorControl(1, vendorControlPerPage, '', false, unique);
+    };
+    const addVendorFilter = (vendor) => {
+      const value = String(vendor || '').trim();
+      if (!value) return;
+      applyVendorFilters([...vendorControlSelectedVendors, value]);
+    };
+    const removeVendorFilter = (vendor) => {
+      applyVendorFilters(vendorControlSelectedVendors.filter(v => v !== vendor));
+    };
+    const handleSearch = () => {
+      const q = vendorControlSearch.trim();
+      if (q) {
+        addVendorFilter(q);
+        return;
+      }
+      setVendorControlAppliedVendors(vendorControlSelectedVendors);
+      setVendorControlAppliedSearch('');
+      setVendorControlPage(1);
+      fetchVendorControl(1, vendorControlPerPage, '', false, vendorControlSelectedVendors);
+    };
+    const handleClear = () => {
+      setVendorControlSearch('');
+      setVendorControlAppliedSearch('');
+      setVendorControlSelectedVendors([]);
+      setVendorControlAppliedVendors([]);
+      setVendorControlSuggestions([]);
+      setVendorControlSuggestOpen(false);
+      setVendorControlPage(1);
+      fetchVendorControl(1, vendorControlPerPage, '', false, []);
+    };
+    const renderEditableVendorCell = (row, field, isPassword = false) => {
+      const editing = editingCell?.id === row.row_key && editingCell.field === `vendor_${field}`;
+      const visible = Boolean(vendorPasswordVisible[row.row_key]);
+      if (editing) {
+        return (
+          <input
+            type={isPassword && !visible ? 'password' : 'text'}
+            value={editValue || ''}
+            onChange={e => setEditValue(e.target.value)}
+            onBlur={() => updateVendorControlCell(row.row_key, field, editValue)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') updateVendorControlCell(row.row_key, field, editValue);
+              if (e.key === 'Escape') setEditingCell(null);
+            }}
+            className={`w-full h-9 px-2 rounded-lg border text-sm ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-blue-200 text-gray-900'}`}
+            autoFocus
+          />
+        );
+      }
+      const display = isPassword && !visible ? '********' : row[field];
+      return (
+        <div className="flex items-center gap-2 min-w-0">
+          <button
+            type="button"
+            onClick={() => { setEditingCell({ id: row.row_key, field: `vendor_${field}` }); setEditValue(row[field] || ''); }}
+            className="min-w-0 flex-1 text-left truncate text-blue-600 hover:underline font-semibold"
+            title={row[field] || ''}
+          >
+            {display || '-'}
+          </button>
+          {isPassword && (
+            <button
+              type="button"
+              onClick={() => setVendorPasswordVisible(prev => ({ ...prev, [row.row_key]: !prev[row.row_key] }))}
+              className={`flex-shrink-0 p-1.5 rounded-lg ${darkMode ? 'hover:bg-gray-700 text-gray-300' : 'hover:bg-slate-100 text-slate-500'}`}
+              title={visible ? 'Hide password' : 'Show password'}
+            >
+              {visible ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}
+            </button>
+          )}
+        </div>
+      );
+    };
+
+    return (
+      <div className={`${card} overflow-hidden`}>
+        <div className={`px-5 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+          <div>
+            <h2 className={`text-lg font-bold ${txt}`}>Vendor Control</h2>
+            <p className={`text-xs ${txt2}`}>Complete vendor login list from Google Sheet. Last update: {fmtDateTime(vendorControlLastUpdated)}</p>
+          </div>
+          <button
+            onClick={() => fetchVendorControl(vendorControlPage, vendorControlPerPage, vendorControlAppliedSearch, true, vendorControlAppliedVendors)}
+            className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-semibold ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}
+          >
+            <RotateCcw className="w-4 h-4"/>Refresh Sheet
+          </button>
+        </div>
+
+        <FilterPanel darkMode={darkMode}>
+          <div className="grid grid-cols-1 md:grid-cols-[minmax(260px,1fr)_110px_90px] gap-2 items-end">
+            <div className="min-w-0 relative">
+              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Vendor</label>
+              <input
+                value={vendorControlSearch}
+                autoComplete="off"
+                onChange={e => {
+                  const next = e.target.value;
+                  setVendorControlSearch(next);
+                  setVendorControlSuggestOpen(next.trim().length >= 2);
+                }}
+                onFocus={() => setVendorControlSuggestOpen(vendorControlSearch.trim().length >= 2 && vendorControlSuggestions.length > 0)}
+                onBlur={() => setTimeout(() => setVendorControlSuggestOpen(false), 120)}
+                onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); setVendorControlSuggestOpen(false); handleSearch(); } }}
+                placeholder="Type vendor name or ID, then select/add..."
+                className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode?'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400':'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}
+              />
+              {vendorControlSuggestOpen && vendorControlSuggestions.length > 0 && (
+                <div className={`absolute left-0 right-0 top-full mt-1 z-50 max-h-64 overflow-auto rounded-xl border shadow-xl ${darkMode ? 'bg-gray-800 border-gray-700 text-gray-100' : 'bg-white border-gray-200 text-gray-800'}`}>
+                  {vendorControlSuggestions.map(name => (
+                    <button
+                      key={name}
+                      type="button"
+                      onMouseDown={e => e.preventDefault()}
+                      onClick={() => {
+                        addVendorFilter(name);
+                      }}
+                      className={`block w-full px-3 py-2 text-left text-sm font-semibold ${darkMode ? 'hover:bg-gray-700' : 'hover:bg-blue-50'}`}
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <button onClick={handleSearch} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm flex items-center justify-center gap-2">
+              <Search className="w-4 h-4"/>{vendorControlSearch.trim() ? 'Add' : 'Search'}
+            </button>
+            <button onClick={handleClear} className={`w-full h-10 px-3 py-2 rounded-xl text-sm font-medium shadow-sm ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>
+              Clear
+            </button>
+          </div>
+          {vendorControlSelectedVendors.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {vendorControlSelectedVendors.map(vendor => (
+                <span key={vendor} className={`inline-flex max-w-full items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold ${darkMode ? 'bg-blue-900/40 text-blue-100 border border-blue-800' : 'bg-blue-50 text-blue-700 border border-blue-200'}`}>
+                  <span className="max-w-[260px] truncate" title={vendor}>{vendor}</span>
+                  <button type="button" onClick={() => removeVendorFilter(vendor)} className={`rounded-full p-0.5 ${darkMode ? 'hover:bg-blue-800' : 'hover:bg-blue-100'}`} title="Remove vendor filter">
+                    <X className="w-3.5 h-3.5"/>
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+        </FilterPanel>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm min-w-[860px]">
+            <thead className={tblHd}>
+              <tr>
+                {['Vendor Name', 'Vendor ID', 'Password', 'Action'].map(label => (
+                  <th key={label} className={`px-3 py-3 text-center font-bold ${txt2}`}>{label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className={`divide-y ${tblDv}`}>
+              {vendorControlData.length === 0 ? (
+                <tr><td colSpan={4} className={`px-4 py-12 text-center ${txt2}`}><Building2 className="w-10 h-10 mx-auto mb-2 opacity-40"/>No complete vendor login data</td></tr>
+              ) : vendorControlData.map(row => (
+                <tr key={row.row_key} className={trHov}>
+                  <td className={`px-3 py-3 font-semibold ${txt}`}>{row.vendor_name}</td>
+                  <td className="px-3 py-3 min-w-[180px]">{renderEditableVendorCell(row, 'vendor_id')}</td>
+                  <td className="px-3 py-3 min-w-[220px]">{renderEditableVendorCell(row, 'password', true)}</td>
+                  <td className="px-3 py-3 text-center">
+                    <button
+                      type="button"
+                      onClick={() => openVendorLogin(row)}
+                      className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-bold shadow-sm"
+                    >
+                      <LinkIcon className="w-4 h-4"/>Login
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <PagePagination
+          darkMode={darkMode}
+          txt2={txt2}
+          page={vendorControlPage}
+          totalPages={totalPages}
+          total={vendorControlTotal}
+          perPage={vendorControlPerPage}
+          onPageChange={(p) => { setVendorControlPage(p); fetchVendorControl(p, vendorControlPerPage, vendorControlAppliedSearch, false, vendorControlAppliedVendors); }}
+          onPerPageChange={(next) => { setVendorControlPerPage(next); setVendorControlPage(1); fetchVendorControl(1, next, vendorControlAppliedSearch, false, vendorControlAppliedVendors); }}
+        />
       </div>
     );
   };
@@ -3368,6 +3726,17 @@ const App = () => {
       }
       const display = value === 0 || value ? value : '-';
       return <span className={extraClass} title={String(value || '')}>{display}</span>;
+    };
+    const splitSimilarValues = (value, allowComma = false) => String(value || '')
+      .split(allowComma ? /\r?\n|,\s*/ : /\r?\n/)
+      .map(v => v.trim())
+      .filter(Boolean);
+    const renderSimilarLines = (value, className = '') => {
+      const lines = splitSimilarValues(value);
+      if (!lines.length) return <span>-</span>;
+      return <div className="flex flex-col gap-1">{lines.map((line, index) => (
+        <div key={`${line}-${index}`} className={`min-h-[22px] min-w-0 truncate ${className}`} title={line}>{line}</div>
+      ))}</div>;
     };
     const toDateInputValue = (value) => {
       const raw = String(value || '').trim();
@@ -3726,18 +4095,24 @@ const App = () => {
                       </td>;
                     }
                     if (field === 'similar_prod_ids') {
-                      const ids = String(value || '').split(',').map(v => v.trim()).filter(Boolean);
+                      const ids = splitSimilarValues(value, true);
                       const noSimilar = ids.length === 1 && ids[0].toLowerCase() === 'no similar item';
                       return <td key={field} className={`px-2 py-1 align-top border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'} ${txt2}`} title={String(value || '')}>
                         {ids.length ? (
                           <div className="flex flex-col gap-1">
                             {ids.map(id => (
                               <div key={id} className="flex items-center gap-1 min-w-0">
-                                <span className={`min-w-0 flex-1 truncate ${noSimilar ? 'font-semibold text-slate-500' : 'font-mono text-blue-600'}`}>{id}</span>
-                                {!row.product_id && !noSimilar && (
+                                <button
+                                  type="button"
+                                  disabled={noSimilar}
+                                  onClick={() => !noSimilar && setRfqSimilarAction(prev => (prev?.rowKey === row.row_key && prev?.productId === id ? null : { rowKey: row.row_key, productId: id }))}
+                                  className={`min-h-[22px] min-w-0 flex-1 truncate text-left ${noSimilar ? 'font-semibold text-slate-500 cursor-default' : 'font-mono text-blue-600 hover:underline'}`}
+                                  title={id}
+                                >{id}</button>
+                                {!row.product_id && !noSimilar && rfqSimilarAction?.rowKey === row.row_key && rfqSimilarAction?.productId === id && (
                                   <button
                                     type="button"
-                                    onClick={() => updateRFQCell(row.row_key, 'product_id', id)}
+                                    onClick={() => { setRfqSimilarAction(null); updateRFQCell(row.row_key, 'product_id', id); }}
                                     className={`flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold ${darkMode ? 'bg-blue-900/50 text-blue-200 hover:bg-blue-800' : 'bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200'}`}
                                   >
                                     Use this ID
@@ -3749,10 +4124,16 @@ const App = () => {
                         ) : <span>-</span>}
                       </td>;
                     }
+                    if (['similar_prod_name', 'similar_spec', 'similar_mfr_name', 'similar_odr_unit'].includes(field)) {
+                      return <td key={field} className={`px-2 py-1 align-top border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'} ${txt2}`} title={String(value || '')}>
+                        {renderSimilarLines(value)}
+                      </td>;
+                    }
                     if (field === 'similar_score') {
-                      const score = value === 0 || value ? String(value).trim() : '';
-                      const displayScore = score ? `${score.replace(/%$/, '')}%` : '-';
-                      return <td key={field} className={`px-2 py-2 align-top text-right font-semibold border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'} ${txt2}`}>{displayScore}</td>;
+                      const scores = splitSimilarValues(value, true).map(score => score ? `${String(score).replace(/%$/, '')}%` : '-');
+                      return <td key={field} className={`px-2 py-1 align-top text-right font-semibold border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'} ${txt2}`} title={String(value || '')}>
+                        {scores.length ? <div className="flex flex-col gap-1">{scores.map((score, index) => <div key={`${score}-${index}`} className="min-h-[22px]">{score}</div>)}</div> : '-'}
+                      </td>;
                     }
                     if (field === 'purchase_pic') {
                       const c = getPicColor(value);
@@ -4479,7 +4860,7 @@ const App = () => {
         <div className="overflow-x-auto rounded-lg border border-gray-200">
           <table className="freeze-table-pending-delivery w-full text-sm">
             <colgroup>
-              <col style={{minWidth:'110px'}}/>
+              <col style={{minWidth:'76px', width:'76px', maxWidth:'76px'}}/>
               <col style={{minWidth:'60px'}}/>
               <col style={{minWidth:'110px'}}/>
               <col style={{minWidth:'100px'}}/>
@@ -4530,7 +4911,7 @@ const App = () => {
                 const marginColor = margin < 0 ? 'text-red-600 font-semibold' : margin > 0 ? 'text-green-600 font-semibold' : txt2;
                 return (
                 <tr key={so.id} className={`${trHov} transition-colors`}>
-                  <td className="px-3 py-2 whitespace-nowrap">
+                  <td className="px-2 py-2 text-center whitespace-nowrap">
                     {!isDeliveryCompleted && so.aging_label && so.aging_label !== 'No Date' ? (
                       <span className="px-2 py-0.5 rounded-full text-xs font-bold text-white"
                         style={{backgroundColor: AGING_COLORS[so.aging_label] || '#6B7280'}}>
@@ -4894,10 +5275,15 @@ const App = () => {
             <Wrench className="w-5 h-5 flex-shrink-0"/>
             <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-44 opacity-100':'max-w-0 opacity-0'}`}>Item Registration</span>
           </button>
-          <button onClick={()=>{ setActivePage('rfq'); setRfqPage(1); fetchRFQData(1,rfqPerPage,rfqAppliedSearch,false,rfqFilters,rfqPicFilter); window.scrollTo({top:0,behavior:'smooth'}); }}
+          <button onClick={()=>{ setActivePage('rfq'); setRfqPage(1); window.scrollTo({top:0,behavior:'smooth'}); }}
             className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='rfq'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="RFQ">
             <Mail className="w-5 h-5 flex-shrink-0"/>
             <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-44 opacity-100':'max-w-0 opacity-0'}`}>RFQ</span>
+          </button>
+          <button onClick={()=>{ setActivePage('vendor-control'); setVendorControlPage(1); window.scrollTo({top:0,behavior:'smooth'}); }}
+            className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='vendor-control'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="Vendor Control">
+            <Building2 className="w-5 h-5 flex-shrink-0"/>
+            <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-44 opacity-100':'max-w-0 opacity-0'}`}>Vendor Control</span>
           </button>
           <button onClick={()=>{ setActivePage('all-registered-items'); setRegisteredItemsPage(1); fetchRegisteredItems(1,registeredItemsPerPage,registeredItemsAppliedSearch,registeredItemsAppliedProdIds); window.scrollTo({top:0,behavior:'smooth'}); }}
             className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='all-registered-items'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="All Registered Items">
@@ -4926,6 +5312,7 @@ const App = () => {
                :activePage==='all-so'?'Pending Delivery monitoring and detail records'
                :activePage==='item-registration'?'Process Purchase Info Registration data'
                :activePage==='rfq'?'Sales Submit-RFQ live data and quotation updates'
+               :activePage==='vendor-control'?'Vendor account access and credential control'
                :activePage==='all-registered-items'?'All registered product master data'
                :'Manage Pending Delivery records'}
             </p>
@@ -5057,12 +5444,13 @@ const App = () => {
         {activePage==='dashboard' ? renderDashboardOverview()
           : activePage==='item-registration' ? renderItemRegistration()
           : activePage==='rfq' ? renderRFQ()
+          : activePage==='vendor-control' ? renderVendorControl()
           : activePage==='all-registered-items' ? renderAllRegisteredItems()
           : renderAllSO()}
         </div>
       </main>
 
-      {modal && <SOModal title={modal.title} data={modal.data} darkMode={darkMode} onClose={()=>setModal(null)}/>}
+      {modal && <SOModal title={modal.title} data={modal.data} darkMode={darkMode} onClose={()=>setModal(null)} onUpdateCell={updateSOCell}/>} 
 
       {showAboutModal && (
         <div className="fixed inset-0 bg-[#edf2f1]/85 z-[70] flex items-center justify-center p-4 backdrop-blur-md" onClick={()=>setShowAboutModal(false)}>
