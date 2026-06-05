@@ -5,6 +5,7 @@ import pandas as pd
 import re
 import os
 import json
+import html
 from datetime import datetime, date, timedelta
 import io
 from sqlalchemy import func, text
@@ -939,6 +940,11 @@ def clean_product_id(val):
 RFQ_SHEET_ID = '1JrdsYWhv1mzeXB-jbukDxDYxBgaeISzpiVKEKdgfQvw'
 RFQ_SHEET_NAME = 'Sales Submit-RFQ'
 RFQ_CACHE = {'expires_at': None, 'rows': [], 'fetched_at': None}
+RFQ_CACHE_TTL_SECONDS = 300
+VENDOR_CONTROL_SHEET_ID = '1N0Jr_h5InHH1X2TyLxRf2SMXgDzAXIJnhswzMv5Wf4E'
+VENDOR_CONTROL_SHEET_GID = 723367207
+VENDOR_CONTROL_CACHE = {'expires_at': None, 'rows': [], 'fetched_at': None, 'sheet_name': None, 'columns': {}}
+VENDOR_CONTROL_CACHE_TTL_SECONDS = 300
 RFQ_TEMPLATE_COLUMNS = [
     ('check', 'Check'),
     ('sheet_status', 'Status'),
@@ -1196,12 +1202,15 @@ def fetch_rfq_rows(force=False):
     RFQ_CACHE.update({
         'rows': rows,
         'fetched_at': fetched_at,
-        'expires_at': fetched_at + timedelta(seconds=60),
+        'expires_at': fetched_at + timedelta(seconds=RFQ_CACHE_TTL_SECONDS),
     })
     return rows, fetched_at
 
-def rfq_rows_with_edits(force=False):
-    rows, fetched_at = fetch_rfq_rows(force=force)
+def rfq_rows_with_edits(force=False, prefer_stale_cache=False):
+    if prefer_stale_cache and not force and RFQ_CACHE.get('rows'):
+        rows, fetched_at = RFQ_CACHE['rows'], RFQ_CACHE['fetched_at']
+    else:
+        rows, fetched_at = fetch_rfq_rows(force=force)
     edits = RFQCellEdit.query.all()
     edit_map = {}
     for edit in edits:
@@ -1217,44 +1226,43 @@ def rfq_rows_with_edits(force=False):
     return merged, fetched_at
 
 def _candidate_registered_items_for_rfq_similarity(row, limit=1200):
-    unit = (clean(row.get('unit')) or '').lower()
-    mfr_token = _similarity_token(row.get('brand_manufacturer'))
     name_token = _similarity_token(row.get('item_name'))
+    spec_token = _similarity_token(row.get('detail_spec'))
+
+    if not clean(row.get('unit')) or not clean(row.get('item_name')) or not clean(row.get('detail_spec')):
+        return []
 
     q = ProductIDDB.query.filter(
         ProductIDDB.product_id.isnot(None),
         ProductIDDB.product_id != '',
         db.or_(ProductIDDB.product_status.is_(None), ProductIDDB.product_status == '', func.lower(ProductIDDB.product_status) == 'use')
     )
-    if unit:
-        q = q.filter(func.lower(ProductIDDB.order_unit) == unit)
     token_filters = []
-    if mfr_token:
-        token_filters.append(ProductIDDB.manufacturer_name.ilike(f'%{mfr_token}%'))
     if name_token:
         token_filters.append(ProductIDDB.product_name.ilike(f'%{name_token}%'))
+    if spec_token:
+        token_filters.append(ProductIDDB.specification.ilike(f'%{spec_token}%'))
     if token_filters:
         q = q.filter(db.or_(*token_filters))
-    elif not unit:
-        return []
     return q.limit(limit).all()
 
 def find_similar_rfq_registered_items(row):
     try:
+        if (clean(row.get('check')) or '').lower() != 'open':
+            return None
         if clean_product_id(row.get('product_id')):
             return None
-        key_fields = [row.get('item_name'), row.get('detail_spec'), row.get('brand_manufacturer'), row.get('unit')]
-        if not any(clean(v) for v in key_fields):
+        key_fields = [row.get('item_name'), row.get('detail_spec'), row.get('unit')]
+        if not all(clean(v) for v in key_fields):
             return None
 
         current_prod_id = clean_product_id(row.get('product_id'))
         cache_key = '|'.join([
-            'rfq_similar_v3',
+            'rfq_similar_v5',
             clean(row.get('row_key')) or '',
             current_prod_id,
             (clean(row.get('item_name')) or '').lower(),
             (clean(row.get('detail_spec')) or '').lower(),
-            (clean(row.get('brand_manufacturer')) or '').lower(),
             (clean(row.get('unit')) or '').lower(),
         ])
         if cache_key in _SIMILARITY_CACHE:
@@ -1265,23 +1273,13 @@ def find_similar_rfq_registered_items(row):
             reg_prod_id = clean_product_id(reg.product_id)
             if not reg_prod_id or (current_prod_id and reg_prod_id == current_prod_id):
                 continue
-            has_descriptive_pair = any(
-                clean(left) and clean(right)
-                for left, right in [
-                    (row.get('item_name'), reg.product_name),
-                    (row.get('detail_spec'), reg.specification),
-                    (row.get('brand_manufacturer'), reg.manufacturer_name),
-                ]
-            )
-            if not has_descriptive_pair:
+            if not (clean(reg.product_name) and clean(reg.specification) and clean(reg.order_unit)):
                 continue
-            total_sim = _similarity_score([
-                (row.get('item_name'), reg.product_name),
-                (row.get('detail_spec'), reg.specification),
-                (row.get('brand_manufacturer'), reg.manufacturer_name),
-                (row.get('unit'), reg.order_unit),
-            ])
-            if total_sim >= 70.0:
+            item_score = calculate_similarity(row.get('item_name'), reg.product_name)
+            spec_score = calculate_similarity(row.get('detail_spec'), reg.specification)
+            unit_score = calculate_similarity(row.get('unit'), reg.order_unit)
+            if item_score >= 70.0 and spec_score >= 70.0 and unit_score >= 70.0:
+                total_sim = (item_score + spec_score + unit_score) / 3
                 similar_items.append({
                     'product_id': reg_prod_id,
                     'product_name': reg.product_name or '',
@@ -1295,14 +1293,13 @@ def find_similar_rfq_registered_items(row):
         if not similar_items:
             result = None
         else:
-            best = similar_items[0]
             result = {
-                'product_ids': ', '.join(x['product_id'] for x in similar_items),
-                'product_name': best['product_name'],
-                'specification': best['specification'],
-                'manufacturer_name': best['manufacturer_name'],
-                'order_unit': best['order_unit'],
-                'similarity': best['similarity'],
+                'product_ids': '\n'.join(x['product_id'] for x in similar_items),
+                'product_name': '\n'.join(x['product_name'] or '-' for x in similar_items),
+                'specification': '\n'.join(x['specification'] or '-' for x in similar_items),
+                'manufacturer_name': '\n'.join(x['manufacturer_name'] or '-' for x in similar_items),
+                'order_unit': '\n'.join(x['order_unit'] or '-' for x in similar_items),
+                'similarity': '\n'.join(f"{x['similarity']:.0f}%" for x in similar_items),
                 'count': len(similar_items),
             }
         _SIMILARITY_CACHE[cache_key] = result
@@ -1312,6 +1309,14 @@ def find_similar_rfq_registered_items(row):
         return None
 
 def apply_rfq_similarity(row):
+    if (clean(row.get('check')) or '').lower() != 'open':
+        row['similar_prod_ids'] = ''
+        row['similar_prod_name'] = ''
+        row['similar_spec'] = ''
+        row['similar_mfr_name'] = ''
+        row['similar_odr_unit'] = ''
+        row['similar_score'] = None
+        return row
     similar = find_similar_rfq_registered_items(row)
     row['similar_prod_ids'] = (similar or {}).get('product_ids', '') if clean_product_id(row.get('product_id')) else (similar or {}).get('product_ids', 'No Similar Item')
     row['similar_prod_name'] = (similar or {}).get('product_name', '')
@@ -1403,6 +1408,145 @@ def sync_rfq_cells_to_google_sheet(updates):
     ).execute()
     RFQ_CACHE['expires_at'] = None
     return {'synced': True, 'ranges': len(ranges)}
+
+def google_sheets_service():
+    credentials_info = rfq_sheet_sync_credentials()
+    if not credentials_info:
+        raise RuntimeError('Google service account credential is not configured')
+    try:
+        from google.oauth2.service_account import Credentials
+        from googleapiclient.discovery import build
+    except ImportError as e:
+        raise RuntimeError('google-api-python-client/google-auth is not installed') from e
+    scopes = ['https://www.googleapis.com/auth/spreadsheets']
+    creds = Credentials.from_service_account_info(credentials_info, scopes=scopes)
+    return build('sheets', 'v4', credentials=creds, cache_discovery=False)
+
+def column_letter_from_index(index):
+    result = ''
+    while index > 0:
+        index, rem = divmod(index - 1, 26)
+        result = chr(65 + rem) + result
+    return result
+
+def vendor_control_sheet_name(service):
+    if VENDOR_CONTROL_CACHE.get('sheet_name'):
+        return VENDOR_CONTROL_CACHE['sheet_name']
+    meta = service.spreadsheets().get(spreadsheetId=VENDOR_CONTROL_SHEET_ID).execute()
+    for sheet in meta.get('sheets', []):
+        props = sheet.get('properties', {})
+        if props.get('sheetId') == VENDOR_CONTROL_SHEET_GID:
+            VENDOR_CONTROL_CACHE['sheet_name'] = props.get('title')
+            return VENDOR_CONTROL_CACHE['sheet_name']
+    sheets = meta.get('sheets', [])
+    if sheets:
+        VENDOR_CONTROL_CACHE['sheet_name'] = sheets[0].get('properties', {}).get('title')
+        return VENDOR_CONTROL_CACHE['sheet_name']
+    raise RuntimeError('Vendor Control sheet not found')
+
+def normalized_header(value):
+    return re.sub(r'[^a-z0-9]+', '', str(value or '').lower())
+
+def find_vendor_control_columns(headers):
+    normalized = {}
+    for idx, header in enumerate(headers or []):
+        key = normalized_header(header)
+        if key and key not in normalized:
+            normalized[key] = idx + 1
+    def pick(names):
+        for name in names:
+            idx = normalized.get(normalized_header(name))
+            if idx:
+                return idx
+        return None
+    return {
+        'vendor_name': pick(['Vendor Name', 'Vendor Nm', 'Vendor', 'Supplier Name', 'Supplier']),
+        'vendor_id': pick(['Vendor ID', 'Vendor Id', 'VendorID', 'ID', 'User ID']),
+        'password': pick(['Password', 'Pass', 'PWD', 'Pwd']),
+    }
+
+def vendor_control_rows(force=False):
+    now = datetime.utcnow()
+    if (not force and VENDOR_CONTROL_CACHE.get('expires_at') and
+            VENDOR_CONTROL_CACHE['expires_at'] > now and VENDOR_CONTROL_CACHE.get('rows')):
+        return VENDOR_CONTROL_CACHE['rows'], VENDOR_CONTROL_CACHE.get('fetched_at')
+
+    service = google_sheets_service()
+    sheet_name = vendor_control_sheet_name(service)
+    result = service.spreadsheets().values().get(
+        spreadsheetId=VENDOR_CONTROL_SHEET_ID,
+        range=f"'{sheet_name}'!A:Z",
+        valueRenderOption='UNFORMATTED_VALUE'
+    ).execute()
+    values = result.get('values', [])
+    if not values:
+        rows = []
+        fetched_at = datetime.utcnow()
+        VENDOR_CONTROL_CACHE.update({'rows': rows, 'fetched_at': fetched_at, 'expires_at': fetched_at + timedelta(seconds=VENDOR_CONTROL_CACHE_TTL_SECONDS), 'columns': {}})
+        return rows, fetched_at
+
+    header_index = 0
+    columns = {}
+    for idx, candidate_headers in enumerate(values[:20]):
+        candidate_columns = find_vendor_control_columns(candidate_headers)
+        if all(candidate_columns.get(name) for name in ('vendor_name', 'vendor_id', 'password')):
+            header_index = idx
+            columns = candidate_columns
+            break
+    missing = [name for name in ('vendor_name', 'vendor_id', 'password') if not columns.get(name)]
+    if missing:
+        raise RuntimeError(f"Vendor Control sheet missing required columns: {', '.join(missing)}")
+
+    def cell(row, col_index):
+        idx = col_index - 1
+        return clean(row[idx]) if idx < len(row) else ''
+
+    rows = []
+    for sheet_row, raw in enumerate(values[header_index + 1:], start=header_index + 2):
+        vendor_name = cell(raw, columns['vendor_name'])
+        vendor_id = cell(raw, columns['vendor_id'])
+        password = cell(raw, columns['password'])
+        if not (vendor_name and vendor_id and password):
+            continue
+        if re.fullmatch(r'\d+(?:\.0+)?', str(vendor_name).strip()):
+            continue
+        rows.append({
+            'row_key': str(sheet_row),
+            'sheet_row': sheet_row,
+            'vendor_name': vendor_name,
+            'vendor_id': vendor_id,
+            'password': password,
+        })
+    fetched_at = datetime.utcnow()
+    VENDOR_CONTROL_CACHE.update({
+        'rows': rows,
+        'fetched_at': fetched_at,
+        'expires_at': fetched_at + timedelta(seconds=VENDOR_CONTROL_CACHE_TTL_SECONDS),
+        'columns': columns,
+    })
+    return rows, fetched_at
+
+def sync_vendor_control_cell(sheet_row, field, value):
+    if field not in ('vendor_id', 'password'):
+        return {'synced': False, 'reason': 'Field is not editable'}
+    service = google_sheets_service()
+    sheet_name = vendor_control_sheet_name(service)
+    columns = VENDOR_CONTROL_CACHE.get('columns') or {}
+    if not columns.get(field):
+        vendor_control_rows(force=True)
+        columns = VENDOR_CONTROL_CACHE.get('columns') or {}
+    column_index = columns.get(field)
+    if not column_index:
+        return {'synced': False, 'reason': f'Sheet column for {field} was not found'}
+    range_name = f"'{sheet_name}'!{column_letter_from_index(column_index)}{sheet_row}"
+    service.spreadsheets().values().update(
+        spreadsheetId=VENDOR_CONTROL_SHEET_ID,
+        range=range_name,
+        valueInputOption='USER_ENTERED',
+        body={'values': [[value or '']]}
+    ).execute()
+    VENDOR_CONTROL_CACHE['expires_at'] = None
+    return {'synced': True, 'range': range_name}
 
 def parse_date(val):
     if val is None: return None
@@ -3467,6 +3611,25 @@ def update_so(so_id):
         db.session.rollback(); return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/data/so/by-item/<path:so_item>', methods=['PUT'])
+def update_so_by_item(so_item):
+    """Update editable SO fields when a detail response only has SO Item."""
+    try:
+        data = request.json or {}
+        so = SOData.query.filter_by(so_item=so_item).first()
+        if not so:
+            return jsonify({'error': 'Not found'}), 404
+        if 'delivery_plan_date' in data:
+            so.delivery_plan_date = parse_date(data['delivery_plan_date'])
+        if 'remarks' in data:
+            so.remarks = data['remarks']
+        db.session.commit()
+        return jsonify({'success': True, 'id': so.id, 'so_item': so.so_item})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/data/po/<int:po_id>', methods=['PUT'])
 def update_po(po_id):
     try:
@@ -4396,6 +4559,7 @@ def completed_margin_detail():
             elif category == 'zero' and (m is None or m != 0):
                 continue
             result.append({
+                'id': s.id,
                 'so_item': s.so_item,
                 'so_number': s.so_number,
                 'product': s.product_name or '-',
@@ -5195,6 +5359,109 @@ def master_pic_status():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/vendor-control/data', methods=['GET'])
+def get_vendor_control_data():
+    try:
+        page = max(int(request.args.get('page', 1)), 1)
+        per_page = min(max(int(request.args.get('per_page', 10)), 1), 500)
+        search = (clean(request.args.get('search')) or '').lower()
+        vendors = [clean(v) for v in request.args.getlist('vendor') if clean(v)]
+        force = str(request.args.get('refresh', '')).lower() in ('1', 'true', 'yes')
+        rows, fetched_at = vendor_control_rows(force=force)
+        if vendors:
+            vendor_needles = [v.lower() for v in vendors]
+            rows = [row for row in rows if any(
+                needle == str(row.get('vendor_name') or '').lower()
+                or needle == str(row.get('vendor_id') or '').lower()
+                or needle in str(row.get('vendor_name') or '').lower()
+                or needle in str(row.get('vendor_id') or '').lower()
+                for needle in vendor_needles
+            )]
+        if search:
+            rows = [row for row in rows if search in str(row.get('vendor_name') or '').lower() or search in str(row.get('vendor_id') or '').lower()]
+        rows = sorted(rows, key=lambda row: (str(row.get('vendor_name') or '').lower(), str(row.get('vendor_id') or '').lower()))
+        total = len(rows)
+        start = (page - 1) * per_page
+        return jsonify({
+            'data': rows[start:start + per_page],
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'suggestions': [row.get('vendor_name') for row in rows[:20] if row.get('vendor_name')],
+            'last_updated': utc_isoformat(fetched_at),
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vendor-control/<path:row_key>', methods=['PUT'])
+def update_vendor_control(row_key):
+    try:
+        data = request.json or {}
+        field = clean(data.get('field')) or ''
+        value = clean(data.get('value')) or ''
+        if field not in ('vendor_id', 'password'):
+            return jsonify({'error': 'Only Vendor ID and Password can be edited'}), 400
+        try:
+            sheet_row = int(str(row_key).strip())
+        except ValueError:
+            return jsonify({'error': 'Invalid vendor row key'}), 400
+        sync = sync_vendor_control_cell(sheet_row, field, value)
+        if sync.get('synced'):
+            for row in VENDOR_CONTROL_CACHE.get('rows') or []:
+                if str(row.get('row_key')) == str(row_key):
+                    row[field] = value
+        return jsonify({'success': True, 'sheet_sync': sync})
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vendor-control/login/<path:row_key>', methods=['GET'])
+def vendor_control_login(row_key):
+    try:
+        rows, _ = vendor_control_rows(force=False)
+        row = next((item for item in rows if str(item.get('row_key')) == str(row_key)), None)
+        if not row:
+            return '<h3>Vendor credential was not found or incomplete.</h3>', 404
+        vendor_id = row.get('vendor_id') or ''
+        password = row.get('password') or ''
+        action = 'https://mall.serveone.id/vendor/cmm/doLogin.dev?signData=noSign'
+        if vendor_id.upper().startswith('FW'):
+            action = 'https://mall.serveone.id/vendor/fwdr/fwdr/doChkFirstLogin.dev?mallType=FORWARDER'
+        vendor_name = row.get('vendor_name') or vendor_id
+        return f'''<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vendor Login - {html.escape(str(vendor_name))}</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; background: #f8fafc; color: #0f172a; display: grid; min-height: 100vh; place-items: center; margin: 0; }}
+    .box {{ background: white; border: 1px solid #e2e8f0; border-radius: 14px; padding: 24px; width: min(420px, calc(100vw - 32px)); box-shadow: 0 20px 50px rgba(15,23,42,.12); }}
+    h1 {{ font-size: 18px; margin: 0 0 6px; }}
+    p {{ color: #475569; font-size: 13px; line-height: 1.5; margin: 0 0 18px; }}
+    button {{ width: 100%; border: 0; border-radius: 10px; background: #2563eb; color: white; font-weight: 700; padding: 12px; cursor: pointer; }}
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>Logging in to {html.escape(str(vendor_name))}</h1>
+    <p>This tab will submit the vendor login form automatically. If it does not continue, click the button below.</p>
+    <form id="vendorLoginForm" method="post" action="{html.escape(action)}">
+      <input type="hidden" name="cprtcpUsrId" value="{html.escape(str(vendor_id))}">
+      <input type="hidden" name="cprtcpSectNo" value="{html.escape(str(password))}">
+      <input type="hidden" name="agreType" value="">
+      <input type="hidden" name="signData" value="noSign">
+      <button type="submit">Log-In</button>
+    </form>
+  </div>
+  <script>setTimeout(function(){{ document.getElementById('vendorLoginForm').submit(); }}, 250);</script>
+</body>
+</html>'''
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return f'<h3>Vendor login failed to prepare.</h3><p>{html.escape(str(e))}</p>', 500
+
 @app.route('/api/rfq/data', methods=['GET'])
 def get_rfq_data():
     try:
@@ -5436,7 +5703,7 @@ def update_rfq_cells_batch():
         if len(updates) > 1000:
             return jsonify({'error': 'Maximum 1000 cells can be updated at once'}), 400
 
-        base_rows, _ = rfq_rows_with_edits(force=False)
+        base_rows, _ = rfq_rows_with_edits(force=False, prefer_stale_cache=True)
         row_map = {row.get('row_key'): row for row in base_rows}
         sheet_updates = []
         updated = 0
@@ -5483,7 +5750,7 @@ def update_rfq_cell(row_key):
         value = payload.get('value')
         if field not in RFQ_EDITABLE_FIELDS and field not in RFQ_DIRECT_UPDATE_FIELDS:
             return jsonify({'error': 'Field is not editable'}), 400
-        base_rows, _ = rfq_rows_with_edits(force=False)
+        base_rows, _ = rfq_rows_with_edits(force=False, prefer_stale_cache=True)
         base_row = next((row for row in base_rows if row.get('row_key') == row_key), None)
         if not base_row:
             return jsonify({'error': 'RFQ row not found'}), 404
