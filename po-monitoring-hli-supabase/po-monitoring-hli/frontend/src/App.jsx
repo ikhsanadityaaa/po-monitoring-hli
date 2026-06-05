@@ -2642,7 +2642,6 @@ const App = () => {
         </div>
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-5"><div className={`p-5 rounded-2xl ${card}`}><h3 className={`text-base font-bold ${txt}`}>Top 5 Vendor PO Amount</h3><p className={`text-xs mb-4 ${txt2}`}>Total: {fmtCurShort(sumRows(d.top_vendors, 'purchase_amount'))}</p>{barList(d.top_vendors, 'vendor', 'purchase_amount', 'PO Amount', '#2563EB')}</div><div className={`p-5 rounded-2xl ${card}`}><h3 className={`text-base font-bold ${txt}`}>Top 5 Client Sales Amount</h3><p className={`text-xs mb-4 ${txt2}`}>Total: {fmtCurShort(sumRows(d.top_clients, 'sales_amount'))}</p>{barList(d.top_clients, 'client', 'sales_amount', 'Sales Amount', '#14B8A6')}</div></div>
         {renderPendingDeliverySummary()}
-        {renderCompletedNegativeTables(d)}
       </div>
     );
   };
