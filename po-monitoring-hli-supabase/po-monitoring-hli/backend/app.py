@@ -1470,6 +1470,86 @@ def rfq_sheet_sync_credentials():
             return json.load(f)
     return None
 
+GOOGLE_SHEETS_SCOPE = ['https://www.googleapis.com/auth/spreadsheets']
+
+def google_sheets_access_token():
+    credentials_info = rfq_sheet_sync_credentials()
+    if not credentials_info:
+        raise RuntimeError('Google service account credential is not configured')
+    try:
+        from google.oauth2.service_account import Credentials
+        from google.auth.transport.requests import Request
+    except ImportError as e:
+        raise RuntimeError('google-auth and requests are required for Google Sheets access') from e
+    creds = Credentials.from_service_account_info(credentials_info, scopes=GOOGLE_SHEETS_SCOPE)
+    creds.refresh(Request())
+    return creds.token
+
+def google_sheets_request(method, spreadsheet_id, path, params=None, body=None):
+    try:
+        import requests
+        from urllib.parse import quote
+    except ImportError as e:
+        raise RuntimeError('requests is required for Google Sheets access') from e
+    token = google_sheets_access_token()
+    encoded_path = '/'.join(quote(str(part), safe='') for part in path)
+    url = f'https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/{encoded_path}'
+    headers = {'Authorization': f'Bearer {token}'}
+    if body is not None:
+        headers['Content-Type'] = 'application/json'
+    proxies = {}
+    if os.environ.get('HTTPS_PROXY'):
+        proxies['https'] = os.environ.get('HTTPS_PROXY')
+    if os.environ.get('HTTP_PROXY'):
+        proxies['http'] = os.environ.get('HTTP_PROXY')
+    kwargs = {'headers': headers, 'params': params or {}, 'timeout': 60}
+    if body is not None:
+        kwargs['json'] = body
+    if proxies:
+        kwargs['proxies'] = proxies
+    response = requests.request(method, url, **kwargs)
+    if not response.ok:
+        detail = response.text[:500]
+        raise RuntimeError(f'Google Sheets API {method} {path} failed: {response.status_code} {detail}')
+    return response.json() if response.text else {}
+
+def google_sheets_metadata(spreadsheet_id):
+    try:
+        import requests
+    except ImportError as e:
+        raise RuntimeError('requests is required for Google Sheets access') from e
+    token = google_sheets_access_token()
+    url = f'https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}'
+    headers = {'Authorization': f'Bearer {token}'}
+    proxies = {}
+    if os.environ.get('HTTPS_PROXY'):
+        proxies['https'] = os.environ.get('HTTPS_PROXY')
+    if os.environ.get('HTTP_PROXY'):
+        proxies['http'] = os.environ.get('HTTP_PROXY')
+    kwargs = {'headers': headers, 'timeout': 60}
+    if proxies:
+        kwargs['proxies'] = proxies
+    response = requests.get(url, **kwargs)
+    if not response.ok:
+        raise RuntimeError(f'Google Sheets metadata failed: {response.status_code} {response.text[:500]}')
+    return response.json()
+
+def google_sheets_values_get(spreadsheet_id, range_name, value_render_option='UNFORMATTED_VALUE'):
+    return google_sheets_request('GET', spreadsheet_id, ['values', range_name], params={'valueRenderOption': value_render_option})
+
+def google_sheets_values_update(spreadsheet_id, range_name, values):
+    return google_sheets_request(
+        'PUT', spreadsheet_id, ['values', range_name],
+        params={'valueInputOption': 'USER_ENTERED'},
+        body={'values': values}
+    )
+
+def google_sheets_values_batch_update(spreadsheet_id, ranges):
+    return google_sheets_request(
+        'POST', spreadsheet_id, ['values:batchUpdate'],
+        body={'valueInputOption': 'USER_ENTERED', 'data': ranges}
+    )
+
 def sync_rfq_cell_to_google_sheet(row, field, value):
     column = RFQ_SHEET_COLUMN_BY_FIELD.get(field)
     if not column:
@@ -1478,26 +1558,8 @@ def sync_rfq_cell_to_google_sheet(row, field, value):
     if not sheet_row:
         return {'synced': False, 'reason': 'RFQ sheet row is missing'}
 
-    credentials_info = rfq_sheet_sync_credentials()
-    if not credentials_info:
-        return {'synced': False, 'reason': 'Google service account credential is not configured'}
-
-    try:
-        from google.oauth2.service_account import Credentials
-        from googleapiclient.discovery import build
-    except ImportError:
-        return {'synced': False, 'reason': 'google-api-python-client/google-auth is not installed'}
-
-    scopes = ['https://www.googleapis.com/auth/spreadsheets']
-    creds = Credentials.from_service_account_info(credentials_info, scopes=scopes)
-    service = build('sheets', 'v4', credentials=creds, cache_discovery=False, static_discovery=False)
     range_name = f"'{RFQ_SHEET_NAME}'!{column}{sheet_row}"
-    service.spreadsheets().values().update(
-        spreadsheetId=RFQ_SHEET_ID,
-        range=range_name,
-        valueInputOption='USER_ENTERED',
-        body={'values': [[value or '']]}
-    ).execute()
+    google_sheets_values_update(RFQ_SHEET_ID, range_name, [[value or '']])
     RFQ_CACHE['expires_at'] = None
     return {'synced': True, 'range': range_name}
 
@@ -1517,41 +1579,9 @@ def sync_rfq_cells_to_google_sheet(updates):
     if not ranges:
         return {'synced': False, 'reason': 'No mapped RFQ sheet cells to sync'}
 
-    credentials_info = rfq_sheet_sync_credentials()
-    if not credentials_info:
-        return {'synced': False, 'reason': 'Google service account credential is not configured'}
-
-    try:
-        from google.oauth2.service_account import Credentials
-        from googleapiclient.discovery import build
-    except ImportError:
-        return {'synced': False, 'reason': 'google-api-python-client/google-auth is not installed'}
-
-    scopes = ['https://www.googleapis.com/auth/spreadsheets']
-    creds = Credentials.from_service_account_info(credentials_info, scopes=scopes)
-    service = build('sheets', 'v4', credentials=creds, cache_discovery=False, static_discovery=False)
-    service.spreadsheets().values().batchUpdate(
-        spreadsheetId=RFQ_SHEET_ID,
-        body={
-            'valueInputOption': 'USER_ENTERED',
-            'data': ranges,
-        }
-    ).execute()
+    google_sheets_values_batch_update(RFQ_SHEET_ID, ranges)
     RFQ_CACHE['expires_at'] = None
     return {'synced': True, 'ranges': len(ranges)}
-
-def google_sheets_service():
-    credentials_info = rfq_sheet_sync_credentials()
-    if not credentials_info:
-        raise RuntimeError('Google service account credential is not configured')
-    try:
-        from google.oauth2.service_account import Credentials
-        from googleapiclient.discovery import build
-    except ImportError as e:
-        raise RuntimeError('google-api-python-client/google-auth is not installed') from e
-    scopes = ['https://www.googleapis.com/auth/spreadsheets']
-    creds = Credentials.from_service_account_info(credentials_info, scopes=scopes)
-    return build('sheets', 'v4', credentials=creds, cache_discovery=False, static_discovery=False)
 
 def column_letter_from_index(index):
     result = ''
@@ -1560,10 +1590,10 @@ def column_letter_from_index(index):
         result = chr(65 + rem) + result
     return result
 
-def vendor_control_sheet_name(service):
+def vendor_control_sheet_name():
     if VENDOR_CONTROL_CACHE.get('sheet_name'):
         return VENDOR_CONTROL_CACHE['sheet_name']
-    meta = service.spreadsheets().get(spreadsheetId=VENDOR_CONTROL_SHEET_ID).execute()
+    meta = google_sheets_metadata(VENDOR_CONTROL_SHEET_ID)
     for sheet in meta.get('sheets', []):
         props = sheet.get('properties', {})
         if props.get('sheetId') == VENDOR_CONTROL_SHEET_GID:
@@ -1602,13 +1632,8 @@ def vendor_control_rows(force=False):
             VENDOR_CONTROL_CACHE['expires_at'] > now and VENDOR_CONTROL_CACHE.get('rows')):
         return VENDOR_CONTROL_CACHE['rows'], VENDOR_CONTROL_CACHE.get('fetched_at')
 
-    service = google_sheets_service()
-    sheet_name = vendor_control_sheet_name(service)
-    result = service.spreadsheets().values().get(
-        spreadsheetId=VENDOR_CONTROL_SHEET_ID,
-        range=f"'{sheet_name}'!A:Z",
-        valueRenderOption='UNFORMATTED_VALUE'
-    ).execute()
+    sheet_name = vendor_control_sheet_name()
+    result = google_sheets_values_get(VENDOR_CONTROL_SHEET_ID, f"'{sheet_name}'!A:Z")
     values = result.get('values', [])
     if not values:
         rows = []
@@ -1660,8 +1685,7 @@ def vendor_control_rows(force=False):
 def sync_vendor_control_cell(sheet_row, field, value):
     if field not in ('vendor_id', 'password'):
         return {'synced': False, 'reason': 'Field is not editable'}
-    service = google_sheets_service()
-    sheet_name = vendor_control_sheet_name(service)
+    sheet_name = vendor_control_sheet_name()
     columns = VENDOR_CONTROL_CACHE.get('columns') or {}
     if not columns.get(field):
         vendor_control_rows(force=True)
@@ -1670,12 +1694,7 @@ def sync_vendor_control_cell(sheet_row, field, value):
     if not column_index:
         return {'synced': False, 'reason': f'Sheet column for {field} was not found'}
     range_name = f"'{sheet_name}'!{column_letter_from_index(column_index)}{sheet_row}"
-    service.spreadsheets().values().update(
-        spreadsheetId=VENDOR_CONTROL_SHEET_ID,
-        range=range_name,
-        valueInputOption='USER_ENTERED',
-        body={'values': [[value or '']]}
-    ).execute()
+    google_sheets_values_update(VENDOR_CONTROL_SHEET_ID, range_name, [[value or '']])
     VENDOR_CONTROL_CACHE['expires_at'] = None
     return {'synced': True, 'range': range_name}
 
@@ -5481,14 +5500,9 @@ def vendor_control_debug():
             'sheet_id': VENDOR_CONTROL_SHEET_ID,
             'sheet_gid': VENDOR_CONTROL_SHEET_GID,
         }
-        service = google_sheets_service()
-        sheet_name = vendor_control_sheet_name(service)
+        sheet_name = vendor_control_sheet_name()
         info['sheet_name'] = sheet_name
-        result = service.spreadsheets().values().get(
-            spreadsheetId=VENDOR_CONTROL_SHEET_ID,
-            range=f"'{sheet_name}'!A1:Z20",
-            valueRenderOption='UNFORMATTED_VALUE'
-        ).execute()
+        result = google_sheets_values_get(VENDOR_CONTROL_SHEET_ID, f"'{sheet_name}'!A1:Z20")
         values = result.get('values', [])
         info['sample_rows'] = len(values)
         info['header_candidates'] = []
