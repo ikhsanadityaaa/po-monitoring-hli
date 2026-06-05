@@ -215,9 +215,16 @@ def workdays_until(future_date, today=None):
 
 
 CORS(app, resources={r"/api/*": {
-    "origins": "*",
+    "origins": [
+        "https://svodashboard.vercel.app",
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+    ],
     "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    "allow_headers": ["Content-Type", "Authorization", "Accept"]
+    "allow_headers": ["Content-Type", "Authorization", "Accept"],
+    "supports_credentials": False,
 }})
 
 _db_url = os.environ.get('DATABASE_URL', '')
