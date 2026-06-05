@@ -17,7 +17,7 @@ import * as XLSX from 'xlsx';
 import { saveAs } from 'file-saver';
 
 const BACKEND = import.meta.env.VITE_API_URL || 'http://127.0.0.1:5001';
-const api = axios.create({ baseURL: BACKEND, timeout: 600000 });
+const api = axios.create({ baseURL: BACKEND, timeout: 30000 }); // 30s default; uploads override per-request
 
 const PIE_COLORS = ['#2563EB','#14B8A6','#22C55E','#EF4444','#06B6D4',
                     '#84CC16','#EC4899','#0EA5E9','#F43F5E','#94A3B8'];
@@ -900,7 +900,7 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
   };
 
   return (
-    <div data-tour="date-filter" className={`relative flex min-h-[64px] flex-wrap items-center gap-3 px-5 py-3 rounded-xl ${card} shadow ${compact ? 'mb-0' : 'mb-4'}`}>
+    <div className={`relative flex min-h-[64px] flex-wrap items-center gap-3 px-5 py-3 rounded-xl ${card} shadow ${compact ? 'mb-0' : 'mb-4'}`}>
       <Calendar className="w-4 h-4 text-blue-500 flex-shrink-0"/>
       <span className={`text-sm font-semibold ${txt} flex-shrink-0`}>{label}:</span>
       {/* Mode selector */}
@@ -941,7 +941,6 @@ const App = () => {
   const [darkMode, setDarkMode] = useState(false);
   const [activePage, setActivePage] = useState('dashboard');
   const [showUploadDropdown, setShowUploadDropdown] = useState(false);
-  const [showAboutModal, setShowAboutModal] = useState(false);
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
   const uploadDropdownRef = useRef(null);
   const [frozenColumns, setFrozenColumns] = useState({});
@@ -1044,9 +1043,6 @@ const App = () => {
   const [uploadProgress, setUploadProgress] = useState(null);
   const [toasts, setToasts] = useState([]);
   const [modal, setModal] = useState(null);
-  const [showTour, setShowTour] = useState(false);
-  const [tourStep, setTourStep] = useState(0);
-  const [tourTarget, setTourTarget] = useState(null);
   const [editingCell, setEditingCell] = useState(null);
   const [editValue, setEditValue] = useState('');
   const [downloadToast, setDownloadToast] = useState(null);
@@ -1066,7 +1062,6 @@ const App = () => {
   const [marginDetailModal, setMarginDetailModal] = useState(null); // {category, data}
   const [picDbStatus, setPicDbStatus] = useState(null); // {product_id_count, master_pic_count, last_product_id_upload, last_pic_update}
   const [picUploadMsg, setPicUploadMsg] = useState(''); // feedback message for PIC uploads
-  const [uniqueVisitors, setUniqueVisitors] = useState(null);
 
   // Dynamic color palette for PIC badges — each unique name gets a consistent color
   const PIC_COLORS = [
@@ -1171,95 +1166,6 @@ const App = () => {
   const completedDateFilter = globalDateFilter;
   const setCompletedDateFilter = setGlobalDateFilter;
 
-  const tourSteps = [
-    {
-      title: 'Summary Overview',
-      body: 'This page summarizes open purchase orders, open sales orders, unmatched records, and total amounts so you can quickly see portfolio health.',
-      target: '[data-tour="page-title"]',
-      page: 'dashboard',
-    },
-    {
-      title: 'Manual Update',
-      body: 'Use Manual Update to upload SO data, Product ID, PIC mapping, or Item Registration files. The dashboard refreshes its calculations after upload.',
-      target: '[data-tour="manual-update"]',
-      page: 'dashboard',
-    },
-    {
-      title: 'Date Filter',
-      body: 'Use the SO Create Date filter to review all data, one selected year, or a custom date range across dashboard and Pending Delivery views.',
-      target: '[data-tour="date-filter"]',
-      page: 'dashboard',
-    },
-    {
-      title: 'KPI Cards',
-      body: 'The top cards show key counts and amounts. Click cards such as PO without SO or SO without PO to open the related detail table.',
-      target: '[data-tour="kpi-cards"]',
-      page: 'dashboard',
-    },
-    {
-      title: 'Monthly Trend',
-      body: 'Monthly Trend shows sales amount, purchase amount, and transaction count over time. It helps you spot volume spikes and business movement by month.',
-      target: '[data-tour="monthly-trend"]',
-      page: 'dashboard',
-    },
-    {
-      title: 'Status and Aging Charts',
-      body: 'Status distribution, operation unit summaries, and aging charts show where open SO records are concentrated and how long they have been pending.',
-      target: '[data-tour="status-aging"]',
-      page: 'dashboard',
-    },
-    {
-      title: 'Pending Delivery Detail',
-      body: 'Pending Delivery includes aging KPIs, monthly pending trends, status distribution, vendor ranking, filters, inline edits, templates, batch uploads, and Excel exports.',
-      target: '[data-tour="open-so-nav"]',
-      page: 'all-so',
-    },
-    {
-      title: 'Hide and Restore',
-      body: 'Use Hide to temporarily remove selected PO or SO records from dashboard calculations. Hidden records can be reviewed and restored later.',
-      target: '[data-tour="hide-menu"]',
-      page: 'dashboard',
-    },
-  ];
-  const currentTour = tourSteps[tourStep] || tourSteps[0];
-
-  useEffect(() => {
-    if (!showTour) {
-      setTourTarget(null);
-      return;
-    }
-    if (currentTour.page && activePage !== currentTour.page) {
-      setTourTarget(null);
-      setActivePage(currentTour.page);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-      return;
-    }
-    const updateTarget = () => {
-      const el = document.querySelector(currentTour.target);
-      if (!el) {
-        setTourTarget(null);
-        return;
-      }
-      el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
-      window.setTimeout(() => {
-        const r = el.getBoundingClientRect();
-        setTourTarget({
-          top: Math.max(12, r.top - 10),
-          left: Math.max(12, r.left - 10),
-          width: r.width + 20,
-          height: r.height + 20,
-        });
-      }, 260);
-    };
-    updateTarget();
-    window.addEventListener('resize', updateTarget);
-    window.addEventListener('scroll', updateTarget, true);
-    return () => {
-      window.removeEventListener('resize', updateTarget);
-      window.removeEventListener('scroll', updateTarget, true);
-    };
-  }, [showTour, currentTour.target, currentTour.page, activePage]);
-  
   // Click-outside handlers
   useEffect(() => {
     const handler = (e) => { if (hideMenuRef.current && !hideMenuRef.current.contains(e.target)) setShowHideMenu(false); };
@@ -1271,25 +1177,6 @@ const App = () => {
     const handler = (e) => { if (uploadDropdownRef.current && !uploadDropdownRef.current.contains(e.target)) setShowUploadDropdown(false); };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
-  }, []);
-
-  useEffect(() => {
-    const key = 'po_monitoring_visitor_id';
-    let visitorId = '';
-    try {
-      visitorId = localStorage.getItem(key) || '';
-      if (!visitorId) {
-        visitorId = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        localStorage.setItem(key, visitorId);
-      }
-    } catch {
-      visitorId = '';
-    }
-    api.post('/api/visitor/track', visitorId ? { visitor_id: visitorId } : {})
-      .then(res => setUniqueVisitors(res.data?.unique_visitors ?? null))
-      .catch(() => api.get('/api/visitor/stats')
-        .then(res => setUniqueVisitors(res.data?.unique_visitors ?? null))
-        .catch(() => {}));
   }, []);
 
   const addToast = useCallback((message, type='success') => {
@@ -1324,18 +1211,23 @@ const App = () => {
       appendMultiParam(pendingParams, 'global_pic', globalPicFilter);
       pendingParams.set('page', '1');
       pendingParams.set('per_page', '1');
-      const [sRes, aRes, cRes, pendingRes] = await Promise.all([
+      const [sRes, aRes, pendingRes] = await Promise.all([
         api.get(`/api/dashboard/stats${qs}`),
         api.get(`/api/data/aging${qs}`),
-        api.get(`/api/completed/summary?${completedQs}`),
         api.get(`/api/data/all-so?${pendingParams}`)
       ]);
       setStats(sRes.data);
       setSummaryPendingTotal(Number(pendingRes.data?.total) || 0);
       setDashboardFilterOptions(sRes.data?.filters || { clients: [], pics: [] });
       setAgingData(Array.isArray(aRes.data) ? aRes.data : []);
-      setCompletedData(cRes.data);
-      setCompletedLoaded(true);
+      // Render dashboard immediately, then load heavy Completed Summary in background
+      setLoading(false);
+      api.get(`/api/completed/summary?${completedQs}`)
+        .then(cRes => {
+          setCompletedData(cRes.data);
+          setCompletedLoaded(true);
+        })
+        .catch(e => addToast(`Error loading completed summary: ${e.response?.data?.error || e.message}`, 'error'));
     } catch (e) {
       addToast(`Error: ${e.response?.data?.error || e.message}`, 'error');
     } finally { setLoading(false); }
@@ -1748,6 +1640,7 @@ const App = () => {
     setUploadProgress({ label, pct: 0 });
     try {
       const res = await api.post(endpoint, fd, {
+        timeout: 300000, // 5 minutes for file upload — override the 30s default
         headers: { 'Content-Type': 'multipart/form-data' },
         onUploadProgress: (ev) => setUploadProgress({ label, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
       });
@@ -2705,7 +2598,7 @@ const App = () => {
       </div>
 
       {/* KPI Row */}
-      <div data-tour="kpi-cards" className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
         <div className={`p-5 rounded-2xl transition-all cursor-pointer hover:border-slate-300 ${card}`}
           onClick={() => {
             setActivePage('all-so');
@@ -2767,7 +2660,7 @@ const App = () => {
 
       {/* Charts Row 1 */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4 items-stretch">
-        <div data-tour="monthly-trend" className={`p-5 rounded-2xl h-full flex flex-col ${card}`}>
+        <div className={`p-5 rounded-2xl h-full flex flex-col ${card}`}>
           <h3 className={`text-base font-bold mb-4 flex items-center gap-2 ${txt}`}>
             <TrendingUp className="w-5 h-5 text-blue-600"/> Monthly Open SO Trend
           </h3>
@@ -2829,7 +2722,7 @@ const App = () => {
       </div>
 
       {/* Charts Row 2 */}
-      <div data-tour="status-aging" className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4 items-stretch">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4 items-stretch">
         <div className={`p-5 rounded-2xl flex flex-col h-full ${card}`}>
           <h3 className={`text-base font-bold mb-4 flex items-center gap-2 ${txt}`}>
             <FileText className="w-5 h-5 text-green-600"/> SO Status Distribution
@@ -5265,7 +5158,7 @@ const App = () => {
             <BarChart3 className="w-5 h-5 flex-shrink-0"/>
             <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-40 opacity-100':'max-w-0 opacity-0'}`}>Summary</span>
           </button>
-          <button data-tour="open-so-nav" onClick={()=>{ setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums,soMarginFilter,soDateFilter); window.scrollTo({top:0, behavior:'smooth'}); }}
+          <button onClick={()=>{ setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums,soMarginFilter,soDateFilter); window.scrollTo({top:0, behavior:'smooth'}); }}
             className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='all-so'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="Pending Delivery">
             <Clock className="w-5 h-5 flex-shrink-0"/>
             <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-40 opacity-100':'max-w-0 opacity-0'}`}>Pending Delivery</span>
@@ -5303,7 +5196,7 @@ const App = () => {
       <main className={`ml-16 ${sidebarExpanded?'lg:ml-60':'lg:ml-16'} p-4 lg:p-6 transition-[margin-left] duration-200 ease-out`}>
         <div className={`${darkMode?'bg-gray-900 border-gray-800':'bg-[#fbfbfa] border-gray-200/70'} ${activePage === 'dashboard' ? '' : darkMode ? 'data-table-page data-table-page-dark' : 'data-table-page'} min-h-[calc(100vh-32px)] lg:min-h-[calc(100vh-48px)] rounded-2xl border shadow-[0_12px_36px_rgba(15,23,42,0.07)] p-4 lg:p-6`}>
         <header className="mb-7 flex flex-wrap justify-between items-center gap-4">
-          <div data-tour="page-title">
+          <div>
             <h1 className={`text-[28px] leading-tight font-bold tracking-[-0.02em] ${txt}`}>
               Serveone <span className="text-[#2563EB]">Dashboard</span>
             </h1>
@@ -5321,7 +5214,6 @@ const App = () => {
             <div className="flex flex-wrap gap-2 justify-end">
               <div className="relative" ref={uploadDropdownRef}>
               <button
-                data-tour="manual-update"
                 onClick={() => setShowUploadDropdown(v => !v)}
                 className="flex items-center gap-2 px-4 py-2.5 rounded-xl shadow-sm transition-all bg-blue-600 hover:bg-blue-700 text-white"
               >
@@ -5368,7 +5260,7 @@ const App = () => {
               </div>
 
               <div className="relative" ref={hideMenuRef}>
-              <button data-tour="hide-menu" onClick={()=>setShowHideMenu(o=>!o)}
+              <button onClick={()=>setShowHideMenu(o=>!o)}
                 className="flex items-center gap-2 px-4 py-2.5 rounded-xl shadow-sm transition-all bg-slate-600 hover:bg-slate-700 text-white">
                 <EyeOff className="w-4 h-4"/><span className="text-sm font-medium">Hide</span>
                 <ChevronDown className="w-3.5 h-3.5"/>
@@ -5451,142 +5343,6 @@ const App = () => {
       </main>
 
       {modal && <SOModal title={modal.title} data={modal.data} darkMode={darkMode} onClose={()=>setModal(null)} onUpdateCell={updateSOCell}/>} 
-
-      {showAboutModal && (
-        <div className="fixed inset-0 bg-[#edf2f1]/85 z-[70] flex items-center justify-center p-4 backdrop-blur-md" onClick={()=>setShowAboutModal(false)}>
-          <div className="relative w-full max-w-lg overflow-hidden rounded-[28px] border border-white/80 bg-[#fbfbfa] text-[#090909] shadow-[0_24px_80px_rgba(15,23,42,0.16)]" style={{fontFamily: "'Inter', 'Plus Jakarta Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"}} onClick={e=>e.stopPropagation()}>
-            <div className="absolute -top-24 -right-20 h-56 w-56 rounded-full bg-blue-500/10 blur-3xl"/>
-            <div className="absolute -bottom-28 -left-20 h-56 w-56 rounded-full bg-slate-400/10 blur-3xl"/>
-            <button onClick={()=>setShowAboutModal(false)} className="absolute top-5 right-5 z-10 p-3 rounded-full bg-white text-gray-700 shadow-[0_10px_30px_rgba(15,23,42,0.08)] hover:bg-gray-50 transition-all" aria-label="Close About popup">
-              <X className="w-5 h-5"/>
-            </button>
-
-            <div className="relative px-7 py-7">
-              <div className="mb-8">
-                <p className="text-[34px] leading-[1.05] font-black tracking-[-0.04em]">Hello!</p>
-              </div>
-
-              <div className="mb-5">
-                <p className="text-[13px] font-semibold text-gray-500 mb-2">About Summary</p>
-                <h2 className="text-[34px] leading-[1.05] font-black tracking-[-0.04em] text-[#050505]">Purchase Monitoring Summary</h2>
-              </div>
-
-              <div className="rounded-[24px] bg-white p-5 shadow-[0_18px_50px_rgba(15,23,42,0.08)] border border-gray-100">
-                <p className="text-[15px] leading-relaxed text-gray-600 mb-5">
-                  This dashboard was created by <span className="font-extrabold text-black">ADITYA NUR IKHSAN</span> to help monitor Purchase Order (PO), Sales Order (SO), margins and transaction status more efficiently.
-                </p>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    onClick={() => { setShowAboutModal(false); setTourStep(0); setShowTour(true); }}
-                    className="col-span-2 flex items-center justify-center gap-2 rounded-full bg-gradient-to-r from-emerald-500 to-green-700 px-4 py-3.5 text-white shadow-[0_14px_35px_rgba(16,185,129,0.28)] hover:-translate-y-0.5 hover:shadow-[0_18px_45px_rgba(16,185,129,0.34)] transition-all"
-                  >
-                    <Search className="w-5 h-5"/>
-                    <span className="text-sm font-semibold">Take a Tour</span>
-                  </button>
-                  <a href="https://linkedin.com/in/ikhsanaditya" target="_blank" rel="noreferrer" className="group flex items-center justify-center gap-2 rounded-full bg-[#0b0b0b] px-4 py-3.5 text-white shadow-[0_14px_35px_rgba(0,0,0,0.16)] hover:-translate-y-0.5 hover:shadow-[0_18px_45px_rgba(0,0,0,0.22)] transition-all">
-                    <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                      <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.447-2.136 2.942v5.664H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.266 2.371 4.266 5.455v6.286zM5.337 7.433a2.064 2.064 0 1 1 0-4.128 2.064 2.064 0 0 1 0 4.128zM7.119 20.452H3.554V9h3.565v11.452z"/>
-                    </svg>
-                    <span className="text-sm font-semibold">LinkedIn</span>
-                  </a>
-                  <a href="mailto:ikhsanadityainfo@gmail.com" className="group flex items-center justify-center gap-2 rounded-full bg-gradient-to-r from-blue-500 to-blue-700 px-4 py-3.5 text-white shadow-[0_14px_35px_rgba(37,99,235,0.28)] hover:-translate-y-0.5 hover:shadow-[0_18px_45px_rgba(37,99,235,0.34)] transition-all">
-                    <Mail className="w-5 h-5"/>
-                    <span className="text-sm font-semibold">Email</span>
-                  </a>
-                </div>
-
-                <p className="mt-5 text-center text-xs font-medium text-gray-400">
-                  Use the contact buttons if needed.
-                </p>
-                <p className="mt-2 text-center text-xs font-medium text-gray-400">
-                  Please close this pop-up to view the dashboard. Thank you!
-                </p>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showTour && (() => {
-        const r = tourTarget || { top: 120, left: 120, width: 320, height: 120 };
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
-        const popupWidth = Math.min(420, vw - 32);
-        const popupHeight = 306;
-        const canPlaceRight = r.left + r.width + 18 + popupWidth <= vw - 16;
-        const canPlaceLeft = r.left - 18 - popupWidth >= 16;
-        const popupLeft = canPlaceRight
-          ? r.left + r.width + 18
-          : canPlaceLeft
-          ? r.left - popupWidth - 18
-          : Math.min(Math.max(16, r.left), vw - popupWidth - 16);
-        const popupBelow = r.top + r.height + 18;
-        const popupTop = (canPlaceRight || canPlaceLeft)
-          ? Math.min(Math.max(16, r.top), vh - popupHeight - 16)
-          : popupBelow + popupHeight < vh
-          ? popupBelow
-          : Math.max(16, r.top - popupHeight - 18);
-        return (
-          <div className="fixed inset-0 z-[80] pointer-events-none">
-            <div className="fixed left-0 top-0 right-0 bg-black/58 backdrop-blur-[1px]" style={{height:r.top}}/>
-            <div className="fixed left-0 bg-black/58 backdrop-blur-[1px]" style={{top:r.top, width:r.left, height:r.height}}/>
-            <div className="fixed bg-black/58 backdrop-blur-[1px]" style={{top:r.top, left:r.left+r.width, right:0, height:r.height}}/>
-            <div className="fixed left-0 right-0 bottom-0 bg-black/58 backdrop-blur-[1px]" style={{top:r.top+r.height}}/>
-            <div
-              className="fixed rounded-2xl border-2 border-emerald-400 shadow-[0_0_0_4px_rgba(16,185,129,0.18),0_20px_70px_rgba(16,185,129,0.30)] pointer-events-none"
-              style={{top:r.top, left:r.left, width:r.width, height:r.height}}
-            />
-            <div
-              className={`fixed pointer-events-auto w-full rounded-2xl shadow-2xl border ${darkMode?'bg-gray-800 border-gray-700 text-white':'bg-white border-gray-100 text-gray-900'}`}
-              style={{top:popupTop, left:popupLeft, maxWidth:popupWidth}}
-              onClick={e=>e.stopPropagation()}
-            >
-              <div className={`flex items-center justify-between px-5 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
-                <div>
-                  <p className="text-xs font-bold uppercase tracking-[0.16em] text-emerald-600">Summary Tour</p>
-                  <h3 className="text-lg font-black mt-1">{currentTour.title}</h3>
-                </div>
-                <button onClick={()=>setShowTour(false)} className={`p-2 rounded-full ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`} aria-label="Close tour">
-                  <X className="w-5 h-5"/>
-                </button>
-              </div>
-              <div className="px-5 py-4">
-                <div className={`mb-4 h-2 rounded-full ${darkMode?'bg-gray-700':'bg-gray-100'}`}>
-                  <div
-                    className="h-2 rounded-full bg-gradient-to-r from-emerald-500 to-green-700 transition-all"
-                    style={{width: `${((tourStep + 1) / tourSteps.length) * 100}%`}}
-                  />
-                </div>
-                <p className={`text-sm leading-relaxed ${darkMode?'text-gray-300':'text-gray-600'}`}>{currentTour.body}</p>
-                <p className={`mt-4 text-xs font-semibold ${darkMode?'text-gray-400':'text-gray-500'}`}>Step {tourStep + 1} of {tourSteps.length}</p>
-              </div>
-              <div className={`flex items-center justify-between gap-3 px-5 py-4 border-t ${darkMode?'border-gray-700':'border-gray-100'}`}>
-                <button
-                  onClick={()=>setTourStep(s=>Math.max(0, s-1))}
-                  disabled={tourStep === 0}
-                  className={`px-4 py-2 rounded-full text-sm font-semibold ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
-                >
-                  Back
-                </button>
-                <div className="flex items-center gap-2">
-                  <button onClick={()=>setShowTour(false)} className={`px-4 py-2 rounded-full text-sm font-semibold ${darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-500 hover:bg-gray-100'}`}>Skip</button>
-                  <button
-                    onClick={() => {
-                      if (tourStep >= tourSteps.length - 1) setShowTour(false);
-                      else setTourStep(s=>s+1);
-                    }}
-                    className="px-5 py-2 rounded-full text-sm font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-[0_12px_28px_rgba(16,185,129,0.25)]"
-                  >
-                    {tourStep >= tourSteps.length - 1 ? 'Finish' : 'Next'}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
-
       {marginDetailModal && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={()=>setMarginDetailModal(null)}>
           <div className={`rounded-2xl overflow-hidden shadow-2xl w-full max-w-5xl max-h-[85vh] flex flex-col ${darkMode?'bg-gray-800 text-white':'bg-white'}`} onClick={e=>e.stopPropagation()}>
