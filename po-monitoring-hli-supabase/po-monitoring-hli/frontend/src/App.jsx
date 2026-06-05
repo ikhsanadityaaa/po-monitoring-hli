@@ -17,7 +17,7 @@ import * as XLSX from 'xlsx';
 import { saveAs } from 'file-saver';
 
 const BACKEND = import.meta.env.VITE_API_URL || 'http://127.0.0.1:5001';
-const api = axios.create({ baseURL: BACKEND, timeout: 30000 }); // 30s default; uploads override per-request
+const api = axios.create({ baseURL: BACKEND, timeout: 600000 });
 
 const PIE_COLORS = ['#2563EB','#14B8A6','#22C55E','#EF4444','#06B6D4',
                     '#84CC16','#EC4899','#0EA5E9','#F43F5E','#94A3B8'];
@@ -900,7 +900,7 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
   };
 
   return (
-    <div className={`relative flex min-h-[64px] flex-wrap items-center gap-3 px-5 py-3 rounded-xl ${card} shadow ${compact ? 'mb-0' : 'mb-4'}`}>
+    <div data-tour="date-filter" className={`relative flex min-h-[64px] flex-wrap items-center gap-3 px-5 py-3 rounded-xl ${card} shadow ${compact ? 'mb-0' : 'mb-4'}`}>
       <Calendar className="w-4 h-4 text-blue-500 flex-shrink-0"/>
       <span className={`text-sm font-semibold ${txt} flex-shrink-0`}>{label}:</span>
       {/* Mode selector */}
@@ -947,8 +947,6 @@ const App = () => {
 
   const [stats, setStats] = useState(null);
   const [summaryPendingTotal, setSummaryPendingTotal] = useState(null);
-  const [poWithoutSO, setPoWithoutSO] = useState([]);
-  const [poFiltered, setPoFiltered] = useState([]); // after local filters
   const [agingData, setAgingData] = useState([]);
   const [allSOData, setAllSOData] = useState([]);
   const [approvalSOData, setApprovalSOData] = useState([]);
@@ -971,16 +969,6 @@ const App = () => {
   const [approvalSearchNums, setApprovalSearchNums] = useState([]);
   const [approvalPage, setApprovalPage] = useState(1);
   const [approvalPerPage, setApprovalPerPage] = useState(10);
-
-  // PO filters
-  const [poPage, setPoPage] = useState(1);
-  const [poPerPage, setPoPerPage] = useState(10);
-  const [poSearchNums, setPoSearchNums] = useState([]); // search PO Number
-  const [poFilterItemType, setPoFilterItemType] = useState([]); // multi-select
-  const [poFilterOpUnit, setPoFilterOpUnit] = useState([]);   // multi-select
-  const [poSortOrder, setPoSortOrder] = useState('oldest'); // 'oldest' | 'newest'
-  const [poItemTypeOptions, setPoItemTypeOptions] = useState([]);
-  const [poOpUnitOptions, setPoOpUnitOptions] = useState([]);
 
   // Item Registration
   const [itemRegData, setItemRegData] = useState([]);
@@ -1046,7 +1034,6 @@ const App = () => {
   const [editingCell, setEditingCell] = useState(null);
   const [editValue, setEditValue] = useState('');
   const [downloadToast, setDownloadToast] = useState(null);
-  const poTableRef = useRef(null);
 
   // Delete request / hide feature
   const [deleteRequests, setDeleteRequests] = useState([]);
@@ -1211,23 +1198,18 @@ const App = () => {
       appendMultiParam(pendingParams, 'global_pic', globalPicFilter);
       pendingParams.set('page', '1');
       pendingParams.set('per_page', '1');
-      const [sRes, aRes, pendingRes] = await Promise.all([
+      const [sRes, aRes, cRes, pendingRes] = await Promise.all([
         api.get(`/api/dashboard/stats${qs}`),
         api.get(`/api/data/aging${qs}`),
+        api.get(`/api/completed/summary?${completedQs}`),
         api.get(`/api/data/all-so?${pendingParams}`)
       ]);
       setStats(sRes.data);
       setSummaryPendingTotal(Number(pendingRes.data?.total) || 0);
       setDashboardFilterOptions(sRes.data?.filters || { clients: [], pics: [] });
       setAgingData(Array.isArray(aRes.data) ? aRes.data : []);
-      // Render dashboard immediately, then load heavy Completed Summary in background
-      setLoading(false);
-      api.get(`/api/completed/summary?${completedQs}`)
-        .then(cRes => {
-          setCompletedData(cRes.data);
-          setCompletedLoaded(true);
-        })
-        .catch(e => addToast(`Error loading completed summary: ${e.response?.data?.error || e.message}`, 'error'));
+      setCompletedData(cRes.data);
+      setCompletedLoaded(true);
     } catch (e) {
       addToast(`Error: ${e.response?.data?.error || e.message}`, 'error');
     } finally { setLoading(false); }
@@ -1476,41 +1458,6 @@ const App = () => {
     }
   };
 
-  // Apply PO local filters whenever dependencies change
-
-  // Apply PO local filters whenever dependencies change
-  useEffect(() => {
-    let filtered = [...poWithoutSO];
-    if (poSearchNums.length > 0) {
-      const nums = poSearchNums.map(n=>n.toLowerCase());
-      filtered = filtered.filter(p => {
-        const poHliKey = p.item_no ? `${p.po_no}-${p.item_no}`.toLowerCase() : (p.po_no||'').toLowerCase();
-        return nums.some(n =>
-          poHliKey.includes(n) ||
-          (p.po_no||'').toLowerCase().includes(n)
-        );
-      });
-    }
-    // __NONE__ = nothing passes; [] = all pass; array = filter by those values
-    if (poFilterItemType === '__NONE__') {
-      filtered = [];
-    } else if (Array.isArray(poFilterItemType) && poFilterItemType.length > 0) {
-      filtered = filtered.filter(p => poFilterItemType.includes(p.po_item_type));
-    }
-    if (poFilterOpUnit === '__NONE__') {
-      filtered = [];
-    } else if (Array.isArray(poFilterOpUnit) && poFilterOpUnit.length > 0) {
-      filtered = filtered.filter(p => poFilterOpUnit.includes(p.operation_unit));
-    }
-    filtered.sort((a, b) => {
-      const da = a.po_date ? new Date(a.po_date).getTime() : Number.MAX_SAFE_INTEGER;
-      const db = b.po_date ? new Date(b.po_date).getTime() : Number.MAX_SAFE_INTEGER;
-      return poSortOrder === 'newest' ? db - da : da - db;
-    });
-    setPoFiltered(filtered);
-    setPoPage(1);
-  }, [poWithoutSO, poSearchNums, poFilterItemType, poFilterOpUnit, poSortOrder]);
-
   useEffect(() => { fetchDashboard(); fetchDeleteRequests(); fetchPicDbStatus(); }, []);
   useEffect(() => {
     if (activePage === 'all-so') {
@@ -1640,7 +1587,6 @@ const App = () => {
     setUploadProgress({ label, pct: 0 });
     try {
       const res = await api.post(endpoint, fd, {
-        timeout: 300000, // 5 minutes for file upload — override the 30s default
         headers: { 'Content-Type': 'multipart/form-data' },
         onUploadProgress: (ev) => setUploadProgress({ label, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
       });
@@ -1915,7 +1861,6 @@ const App = () => {
       `SO_Approval_Status_${new Date().toISOString().slice(0,10)}.xlsx`);
     addToast('✅ SO Approval Status Excel downloaded successfully', 'success');
   };
-  const downloadPOExcel = () => downloadBlob('/api/export/po-without-so', `PO_Without_SO_${new Date().toISOString().slice(0,10)}.xlsx`, 'PO Without SO');
   const downloadSOTemplate = () => {
     const p = new URLSearchParams();
     resolveFilter(soFilters.op_units).forEach(v => p.append('op_unit', v));
@@ -2101,8 +2046,6 @@ const App = () => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const poTotalPages = Math.max(1, Math.ceil(poFiltered.length / poPerPage));
-  const poRows = poFiltered.slice((poPage-1)*poPerPage, poPage*poPerPage);
   const sortedApprovalSOData = [...approvalSOData]
     .filter((so) => {
       if (approvalFilters.op_units.length && !approvalFilters.op_units.includes(so.operation_unit_name)) return false;
@@ -2131,9 +2074,6 @@ const App = () => {
   });
   const soTotalPages = Math.max(1, Math.ceil(soTotal / soPerPage));
   const itemRegTotalPages = Math.max(1, Math.ceil(itemRegTotal / itemRegPerPage));
-
-  // PO KPI — unique PO numbers from filtered set (excluding consumable)
-  const uniquePOCount = new Set(poFiltered.map(p=>p.po_no)).size;
 
   const card  = darkMode ? 'bg-gray-800 border border-gray-700 shadow-sm' : 'bg-white border border-gray-200/80 shadow-[0_8px_24px_rgba(15,23,42,0.05)]';
   const txt   = darkMode ? 'text-white' : 'text-[#1f2937]';
@@ -2547,491 +2487,6 @@ const App = () => {
           >
             Clear
           </button>
-        </div>
-      </div>
-    );
-  };
-
-  const renderDashboard = () => {
-    // Apply client-side date filter to dashboard data
-    const filteredMonthly = dashDateFilter.mode === 'all'
-      ? (stats?.monthly_trend || [])
-      : (stats?.monthly_trend || []).filter(m => {
-          if (!m.month) return false;
-          // month format: "Jan 2024"
-          try {
-            const d = new Date(m.month);
-            const iso = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
-            const bounds = getDateFilterBounds(dashDateFilter);
-            if (bounds.date_from || bounds.date_to) {
-              if (bounds.date_from && iso < bounds.date_from.slice(0,7)) return false;
-              if (bounds.date_to && iso > bounds.date_to.slice(0,7)) return false;
-              return true;
-            }
-          } catch { return true; }
-          return true;
-        });
-
-    return (
-    <>
-      {/* Date Range Filter + Info Row */}
-        <div className="mb-4">
-        <DateRangeFilter
-          darkMode={darkMode} txt={txt} txt2={txt2} card={card}
-          value={globalDateFilter}
-          label="Filter SO Create Date"
-          onFilter={(f) => { setGlobalDateFilter(f); }}
-        />
-        {/* Date range info row */}
-        <div className={`-mt-3 mb-4 px-5 py-2.5 rounded-b-xl flex flex-wrap gap-4 text-xs ${darkMode?'bg-gray-800/50':'bg-slate-50/90'} border-x border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
-          <div className="flex items-center gap-1.5">
-            <Calendar className="w-3.5 h-3.5 text-blue-400"/>
-            <span className={txt2}>PO Range:</span>
-            <span className={`font-semibold ${txt}`}>{fmtDateRange(stats?.po_date_range)}</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <Calendar className="w-3.5 h-3.5 text-blue-400"/>
-            <span className={txt2}>SO Create Range:</span>
-            <span className={`font-semibold ${txt}`}>{fmtDateRange(stats?.so_date_range)}</span>
-          </div>
-        </div>
-      </div>
-
-      {/* KPI Row */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
-        <div className={`p-5 rounded-2xl transition-all cursor-pointer hover:border-slate-300 ${card}`}
-          onClick={() => {
-            setActivePage('all-so');
-            setSoPage(1);
-            fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
-            setTimeout(() => { poTableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 300);
-          }}>
-          <div className="flex justify-between items-start">
-            <div className="min-w-0 pr-3">
-              <p className={`text-sm font-medium ${txt2}`}>PO without SO</p>
-              {/* Use client-side filtered count which excludes CONSUMABLE */}
-              <h3 className={`text-3xl font-bold mt-1 ${kpiValue}`}>{fmtNum(uniquePOCount)}</h3>
-              <p className={`text-xs mt-1 ${txt2}`}>unique PO numbers · click for details</p>
-            </div>
-            <div className={`p-3 rounded-xl ${neutralIcon}`}><AlertCircle className="w-6 h-6"/></div>
-          </div>
-        </div>
-
-        <div className={`p-5 rounded-2xl transition-all cursor-pointer hover:border-slate-300 ${card}`}
-          onClick={() => openModal('SO without PO', appendDateQuery('/api/data/so-without-po'))}>
-          <div className="flex justify-between items-start">
-            <div className="min-w-0 pr-3">
-              <p className={`text-sm font-medium ${txt2}`}>SO without PO</p>
-              <h3 className={`text-3xl font-bold mt-1 ${kpiValue}`}>{fmtNum(stats?.so_without_po)}</h3>
-              <p className={`text-xs mt-1 ${txt2}`}>Click for details</p>
-            </div>
-            <div className={`p-3 rounded-xl ${neutralIcon}`}><XCircle className="w-6 h-6"/></div>
-          </div>
-        </div>
-
-        <div className={`p-5 rounded-2xl transition-all ${card}`}>
-          <div className="flex justify-between items-start">
-            <div className="min-w-0 pr-3">
-              <p className={`text-sm font-medium ${txt2}`}>Total PO Amount</p>
-              <h3 className={`text-3xl font-bold mt-1 leading-tight ${kpiValue}`}>{fmtCurShort(stats?.total_po_amount)}</h3>
-              <p className={`text-xs mt-1 ${txt2}`}>{fmtCur(stats?.total_po_amount)}</p>
-            </div>
-            <div className={`p-3 rounded-xl ${neutralIcon}`}><Coins className="w-6 h-6"/></div>
-          </div>
-        </div>
-
-        <div className={`p-5 rounded-2xl transition-all cursor-pointer hover:border-slate-300 ${card}`}
-          onClick={() => {
-            setActivePage('all-so');
-            setSoPage(1);
-            fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
-            window.scrollTo({ top: 0, behavior: 'smooth' });
-          }}>
-          <div className="flex justify-between items-start">
-            <div className="min-w-0 pr-3">
-              <p className={`text-sm font-medium ${txt2}`}>Total SO (Open)</p>
-              <h3 className={`text-3xl font-bold mt-1 ${kpiValue}`}>{fmtNum(stats?.total_so_count)}</h3>
-              <p className={`text-xs mt-1 ${txt2}`}>{stats?.so_date_range?.max ? fmtDate(stats.so_date_range.max) : 'No data uploaded'} · click for details</p>
-            </div>
-            <div className={`p-3 rounded-xl ${neutralIcon}`}><CheckCircle className="w-6 h-6"/></div>
-          </div>
-        </div>
-      </div>
-
-      {/* Charts Row 1 */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4 items-stretch">
-        <div className={`p-5 rounded-2xl h-full flex flex-col ${card}`}>
-          <h3 className={`text-base font-bold mb-4 flex items-center gap-2 ${txt}`}>
-            <TrendingUp className="w-5 h-5 text-blue-600"/> Monthly Open SO Trend
-          </h3>
-          <div className="flex-1 min-h-[220px]">
-          <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={filteredMonthly}>
-              <defs>
-                <linearGradient id="cSO" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#2563EB" stopOpacity={0.3}/><stop offset="95%" stopColor="#2563EB" stopOpacity={0}/>
-                </linearGradient>
-                <linearGradient id="cAmt" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#14B8A6" stopOpacity={0.22}/><stop offset="95%" stopColor="#14B8A6" stopOpacity={0}/>
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={darkMode?'#374151':'#E5E7EB'}/>
-              <XAxis dataKey="month" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10}/>
-              <YAxis yAxisId="left" stroke="#2563EB" fontSize={10}/>
-              <YAxis yAxisId="right" orientation="right" stroke="#14B8A6" fontSize={10}/>
-              <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}}/>
-              <Legend iconSize={8} wrapperStyle={{fontSize:'11px'}}/>
-              <Area yAxisId="left" type="monotone" dataKey="so_count" name="SO Count" stroke="#2563EB" strokeWidth={2} fill="url(#cSO)"/>
-              <Area yAxisId="right" type="monotone" dataKey="amount" name="Value (IDR Mil)" stroke="#14B8A6" strokeWidth={2} fill="url(#cAmt)"/>
-              <Line yAxisId="right" type="monotone" dataKey="amount" name="Total Sales Amount" stroke="#14B8A6" strokeWidth={3} dot={{r:4,fill:'#14B8A6'}} activeDot={{r:6, fill:'#14B8A6'}} z={10} isAnimationActive={false}/>
-            </ComposedChart>
-          </ResponsiveContainer>
-          </div>
-        </div>
-
-        <div className="flex flex-col gap-4 h-full">
-          <div className={`p-5 rounded-2xl h-full flex flex-col ${card}`}>
-            <h3 className={`text-sm font-bold mb-3 flex items-center gap-2 ${txt}`}>
-              <BarChart3 className="w-4 h-4 text-blue-600"/> Top 5 Vendors (Open SO)
-            </h3>
-            <table className="w-full text-xs flex-1">
-              <thead className={tblHd}>
-                <tr>
-                  <th className={`p-1.5 text-center font-bold ${txt2}`}>#</th>
-                  <th className={`p-1.5 text-center font-bold ${txt2}`}>Vendor</th>
-                  <th className={`p-1.5 text-center font-bold ${txt2}`}>Open SO</th>
-                  <th className={`p-1.5 text-center font-bold ${txt2}`}>Amount</th>
-                </tr>
-              </thead>
-              <tbody className={`divide-y ${tblDv}`}>
-                {(stats?.top_vendors||[]).map((v,i)=>(
-                  <tr key={i} className={`${trHov} cursor-pointer`}
-                    onClick={()=>openModal(`Vendor: ${v.vendor}`, appendDateQuery(`/api/data/top-vendor-detail/${encodeURIComponent(v.vendor)}`))}>
-                    <td className="p-1.5">
-                      <span className={`inline-flex items-center justify-center w-6 h-6 rounded text-xs font-bold ${i===0?'bg-blue-600 text-white':i===1?'bg-slate-200 text-slate-700':i===2?'bg-teal-100 text-teal-700':'bg-blue-100 text-blue-700'}`}>#{i+1}</span>
-                    </td>
-                    <td className={`p-1.5 font-medium ${txt} max-w-[120px] truncate`} title={v.vendor}>{v.vendor}</td>
-                    <td className={`p-1.5 text-center font-bold ${kpiValue}`}>{fmtNum(v.so_count)}</td>
-                    <td className={`p-1.5 text-center font-bold ${kpiValue}`}>{fmtCurShort(v.total_amount)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      {/* Charts Row 2 */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4 items-stretch">
-        <div className={`p-5 rounded-2xl flex flex-col h-full ${card}`}>
-          <h3 className={`text-base font-bold mb-4 flex items-center gap-2 ${txt}`}>
-            <FileText className="w-5 h-5 text-green-600"/> SO Status Distribution
-          </h3>
-          {(() => {
-            const months = stats?.status_months || [];
-            const rows   = stats?.so_status_monthly || [];
-            const totByMonth = months.reduce((acc, m) => { acc[m] = rows.reduce((s, r) => s + (r.monthly?.[m] || 0), 0); return acc; }, {});
-            const grandTotal  = rows.reduce((s, r) => s + r.total, 0);
-            const grandAmount = rows.reduce((s, r) => s + (r.amount || 0), 0);
-            const monthLabel = (m) => { try { const [y,mo] = m.split('-'); return format(new Date(parseInt(y), parseInt(mo)-1, 1), 'MMM yy'); } catch { return m; } };
-            return (
-              <div className="overflow-auto flex-1">
-                <table className="w-full text-xs" style={{minWidth: months.length > 4 ? `${160 + months.length * 72 + 200}px` : undefined}}>
-                  <thead className={`sticky top-0 ${tblHd}`}>
-                    <tr>
-                      <th className={`px-3 py-2 text-center font-bold whitespace-nowrap ${txt2} sticky left-0 ${darkMode?'bg-gray-700':'bg-blue-50'}`}>Status</th>
-                      {months.map(m => <th key={m} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{monthLabel(m)}</th>)}
-                      <th className={`px-3 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>Total</th>
-                      <th className={`px-3 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>%</th>
-                      <th className={`px-3 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>Sales Amount</th>
-                    </tr>
-                  </thead>
-                  <tbody className={`divide-y ${tblDv}`}>
-                    {rows.map((s, i) => (
-                      <tr key={i} className={trHov}>
-                        <td
-                          className={`px-3 py-2 font-medium whitespace-nowrap sticky left-0 ${darkMode?'bg-gray-800':'bg-white'} ${txt} cursor-pointer hover:text-blue-600 hover:underline`}
-                          onClick={() => openModal(`SO Status: ${s.name}`, appendDateQuery(`/api/data/so-status-detail/${encodeURIComponent(s.name)}`))}>
-                          {s.name}
-                        </td>
-                        {months.map(m => {
-                          const val = s.monthly?.[m];
-                          return val ? (
-                            <td key={m} className="px-2 py-2 text-center font-semibold text-white" style={{backgroundColor:'#2563EB'}}>
-                              <button
-                                onClick={() => openModal(`SO Status: ${s.name} — ${m}`, appendDateQuery(`/api/data/so-status-detail/${encodeURIComponent(s.name)}?month=${encodeURIComponent(m)}`))}
-                                className="font-semibold underline-offset-2 hover:underline cursor-pointer text-white w-full">
-                                {fmtNum(val)}
-                              </button>
-                            </td>
-                          ) : (
-                            <td key={m} className="px-2 py-2 text-center" style={{backgroundColor: darkMode?'rgba(59,130,246,0.08)':'rgba(219,234,254,0.45)'}}></td>
-                          );
-                        })}
-                        <td className={`px-3 py-2 text-right font-bold ${kpiValue}`}>
-                          <button
-                            onClick={() => openModal(`SO Status: ${s.name}`, appendDateQuery(`/api/data/so-status-detail/${encodeURIComponent(s.name)}`))}
-                            className="font-bold text-blue-600 hover:underline cursor-pointer">
-                            {fmtNum(s.total)}
-                          </button>
-                        </td>
-                        <td className={`px-3 py-2 text-right ${txt2}`}>{s.percentage}%</td>
-                        <td className={`px-3 py-2 text-right whitespace-nowrap ${kpiValue}`}>{fmtCurShort(s.amount)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                  <tfoot className={`${tblHd} font-bold`}>
-                    <tr>
-                      <td className={`px-3 py-2 sticky left-0 ${darkMode?'bg-gray-700':'bg-blue-50'} ${txt}`}>TOTAL</td>
-                      {months.map(m => (
-                        <td key={m} className="px-2 py-2 text-center">
-                          {totByMonth[m] ? (
-                            <button
-                              onClick={() => openModal(`All Status — ${m}`, appendDateQuery(`/api/data/so-status-detail-all?month=${encodeURIComponent(m)}`))}
-                              className="font-bold text-blue-600 hover:underline cursor-pointer">
-                              {fmtNum(totByMonth[m])}
-                            </button>
-                          ) : ''}
-                        </td>
-                      ))}
-                      <td className="px-3 py-2 text-right">
-                        <button
-                          onClick={() => openModal('All SO', appendDateQuery('/api/data/so-status-detail-all'))}
-                          className="font-bold text-blue-600 hover:underline cursor-pointer">
-                          {fmtNum(grandTotal)}
-                        </button>
-                      </td>
-                      <td className={`px-3 py-2 text-right ${txt2}`}>100%</td>
-                      <td className={`px-3 py-2 text-right whitespace-nowrap ${kpiValue}`}>{fmtCurShort(grandAmount)}</td>
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
-            );
-          })()}
-        </div>
-
-        <div className="flex flex-col gap-4 h-full">
-          <div className={`p-5 rounded-2xl ${card}`}>
-            <h3 className={`text-sm font-bold mb-3 flex items-center gap-2 ${txt}`}>
-              <Building2 className="w-4 h-4 text-green-600"/> Total Open SO per Operation Unit
-            </h3>
-            <div className="overflow-auto max-h-40">
-              <table className="w-full text-xs">
-                <thead className={`sticky top-0 ${tblHd}`}>
-                  <tr>
-                    <th className={`p-1.5 text-center font-bold ${txt2}`}>Operation Unit</th>
-                    <th className={`p-1.5 text-center font-bold ${txt2}`}>Open SO</th>
-                    <th className={`p-1.5 text-center font-bold ${txt2}`}>Amount</th>
-                  </tr>
-                </thead>
-                <tbody className={`divide-y ${tblDv}`}>
-                  {(stats?.top_op_units||[]).map((u,i)=>(
-                    <tr key={i} className={`${trHov} transition-colors`}>
-                      <td className={`p-1.5 font-medium ${txt} max-w-[160px] truncate`} title={u.op_unit}>{u.op_unit}</td>
-                      <td className={`p-1.5 text-center font-bold ${kpiValue}`}>{fmtNum(u.so_count)}</td>
-                      <td className={`p-1.5 text-center font-bold ${kpiValue}`}>{fmtCurShort(u.total_amount)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <div className="grid gap-4 flex-1" style={{gridTemplateColumns:'3fr 2fr'}}>
-            <div className={`p-5 rounded-2xl ${card}`}>
-              <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><BarChart3 className="w-4 h-4 text-blue-600"/> SO Status (Pie)</h3>
-              <StatusPie data={stats?.so_status} darkMode={darkMode}/>
-            </div>
-            {(() => {
-              const agingPieData = [
-                { name:'< 30 Days', value:agingData.reduce((s,v)=>s+(v.less_30||0),0), fill:'#10B981' },
-                { name:'30-90 Days', value:agingData.reduce((s,v)=>s+(v.days_30_90||0),0), fill:'#0EA5E9' },
-                { name:'90-180 Days', value:agingData.reduce((s,v)=>s+(v.days_90_180||0),0), fill:'#F43F5E' },
-                { name:'> 180 Days', value:agingData.reduce((s,v)=>s+(v.more_180||0),0), fill:'#EF4444' },
-              ].filter(d=>d.value>0);
-              return (
-                <div className={`p-5 rounded-2xl ${card}`}>
-                  <h3 className={`text-sm font-bold mb-2 flex items-center gap-2 ${txt}`}><Calendar className="w-4 h-4 text-red-500"/> SO Aging (Pie)</h3>
-                  <div className="w-full overflow-hidden">
-                    <ResponsiveContainer width="100%" height={300}>
-                      <PieChart margin={{ top: 8, right: 8, bottom: 28, left: 8 }}>
-                        <Pie
-                          data={agingPieData}
-                          cx="50%"
-                          cy="42%"
-                          innerRadius={52}
-                          outerRadius={88}
-                          paddingAngle={0}
-                          dataKey="value"
-                          labelLine={false}
-                          label={renderPctLabel}
-                        >
-                          {agingPieData.map((d,i)=><Cell key={i} fill={d.fill}/>)}
-                        </Pie>
-                        <Tooltip
-                          contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}}
-                          formatter={(v,n)=>[fmtNum(v)+' SO',n]}
-                          labelStyle={{color:darkMode?'#F3F4F6':'#111827'}}
-                          itemStyle={{color:darkMode?'#F3F4F6':'#111827'}}
-                        />
-                        <Legend
-                          layout="horizontal"
-                          align="center"
-                          verticalAlign="bottom"
-                          iconSize={8}
-                          wrapperStyle={{ fontSize: 12, color: darkMode ? '#F3F4F6' : '#111827' }}
-                          formatter={(v)=><span className="text-xs" style={{ color: darkMode ? '#F3F4F6' : '#111827' }}>{v}</span>}
-                        />
-                      </PieChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-              );
-            })()}
-          </div>
-
-        </div>
-      </div>
-
-      {/* SO Aging Table */}
-      <div className={`p-5 rounded-2xl mb-4 ${card}`}>
-        <h3 className={`text-base font-bold mb-4 flex items-center gap-2 ${txt}`}>
-          <Calendar className="w-5 h-5 text-red-600"/> SO Aging — Open SO by Vendor
-        </h3>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className={tblHd}>
-              <tr>{['Vendor','< 30 Days','30–90 Days','90–180 Days','> 180 Days','Total Open','Sales Amount'].map(h=>(
-                <th key={h} className={`p-3 text-center font-bold ${darkMode?'text-gray-200':'text-gray-700'}`}>{h}</th>
-              ))}</tr>
-            </thead>
-            <tbody className={`divide-y ${tblDv}`}>
-              {agingData.slice(0,15).map((v,i)=>{
-                const openDetail = (bucket) => {
-                  const url = appendDateQuery(bucket
-                    ? `/api/data/aging-detail/${encodeURIComponent(v.vendor)}?bucket=${encodeURIComponent(bucket)}`
-                    : `/api/data/aging-detail/${encodeURIComponent(v.vendor)}`);
-                  const label = bucket ? `${v.vendor} — ${bucket} days` : `Aging Detail: ${v.vendor}`;
-                  openModal(label, url);
-                };
-                const cellBtn = (val, bucket, colorClass) => val > 0 ? (
-                  <button onClick={e=>{e.stopPropagation();openDetail(bucket);}}
-                    className={`font-semibold underline-offset-2 hover:underline cursor-pointer ${colorClass}`}>
-                    {fmtNum(val)}
-                  </button>
-                ) : <span className={`${colorClass} opacity-40`}>0</span>;
-                return (
-                  <tr key={i} className={`${trHov}`}>
-                    <td className={`p-3 font-medium text-xs cursor-pointer hover:text-blue-600 ${txt}`}
-                      onClick={()=>openDetail(null)}>{v.vendor}</td>
-                    <td className="p-3 text-center">{cellBtn(v.less_30,'0-30','text-green-600')}</td>
-                    <td className="p-3 text-center">{cellBtn(v.days_30_90,'30-90',txt2)}</td>
-                    <td className="p-3 text-center">{cellBtn(v.days_90_180,'90-180','text-slate-700')}</td>
-                    <td className="p-3 text-center">{cellBtn(v.more_180,'180+','text-red-600')}</td>
-                    <td className="p-3 text-center">
-                      <button onClick={()=>openDetail(null)}
-                        className="font-bold text-blue-600 hover:underline cursor-pointer">
-                        {fmtNum(v.total_open)}
-                      </button>
-                    </td>
-                    <td className={`p-3 text-center font-bold text-xs ${kpiValue}`}>{fmtCurShort(v.sales_amount)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-            <tfoot className={`${tblHd} font-bold text-sm`}>
-              {(() => {
-                const tot = agingData.reduce((acc,v)=>({
-                  less_30:acc.less_30+(v.less_30||0), days_30_90:acc.days_30_90+(v.days_30_90||0),
-                  days_90_180:acc.days_90_180+(v.days_90_180||0), more_180:acc.more_180+(v.more_180||0),
-                  total_open:acc.total_open+(v.total_open||0), sales_amount:acc.sales_amount+(v.sales_amount||0),
-                }), {less_30:0,days_30_90:0,days_90_180:0,more_180:0,total_open:0,sales_amount:0});
-                const totCellBtn = (val, bucket, colorClass) => val > 0 ? (
-                  <button
-                    onClick={() => openModal(`All Vendors — ${bucket} days`, appendDateQuery(`/api/data/aging-detail-all?bucket=${encodeURIComponent(bucket)}`))}
-                    className={`font-bold underline-offset-2 hover:underline cursor-pointer ${colorClass}`}>
-                    {fmtNum(val)}
-                  </button>
-                ) : <span className={colorClass}>{fmtNum(val)}</span>;
-                return (
-                  <tr>
-                    <td className={`p-3 font-bold ${txt}`}>TOTAL</td>
-                    <td className="p-3 text-center">{totCellBtn(tot.less_30,'0-30','text-green-700')}</td>
-                    <td className="p-3 text-center">{totCellBtn(tot.days_30_90,'30-90',txt2)}</td>
-                    <td className="p-3 text-center">{totCellBtn(tot.days_90_180,'90-180','text-slate-700')}</td>
-                    <td className="p-3 text-center">{totCellBtn(tot.more_180,'180+','text-red-700')}</td>
-                    <td className="p-3 text-center">
-                      <button
-                        onClick={() => openModal('All Vendors — All Aging', appendDateQuery('/api/data/aging-detail-all'))}
-                        className="font-bold text-blue-700 hover:underline cursor-pointer">
-                        {fmtNum(tot.total_open)}
-                      </button>
-                    </td>
-                    <td className={`p-3 text-center font-bold text-xs ${kpiValue}`}>{fmtCurShort(tot.sales_amount)}</td>
-                  </tr>
-                );
-              })()}
-            </tfoot>
-          </table>
-        </div>
-      </div>
-    </>
-    );
-  };
-
-  // ══════════════════════════════════════════════════════════════
-  // RENDER ALL SO PAGE
-  // ══════════════════════════════════════════════════════════════
-  const renderCompletedNegativeTables = (d = {}) => {
-    const rankBadge = (i) => darkMode ? 'bg-gray-600 text-gray-300' : 'bg-gray-200 text-gray-600';
-    return (
-      <div className="space-y-3">
-        <h3 className={`text-base font-bold ${txt} flex items-center gap-2`}>
-          <TrendingDown className="w-5 h-5 text-red-600"/> Negative Margin
-        </h3>
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-          <div className={`p-5 rounded-2xl ${card}`}>
-            <h3 className={`text-base font-bold mb-4 ${txt}`}>Vendors — Largest Negative Margin</h3>
-            <div className="space-y-3 max-h-[420px] overflow-auto pr-1">
-              {(d.worst_margin_vendors || []).map((v,i)=>(
-                <button type="button" key={i} onClick={() => openNegativeVendorDetail(v.vendor)} className={`block w-full text-left p-3 rounded-xl ${darkMode?'bg-red-900/20 hover:bg-red-900/30':'bg-red-50 hover:bg-red-100'} transition-all hover:shadow-md hover:-translate-y-0.5`}>
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className={`inline-flex h-6 w-6 items-center justify-center rounded text-xs font-bold ${rankBadge(i)}`}>#{i+1}</span>
-                        <p className={`font-semibold truncate ${txt}`} title={v.vendor}>{v.vendor}</p>
-                      </div>
-                      <p className={`text-xs mt-1 ${txt2}`}>{fmtNum(v.count)} transactions · Sales {fmtCurShort(v.total_sales)}</p>
-                    </div>
-                    <span className="text-sm font-bold text-red-600 whitespace-nowrap">{fmtCurShort(v.margin)}</span>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className={`p-5 rounded-2xl ${card}`}>
-            <h3 className={`text-base font-bold mb-4 ${txt}`}>Top 30 Transactions — Largest Negative Margin</h3>
-            <div className="overflow-auto max-h-[420px]">
-              <table className="w-full text-xs">
-                <thead className={`sticky top-0 ${tblHd}`}><tr>{['#','SO Item','Product','Vendor','Sales','PO','Margin','%'].map(h=><th key={h} className={`px-2 py-2 text-center font-bold ${txt2}`}>{h}</th>)}</tr></thead>
-                <tbody className={`divide-y ${tblDv}`}>
-                  {(d.worst_margin_transactions || []).map((t,i)=>(
-                    <tr key={i} className={trHov}>
-                      <td className="px-2 py-2 font-bold text-red-600">{i+1}</td>
-                      <td className="px-2 py-2 font-semibold text-blue-600 whitespace-nowrap">{t.so_item || '-'}</td>
-                      <td className={`px-2 py-2 max-w-[180px] truncate ${txt2}`} title={t.product}>{t.product || '-'}</td>
-                      <td className={`px-2 py-2 max-w-[160px] truncate ${txt2}`} title={t.vendor}>{t.vendor || '-'}</td>
-                      <td className={`px-2 py-2 text-right whitespace-nowrap ${kpiValue}`}>{fmtCurShort(t.sales_amount)}</td>
-                      <td className={`px-2 py-2 text-right whitespace-nowrap ${kpiValue}`}>{fmtCurShort(t.purchase_amount)}</td>
-                      <td className="px-2 py-2 text-right font-bold text-red-600 whitespace-nowrap">{fmtCurShort(t.margin)}</td>
-                      <td className="px-2 py-2 text-right font-semibold text-red-600 whitespace-nowrap">{t.margin_pct == null ? '-' : `${t.margin_pct}%`}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
         </div>
       </div>
     );
@@ -4916,164 +4371,6 @@ const App = () => {
         />
       </div>
 
-      {false && (<>
-      {/* PO Without SO Table */}
-      <div ref={poTableRef} className={`rounded-2xl shadow overflow-hidden ${card}`}>
-        <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
-          <div className="flex items-center gap-2">
-            <AlertCircle className="w-5 h-5 text-slate-600"/>
-            <h3 className={`text-base font-bold ${txt}`}>PO Without SO</h3>
-            <span className={`text-sm ${txt2}`}>
-              ({fmtNum(new Set(poFiltered.map(p=>p.po_no)).size)} PO · {fmtNum(poFiltered.length)} line items)
-            </span>
-          </div>
-          <div className="flex gap-2 items-center">
-            <DownloadButton onClick={downloadPOExcel} className="flex items-center gap-1 px-4 py-1.5 bg-blue-700 hover:bg-blue-800 text-white rounded-lg text-sm font-medium shadow-sm">
-              <Download className="w-4 h-4"/>Download Excel
-            </DownloadButton>
-          </div>
-        </div>
-
-        {/* PO Filters row */}
-        <div className={`px-5 py-2.5 border-b ${darkMode?'border-gray-700 bg-gray-750':'border-gray-100 bg-gray-50'}`}>
-          <div className="grid grid-cols-12 gap-2 items-end">
-            <div className="col-span-12 sm:col-span-2 xl:col-span-1 min-w-0">
-              <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ PO Date</label>
-              <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
-                value={poSortOrder} onChange={e=>{ setPoSortOrder(e.target.value); setPoPage(1); }} title="Sort PO Date">
-                <option value="oldest">Oldest ↑</option>
-                <option value="newest">Newest ↓</option>
-              </select>
-            </div>
-            <div className="col-span-12 sm:col-span-3 xl:col-span-2 min-w-0">
-              <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Search PO Number</label>
-              <SearchInput
-                label="PO Number"
-                placeholder={"e.g.\n4502358819\n4502358819-10"}
-                onSearch={(nums) => { setPoSearchNums(nums); setPoPage(1); }}
-                darkMode={darkMode} txt2={txt2}
-              />
-            </div>
-            <div className="col-span-12 sm:col-span-4 xl:col-span-2 min-w-0">
-              <MultiSelect
-                label="PO Item Type"
-                options={poItemTypeOptions}
-                selected={poFilterItemType}
-                onChange={v => { setPoFilterItemType(v); setPoPage(1); }}
-                darkMode={darkMode} txt2={txt2}
-              />
-            </div>
-            <div className="col-span-12 sm:col-span-4 xl:col-span-2 min-w-0">
-              <MultiSelect
-                label="Operation Unit"
-                options={poOpUnitOptions}
-                selected={poFilterOpUnit}
-                onChange={v => { setPoFilterOpUnit(v); setPoPage(1); }}
-                darkMode={darkMode} txt2={txt2}
-              />
-            </div>
-            <div className="col-span-12 sm:col-span-4 xl:col-span-1 min-w-[110px]">
-              <button onClick={()=>{ setPoSearchNums([]); setPoFilterItemType([]); setPoFilterOpUnit([]); setPoPage(1); }}
-                className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
-            </div>
-          </div>
-        </div>
-
-        {/* Active PO filter tags */}
-        {(poSearchNums.length > 0 || poFilterItemType.length > 0 || poFilterOpUnit.length > 0) && (
-          <div className={`px-5 py-2 flex flex-wrap gap-1.5 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
-            {poSearchNums.map(v=>(
-              <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-xs">
-                PO: {v}<button onClick={()=>setPoSearchNums(prev=>prev.filter(x=>x!==v))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
-              </span>
-            ))}
-            {poFilterItemType.map(v=>(
-              <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">
-                {v}<button onClick={()=>setPoFilterItemType(prev=>prev.filter(x=>x!==v))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
-              </span>
-            ))}
-            {poFilterOpUnit.map(v=>(
-              <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">
-                {v}<button onClick={()=>setPoFilterOpUnit(prev=>prev.filter(x=>x!==v))} className="hover:text-red-600"><X className="w-3 h-3"/></button>
-              </span>
-            ))}
-          </div>
-        )}
-
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className={tblHd}>
-              <tr>
-                {['PO NUMBER','PO ITEM TYPE','ITEM CODE','OPERATION UNIT','DESCRIPTION','QTY','UNIT','PRICE','AMOUNT','CURRENCY','PO DATE','PURCHASE MEMBER','REQ. DELIVERY','WORKING DAYS LEFT'].map(h=>(
-                  <th key={h} className={`px-4 py-3 text-center font-bold whitespace-nowrap ${txt2} ${h==='PRICE'||h==='AMOUNT'?'min-w-[140px]':''}`}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className={`divide-y ${tblDv}`}>
-              {poRows.length === 0 ? (
-                <tr><td colSpan={16} className={`px-4 py-10 text-center ${txt2}`}>
-                  <Package className="w-10 h-10 mx-auto mb-2 opacity-40"/>No data
-                </td></tr>
-              ) : poRows.map((row,i)=>{
-                const daysLeft = row.days_remaining;
-                const daysColor = daysLeft === null ? txt2 : daysLeft < 0 ? 'text-red-600 font-bold' : daysLeft <= 30 ? 'text-slate-700 font-semibold' : 'text-green-600';
-                return (
-                  <tr key={i} className={`${trHov} transition-colors`}>
-                    <td className="px-4 py-3 text-blue-600 font-medium whitespace-nowrap">
-                      {row.item_no ? `${row.po_no}-${row.item_no}` : row.po_no}
-                    </td>
-                    <td className={`px-4 py-3 whitespace-nowrap`}>
-                      {row.po_item_type ? (
-                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                          row.po_item_type.toUpperCase()==='MRO' ? 'bg-blue-100 text-blue-700' :
-                          row.po_item_type.toUpperCase()==='EQUIPMENT' ? 'bg-green-100 text-green-700' :
-                          'bg-gray-100 text-gray-700'}`}>{row.po_item_type}</span>
-                      ) : <span className={`${txt2} text-xs`}>-</span>}
-                    </td>
-                    <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.item_code||'-'}</td>
-                    <td className={`px-4 py-3 ${txt2} whitespace-nowrap text-xs`} title={row.operation_unit}>{row.operation_unit||'-'}</td>
-                    <td className={`px-4 py-3 ${txt2} max-w-xs truncate`} title={row.description}>{row.description}</td>
-                    <td className={`px-4 py-3 text-right ${txt2}`}>{fmtNum(row.qty)}</td>
-                    <td className={`px-4 py-3 ${txt2}`}>{row.unit||'-'}</td>
-                    <td className={`px-4 py-3 text-right whitespace-nowrap min-w-[140px] ${txt}`}>{fmtCur(row.price)}</td>
-                    <td className={`px-4 py-3 text-center font-bold whitespace-nowrap min-w-[140px] ${kpiValue}`}>{fmtCur(row.amount)}</td>
-                    <td className={`px-4 py-3 ${txt2}`}>{row.currency||'IDR'}</td>
-                    <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.po_date||'-'}</td>
-                    <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.purchase_member||'-'}</td>
-                    <td className={`px-4 py-3 ${txt2} whitespace-nowrap`}>{row.req_delivery||'-'}</td>
-                    <td className={`px-4 py-3 text-center whitespace-nowrap ${daysColor}`}>
-                      {daysLeft === null ? '-' : daysLeft < 0 ? `${Math.abs(daysLeft)} days overdue` : `${daysLeft} days`}                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-        <div className={`px-5 py-3 border-t ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
-          <div className="flex items-center gap-3">
-            <span className={`text-sm ${txt2}`}>Showing {(poPage-1)*poPerPage+1}–{Math.min(poPage*poPerPage,poFiltered.length)} of {fmtNum(poFiltered.length)}</span>
-            <label className={`flex items-center gap-1 text-xs ${txt2}`}>
-              Rows
-              <select className={`px-2 py-1 rounded-lg text-xs border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-200'}`}
-                value={poPerPage} onChange={e=>{ setPoPerPage(Number(e.target.value)); setPoPage(1); }}>
-                <option value={10}>10</option>
-                <option value={25}>25</option>
-                <option value={50}>50</option>
-                <option value={100}>100</option>
-                <option value={500}>500</option>
-              </select>
-            </label>
-          </div>
-          <div className="flex gap-1 items-center">
-            <button disabled={poPage===1} onClick={()=>setPoPage(p=>p-1)} className={`p-1.5 rounded ${poPage===1?'opacity-40':'hover:bg-blue-100'}`}><ChevronLeft className="w-4 h-4"/></button>
-            <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode?'bg-gray-700 text-white':'bg-blue-100 text-blue-700'}`}>{poPage}/{poTotalPages}</span>
-            <button disabled={poPage===poTotalPages} onClick={()=>setPoPage(p=>p+1)} className={`p-1.5 rounded ${poPage===poTotalPages?'opacity-40':'hover:bg-blue-100'}`}><ChevronRight className="w-4 h-4"/></button>
-          </div>
-        </div>
-      </div>
-      </>)}
-
-
     </div>
   );
 
@@ -5158,7 +4455,7 @@ const App = () => {
             <BarChart3 className="w-5 h-5 flex-shrink-0"/>
             <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-40 opacity-100':'max-w-0 opacity-0'}`}>Summary</span>
           </button>
-          <button onClick={()=>{ setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums,soMarginFilter,soDateFilter); window.scrollTo({top:0, behavior:'smooth'}); }}
+          <button data-tour="open-so-nav" onClick={()=>{ setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums,soMarginFilter,soDateFilter); window.scrollTo({top:0, behavior:'smooth'}); }}
             className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='all-so'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="Pending Delivery">
             <Clock className="w-5 h-5 flex-shrink-0"/>
             <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-40 opacity-100':'max-w-0 opacity-0'}`}>Pending Delivery</span>
@@ -5196,7 +4493,7 @@ const App = () => {
       <main className={`ml-16 ${sidebarExpanded?'lg:ml-60':'lg:ml-16'} p-4 lg:p-6 transition-[margin-left] duration-200 ease-out`}>
         <div className={`${darkMode?'bg-gray-900 border-gray-800':'bg-[#fbfbfa] border-gray-200/70'} ${activePage === 'dashboard' ? '' : darkMode ? 'data-table-page data-table-page-dark' : 'data-table-page'} min-h-[calc(100vh-32px)] lg:min-h-[calc(100vh-48px)] rounded-2xl border shadow-[0_12px_36px_rgba(15,23,42,0.07)] p-4 lg:p-6`}>
         <header className="mb-7 flex flex-wrap justify-between items-center gap-4">
-          <div>
+          <div data-tour="page-title">
             <h1 className={`text-[28px] leading-tight font-bold tracking-[-0.02em] ${txt}`}>
               Serveone <span className="text-[#2563EB]">Dashboard</span>
             </h1>
@@ -5214,6 +4511,7 @@ const App = () => {
             <div className="flex flex-wrap gap-2 justify-end">
               <div className="relative" ref={uploadDropdownRef}>
               <button
+                data-tour="manual-update"
                 onClick={() => setShowUploadDropdown(v => !v)}
                 className="flex items-center gap-2 px-4 py-2.5 rounded-xl shadow-sm transition-all bg-blue-600 hover:bg-blue-700 text-white"
               >
@@ -5260,7 +4558,7 @@ const App = () => {
               </div>
 
               <div className="relative" ref={hideMenuRef}>
-              <button onClick={()=>setShowHideMenu(o=>!o)}
+              <button data-tour="hide-menu" onClick={()=>setShowHideMenu(o=>!o)}
                 className="flex items-center gap-2 px-4 py-2.5 rounded-xl shadow-sm transition-all bg-slate-600 hover:bg-slate-700 text-white">
                 <EyeOff className="w-4 h-4"/><span className="text-sm font-medium">Hide</span>
                 <ChevronDown className="w-3.5 h-3.5"/>
@@ -5343,6 +4641,7 @@ const App = () => {
       </main>
 
       {modal && <SOModal title={modal.title} data={modal.data} darkMode={darkMode} onClose={()=>setModal(null)} onUpdateCell={updateSOCell}/>} 
+
       {marginDetailModal && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={()=>setMarginDetailModal(null)}>
           <div className={`rounded-2xl overflow-hidden shadow-2xl w-full max-w-5xl max-h-[85vh] flex flex-col ${darkMode?'bg-gray-800 text-white':'bg-white'}`} onClick={e=>e.stopPropagation()}>
