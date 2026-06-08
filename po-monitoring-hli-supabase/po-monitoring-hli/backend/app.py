@@ -2672,8 +2672,8 @@ def debug_smro_columns():
         all_cols = df.columns.tolist()
 
         detected = {
-            'col_so':      find_column(df, ['SO Number','SO No','SO No.','SO','SO Item','Sales Order Number','No SO','Nomor SO']),
-            'col_soitem':  find_column(df, ['SO Item No','Item No','Line','SO Line','SO Item']),
+            'col_so_item':  find_column(df, ['SO Item', 'SO Item No', 'SO Line', 'Item No', 'Line']),
+            'col_so_number': find_column(df, ['SO Number','SO No','SO No.','SO','Sales Order Number','No SO','Nomor SO']),
             'col_spec':    find_column(df, ['Specification','Spec','Specifications','Product Specification','Material Description','Material Desc','Short Text']),
             'col_pid':     find_column(df, ['Product ID','Product Id','Product Code','Material','Material No','Material Number','Material Code','SKU','Article','Article Number']),
             'col_prod':    find_column(df, ['Product Name','Item Name','Description','Product']),
@@ -2682,18 +2682,25 @@ def debug_smro_columns():
             'col_sodate':  find_column(df, ['SO Create Date','Order Date','SO Date','Create Date']),
         }
 
-        missing_critical = [k for k in ('col_spec', 'col_pid') if not detected[k]]
+        col_primary = detected['col_so_item'] or detected['col_so_number']
+        missing_critical = []
+        if not col_primary:
+            missing_critical.append('col_so_item / col_so_number')
+        for k in ('col_spec', 'col_pid'):
+            if not detected[k]:
+                missing_critical.append(k)
 
         return jsonify({
             'total_columns': len(all_cols),
             'all_columns': all_cols,
             'detected': detected,
+            'primary_key_column': col_primary,
             'missing_critical': missing_critical,
             'diagnosis': (
-                'col_spec and col_pid NOT detected — column names in this file do not match any known alias. '
+                'col_spec and/or col_pid NOT detected — column names in this file do not match any known alias. '
                 'Check "all_columns" list and update backend aliases.'
                 if missing_critical else
-                'col_spec and col_pid both detected — upload should populate Specification and Product ID correctly.'
+                'SO Item key, col_spec, and col_pid all detected — upload should work correctly.'
             )
         })
     except Exception as e:
@@ -3496,15 +3503,17 @@ def upload_smro():
         if not uploads:
             return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
 
+        # SO Item adalah primary key upsert (format: "7001664545-10").
+        # Upload JSON dari SAP hanya punya kolom "SO Item" — SO Number di-derive otomatis dari prefix.
+        # Upload Excel lama tetap bisa pakai "SO Number" atau "SO Item No" dll.
         required_smro_cols = {
-            'SO Number': ['SO Number','SO No','SO No.','SO','Sales Order','Sales Order Number','No SO','Nomor SO'],
-            'SO Item': ['SO Item No','Item No','Line','SO Line','SO Item'],
-            'SO Status': ['SO Status','Status','Order Status'],
-            'Operation Unit': ['Operation Unit Name','Op Unit','Client Name','Client','Operation Unit'],
-            'Vendor Name': ['Vendor Name','Vendor','Supplier'],
-            'Customer PO': ['Customer PO Number','Customer PO','PO Ref','PO Reference'],
-            'Sales Amount': ['Sales Amount(Exclude Tax)','Sales Amount','Amount','Total'],
-            'SO Create Date': ['SO Create Date','Order Date','SO Date','Create Date'],
+            'SO Item': ['SO Item', 'SO Item No', 'SO Number', 'SO No', 'SO No.', 'SO', 'Sales Order', 'Sales Order Number', 'No SO', 'Nomor SO'],
+            'SO Status': ['SO Status', 'Status', 'Order Status'],
+            'Operation Unit': ['Operation Unit Name', 'Op Unit', 'Client Name', 'Client', 'Operation Unit'],
+            'Vendor Name': ['Vendor Name', 'Vendor', 'Supplier'],
+            'Customer PO': ['Customer PO number', 'Customer PO Number', 'Customer PO', 'PO Ref', 'PO Reference'],
+            'Sales Amount': ['Sales Amount(Exclude Tax)', 'Sales Amount', 'Amount', 'Total'],
+            'SO Create Date': ['SO Create Date', 'Order Date', 'SO Date', 'Create Date', 'Create Sales Order Date'],
         }
 
         existing_so = {s.so_item: s for s in SOData.query.all() if s.so_item}
@@ -3516,8 +3525,26 @@ def upload_smro():
             df = upload['df']
             df.columns = [str(c).strip() for c in df.columns]
 
+            # Validasi kolom: SO Item (atau SO Number) wajib ada.
+            # Kolom lain seperti Vendor Name, Sales Amount, SO Create Date mungkin tidak ada
+            # di JSON SAP — itu normal, field tersebut tetap NULL / tidak diupdate di DB.
+            has_primary_key = (
+                find_column(df, ['SO Item', 'SO Item No', 'SO Number', 'SO No', 'SO No.', 'SO',
+                                  'Sales Order', 'Sales Order Number', 'No SO', 'Nomor SO'])
+            )
+            if not has_primary_key:
+                return jsonify({
+                    'error': (
+                        f'Invalid file "{filename}" - kolom SO Item / SO Number tidak ditemukan. '
+                        f'Available columns: {df.columns.tolist()}'
+                    )
+                }), 400
+
+            # Soft-check kolom lain: hanya log warning, tidak reject
             missing_required = [name for name, aliases in required_smro_cols.items() if not find_column(df, aliases)]
-            if len(missing_required) > 3:
+            # Untuk upload Excel lengkap: reject jika lebih dari 4 kolom penting tidak ada
+            # Untuk JSON dari SAP: kolom Vendor/Amount/Date mungkin memang tidak ada — tetap lanjut
+            if upload_mode == 'excel' and len(missing_required) > 4:
                 return jsonify({
                     'error': (
                         f'Invalid file "{filename}" - {len(missing_required)} required columns not found: '
@@ -3525,40 +3552,64 @@ def upload_smro():
                     )
                 }), 400
 
-            col_so = find_column(df, ['SO Number','SO No','SO No.','SO','SO Item','Sales Order','Sales Order Number','No SO','Nomor SO'])
-            if not col_so:
-                return jsonify({'error': f'SO Number column not found in "{filename}". Available columns: {df.columns.tolist()}'}), 400
+            # col_soitem = primary key untuk upsert (value: "8061874935-10")
+            # Prioritas: kolom bernama "SO Item" dulu (JSON dari SAP), fallback ke "SO Number" dll (Excel lama)
+            # Deteksi kolom — alias diurutkan dari nama paling spesifik/exact ke nama fallback
+            # Nama kolom exact dari SMRO Excel diletakkan di depan list alias
 
-            col_soitem = find_column(df, ['SO Item No','Item No','Line','SO Line','SO Item'])
-            col_status = find_column(df, ['SO Status','Status','Order Status'])
-            col_opunit = find_column(df, ['Operation Unit Name','Op Unit','Client Name','Client','Operation Unit'])
-            col_vendor_id = find_column(df, ['Vendor ID','Vendor Id','Vendor Code','Supplier ID','Supplier Code'])
-            col_vendor = find_column(df, ['Vendor Name','Vendor','Supplier'])
-            col_custpo = find_column(df, ['Customer PO Number','Customer PO','PO Ref','PO Reference'])
-            col_memo = find_column(df, ['Delivery Memo','Memo','Delivery Note'])
-            col_prod = find_column(df, ['Product Name','Item Name','Description','Product'])
-            col_spec = find_column(df, ['Specification','Spec','Specifications','Product Specification','Material Description','Material Desc','Short Text'])
-            col_mfr = find_column(df, ['Manufacturer Name','Mfr. Nm.','Mfr. Nm','Maker Nm.','Manufacturer'])
-            col_pid = find_column(df, ['Product ID','Product Id','Product Code','Material','Material No','Material Number','Material Code','SKU','Article','Article Number'])
-            col_qty = find_column(df, ['SO Quantity','SO Qty','Qty','Quantity'])
-            col_sunit = find_column(df, ['Sales Unit','Unit','UOM'])
-            col_sprice = find_column(df, ['Sales Price(Exclude Tax)','Sales Price','Price','Unit Price'])
-            col_samt = find_column(df, ['Sales Amount(Exclude Tax)','Sales Amount','Amount','Total'])
-            col_cur = find_column(df, ['Currency','Curr'])
-            col_pprice = find_column(df, ['Purchasing Price','Purchase Price','PO Price'])
-            col_pamt = find_column(df, ['Purchasing Amount','Purchase Amount','PO Amount'])
-            col_pcur = find_column(df, ['Purchasing Currency','Purchase Currency','PO Currency','Purchasing Curr','Purchase Curr'])
-            col_sodate = find_column(df, ['SO Create Date','Order Date','SO Date','Create Date'])
-            col_delposs = find_column(df, ['Delivery Possible Date','Possible Delivery Date','Est Delivery'])
-            col_matchpo = find_column(df, ['Matched PO Number','Matched PO','PO HLI','PO HLI Number','Purchasing Order Number','PO Number'])
+            # Primary key: "SO Item" di SMRO = format "7001664545-10"
+            col_soitem = find_column(df, ['SO Item', 'SO Item No', 'SO Line', 'Item No', 'Line'])
+            # SO Number numeric (angka saja, tanpa suffix -10) — optional, di-derive kalau tidak ada
+            col_so = find_column(df, ['SO Number', 'SO No', 'SO No.', 'SO', 'Sales Order', 'Sales Order Number', 'No SO', 'Nomor SO'])
+            col_primary = col_soitem or col_so
+            if not col_primary:
+                return jsonify({'error': f'SO Item / SO Number column not found in "{filename}". Available columns: {df.columns.tolist()}'}), 400
+
+            col_status   = find_column(df, ['SO Status', 'Status', 'Order Status', 'SO Status Code'])
+            col_opunit   = find_column(df, ['Operation Unit Name', 'Op Unit', 'Client Name', 'Client', 'Operation Unit'])
+            col_vendor_id = find_column(df, ['Vendor ID', 'Vendor Id', 'Vendor Code', 'Supplier ID', 'Supplier Code'])
+            col_vendor   = find_column(df, ['Vendor Name', 'Vendor', 'Supplier'])
+            # SMRO Excel: "Customer PO number" (n lowercase) dan "Customer PR number"
+            col_custpo   = find_column(df, ['Customer PO number', 'Customer PO Number', 'Customer PO', 'PO Ref', 'PO Reference'])
+            col_memo     = find_column(df, ['Delivery Memo', 'Memo', 'Delivery Note'])
+            col_prod     = find_column(df, ['Product Name', 'Item Name', 'Description', 'Product'])
+            col_spec     = find_column(df, ['Specification', 'Spec', 'Specifications', 'Product Specification', 'Material Description', 'Material Desc', 'Short Text'])
+            col_mfr      = find_column(df, ['Manufacturer Name', 'Mfr. Nm.', 'Mfr. Nm', 'Maker Nm.', 'Manufacturer'])
+            col_pid      = find_column(df, ['Product ID', 'Product Id', 'Product Code', 'Material', 'Material No', 'Material Number', 'Material Code', 'SKU', 'Article', 'Article Number'])
+            col_qty      = find_column(df, ['SO Quantity', 'SO Qty', 'Qty', 'Quantity'])
+            col_sunit    = find_column(df, ['Sales Unit', 'Unit', 'UOM'])
+            col_sprice   = find_column(df, ['Sales Price(Exclude Tax)', 'Sales Price', 'Price', 'Unit Price'])
+            col_samt     = find_column(df, ['Sales Amount(Exclude Tax)', 'Sales Amount', 'Amount', 'Total'])
+            col_cur      = find_column(df, ['Currency', 'Curr'])
+            col_pprice   = find_column(df, ['Purchasing Price', 'Purchase Price', 'PO Price'])
+            col_pamt     = find_column(df, ['Purchasing Amount', 'Purchase Amount', 'PO Amount'])
+            col_pcur     = find_column(df, ['Purchasing Currency', 'Purchase Currency', 'PO Currency', 'Purchasing Curr', 'Purchase Curr'])
+            # SMRO Excel: "SO Create Date" (exact match)
+            col_sodate   = find_column(df, ['SO Create Date', 'Order Date', 'SO Date', 'Create Date', 'Create Sales Order Date'])
+            col_delposs  = find_column(df, ['Delivery Possible Date', 'Possible Delivery Date', 'Est Delivery'])
+            # SMRO Excel: "Purchasing Order Number" = matched PO
+            col_matchpo  = find_column(df, ['Purchasing Order Number', 'Matched PO Number', 'Matched PO', 'PO HLI', 'PO HLI Number', 'PO Number'])
 
             count = updated = inserted = spec_filled = pid_filled = 0
 
             for _, row in df.iterrows():
-                so_val = clean(df_val(row, col_so))
-                if not so_val:
+                primary_val = clean(df_val(row, col_primary))
+                if not primary_val:
                     continue
-                so_item_val = clean(df_val(row, col_soitem))
+
+                # so_item = primary key DB (format "8061874935-10")
+                # so_number = prefix sebelum "-" (auto-derive jika tidak ada kolom SO Number terpisah)
+                if col_soitem:
+                    so_item_val = primary_val
+                    # Jika ada kolom SO Number terpisah, pakai itu; jika tidak, derive dari prefix
+                    so_val = clean(df_val(row, col_so)) if col_so else None
+                    if not so_val:
+                        so_val = so_item_val.rsplit('-', 1)[0] if '-' in so_item_val else so_item_val
+                else:
+                    # Upload Excel lama: primary dari kolom SO Number
+                    so_val = primary_val
+                    so_item_val = so_val  # tidak ada SO Item terpisah, pakai SO Number sebagai so_item
+
                 spec_val = clean(df_val(row, col_spec)) if col_spec else None
                 pid_val = clean(df_val(row, col_pid)) if col_pid else None
                 if spec_val:
@@ -3652,7 +3703,13 @@ def upload_smro():
 
             diagnostics = {
                 'filename': filename,
-                'columns_detected': {'specification': col_spec, 'product_id': col_pid},
+                'columns_detected': {
+                    'so_item': col_primary,
+                    'so_item_col': col_soitem,
+                    'so_number_col': col_so,
+                    'specification': col_spec,
+                    'product_id': col_pid,
+                },
                 'rows_with_specification': spec_filled,
                 'rows_with_product_id': pid_filled,
                 'all_file_columns': df.columns.tolist(),
