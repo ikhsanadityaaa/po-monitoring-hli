@@ -1739,6 +1739,108 @@ def read_upload_excel(file):
     engine = 'xlrd' if is_xls_format or filename.endswith('.xls') else 'openpyxl'
     return pd.read_excel(file, sheet_name=0, engine=engine)
 
+
+
+# ─── Shared upload input helpers: Excel and JSON ──────────────────────────────
+def _json_rows_to_dataframe(rows, columns=None):
+    """Convert JSON rows into a pandas DataFrame.
+
+    Supported row formats:
+    - list[dict]: [{"SO Number": "...", ...}]
+    - list[list] + columns: {"columns": ["SO Number", ...], "rows": [[...], ...]}
+    """
+    if rows is None:
+        rows = []
+    if not isinstance(rows, list):
+        raise ValueError('JSON rows/data must be a list')
+
+    if columns:
+        return pd.DataFrame(rows, columns=[str(c).strip() for c in columns])
+
+    if not rows:
+        return pd.DataFrame()
+
+    if all(isinstance(r, dict) for r in rows):
+        return pd.DataFrame(rows)
+
+    return pd.DataFrame(rows)
+
+
+def _json_payload_to_uploads(payload, default_filename='json_upload'):
+    """Normalize one JSON request body into [{'filename': str, 'df': DataFrame}].
+
+    Accepted payloads:
+    1. {"filename": "x.json", "rows": [{...}]}
+    2. {"filename": "x.json", "columns": [...], "rows": [[...]]}
+    3. {"files": [{"filename": "a.json", "rows": [...]}, ...]}
+    4. [{"col": "value"}, ...]
+    5. {"col": "value"}  -> treated as one row
+    """
+    if payload is None:
+        raise ValueError('Invalid or empty JSON body')
+
+    def one(obj, index=1):
+        if isinstance(obj, dict):
+            filename = clean(obj.get('filename')) or clean(obj.get('name')) or f'{default_filename}_{index}.json'
+            columns = obj.get('columns')
+            rows = (
+                obj.get('rows')
+                if 'rows' in obj else
+                obj.get('data')
+                if 'data' in obj else
+                obj.get('records')
+                if 'records' in obj else
+                obj.get('items')
+                if 'items' in obj else
+                None
+            )
+
+            if rows is None:
+                # Treat plain JSON object as a single row if it does not use rows/data.
+                row = {k: v for k, v in obj.items() if k not in ('filename', 'name', 'columns')}
+                rows = [row] if row else []
+
+            df = _json_rows_to_dataframe(rows, columns=columns)
+            df.columns = [str(c).strip() for c in df.columns]
+            return {'filename': filename, 'df': df}
+
+        if isinstance(obj, list):
+            filename = f'{default_filename}_{index}.json'
+            df = _json_rows_to_dataframe(obj)
+            df.columns = [str(c).strip() for c in df.columns]
+            return {'filename': filename, 'df': df}
+
+        raise ValueError('Each JSON upload must be an object or list')
+
+    uploads = []
+    if isinstance(payload, dict) and isinstance(payload.get('files'), list):
+        for idx, item in enumerate(payload.get('files') or [], start=1):
+            uploads.append(one(item, idx))
+    else:
+        uploads.append(one(payload, 1))
+
+    return [u for u in uploads if u['df'] is not None]
+
+
+def request_upload_dataframes(default_filename='upload'):
+    """Return uploads from either Excel multipart/form-data or JSON body.
+
+    This keeps manual Excel upload working, while allowing the same endpoint
+    to receive JSON from automation.
+    """
+    content_type = (request.content_type or '').lower()
+    if request.is_json or 'application/json' in content_type:
+        payload = request.get_json(silent=True)
+        uploads = _json_payload_to_uploads(payload, default_filename=default_filename)
+        return uploads, 'json'
+
+    files = uploaded_files()
+    uploads = []
+    for file in files:
+        df = read_upload_excel(file)
+        df.columns = [str(c).strip() for c in df.columns]
+        uploads.append({'filename': file.filename, 'df': df})
+    return uploads, 'excel'
 def validate_upload_columns(filename, label, col_map, expected, required, max_missing=3):
     missing_expected = [display for key, display in expected if not col_map.get(key)]
     if len(missing_expected) > max_missing:
@@ -3383,14 +3485,16 @@ def upload_po_list():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/upload/scor-json', methods=['POST'])
 @app.route('/api/upload/scor', methods=['POST'])
+@app.route('/api/upload/smro-json', methods=['POST'])
 @app.route('/api/upload/smro', methods=['POST'])
 def upload_smro():
     """SMRO upload: upsert by SO Item and preserve manual remarks/plan date."""
     try:
-        files = uploaded_files()
-        if not files:
-            return jsonify({'error': 'No file'}), 400
+        uploads, upload_mode = request_upload_dataframes('smro')
+        if not uploads:
+            return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
 
         required_smro_cols = {
             'SO Number': ['SO Number','SO No','SO No.','SO','Sales Order','Sales Order Number','No SO','Nomor SO'],
@@ -3407,22 +3511,23 @@ def upload_smro():
         total_count = total_updated = total_inserted = 0
         diagnostics_by_file = []
 
-        for file in files:
-            df = read_upload_excel(file)
+        for upload in uploads:
+            filename = upload['filename']
+            df = upload['df']
             df.columns = [str(c).strip() for c in df.columns]
 
             missing_required = [name for name, aliases in required_smro_cols.items() if not find_column(df, aliases)]
             if len(missing_required) > 3:
                 return jsonify({
                     'error': (
-                        f'Invalid file "{file.filename}" - {len(missing_required)} required columns not found: '
+                        f'Invalid file "{filename}" - {len(missing_required)} required columns not found: '
                         f'{", ".join(missing_required)}. Please make sure you are uploading the correct SMRO file.'
                     )
                 }), 400
 
             col_so = find_column(df, ['SO Number','SO No','SO No.','SO','SO Item','Sales Order','Sales Order Number','No SO','Nomor SO'])
             if not col_so:
-                return jsonify({'error': f'SO Number column not found in "{file.filename}". Available columns: {df.columns.tolist()}'}), 400
+                return jsonify({'error': f'SO Number column not found in "{filename}". Available columns: {df.columns.tolist()}'}), 400
 
             col_soitem = find_column(df, ['SO Item No','Item No','Line','SO Line','SO Item'])
             col_status = find_column(df, ['SO Status','Status','Order Status'])
@@ -3540,13 +3645,13 @@ def upload_smro():
                 if count % CHUNK_SIZE == 0:
                     db.session.flush()
 
-            db.session.add(UploadLog(file_type='SO', filename=file.filename, records_count=count))
+            db.session.add(UploadLog(file_type='SO', filename=filename, records_count=count))
             total_count += count
             total_updated += updated
             total_inserted += inserted
 
             diagnostics = {
-                'filename': file.filename,
+                'filename': filename,
                 'columns_detected': {'specification': col_spec, 'product_id': col_pid},
                 'rows_with_specification': spec_filled,
                 'rows_with_product_id': pid_filled,
@@ -3575,9 +3680,10 @@ def upload_smro():
             diagnostics = {**diagnostics, 'files': diagnostics_by_file}
 
         return jsonify({
-            'message': f'Berhasil upload {len(files)} file: {total_inserted} SO baru ditambahkan, {total_updated} SO diperbarui. Data lama yang tidak ada di file ini tetap dipertahankan.',
+            'message': f'Berhasil upload {len(uploads)} file: {total_inserted} SO baru ditambahkan, {total_updated} SO diperbarui. Data lama yang tidak ada di file ini tetap dipertahankan.',
             'uploaded': total_count,
-            'files': len(files),
+            'files': len(uploads),
+            'mode': upload_mode,
             'inserted': total_inserted,
             'updated': total_updated,
             'diagnostics': diagnostics,
@@ -3587,118 +3693,125 @@ def upload_smro():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/upload/smro-backfill-spec-json', methods=['POST'])
 @app.route('/api/upload/smro-backfill-spec', methods=['POST'])
 def upload_smro_backfill_spec():
-    """Backfill-only upload: reads Specification and Product ID from an SMRO
-    Excel file and updates those two fields on existing SO records.
+    """Backfill-only upload from Excel or JSON.
 
-    Matching strategy (in order):
-    1. Exact SO Item match  (e.g. '9008123456-10' in file == '9008123456-10' in DB)
-    2. SO Number + item-line suffix match  (file SO Item '9008123456-10' →
-       SO Number '9008123456', item line '10')
-    3. SO Number only match (last resort — updates all lines of that SO)
-
-    Safe to run multiple times.  Only writes when spec or pid is non-null in file.
+    Reads Specification and Product ID and updates those two fields on existing SO records.
+    Accepts either multipart Excel upload or JSON body with rows/data.
     """
     try:
-        if 'file' not in request.files:
-            return jsonify({'error': 'No file'}), 400
-        file = request.files['file']
-        df = pd.read_excel(file, engine='openpyxl')
-        df.columns = [str(c).strip() for c in df.columns]
-
-        col_sonum  = find_column(df, ['SO Number', 'SO No', 'SO No.', 'SO'])
-        col_soitem = find_column(df, ['SO Item', 'SO Item No', 'SO Line', 'Item No', 'Line'])
-        col_spec   = find_column(df, ['Specification', 'Spec', 'Specifications', 'Product Specification'])
-        col_pid    = find_column(df, ['Product ID', 'Product Id', 'Product Code',
-                                      'Material', 'Material No', 'Material Number', 'Material Code', 'SKU'])
-
-        if not col_soitem and not col_sonum:
-            return jsonify({'error': f'SO Item / SO Number column not found. Columns: {df.columns.tolist()}'}), 400
-        if not col_spec and not col_pid:
-            return jsonify({'error': 'Neither Specification nor Product ID column found.'}), 400
+        uploads, upload_mode = request_upload_dataframes('smro_backfill_spec')
+        if not uploads:
+            return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
 
         # Ensure columns exist in DB before writing
         _ensure_so_extra_columns()
 
         # Build lookups from all SO records in DB
         all_so = SOData.query.all()
-        # Primary: exact so_item match
         by_soitem = {}
-        # Secondary: so_number → list of records (for fallback)
-        by_sonum  = {}
+        by_sonum = {}
         for s in all_so:
             if s.so_item:
                 by_soitem[s.so_item] = s
-                # Also index by so_number+item_suffix e.g. '9008123456' + '-10'
-                parts = s.so_item.rsplit('-', 1)
-                if len(parts) == 2:
-                    by_soitem[s.so_item] = s  # already done
             if s.so_number:
                 by_sonum.setdefault(s.so_number, []).append(s)
 
         updated = 0
         skipped_no_match = 0
-        skipped_no_data  = 0
-        flush_counter    = 0
+        skipped_no_data = 0
+        flush_counter = 0
+        diagnostics = []
 
-        for _, row in df.iterrows():
-            so_item_val = clean(df_val(row, col_soitem)) if col_soitem else None
-            so_num_val  = clean(df_val(row, col_sonum))  if col_sonum  else None
-            spec_val    = clean(df_val(row, col_spec))   if col_spec   else None
-            pid_val     = clean(df_val(row, col_pid))    if col_pid    else None
+        for upload in uploads:
+            filename = upload['filename']
+            df = upload['df']
+            df.columns = [str(c).strip() for c in df.columns]
 
-            if spec_val is None and pid_val is None:
-                skipped_no_data += 1
-                continue
+            col_sonum  = find_column(df, ['SO Number', 'SO No', 'SO No.', 'SO'])
+            col_soitem = find_column(df, ['SO Item', 'SO Item No', 'SO Line', 'Item No', 'Line'])
+            col_spec   = find_column(df, ['Specification', 'Spec', 'Specifications', 'Product Specification'])
+            col_pid    = find_column(df, ['Product ID', 'Product Id', 'Product Code',
+                                          'Material', 'Material No', 'Material Number', 'Material Code', 'SKU'])
 
-            # Resolve matching DB records
-            matched_recs = []
+            if not col_soitem and not col_sonum:
+                return jsonify({'error': f'SO Item / SO Number column not found in "{filename}". Columns: {df.columns.tolist()}'}), 400
+            if not col_spec and not col_pid:
+                return jsonify({'error': f'Neither Specification nor Product ID column found in "{filename}".'}), 400
 
-            if so_item_val:
-                # Try exact so_item match first
-                rec = by_soitem.get(so_item_val)
-                if rec:
-                    matched_recs = [rec]
-                else:
-                    # Try: maybe DB stores so_number only as so_item (older uploads)
-                    # Extract so_number from so_item (strip '-NN' suffix)
-                    parts = so_item_val.rsplit('-', 1)
-                    so_num_from_item = parts[0] if len(parts) == 2 else so_item_val
-                    candidates = by_sonum.get(so_num_from_item, [])
-                    if len(parts) == 2:
-                        # Try to match by item line number suffix
-                        item_line = parts[1]
-                        line_matched = [
-                            c for c in candidates
-                            if c.so_item and c.so_item.endswith(f'-{item_line}')
-                        ]
-                        matched_recs = line_matched or candidates
+            file_updated = 0
+            file_skipped_no_match = 0
+            file_skipped_no_data = 0
+
+            for _, row in df.iterrows():
+                so_item_val = clean(df_val(row, col_soitem)) if col_soitem else None
+                so_num_val  = clean(df_val(row, col_sonum))  if col_sonum  else None
+                spec_val    = clean(df_val(row, col_spec))   if col_spec   else None
+                pid_val     = clean(df_val(row, col_pid))    if col_pid    else None
+
+                if spec_val is None and pid_val is None:
+                    skipped_no_data += 1
+                    file_skipped_no_data += 1
+                    continue
+
+                matched_recs = []
+
+                if so_item_val:
+                    rec = by_soitem.get(so_item_val)
+                    if rec:
+                        matched_recs = [rec]
                     else:
-                        matched_recs = candidates
+                        parts = so_item_val.rsplit('-', 1)
+                        so_num_from_item = parts[0] if len(parts) == 2 else so_item_val
+                        candidates = by_sonum.get(so_num_from_item, [])
+                        if len(parts) == 2:
+                            item_line = parts[1]
+                            line_matched = [
+                                c for c in candidates
+                                if c.so_item and c.so_item.endswith(f'-{item_line}')
+                            ]
+                            matched_recs = line_matched or candidates
+                        else:
+                            matched_recs = candidates
 
-            if not matched_recs and so_num_val:
-                matched_recs = by_sonum.get(so_num_val, [])
+                if not matched_recs and so_num_val:
+                    matched_recs = by_sonum.get(so_num_val, [])
 
-            if not matched_recs:
-                skipped_no_match += 1
-                continue
+                if not matched_recs:
+                    skipped_no_match += 1
+                    file_skipped_no_match += 1
+                    continue
 
-            for rec in matched_recs:
-                changed = False
-                if spec_val is not None and rec.specification != spec_val:
-                    rec.specification = spec_val
-                    changed = True
-                if pid_val is not None and rec.product_id != pid_val:
-                    rec.product_id = pid_val
-                    changed = True
-                if changed:
-                    updated += 1
-                    flush_counter += 1
-                    if flush_counter % 300 == 0:
-                        db.session.flush()
+                for rec in matched_recs:
+                    changed = False
+                    if spec_val is not None and rec.specification != spec_val:
+                        rec.specification = spec_val
+                        changed = True
+                    if pid_val is not None and rec.product_id != pid_val:
+                        rec.product_id = pid_val
+                        changed = True
+                    if changed:
+                        updated += 1
+                        file_updated += 1
+                        flush_counter += 1
+                        if flush_counter % 300 == 0:
+                            db.session.flush()
+
+            diagnostics.append({
+                'filename': filename,
+                'updated': file_updated,
+                'skipped_no_match': file_skipped_no_match,
+                'skipped_no_data': file_skipped_no_data,
+                'spec_column_detected': col_spec,
+                'pid_column_detected': col_pid,
+                'soitem_column_detected': col_soitem,
+                'sonumber_column_detected': col_sonum,
+            })
 
         db.session.commit()
+        clear_runtime_caches()
         return jsonify({
             'message': (
                 f'Backfill selesai: {updated} SO record diperbarui'
@@ -3706,19 +3819,20 @@ def upload_smro_backfill_spec():
                 + (f', {skipped_no_data} baris tidak ada data Spec/PID' if skipped_no_data else '')
                 + '.'
             ),
+            'mode': upload_mode,
+            'files': len(uploads),
             'updated': updated,
             'skipped_no_match': skipped_no_match,
             'skipped_no_data': skipped_no_data,
-            'spec_column_detected': col_spec,
-            'pid_column_detected': col_pid,
-            'soitem_column_detected': col_soitem,
+            'diagnostics': diagnostics[-1] if len(diagnostics) == 1 else diagnostics,
         })
+    except ValueError as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 400
     except Exception as e:
         db.session.rollback()
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
-
-
 @app.route('/api/data/so/<int:so_id>', methods=['PUT'])
 def update_so(so_id):
     try:
@@ -5042,28 +5156,30 @@ def get_item_registration_data():
 
 
 
+@app.route('/api/upload/item-registration-json', methods=['POST'])
 @app.route('/api/upload/item-registration', methods=['POST'])
 def upload_item_registration():
     try:
-        files = uploaded_files()
-        if not files:
-            return jsonify({'error': 'No file uploaded'}), 400
+        uploads, upload_mode = request_upload_dataframes('item_registration')
+        if not uploads:
+            return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
 
         summary = {'processed': 0, 'added': 0, 'updated': 0, 'removed_duplicates': 0}
-        for file in files:
-            df = read_upload_excel(file)
-            result = import_item_registration_dataframe(df, file.filename)
+        for upload in uploads:
+            df = upload['df']
+            result = import_item_registration_dataframe(df, upload['filename'])
             for key in summary:
                 summary[key] += result.get(key, 0)
         db.session.commit()
         clear_runtime_caches()
         return jsonify({
             'message': (
-                f'Berhasil upload {len(files)} file Item Registration: '
+                f'Berhasil upload {len(uploads)} file Item Registration: '
                 f'+{summary["added"]} added, {summary["updated"]} updated'
             ),
             'uploaded': summary['processed'],
-            'files': len(files),
+            'files': len(uploads),
+            'mode': upload_mode,
             **summary,
         })
     except ValueError as e:
@@ -5294,13 +5410,14 @@ def _lookup_pic(product_id_str):
     return _lookup_pic_by_category_id(prod.category_id)
 
 
+@app.route('/api/upload/product-id-json', methods=['POST'])
 @app.route('/api/upload/product-id', methods=['POST'])
 def upload_product_id():
     """Upload Prod_ID Excel from SAP. Upserts product_id → category_id mapping."""
     try:
-        files = uploaded_files()
-        if not files:
-            return jsonify({'error': 'No file provided'}), 400
+        uploads, upload_mode = request_upload_dataframes('product_id')
+        if not uploads:
+            return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
 
         added = updated = 0
         pic_cache = {}  # category_id → pic_name
@@ -5315,11 +5432,11 @@ def upload_product_id():
         ]
         required = [('product_id', 'Product ID')]
 
-        for file in files:
-            df = read_upload_excel(file)
+        for upload in uploads:
+            df = upload['df']
             df.columns = [str(c).strip() for c in df.columns]
             col = _product_id_columns(df)
-            validate_upload_columns(file.filename, 'Prod ID', col, expected, required)
+            validate_upload_columns(upload['filename'], 'Prod ID', col, expected, required)
 
             for _, row in df.iterrows():
                 pid = clean_product_id(df_val(row, col['product_id']))
@@ -5379,7 +5496,8 @@ def upload_product_id():
 
         return jsonify({
             'status': 'ok',
-            'files': len(files),
+            'files': len(uploads),
+            'mode': upload_mode,
             'added': added, 'updated': updated,
             'so_pic_refreshed': refreshed,
             'total_in_db': db.session.query(ProductIDDB).count()
@@ -5393,13 +5511,14 @@ def upload_product_id():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/upload/master-pic-json', methods=['POST'])
 @app.route('/api/upload/master-pic', methods=['POST'])
 def upload_master_pic():
     """Upload Master PIC Excel. Upserts category_id → PIC mapping, then refreshes SO pic_name."""
     try:
-        files = uploaded_files()
-        if not files:
-            return jsonify({'error': 'No file provided'}), 400
+        uploads, upload_mode = request_upload_dataframes('master_pic')
+        if not uploads:
+            return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
 
         added = updated = 0
         expected = [
@@ -5407,11 +5526,11 @@ def upload_master_pic():
         ]
         required = [('category_id', 'Category ID'), ('pic', 'PIC')]
 
-        for file in files:
-            df = read_upload_excel(file)
+        for upload in uploads:
+            df = upload['df']
             df.columns = [str(c).strip() for c in df.columns]
             col = _master_pic_columns(df)
-            validate_upload_columns(file.filename, 'Update PIC', col, expected, required)
+            validate_upload_columns(upload['filename'], 'Update PIC', col, expected, required)
 
             for _, row in df.iterrows():
                 cat_id = normalize_category_id(df_val(row, col['category_id']))
@@ -5455,7 +5574,8 @@ def upload_master_pic():
 
         return jsonify({
             'status': 'ok',
-            'files': len(files),
+            'files': len(uploads),
+            'mode': upload_mode,
             'added': added, 'updated': updated,
             'so_pic_refreshed': refreshed,
             'total_categories': db.session.query(MasterPIC).count()
@@ -5788,12 +5908,13 @@ def download_rfq_batch_template():
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/rfq/batch-upload-json', methods=['POST'])
 @app.route('/api/rfq/batch-upload', methods=['POST'])
 def batch_upload_rfq():
     try:
-        files = uploaded_files()
-        if not files:
-            return jsonify({'error': 'No file uploaded'}), 400
+        uploads, upload_mode = request_upload_dataframes('rfq_batch')
+        if not uploads:
+            return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
         rows, _ = rfq_rows_with_edits(force=True)
         no_map = {}
         for row in rows:
@@ -5803,8 +5924,8 @@ def batch_upload_rfq():
 
         updated = 0
         not_found = 0
-        for file in files:
-            df = read_upload_excel(file)
+        for upload in uploads:
+            df = upload['df']
             df.columns = [str(c).strip() for c in df.columns]
             col_no = find_column(df, ['No'])
             if not col_no:
@@ -5832,7 +5953,7 @@ def batch_upload_rfq():
                         updated += 1
         db.session.commit()
         clear_runtime_caches()
-        return jsonify({'updated': updated, 'not_found': not_found, 'files': len(files)})
+        return jsonify({'updated': updated, 'not_found': not_found, 'files': len(uploads), 'mode': upload_mode})
     except Exception as e:
         db.session.rollback()
         import traceback; traceback.print_exc()
