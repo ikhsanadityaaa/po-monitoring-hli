@@ -2331,6 +2331,11 @@ def get_dashboard_stats():
             open_so_filter()
         ).all()
 
+        # Prefetch exchange rates for all rows in one shot BEFORE the loop.
+        # Without this, purchase_amount_idr() falls back to per-row HTTP calls
+        # to the Frankfurter API, making page load very slow on first request.
+        prefetch_convertible_exchange_rates(open_so_rows, fetch_missing=False)
+
         total_so_count = 0
         for s in open_so_rows:
             if s.so_item in hidden_so or s.so_number in hidden_so:
@@ -2500,6 +2505,37 @@ def get_dashboard_stats():
         candidates = [x for x in [last_so_upload] if x]
         last_upload = max(candidates) if candidates else None
 
+        # SO coverage: which year/months have data in the DB
+        so_covered_months = {}
+        is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
+        if is_sqlite:
+            month_rows = db.session.query(
+                func.strftime('%Y', SOData.so_create_date).label('yr'),
+                func.strftime('%m', SOData.so_create_date).label('mo'),
+            ).filter(SOData.so_create_date.isnot(None)).distinct().all()
+        else:
+            # PostgreSQL: use EXTRACT
+            month_rows = db.session.query(
+                func.extract('year', SOData.so_create_date).label('yr'),
+                func.extract('month', SOData.so_create_date).label('mo'),
+            ).filter(SOData.so_create_date.isnot(None)).distinct().all()
+            month_rows = [(str(int(yr)), f'{int(mo):02d}') for yr, mo in month_rows]
+        _MONTH_NAMES = ['January','February','March','April','May','June',
+                        'July','August','September','October','November','December']
+        for yr, mo in month_rows:
+            if yr and mo:
+                year_str = str(yr)
+                month_name = _MONTH_NAMES[int(mo) - 1]
+                so_covered_months.setdefault(year_str, []).append((int(mo), month_name))
+        # Sort months within each year
+        so_covered_months = {
+            yr: [name for _, name in sorted(months)]
+            for yr, months in sorted(so_covered_months.items())
+        }
+
+        # RFQ last updated: from the in-process cache (Google Sheets last fetch)
+        rfq_fetched_at = RFQ_CACHE.get('fetched_at')
+
         payload = {
             'po_without_so': po_without_so_count,
             'so_without_po': so_without_po_count,
@@ -2525,6 +2561,8 @@ def get_dashboard_stats():
             'last_updated_po': utc_isoformat(last_po_upload),
             'last_updated_smro': utc_isoformat(last_so_upload),
             'last_updated_item_registration': utc_isoformat(last_item_reg_upload),
+            'last_updated_rfq': utc_isoformat(rfq_fetched_at),
+            'so_covered_months': so_covered_months,
             'po_date_range': {
                 'min': po_date_range[0].isoformat() if po_date_range and po_date_range[0] else None,
                 'max': po_date_range[1].isoformat() if po_date_range and po_date_range[1] else None,
