@@ -3390,7 +3390,7 @@ const App = () => {
                 onSearch={(searchValue) => {
                   setRfqAppliedSearch(searchValue);
                   setRfqPage(1);
-                  fetchRFQData(1, rfqPerPage, searchValue, false, rfqFilters, rfqPicFilter, rfqShowSimilarity);
+                  fetchRFQData(1, rfqPerPage, searchValue, Boolean(searchValue), rfqFilters, rfqPicFilter, rfqShowSimilarity);
                 }}
                 darkMode={darkMode}
                 txt2={txt2}
