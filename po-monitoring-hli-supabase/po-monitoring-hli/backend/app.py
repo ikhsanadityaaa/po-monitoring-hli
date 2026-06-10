@@ -2523,7 +2523,8 @@ def get_dashboard_stats():
         candidates = [x for x in [last_so_upload] if x]
         last_upload = max(candidates) if candidates else None
 
-        # SO coverage: which year/months have data in the DB
+        # SO coverage: which year/months currently exist in the DB.
+        # Kept for API compatibility with any older frontend/client.
         so_covered_months = {}
         is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
         if is_sqlite:
@@ -2532,23 +2533,70 @@ def get_dashboard_stats():
                 func.strftime('%m', SOData.so_create_date).label('mo'),
             ).filter(SOData.so_create_date.isnot(None)).distinct().all()
         else:
-            # PostgreSQL: use EXTRACT
             month_rows = db.session.query(
                 func.extract('year', SOData.so_create_date).label('yr'),
                 func.extract('month', SOData.so_create_date).label('mo'),
             ).filter(SOData.so_create_date.isnot(None)).distinct().all()
             month_rows = [(str(int(yr)), f'{int(mo):02d}') for yr, mo in month_rows]
+
         _MONTH_NAMES = ['January','February','March','April','May','June',
                         'July','August','September','October','November','December']
+
         for yr, mo in month_rows:
             if yr and mo:
                 year_str = str(yr)
                 month_name = _MONTH_NAMES[int(mo) - 1]
                 so_covered_months.setdefault(year_str, []).append((int(mo), month_name))
-        # Sort months within each year
+
         so_covered_months = {
             yr: [name for _, name in sorted(months)]
             for yr, months in sorted(so_covered_months.items())
+        }
+
+        # Months whose SO rows were actually touched by an SO upload TODAY.
+        # uploaded_at is stored as naive UTC, while the business day follows WIB
+        # (UTC+7). Use explicit WIB day boundaries so uploads between 00:00 and
+        # 06:59 WIB are not incorrectly counted as the previous day.
+        wib_today = (datetime.utcnow() + timedelta(hours=7)).date()
+        today_start_utc = datetime.combine(wib_today, datetime.min.time()) - timedelta(hours=7)
+        tomorrow_start_utc = today_start_utc + timedelta(days=1)
+
+        updated_today_filters = (
+            SOData.so_create_date.isnot(None),
+            SOData.uploaded_at.isnot(None),
+            SOData.uploaded_at >= today_start_utc,
+            SOData.uploaded_at < tomorrow_start_utc,
+        )
+
+        if is_sqlite:
+            updated_month_rows = db.session.query(
+                func.strftime('%Y', SOData.so_create_date).label('yr'),
+                func.strftime('%m', SOData.so_create_date).label('mo'),
+            ).filter(*updated_today_filters).distinct().all()
+        else:
+            updated_month_rows = db.session.query(
+                func.extract('year', SOData.so_create_date).label('yr'),
+                func.extract('month', SOData.so_create_date).label('mo'),
+            ).filter(*updated_today_filters).distinct().all()
+            updated_month_rows = [
+                (str(int(yr)), f'{int(mo):02d}')
+                for yr, mo in updated_month_rows
+                if yr is not None and mo is not None
+            ]
+
+        so_updated_months_today = {}
+        for yr, mo in updated_month_rows:
+            if yr and mo:
+                year_str = str(yr)
+                month_number = int(mo)
+                month_name = _MONTH_NAMES[month_number - 1]
+                so_updated_months_today.setdefault(year_str, []).append(
+                    (month_number, month_name)
+                )
+
+        so_updated_months_today = {
+            yr: [name for _, name in sorted(months)]
+            for yr, months in sorted(so_updated_months_today.items())
         }
 
         # RFQ last updated: from the in-process cache (Google Sheets last fetch)
@@ -2581,6 +2629,8 @@ def get_dashboard_stats():
             'last_updated_item_registration': utc_isoformat(last_item_reg_upload),
             'last_updated_rfq': utc_isoformat(rfq_fetched_at),
             'so_covered_months': so_covered_months,
+            'so_updated_months_today': so_updated_months_today,
+            'so_updated_months_today_date': wib_today.isoformat(),
             'po_date_range': {
                 'min': po_date_range[0].isoformat() if po_date_range and po_date_range[0] else None,
                 'max': po_date_range[1].isoformat() if po_date_range and po_date_range[1] else None,
