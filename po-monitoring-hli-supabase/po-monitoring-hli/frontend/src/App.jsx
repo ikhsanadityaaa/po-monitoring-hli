@@ -4634,16 +4634,33 @@ const App = () => {
               <span
                 title={(() => {
                   const base = `Last Update SO: ${fmtDateTime(stats?.last_updated_smro)}`;
-                  const covered = stats?.so_covered_months;
-                  if (!covered || !Object.keys(covered).length) return base;
+                  const updatedToday = stats?.so_updated_months_today;
+                  const updateDate = stats?.so_updated_months_today_date;
+
+                  if (!updatedToday || !Object.keys(updatedToday).length) {
+                    return `${base}\n\nSO months updated today${updateDate ? ` (${updateDate})` : ''}: None`;
+                  }
+
+                  const MONTHS_FULL = ['January','February','March','April','May','June','July','August','September','October','November','December'];
                   const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-                  const lines = Object.entries(covered)
-                    .sort(([a],[b]) => Number(a) - Number(b))
+
+                  const lines = Object.entries(updatedToday)
+                    .sort(([a], [b]) => Number(a) - Number(b))
                     .map(([yr, months]) => {
-                      const shorts = months.map(m => MONTHS_SHORT[['January','February','March','April','May','June','July','August','September','October','November','December'].indexOf(m)] || m);
+                      const uniqueMonths = [...new Set(months || [])];
+                      if (uniqueMonths.length === 12) return `${yr}: All month`;
+
+                      const shorts = uniqueMonths
+                        .map(month => {
+                          const monthIndex = MONTHS_FULL.indexOf(month);
+                          return monthIndex >= 0 ? MONTHS_SHORT[monthIndex] : month;
+                        })
+                        .filter(Boolean);
+
                       return `${yr}: ${shorts.join(', ')}`;
                     });
-                  return `${base}\n\nUploaded months:\n${lines.join('\n')}`;
+
+                  return `${base}\n\nSO months updated today${updateDate ? ` (${updateDate})` : ''}:\n${lines.join('\n')}`;
                 })()}
                 className="cursor-help"
               >SO {fmtUpdateShort(stats?.last_updated_smro)}</span>
