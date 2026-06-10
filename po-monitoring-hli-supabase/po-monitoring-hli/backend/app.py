@@ -1086,6 +1086,23 @@ def clean_product_id(val):
         pass
     return re.sub(r'\.0+$', '', s)
 
+
+def clean_request_number(val):
+    """Keep RFQ request numbers searchable even when Sheets exports them as numbers."""
+    s = clean(val)
+    if not s:
+        return ''
+    s = str(s).strip()
+    # Google Sheets/CSV may expose numeric IDs as 12345.0 or scientific notation.
+    try:
+        from decimal import Decimal, InvalidOperation
+        number = Decimal(s)
+        if number == number.to_integral_value():
+            return format(number.quantize(Decimal('1')), 'f')
+    except (InvalidOperation, ValueError, TypeError):
+        pass
+    return re.sub(r'\.0+$', '', s)
+
 RFQ_SHEET_ID = '1JrdsYWhv1mzeXB-jbukDxDYxBgaeISzpiVKEKdgfQvw'
 RFQ_SHEET_NAME = 'Sales Submit-RFQ'
 RFQ_CACHE = {'expires_at': None, 'rows': [], 'fetched_at': None}
@@ -1156,7 +1173,7 @@ RFQ_SHEET_COLUMN_BY_FIELD = {
     'rfq_date': 'E',
     'closing_date': 'F',
     'sales_pic': 'G',
-    'request_number': 'H',
+    'request_number': 'R',
     'item_name': 'I',
     'detail_spec': 'J',
     'brand_manufacturer': 'K',
@@ -1335,6 +1352,10 @@ def fetch_rfq_rows(force=False):
     for idx in range(3, len(df)):
         src = df.iloc[idx]
         product_id = clean_product_id(rfq_cell(src, 16))
+        # Current sheet layout stores Request Number in column R (zero-based index 17).
+        # It used to be read from column H, which caused dashboard searches to miss
+        # valid request numbers such as 100010794064.
+        request_number = clean_request_number(rfq_cell(src, 17))
         data = {
             'sheet_row': idx + 1,
             'no': rfq_cell(src, 1),
@@ -1352,7 +1373,7 @@ def fetch_rfq_rows(force=False):
             'category_name': rfq_cell(src, 15),
             'product_id': product_id,
             'sheet_status': rfq_cell(src, 0),
-            'request_number': rfq_cell(src, 7),
+            'request_number': request_number,
             'purchase_pic': rfq_cell(src, 18),
             'same_replacement': rfq_cell(src, 21),
             'vendor_name': rfq_cell(src, 22),
