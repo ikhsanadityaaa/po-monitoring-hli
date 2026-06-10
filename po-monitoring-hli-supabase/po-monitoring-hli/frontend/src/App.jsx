@@ -651,6 +651,106 @@ const SearchInput = ({ placeholder, onSearch, darkMode, txt2, label }) => {
   );
 };
 
+// ─── RFQ multiline search dropdown ────────────────────────────────────────
+const RFQMultiSearch = ({ value, onChange, onSearch, darkMode, txt2 }) => {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const handler = (event) => {
+      if (ref.current && !ref.current.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const searchValues = String(value || '')
+    .split(/\r?\n/)
+    .map(item => item.trim())
+    .filter(Boolean);
+
+  const applySearch = () => {
+    const normalized = searchValues.join('\n');
+    onChange(normalized);
+    onSearch(normalized);
+    setOpen(false);
+  };
+
+  const clearSearch = () => {
+    onChange('');
+    onSearch('');
+    setOpen(false);
+  };
+
+  return (
+    <div className="relative w-full min-w-0" ref={ref}>
+      <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search</label>
+      <button
+        type="button"
+        onClick={() => setOpen(current => !current)}
+        className={`w-full h-10 px-3 py-2 rounded-xl text-sm border text-left flex items-center justify-between gap-2 transition-colors ${
+          darkMode
+            ? searchValues.length
+              ? 'bg-amber-900/30 border-amber-500 text-amber-100 hover:bg-amber-900/40'
+              : 'bg-gray-700 border-gray-600 text-white hover:bg-gray-600'
+            : searchValues.length
+              ? 'bg-amber-50 border-amber-300 text-amber-800 hover:bg-amber-100'
+              : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50'
+        }`}
+      >
+        <span className="flex min-w-0 items-center gap-2">
+          <Search className="w-4 h-4 flex-shrink-0" />
+          <span className="truncate">
+            {searchValues.length ? `${searchValues.length} value${searchValues.length > 1 ? 's' : ''}` : 'Search'}
+          </span>
+        </span>
+        <ChevronDown className="w-4 h-4 flex-shrink-0" />
+      </button>
+
+      {open && (
+        <div className={`absolute left-0 top-full z-[80] mt-1 w-[min(440px,calc(100vw-32px))] rounded-xl border p-3 shadow-2xl ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-200'}`}>
+          <p className={`mb-2 text-xs leading-relaxed ${txt2}`}>
+            Enter one Request Number, Item Name, or Spec per line. Results match any entered value.
+          </p>
+          <textarea
+            value={value}
+            onChange={event => onChange(event.target.value)}
+            onKeyDown={event => {
+              if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+                event.preventDefault();
+                applySearch();
+              }
+              if (event.key === 'Escape') setOpen(false);
+            }}
+            placeholder={'REQ-0001\nBearing SKF\nStainless steel 304'}
+            className={`h-52 w-full overflow-y-auto resize-y rounded-lg border px-3 py-2 font-mono text-sm leading-6 ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-gray-50 border-gray-300 text-gray-800 placeholder:text-gray-400'}`}
+            autoFocus
+          />
+          <div className={`mt-1 text-[11px] ${txt2}`}>
+            {searchValues.length} search value{searchValues.length === 1 ? '' : 's'}
+          </div>
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              onClick={applySearch}
+              className="flex-1 rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold text-white hover:bg-blue-700"
+            >
+              Search
+            </button>
+            <button
+              type="button"
+              onClick={clearSearch}
+              className={`flex-1 rounded-lg px-3 py-2 text-xs font-semibold ${darkMode ? 'bg-gray-600 text-gray-100 hover:bg-gray-500' : 'border border-gray-300 bg-white text-gray-700 hover:bg-gray-100'}`}
+            >
+              Clear Search
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const FilterPanel = ({ children, darkMode, className = '' }) => (
   <div className={`mx-5 my-3 rounded-xl border p-3 ${darkMode ? 'border-gray-700 bg-gray-800/70' : 'border-gray-100 bg-[#f6f6f4]'} ${className}`}>
     {children}
@@ -3270,7 +3370,7 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[110px_minmax(170px,1fr)_115px_repeat(4,minmax(120px,1fr))_84px_84px] items-end">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[110px_minmax(170px,1fr)_115px_repeat(4,minmax(120px,1fr))_84px] items-end">
             <div className="min-w-0">
               <label className={`block text-xs font-semibold mb-1 ${txt2}`}>↕ RFQ Date</label>
               <select
@@ -3284,12 +3384,16 @@ const App = () => {
               </select>
             </div>
             <div className="min-w-0">
-              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search RFQ</label>
-              <input
+              <RFQMultiSearch
                 value={rfqSearch}
-                onChange={e => setRfqSearch(e.target.value)}
-                placeholder="Client, item, vendor, product ID..."
-                className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode?'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400':'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}
+                onChange={setRfqSearch}
+                onSearch={(searchValue) => {
+                  setRfqAppliedSearch(searchValue);
+                  setRfqPage(1);
+                  fetchRFQData(1, rfqPerPage, searchValue, false, rfqFilters, rfqPicFilter, rfqShowSimilarity);
+                }}
+                darkMode={darkMode}
+                txt2={txt2}
               />
             </div>
             <div className="min-w-0">
@@ -3312,9 +3416,6 @@ const App = () => {
               <MultiSelect label="Vendor Name" options={rfqOptions.vendors || []} selected={rfqFilters.vendors}
                 onChange={v=>{ const next={...rfqFilters, vendors:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <button onClick={() => { setRfqAppliedSearch(rfqSearch); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqSearch, false, rfqFilters, rfqPicFilter, rfqShowSimilarity); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">
-              Search
-            </button>
             <button onClick={handleClear} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>
               Clear
             </button>
