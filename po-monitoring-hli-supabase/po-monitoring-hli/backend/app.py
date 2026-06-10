@@ -1255,6 +1255,35 @@ def sort_rfq_rows(rows, sort_order='newest'):
     rows.sort(key=key)
     return rows
 
+RFQ_SEARCH_FIELDS = ('request_number', 'item_name', 'detail_spec')
+
+
+def rfq_multiline_search_terms(value):
+    """Return unique, normalized RFQ search terms entered one per line."""
+    terms = []
+    seen = set()
+    for raw in re.split(r'[\r\n]+', str(value or '')):
+        term = raw.strip().lower()
+        if term and term not in seen:
+            seen.add(term)
+            terms.append(term)
+    return terms
+
+
+def filter_rfq_rows_by_multiline_search(rows, value):
+    """Match any entered line against Request Number, Item Name, or Detail Spec."""
+    terms = rfq_multiline_search_terms(value)
+    if not terms:
+        return rows
+
+    filtered = []
+    for row in rows:
+        searchable_values = [str(row.get(field) or '').lower() for field in RFQ_SEARCH_FIELDS]
+        if any(term in field_value for term in terms for field_value in searchable_values):
+            filtered.append(row)
+    return filtered
+
+
 def rfq_check_value(item):
     if clean_product_id(item.get('product_id')):
         return 'complete'
@@ -5976,9 +6005,7 @@ def get_rfq_data():
 
         rows, fetched_at = rfq_rows_with_edits(force=force)
         if search:
-            needle = search.lower()
-            fields = [field for field, _ in RFQ_TEMPLATE_COLUMNS if field != 'check']
-            rows = [row for row in rows if any(needle in str(row.get(field) or '').lower() for field in fields)]
+            rows = filter_rfq_rows_by_multiline_search(rows, search)
 
         option_rows = rows
         if clients:
@@ -6058,9 +6085,7 @@ def rfq_filtered_rows_from_request(force=False):
         sort_order = 'newest'
     rows, fetched_at = rfq_rows_with_edits(force=force)
     if search:
-        needle = search.lower()
-        fields = [field for field, _ in RFQ_TEMPLATE_COLUMNS if field != 'check']
-        rows = [row for row in rows if any(needle in str(row.get(field) or '').lower() for field in fields)]
+        rows = filter_rfq_rows_by_multiline_search(rows, search)
     if clients:
         rows = [row for row in rows if clean(row.get('client_name')) in clients]
     if brands:
