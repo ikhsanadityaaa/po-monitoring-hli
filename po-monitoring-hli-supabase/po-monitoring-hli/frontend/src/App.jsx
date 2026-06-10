@@ -1002,6 +1002,8 @@ const App = () => {
   const [rfqSelectedCell, setRfqSelectedCell] = useState(null);
   const [rfqSimilarAction, setRfqSimilarAction] = useState(null);
   const [rfqLastUpdated, setRfqLastUpdated] = useState(null);
+  const [rfqEditedRowKeys, setRfqEditedRowKeys] = useState(new Set());
+  const [rfqLastUpdatedHeader, setRfqLastUpdatedHeader] = useState(null);
 
   // All Registered Items
   const [registeredItemsData, setRegisteredItemsData] = useState([]);
@@ -1205,6 +1207,7 @@ const App = () => {
         api.get(`/api/data/all-so?${pendingParams}`)
       ]);
       setStats(sRes.data);
+      if (sRes.data?.last_updated_rfq) setRfqLastUpdatedHeader(sRes.data.last_updated_rfq);
       setSummaryPendingTotal(Number(pendingRes.data?.total) || 0);
       setDashboardFilterOptions(sRes.data?.filters || { clients: [], pics: [] });
       setAgingData(Array.isArray(aRes.data) ? aRes.data : []);
@@ -1353,6 +1356,8 @@ const App = () => {
   ]);
 
   const fetchRFQData = useCallback(async (page = rfqPage, perPage = rfqPerPage, search = rfqAppliedSearch, refresh = false, filters = rfqFilters, pic = rfqPicFilter, showSimilarity = rfqShowSimilarity, sortOrder = rfqSortOrder) => {
+    // Clear locally-edited row protection whenever a fresh fetch is triggered
+    setRfqEditedRowKeys(new Set());
     setLoading(true);
     try {
       const params = new URLSearchParams({ page, per_page: perPage });
@@ -1929,13 +1934,15 @@ const App = () => {
         next.unit_price_missing = unitPrice == null;
       }
       return next;
-    }).filter(row => !rfqPicFilter || (row.purchase_pic === rfqPicFilter && row.check === 'open' && row.unit_price_missing && !row.product_id)));
+    }).filter(row => !rfqPicFilter || rfqEditedRowKeys.has(row.row_key) || (row.purchase_pic === rfqPicFilter && row.check === 'open' && row.unit_price_missing && !row.product_id)));
   };
 
   const updateRFQCell = async (rowKey, field, value, options = {}) => {
     const quiet = Boolean(options.quiet);
     if (!quiet) setEditingCell(null);
     if (field === 'product_id') setRfqSimilarAction(null);
+    // Mark this row as locally-edited so it stays visible while KPI filter is active
+    setRfqEditedRowKeys(prev => { const s = new Set(prev); s.add(rowKey); return s; });
     const previousRows = rfqData;
     applyRFQLocalUpdates([{ row_key: rowKey, field, value }]);
     try {
@@ -1990,7 +1997,7 @@ const App = () => {
           if (field === 'unit_price_idr') next.unit_price_missing = unitPrice == null;
         }
         return next;
-      }).filter(row => !rfqPicFilter || (row.purchase_pic === rfqPicFilter && row.check === 'open' && row.unit_price_missing && !row.product_id)));
+      }).filter(row => !rfqPicFilter || rfqEditedRowKeys.has(row.row_key) || (row.purchase_pic === rfqPicFilter && row.check === 'open' && row.unit_price_missing && !row.product_id)));
       return true;
     } catch (e) {
       setRfqData(previousRows);
@@ -2002,6 +2009,12 @@ const App = () => {
   const updateRFQCellsBatch = async (updates) => {
     const cleanUpdates = (updates || []).filter(item => item?.row_key && item?.field);
     if (!cleanUpdates.length) return false;
+    // Mark all affected rows as locally-edited
+    setRfqEditedRowKeys(prev => {
+      const s = new Set(prev);
+      cleanUpdates.forEach(u => s.add(u.row_key));
+      return s;
+    });
     const previousRows = rfqData;
     applyRFQLocalUpdates(cleanUpdates);
     try {
@@ -3332,7 +3345,7 @@ const App = () => {
                 <tr><td colSpan={columns.length} className={`px-4 py-12 text-center ${txt2}`}><Mail className="w-10 h-10 mx-auto mb-2 opacity-40"/>No RFQ data</td></tr>
               ) : rfqData.map((row, rowIndex) => {
                 return (
-                <tr key={row.row_key} className={`${trHov} transition-colors`}>
+                <tr key={row.row_key} className={`${trHov} transition-colors${rfqPicFilter && rfqEditedRowKeys.has(row.row_key) ? ' ring-1 ring-inset ring-amber-400/60' : ''}`}>
                   {columns.map((col) => {
                     const field = col.field;
                     const value = row[field] ?? '';
@@ -3423,9 +3436,19 @@ const App = () => {
                       return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field}
                         tabIndex={0}
                         onFocus={() => setRfqSelectedCell({ rowKey: row.row_key, field })}
-                        onClick={() => { setRfqSelectedCell({ rowKey: row.row_key, field }); setEditingCell({ id: row.row_key, field: `rfq_${field}` }); setEditValue(value ?? ''); }}
+                        onClick={() => {
+                          setRfqSelectedCell({ rowKey: row.row_key, field });
+                          setEditingCell({ id: row.row_key, field: `rfq_${field}` });
+                          // For unit_price_idr: strip formatting so user sees raw number
+                          if (field === 'unit_price_idr') {
+                            const raw = String(value ?? '').replace(/[^0-9.-]/g, '');
+                            setEditValue(raw);
+                          } else {
+                            setEditValue(value ?? '');
+                          }
+                        }}
                         onPaste={e => { e.preventDefault(); applyRFQPaste(rowIndex, field, e.clipboardData.getData('text/plain')); }}
-                        className={`group relative px-2 py-1 align-top border-r ${sourceStyle ? (darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200') : (darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200')} ${selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : ''} ${['qty','unit_price_idr','moq','lead_time_days'].includes(field) ? 'text-right font-semibold' : ''}`}>
+                        className={`group relative px-2 py-1 align-top border-r cursor-pointer ${sourceStyle ? (darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200') : (darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200')} ${selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${['qty','unit_price_idr','moq','lead_time_days'].includes(field) ? 'text-right font-semibold' : ''}`}>
                         <div className={`min-h-7 min-w-0 truncate ${sourceStyle ? txt2 : 'text-blue-600'} ${field === 'photo_url' ? 'flex items-center gap-1 justify-center' : ''} ${field === 'purchase_pic' ? 'text-center' : ''}`}>
                           {field === 'photo_url' && <LinkIcon className={`w-3.5 h-3.5 flex-shrink-0 ${hasValue ? 'text-blue-600' : 'text-blue-400'}`} />}
                           {hasValue && field === 'purchase_pic' ? (() => {
@@ -4619,11 +4642,26 @@ const App = () => {
             </div>
             <div className={`max-w-full text-right text-xs ${txt2}`}>
               <span className="font-semibold">Updates:</span>{' '}
-              <span title={`Last Update SO: ${fmtDateTime(stats?.last_updated_smro)}`}>SO {fmtUpdateShort(stats?.last_updated_smro)}</span>
+              <span
+                title={(() => {
+                  const base = `Last Update SO: ${fmtDateTime(stats?.last_updated_smro)}`;
+                  const covered = stats?.so_covered_months;
+                  if (!covered || !Object.keys(covered).length) return base;
+                  const lines = Object.entries(covered)
+                    .sort(([a],[b]) => Number(a)-Number(b))
+                    .map(([yr, months]) => `${yr}: ${months.join(', ')}`);
+                  return `${base}\n\nCovered months:\n${lines.join('\n')}`;
+                })()}
+                className="cursor-help"
+              >SO {fmtUpdateShort(stats?.last_updated_smro)}</span>
               <span className="mx-1.5 opacity-50">·</span>
               <span title={`Last Update Regist.: ${fmtDateTime(stats?.last_updated_item_registration)}`}>Reg {fmtUpdateShort(stats?.last_updated_item_registration)}</span>
               <span className="mx-1.5 opacity-50">·</span>
               <span title={`Last Update Prod ID: ${fmtDateTime(picDbStatus?.last_product_id_upload)}`}>Prod ID {fmtUpdateShort(picDbStatus?.last_product_id_upload)}</span>
+              {rfqLastUpdatedHeader && (<>
+                <span className="mx-1.5 opacity-50">·</span>
+                <span title={`Last Update RFQ: ${fmtDateTime(rfqLastUpdatedHeader)}`}>RFQ {fmtUpdateShort(rfqLastUpdatedHeader)}</span>
+              </>)}
             </div>
           </div>
         </header>
