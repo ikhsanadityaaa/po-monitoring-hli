@@ -441,14 +441,14 @@ _RATE_CACHE = {}   # {date: float} in-process cache for USD -> IDR
 _FX_RATE_CACHE = {}  # {(currency, date): float} in-process cache for non-USD FX
 
 def _fetch_rate_from_api(d, currency='USD'):
-    """Try Frankfurter (ECB data) for historical currency->IDR. Returns float or None."""
+    """Fetch one historical currency->IDR rate from Frankfurter v2."""
     try:
         import urllib.request, json as _json
         cur = (currency or 'USD').strip().upper()
-        url = f"https://api.frankfurter.app/{d.isoformat()}?from={cur}&to=IDR"
+        url = f"https://api.frankfurter.dev/v2/rate/{cur}/IDR?date={d.isoformat()}"
         with urllib.request.urlopen(url, timeout=6) as resp:
             data = _json.loads(resp.read())
-        return float(data['rates']['IDR'])
+        return float(data['rate'])
     except Exception:
         return None
 
@@ -629,7 +629,7 @@ def convert_to_idr(amount, currency, rate_date=None, cache_only=False):
     return float(amount)
 
 
-def prefetch_convertible_exchange_rates(rows, fetch_missing=True):
+def prefetch_convertible_exchange_rates(rows, fetch_missing=False):
     for currency in ('USD', 'EUR'):
         dates = {
             s.so_create_date for s in rows
@@ -647,36 +647,53 @@ def raw_purchase_amount(s):
 
 
 def purchase_amount_idr(s, allow_persist=False):
-    """Return cached/persisted purchase amount in IDR for SOData.
+    """Return the stored IDR purchase amount without network access on reads.
 
-    Delivery Completed pages call this for every row. For IDR rows the value is
-    already final. For USD/EUR rows we persist the converted result in so_data, so
-    old rows are not converted again on every page load. Only rows whose cache
-    is still empty (typically newly uploaded/updated non-IDR rows) are computed.
+    USD/EUR conversion is performed only by an explicit write/backfill flow
+    (allow_persist=True). Normal dashboard reads reuse purchasing_amount_idr.
     """
     cached = getattr(s, 'purchasing_amount_idr', None)
     cur = (s.purchasing_currency or 'IDR').strip().upper()
-    if cached is not None and cur != 'EUR':
+
+    # Important: cached EUR values are valid too. The previous EUR exception
+    # caused every page load to reconvert every EUR row.
+    if cached is not None:
         return float(cached)
 
     raw = raw_purchase_amount(s)
     if cur in ('IDR', ''):
-        converted = raw
-    else:
-        converted = convert_to_idr(raw, s.purchasing_currency, s.so_create_date, cache_only=True)
+        return raw
 
-    if allow_persist:
-        s.purchasing_amount_idr = converted
-        s.purchasing_amount_idr_cached_at = datetime.utcnow()
+    # Never call an external FX API from a dashboard/read request. Missing
+    # non-IDR rows must be filled by upload or /api/exchange-rate/fetch.
+    if not allow_persist:
+        return 0.0
+
+    converted = convert_to_idr(
+        raw,
+        s.purchasing_currency,
+        s.so_create_date,
+        cache_only=True,
+    )
+    s.purchasing_amount_idr = converted
+    s.purchasing_amount_idr_cached_at = datetime.utcnow()
     return converted
 
 
-def ensure_purchase_amount_idr_cache(rows):
-    """Persist missing IDR purchase amounts for rows in the current result set."""
+def ensure_purchase_amount_idr_cache(rows, fetch_missing=False):
+    """Persist missing USD/EUR conversions.
+
+    Set fetch_missing=True only in write/backfill flows. Dashboard endpoints
+    leave it False, so page loads never wait for Frankfurter.
+    """
+    if not fetch_missing:
+        return 0
+
     missing = [
         s for s in rows
         if getattr(s, 'purchasing_amount_idr', None) is None
-        or (s.purchasing_currency or '').strip().upper() == 'EUR'
+        and (s.purchasing_currency or '').strip().upper() in ('USD', 'EUR')
+        and raw_purchase_amount(s) > 0
     ]
     if not missing:
         return 0
@@ -690,6 +707,7 @@ def ensure_purchase_amount_idr_cache(rows):
         db.session.commit()
     except Exception:
         db.session.rollback()
+        raise
     return len(missing)
 
 
@@ -3294,12 +3312,26 @@ def fetch_exchange_rates_bulk():
                 failed.append(d.isoformat())
 
         db.session.commit()
+
+        # Backfill both USD and EUR transaction values. EUR rates are kept in
+        # the in-process cache for this request, while the converted IDR amount
+        # itself is persisted permanently on each SO row.
+        pending_fx_rows = SOData.query.filter(
+            SOData.purchasing_amount_idr.is_(None),
+            func.upper(func.coalesce(SOData.purchasing_currency, '')).in_(['USD', 'EUR'])
+        ).all()
+        converted_rows = ensure_purchase_amount_idr_cache(
+            pending_fx_rows,
+            fetch_missing=True,
+        )
+
         return jsonify({
             'dates_needed': len(dates_needed),
             'already_stored': len(existing_dates & dates_needed),
             'fetched': fetched,
+            'converted_rows': converted_rows,
             'failed': failed,
-            'message': f'{fetched} kurs berhasil di-fetch dari Frankfurter API.'
+            'message': f'{fetched} kurs USD berhasil di-fetch dan {converted_rows} transaksi USD/EUR dikonversi.'
                        + (f' {len(failed)} tanggal gagal: {", ".join(failed[:5])}' if failed else '')
         })
     except Exception as e:
@@ -3769,6 +3801,26 @@ def upload_smro():
             diagnostics_by_file.append(diagnostics)
 
         db.session.commit()
+
+        # Convert and persist new/changed USD/EUR transactions once during the
+        # upload flow. Dashboard endpoints only read the stored IDR amount.
+        fx_warning = None
+        try:
+            pending_fx_rows = SOData.query.filter(
+                SOData.purchasing_amount_idr.is_(None),
+                func.upper(func.coalesce(SOData.purchasing_currency, '')).in_(['USD', 'EUR'])
+            ).all()
+            converted_fx_rows = ensure_purchase_amount_idr_cache(
+                pending_fx_rows,
+                fetch_missing=True,
+            )
+        except Exception as fx_exc:
+            # The upload itself is already committed. Keep it successful and
+            # allow the dedicated backfill endpoint to retry FX later.
+            db.session.rollback()
+            converted_fx_rows = 0
+            fx_warning = str(fx_exc)
+
         clear_runtime_caches()
         diagnostics = diagnostics_by_file[-1] if diagnostics_by_file else {}
         if len(diagnostics_by_file) > 1:
@@ -3781,6 +3833,8 @@ def upload_smro():
             'mode': upload_mode,
             'inserted': total_inserted,
             'updated': total_updated,
+            'fx_converted': converted_fx_rows,
+            'fx_warning': fx_warning,
             'diagnostics': diagnostics,
         })
     except Exception as e:
