@@ -1970,17 +1970,27 @@ def request_upload_dataframes(default_filename='upload'):
         df.columns = [str(c).strip() for c in df.columns]
         uploads.append({'filename': file.filename, 'df': df})
     return uploads, 'excel'
+
+def upload_replace_mode():
+    """Return True only when caller explicitly wants DB to mirror upload rows."""
+    raw = request.args.get('replace') or request.args.get('snapshot') or ''
+    if not raw and request.is_json:
+        payload = request.get_json(silent=True) or {}
+        if isinstance(payload, dict):
+            raw = payload.get('replace') or payload.get('snapshot') or ''
+    return str(raw).strip().lower() in ('1', 'true', 'yes', 'replace', 'snapshot')
+
 def validate_upload_columns(filename, label, col_map, expected, required, max_missing=3):
     missing_expected = [display for key, display in expected if not col_map.get(key)]
     if len(missing_expected) > max_missing:
         raise ValueError(
-            f'File "{filename}" salah untuk {label}: lebih dari {max_missing} kolom penting tidak ditemukan '
+            f'Struktur kolom tidak cocok untuk {label}: lebih dari {max_missing} kolom penting tidak ditemukan '
             f'({", ".join(missing_expected)}). Pastikan file yang diupload benar.'
         )
     missing_required = [display for key, display in required if not col_map.get(key)]
     if missing_required:
         raise ValueError(
-            f'File "{filename}" salah untuk {label}: kolom wajib tidak ditemukan: '
+            f'Struktur kolom tidak cocok untuk {label}: kolom wajib tidak ditemukan: '
             f'{", ".join(missing_required)}.'
         )
 
@@ -2293,50 +2303,39 @@ def _item_registration_columns(df):
     }
 
 def validate_item_registration_source_file(df, filename='Item Registration'):
-    """Validate by Excel structure, not filename.
+    """Accept only SAP Process Pur. Info. Reg. exports for Item Registration.
 
-    Item Registration must use SAP Process Pur. Info. Reg. exports. SAP file
-    names can be URL-encoded, renamed, or translated, so rejecting by filename is
-    unsafe. The guard below checks source-specific columns before any cleanup or
-    delete operation can run.
+    Prod. Reg. Status is a different SAP export with similar registration-looking
+    columns. It must be rejected here because the Item Registration page is built
+    from Process Pur. Info. Reg. data.
     """
     marker_cols = {str(c).strip().lower() for c in df.columns}
 
-    process_required_markers = {
-        'unified vendor',
-        'bid/quo.',
-        'multi. bidding required',
-        'pur. info. proc. compl. date',
-        'vendor confirm req. detail',
-        'vendor confirm proc. detail',
+    process_markers = {
+        'unified vendor', 'bid/quo.', 'multi. bidding required',
+        'bid no.', 'deadline', 'pur. info. proc. compl. date',
+        'vendor confirm req. detail', 'vendor confirm proc. detail',
     }
-    process_support_markers = {
-        'bid no.', 'deadline', 'pur. info. rcvd. by', 'pur. info. proc. by',
-        'proc. compl. date of export corp.', 'advance quotation: number'
-    }
-    prod_reg_only_markers = {
+    prod_reg_markers = {
         'register request',
         'prod. req. skip reason',
         'prod. reg. req. compl. date',
         'prod. reg. req. reject date',
-        'prod. reg. req. reject memo',
     }
 
-    matched_required = sorted(process_required_markers & marker_cols)
-    matched_support = sorted(process_support_markers & marker_cols)
-    matched_prod_reg = sorted(prod_reg_only_markers & marker_cols)
+    matched_process = sorted(process_markers & marker_cols)
+    matched_prod_reg = sorted(prod_reg_markers & marker_cols)
 
-    if matched_prod_reg and len(matched_required) < 2:
+    if matched_prod_reg and not matched_process:
         raise ValueError(
-            f'File "{filename}" salah untuk Item Registration. File ini terlihat seperti Prod. Reg. Status. '
-            'Upload yang benar adalah SAP Process Pur. Info. Reg.'
+            'Struktur kolom tidak cocok untuk Item Registration. '
+            'Upload yang benar adalah struktur SAP Process Pur. Info. Reg., bukan Prod. Reg. Status.'
         )
 
-    if len(matched_required) < 3 or (len(matched_required) + len(matched_support)) < 5:
+    if not matched_process:
         raise ValueError(
-            f'File "{filename}" tidak terlihat seperti SAP Process Pur. Info. Reg. '
-            f'Kolom penanda yang ditemukan: {matched_required + matched_support}. '
-            'Upload dibatalkan dan database lama tidak diubah.'
+            'Struktur kolom tidak terlihat seperti SAP Process Pur. Info. Reg. '
+            'Kolom marker wajib tidak ditemukan: Unified Vendor / Bid/Quo. / Multi. Bidding Required / Bid No. / Deadline.'
         )
 
 
@@ -3914,6 +3913,7 @@ def upload_smro():
         uploads, upload_mode = request_upload_dataframes('smro')
         if not uploads:
             return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
+        replace_existing = upload_replace_mode()
 
         # SO Item adalah primary key upsert (format: "7001664545-10").
         # Upload JSON dari SAP hanya punya kolom "SO Item" — SO Number di-derive otomatis dari prefix.
@@ -4161,15 +4161,13 @@ def upload_smro():
                 diagnostics['warning'] = ' '.join(warnings)
             diagnostics_by_file.append(diagnostics)
 
-        # Full Search Client Odr upload is the latest snapshot. Remove
-        # duplicate SO Item rows and stale SO Items that are no longer present
-        # in the uploaded file(s), while keeping manual plan date/remarks on
-        # rows that remain.
+        # Default manual upload is merge/upsert. Only delete rows missing from
+        # the uploaded file when caller explicitly requests replace/snapshot.
         db.session.flush()
         cleanup_post = cleanup_source_table_snapshot(
             SOData,
             'so_item',
-            latest_so_items,
+            latest_so_items if replace_existing else None,
             manual_fields=('delivery_plan_date', 'remarks'),
             timestamp_fields=('uploaded_at',),
             delete_blank=True,
@@ -4209,6 +4207,7 @@ def upload_smro():
             'uploaded': total_count,
             'files': len(uploads),
             'mode': upload_mode,
+            'replace': replace_existing,
             'inserted': total_inserted,
             'updated': total_updated,
             'removed_duplicates': total_removed_duplicates,
@@ -5564,6 +5563,7 @@ def upload_item_registration():
         uploads, upload_mode = request_upload_dataframes('item_registration')
         if not uploads:
             return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
+        replace_existing = upload_replace_mode()
 
         summary = {'processed': 0, 'added': 0, 'updated': 0, 'removed_duplicates': 0, 'removed_stale': 0, 'removed_blank': 0}
         latest_req_numbers = set()
@@ -5574,14 +5574,13 @@ def upload_item_registration():
             for key in summary:
                 summary[key] += result.get(key, 0)
 
-        # Full Item Registration upload is the latest snapshot. Remove duplicate
-        # rows left by old append logic and remove rows whose Req. No is no longer
-        # present in the latest uploaded file(s).
+        # Default manual upload is merge/upsert. Only delete rows missing from
+        # the uploaded file when caller explicitly requests replace/snapshot.
         db.session.flush()
         cleanup = cleanup_source_table_snapshot(
             ItemRegistration,
             'req_no',
-            latest_req_numbers,
+            latest_req_numbers if replace_existing else None,
             timestamp_fields=('uploaded_at',),
             delete_blank=True,
         )
@@ -5600,6 +5599,7 @@ def upload_item_registration():
             'uploaded': summary['processed'],
             'files': len(uploads),
             'mode': upload_mode,
+            'replace': replace_existing,
             **summary,
         })
     except ValueError as e:
@@ -5833,6 +5833,7 @@ def upload_product_id():
         uploads, upload_mode = request_upload_dataframes('product_id')
         if not uploads:
             return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
+        replace_existing = upload_replace_mode()
 
         cleanup_pre = cleanup_source_table_snapshot(
             ProductIDDB,
@@ -5900,7 +5901,7 @@ def upload_product_id():
         cleanup_post = cleanup_source_table_snapshot(
             ProductIDDB,
             'product_id',
-            latest_product_ids,
+            latest_product_ids if replace_existing else None,
             timestamp_fields=('updated_at',),
             delete_blank=True,
         )
@@ -5964,6 +5965,7 @@ def upload_master_pic():
         uploads, upload_mode = request_upload_dataframes('master_pic')
         if not uploads:
             return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
+        replace_existing = upload_replace_mode()
 
         cleanup_pre = cleanup_master_pic_by_category_name(None)
         db.session.flush()
@@ -6041,7 +6043,7 @@ def upload_master_pic():
                     added += 1
 
         db.session.flush()
-        cleanup_post = cleanup_master_pic_by_category_name(latest_category_names)
+        cleanup_post = cleanup_master_pic_by_category_name(latest_category_names if replace_existing else None)
         removed_duplicates += cleanup_post.get('removed_duplicates', 0)
         removed_stale += cleanup_post.get('removed_stale', 0)
         removed_blank += cleanup_post.get('removed_blank', 0)
@@ -6077,6 +6079,7 @@ def upload_master_pic():
             'status': 'ok',
             'files': len(uploads),
             'mode': upload_mode,
+            'replace': replace_existing,
             'added': added,
             'updated': updated,
             'unchanged': unchanged,
@@ -7242,6 +7245,7 @@ def upload_delivery_monitoring():
         if 'file' not in request.files:
             return jsonify({'error': 'No file uploaded'}), 400
         file = request.files['file']
+        replace_existing = upload_replace_mode()
 
         df = pd.read_excel(file, engine='openpyxl')
         df.columns = [str(c).strip() for c in df.columns]
@@ -7286,23 +7290,6 @@ def upload_delivery_monitoring():
             return jsonify({'error': f'Kolom "PO No." tidak ditemukan. Kolom tersedia: {df.columns.tolist()}'}), 400
         if not col_pocreate:
             return jsonify({'error': f'Kolom "PO Create Date" tidak ditemukan. Pastikan file yang diupload adalah Search PO Details.'}), 400
-
-        # Strong source validation before any cleanup/delete. This endpoint is destructive
-        # because a valid upload is treated as the latest full snapshot. Therefore,
-        # require multiple Search PO Details-specific columns, not just PO No.
-        delivery_signature_cols = [
-            col_so, col_postatus, col_sostatus, col_vid, col_vnm, col_pid, col_pnm,
-            col_opid, col_opnm, col_dtype, col_ppic, col_spic, col_porcvd, col_shodr,
-            col_shcompl, col_hubrcv, col_hubship, col_dlvcompl, col_dlvdue, col_dlvposs
-        ]
-        delivery_signature_count = sum(1 for c in delivery_signature_cols if c)
-        if delivery_signature_count < 8:
-            return jsonify({
-                'error': (
-                    f'File "{file.filename}" tidak terlihat seperti Search PO Details / Delivery Monitoring. '
-                    f'Hanya {delivery_signature_count} kolom penanda yang cocok. Upload dibatalkan dan database lama tidak diubah.'
-                )
-            }), 400
 
         # Check for in-file duplicates
         file_po_counts = df[col_po].dropna().astype(str).value_counts()
@@ -7390,7 +7377,7 @@ def upload_delivery_monitoring():
         cleanup_post = cleanup_source_table_snapshot(
             DeliveryMonitoring,
             'po_number',
-            latest_po_numbers,
+            latest_po_numbers if replace_existing else None,
             timestamp_fields=('uploaded_at',),
             delete_blank=True,
         )
@@ -7404,6 +7391,7 @@ def upload_delivery_monitoring():
             'message': f'Berhasil upload {count} data delivery monitoring (skip: {skipped}), {removed_duplicates} duplicate lama dihapus, {removed_stale} data lama dibuang',
             'uploaded': count,
             'skipped': skipped,
+            'replace': replace_existing,
             'removed_duplicates': removed_duplicates,
             'removed_stale': removed_stale,
             'removed_blank': removed_blank,
