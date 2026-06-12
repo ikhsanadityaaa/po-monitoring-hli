@@ -1250,14 +1250,6 @@ const App = () => {
     return val;
   };
   const filterValues = (val) => Array.isArray(val) ? val : [];
-  const looksLikeProdRegStatusFile = (name) => {
-    const s = String(name || '').toLowerCase().replace(/[+_\-]+/g, ' ');
-    return s.includes('prod') && s.includes('reg') && s.includes('status');
-  };
-  const looksLikeProcessPurInfoRegFile = (name) => {
-    const s = String(name || '').toLowerCase().replace(/[+_\-]+/g, ' ');
-    return s.includes('process') && s.includes('pur') && s.includes('info') && s.includes('reg');
-  };
 
   const fetchSOData = useCallback(async (filters, page, perPage, searchNums, marginFilter, dateFilter, sortOrder = soSortOrder, kpiPic = pendingPicHighlight) => {
     setLoading(true);
@@ -1504,48 +1496,6 @@ const App = () => {
     const label = files.length > 1 ? `SO - Search Client Odr (${files.length} files)` : 'SO - Search Client Odr';
     const endpoint = '/api/upload/smro';
 
-    // ── Client-side header validation ──────────────────────────────────
-    const REQUIRED_HEADERS = {
-      scor: {
-        'SO Number':      ['so number','so no','so no.','so','sales order','sales order number','no so','nomor so'],
-        'SO Item':        ['so item no','item no','line','so line','so item'],
-        'SO Status':      ['so status','status','order status'],
-        'Operation Unit': ['operation unit name','op unit','client name','client','operation unit'],
-        'Vendor Name':    ['vendor name','vendor','supplier'],
-        'Customer PO':    ['customer po number','customer po','po ref','po reference'],
-        'Sales Amount':   ['sales amount(exclude tax)','sales amount','amount','total'],
-        'SO Create Date': ['so create date','order date','so date','create date'],
-      }
-    };
-
-    try {
-      for (const file of files) {
-        const arrayBuffer = await file.arrayBuffer();
-        const wb = XLSX.read(arrayBuffer, { type: 'array' });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        const jsonData = XLSX.utils.sheet_to_json(ws, { header: 1 });
-        const headerRow = (jsonData[0] || []).map(h => String(h || '').trim().toLowerCase());
-
-        const reqHeaders = REQUIRED_HEADERS[type];
-        const missing = [];
-        for (const [friendlyName, aliases] of Object.entries(reqHeaders)) {
-          const found = aliases.some(alias => headerRow.includes(alias.toLowerCase()));
-          if (!found) missing.push(friendlyName);
-        }
-        if (missing.length > 3) {
-          addToast(
-            `❌ Invalid file ${file.name} — ${missing.length} required columns not found: ${missing.join(', ')}. Please check the ${label} file is correct and try again.`,
-            'error'
-          );
-          return;
-        }
-      }
-    } catch (readErr) {
-      addToast(`❌ Failed to read file: ${readErr.message}`, 'error');
-      return;
-    }
-    // ── End client-side header validation ──────────────────────────────
-
     const fd = new FormData(); files.forEach(file => fd.append('file', file));
     setUploadProgress({ label, pct: 0 });
     try {
@@ -1637,9 +1587,6 @@ const App = () => {
   const handleUploadItemRegistration = async (e) => {
     const files = Array.from(e.target.files || []); if (!files.length) return;
     e.target.value = '';
-    // Do not validate by filename. SAP export filenames can be encoded or renamed.
-    // Backend validates the actual Excel columns and returns a user-facing error
-    // without deleting existing data when the source file is wrong.
     const fd = new FormData(); files.forEach(file => fd.append('file', file));
     const label = files.length > 1 ? `Item Registration (${files.length} files)` : 'Item Registration';
     setUploadProgress({ label, pct: 0 });
@@ -4442,7 +4389,7 @@ const App = () => {
             <p className={`mt-0.5 text-sm ${txt2}`}>
               {activePage==='dashboard'?'Purchase Orders & Sales Orders Summary'
                :activePage==='all-so'?'Pending Delivery monitoring and detail records'
-               :activePage==='item-registration'?'Process Pur. Info. Reg. data'
+               :activePage==='item-registration'?'Product Registration Status data'
                :activePage==='rfq'?'Sales Submit-RFQ live data and quotation updates'
                :activePage==='vendor-control'?'Vendor account access and credential control'
                :activePage==='all-registered-items'?'All registered product master data'
