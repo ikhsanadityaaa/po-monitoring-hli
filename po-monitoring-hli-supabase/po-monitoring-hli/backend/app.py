@@ -6,13 +6,14 @@ import re
 import os
 import json
 import html
+import hashlib
 from datetime import datetime, date, timedelta
 import io
 import threading
 from sqlalchemy import func, text, event
 from sqlalchemy.engine import Engine
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 app = Flask(__name__)
@@ -307,17 +308,6 @@ class UploadLog(db.Model):
     records_count = db.Column(db.Integer)
     uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-# ─── NEW: Delete Request model ─────────────────────────────────────────────
-class DeleteRequest(db.Model):
-    __tablename__ = 'delete_request'
-    id = db.Column(db.Integer, primary_key=True)
-    ref_type = db.Column(db.String(10))       # 'PO' or 'SO'
-    ref_number = db.Column(db.String(100))    # PO HLI number or SO number/item
-    reason = db.Column(db.Text)
-    requested_at = db.Column(db.DateTime, default=datetime.utcnow)
-    is_hidden = db.Column(db.Boolean, default=True)  # True = hidden from dashboard
-
-
 class ExchangeRate(db.Model):
     """USD->IDR exchange rate per date. Auto-fetched via Frankfurter API on first need,
     or set manually via /api/exchange-rate endpoint."""
@@ -340,6 +330,7 @@ class ProductIDDB(db.Model):
     product_status   = db.Column(db.String(100))
     specification    = db.Column(db.Text)
     manufacturer_name = db.Column(db.String(255))
+    vendor_name      = db.Column(db.String(300))
     order_unit       = db.Column(db.String(50))
     hub_handling_check = db.Column(db.String(100))
     tax_type         = db.Column(db.String(100))
@@ -349,7 +340,11 @@ class ProductIDDB(db.Model):
 
 
 class MasterPIC(db.Model):
-    """Master mapping: Category ID → PIC name. Updated manually via UI."""
+    """Master mapping: Category Name → PIC name. Updated manually via UI.
+
+    `category_id` is kept for backward compatibility with existing DB schema,
+    but new Master PIC uploads use Category Name as the business unique key.
+    """
     __tablename__ = 'master_pic'
     id            = db.Column(db.Integer, primary_key=True)
     category_id   = db.Column(db.String(100), unique=True, nullable=False, index=True)
@@ -402,6 +397,7 @@ class ItemRegistration(db.Model):
     __tablename__ = 'item_registration'
     id              = db.Column(db.Integer, primary_key=True)
     proc_status     = db.Column(db.String(100))
+    req_date        = db.Column(db.Date, index=True)
     existing_owner  = db.Column(db.String(100))
     client_name     = db.Column(db.String(300), index=True)
     category        = db.Column(db.String(255))
@@ -749,6 +745,7 @@ def _ensure_extra_columns():
             ('pur_curr',             'VARCHAR(10)'),
         ],
         'item_registration': [
+            ('req_date',             'DATE'),
             ('existing_owner',       'VARCHAR(100)'),
             ('category_id',          'VARCHAR(100)'),
             ('pic_name',             'VARCHAR(200)'),
@@ -762,6 +759,7 @@ def _ensure_extra_columns():
         'product_id_db': [
             ('specification',        'TEXT'),
             ('manufacturer_name',    'VARCHAR(255)'),
+            ('vendor_name',          'VARCHAR(300)'),
             ('order_unit',           'VARCHAR(50)'),
             ('product_status',       'VARCHAR(100)'),
             ('hub_handling_check',   'VARCHAR(100)'),
@@ -842,7 +840,6 @@ def _ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_so_product_id ON so_data (product_id)",
         "CREATE INDEX IF NOT EXISTS idx_so_customer_po ON so_data (customer_po_number)",
         "CREATE INDEX IF NOT EXISTS idx_upload_log_type_date ON upload_log (file_type, uploaded_at)",
-        "CREATE INDEX IF NOT EXISTS idx_delete_ref_hidden ON delete_request (ref_type, is_hidden, ref_number)",
         "CREATE INDEX IF NOT EXISTS idx_item_reg_proc_client ON item_registration (proc_status, client_name)",
         "CREATE INDEX IF NOT EXISTS idx_item_reg_pic ON item_registration (pic)",
         "CREATE INDEX IF NOT EXISTS idx_item_reg_req_no ON item_registration (req_no)",
@@ -1143,6 +1140,8 @@ RFQ_TEMPLATE_COLUMNS = [
     ('valid_period', 'Valid period'),
     ('photo_url', 'Photo URL (optional)'),
     ('remarks', 'Remarks'),
+    ('private_remarks_1', 'Private Remarks 1'),
+    ('private_remarks_2', 'Private Remarks 2'),
 ]
 RFQ_SIMILARITY_COLUMNS = [
     ('similar_prod_ids', 'Similar Product ID'),
@@ -1158,13 +1157,13 @@ RFQ_EDITABLE_FIELDS = {
     'qty', 'unit', 'remark', 'product_id', 'request_number',
     'same_replacement', 'vendor_name', 'unit_price_idr', 'quoted_item_name',
     'quoted_spec', 'quoted_brand', 'quoted_unit', 'moq', 'lead_time_days', 'valid_period',
-    'photo_url', 'remarks'
+    'photo_url', 'remarks', 'private_remarks_1', 'private_remarks_2'
 }
 RFQ_DIRECT_UPDATE_FIELDS = {'product_id'}
 RFQ_BATCH_FIELDS = [
     'same_replacement', 'vendor_name', 'unit_price_idr', 'quoted_item_name',
     'quoted_spec', 'quoted_brand', 'quoted_unit', 'moq', 'lead_time_days', 'valid_period',
-    'photo_url', 'remarks'
+    'photo_url', 'remarks', 'private_remarks_1', 'private_remarks_2'
 ]
 RFQ_SHEET_COLUMN_BY_FIELD = {
     'sheet_status': 'A',
@@ -1195,6 +1194,8 @@ RFQ_SHEET_COLUMN_BY_FIELD = {
     'valid_period': 'AF',
     'photo_url': 'AG',
     'remarks': 'AH',
+    'private_remarks_1': 'AI',
+    'private_remarks_2': 'AJ',
 }
 
 def rfq_label(field):
@@ -1388,6 +1389,8 @@ def fetch_rfq_rows(force=False):
             'valid_period': rfq_cell(src, 31),
             'photo_url': rfq_cell(src, 32),
             'remarks': rfq_cell(src, 33),
+            'private_remarks_1': rfq_cell(src, 34),
+            'private_remarks_2': rfq_cell(src, 35),
             'source_code': rfq_cell(src, 38),
         }
         data['purchase_pic'] = canonical_rfq_pic(data)
@@ -1932,6 +1935,7 @@ def _product_id_columns(df):
         'product_status': find_column(df, ['Product Status', 'Prod. Status', 'Prod Status']),
         'specification': find_column(df, ['Specification', 'Spec.', 'Spec']),
         'manufacturer_name': find_column(df, ['Manufacturer Name', 'Mfr. Nm.', 'Mfr. Nm', 'Maker Nm.']),
+        'vendor_name': find_column(df, ['Vendor Name', 'Vendor Nm.', 'Vendor Nm', 'Supplier Name', 'Supplier']),
         'order_unit': find_column(df, ['Order Unit', 'Odr. Unit', 'Odr. Unit.']),
         'hub_handling_check': find_column(df, ['HUB Handling Check', 'HUB Handling Chk.', 'HUB Handling Chk']),
         'tax_type': find_column(df, ['Purchasing Price Tax Type', 'Tax Type', 'Tax Type.', 'Tax']),
@@ -1948,7 +1952,8 @@ def _master_pic_columns(df):
     return {
         'category_id': find_column(df, ['Category ID', 'Category Id', 'CategoryID', 'Cat. ID', 'Cat. ID.']),
         'category_name': find_column(df, ['Category Name', 'Category Nm.', 'Cat. Nm.', 'Cat. Nm']),
-        'pic': find_column(df, ['PIC', 'PIC Name', 'Pur. PIC', 'Purchase PIC']),
+        'pic': find_column(df, ['PIC', 'PIC Name', 'Pur. PIC', 'Purchase PIC', 'Current PIC', 'Nama PIC']),
+        'pic_update': find_column(df, ['Update New PIC', 'New PIC', 'Update PIC', 'PIC Baru', 'New PIC Name']),
     }
 
 def selected_clients(args=None):
@@ -2022,6 +2027,7 @@ def item_registration_dict(row, registered_items=None, include_similarity=True):
     return {
         'id': row.id,
         'proc_status': row.proc_status or '',
+        'req_date': row.req_date.isoformat() if row.req_date else '',
         'existing_owner': row.existing_owner or '',
         'client_name': row.client_name or '',
         'category': source_category_level1(row.category),
@@ -2080,6 +2086,36 @@ def normalize_category_name(value):
         return ''
     return re.sub(r'\s+', ' ', category).strip().lower()
 
+def master_pic_category_key(category_name):
+    """Stable internal key for MasterPIC rows created from Category Name only."""
+    norm = normalize_category_name(category_name)
+    if not norm:
+        return ''
+    return f"CATNAME_{hashlib.sha1(norm.encode('utf-8')).hexdigest()[:16]}"
+
+def find_master_pic_by_category_name(category_name):
+    norm = normalize_category_name(category_name)
+    if not norm:
+        return None
+    generated_key = master_pic_category_key(category_name)
+    if generated_key:
+        existing = db.session.query(MasterPIC).filter_by(category_id=generated_key).first()
+        if existing:
+            return existing
+    # Backward compatibility: old rows may still have a real Category ID but the
+    # same Category Name. Treat Category Name as the unique business key.
+    for item in db.session.query(MasterPIC).order_by(MasterPIC.updated_at.desc()).all():
+        if normalize_category_name(item.category_name) == norm:
+            return item
+    return None
+
+def master_pic_unique_category_count():
+    return len({
+        normalize_category_name(m.category_name)
+        for m in db.session.query(MasterPIC.category_name).all()
+        if normalize_category_name(m.category_name)
+    })
+
 def invalidate_master_pic_cache():
     _MASTER_PIC_CACHE['signature'] = None
     _MASTER_PIC_CACHE['by_id'] = {}
@@ -2094,7 +2130,7 @@ def master_pic_maps():
 
     by_id = {}
     by_name = {}
-    for m in MasterPIC.query.with_entities(MasterPIC.category_id, MasterPIC.category_name, MasterPIC.pic_name).all():
+    for m in MasterPIC.query.with_entities(MasterPIC.category_id, MasterPIC.category_name, MasterPIC.pic_name).order_by(MasterPIC.updated_at.desc()).all():
         pic = clean(m.pic_name)
         if not pic:
             continue
@@ -2148,6 +2184,7 @@ def refresh_item_registration_mappings():
 def _item_registration_columns(df):
     return {
         'proc_status':  find_column(df, ['Proc. Status', 'Proc Status', 'Process Status']),
+        'req_date':     find_column(df, ['Req. Date', 'Req Date', 'Request Date']),
         'existing_owner': find_column(df, ['Existing Owner', 'Existing Owner.', 'Owner']),
         'client_name':  find_column(df, ['Client Nm.', 'Client Nm', 'Client Name']),
         'category':     find_column(df, ['Cat. Nm.', 'Cat. Nm', 'Category', 'Cate. Nm.', 'Category Name']),
@@ -2208,6 +2245,7 @@ def import_item_registration_dataframe(df, filename='Item Registration'):
         category = source_category_level1(df_val(row, col['category']))
         incoming[req_no] = {
             'proc_status': clean(df_val(row, col['proc_status'])),
+            'req_date': parse_date(df_val(row, col['req_date'])),
             'existing_owner': clean(df_val(row, col['existing_owner'])),
             'client_name': clean(df_val(row, col['client_name'])),
             'category': category,
@@ -2319,14 +2357,12 @@ def so_dict(s):
 
 # ─── Build hidden set from delete requests ────────────────────────────────
 def get_hidden_po_hli_keys():
-    """Return set of hidden PO HLI keys. Format stored: 'po_number-item_no' or just 'po_number'."""
-    rows = db.session.query(DeleteRequest.ref_number).filter_by(ref_type='PO', is_hidden=True).all()
-    return {r[0] for r in rows}
+    """Hide feature disabled: old callers remain compatible, but nothing is excluded."""
+    return set()
 
 def get_hidden_so_items():
-    """Return set of SO items/numbers that are hidden from dashboard."""
-    rows = db.session.query(DeleteRequest.ref_number).filter_by(ref_type='SO', is_hidden=True).all()
-    return {r[0] for r in rows}
+    """Hide feature disabled: old callers remain compatible, but nothing is excluded."""
+    return set()
 
 # Keep alias for backward compat in export
 def get_hidden_po_numbers():
@@ -3460,93 +3496,6 @@ def preview_exchange_rate():
 
 
 # ═══════════════════════════════════════════════════════════════════
-# DELETE REQUEST ENDPOINTS (soft-hide from dashboard)
-# ═══════════════════════════════════════════════════════════════════
-
-@app.route('/api/delete-requests', methods=['GET'])
-def get_delete_requests():
-    """Return all delete requests (both hidden and visible)."""
-    try:
-        reqs = DeleteRequest.query.order_by(DeleteRequest.requested_at.desc()).all()
-        return jsonify([{
-            'id': r.id,
-            'ref_type': r.ref_type,
-            'ref_number': r.ref_number,
-            'reason': r.reason,
-            'requested_at': r.requested_at.isoformat(),
-            'is_hidden': r.is_hidden,
-        } for r in reqs])
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/delete-requests', methods=['POST'])
-def create_delete_request():
-    """Request to hide a PO or SO from dashboard."""
-    try:
-        data = request.json
-        ref_type = data.get('ref_type', '').upper()
-        ref_number = (data.get('ref_number') or '').strip()
-        reason = (data.get('reason') or '').strip()
-
-        if ref_type not in ('PO', 'SO'):
-            return jsonify({'error': 'ref_type harus PO atau SO'}), 400
-        if not ref_number:
-            return jsonify({'error': 'Reference number is required'}), 400
-        if not reason:
-            return jsonify({'error': 'Reason is required'}), 400
-
-        # Check if already requested
-        existing = DeleteRequest.query.filter_by(ref_type=ref_type, ref_number=ref_number, is_hidden=True).first()
-        if existing:
-            return jsonify({'error': f'{ref_type} {ref_number} is already hidden'}), 400
-
-        req = DeleteRequest(
-            ref_type=ref_type,
-            ref_number=ref_number,
-            reason=reason,
-            is_hidden=True
-        )
-        db.session.add(req)
-        db.session.commit()
-        return jsonify({'success': True, 'id': req.id, 'message': f'{ref_type} {ref_number} successfully hidden from dashboard'})
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/delete-requests/<int:req_id>/restore', methods=['PUT'])
-def restore_delete_request(req_id):
-    """Restore a hidden item back to dashboard."""
-    try:
-        req = db.session.get(DeleteRequest, req_id)
-        if not req:
-            return jsonify({'error': 'Request not found'}), 404
-        req.is_hidden = False
-        db.session.commit()
-        return jsonify({'success': True, 'message': f'{req.ref_type} {req.ref_number} successfully restored to dashboard'})
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/delete-requests/<int:req_id>', methods=['DELETE'])
-def delete_request_permanently(req_id):
-    """Permanently remove a delete request record."""
-    try:
-        req = db.session.get(DeleteRequest, req_id)
-        if not req:
-            return jsonify({'error': 'Request not found'}), 404
-        db.session.delete(req)
-        db.session.commit()
-        clear_runtime_caches()
-        return jsonify({'success': True})
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 500
-
-
-# ═══════════════════════════════════════════════════════════════════
 # UPLOAD ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════
 
@@ -4367,11 +4316,11 @@ def batch_upload_so():
             so = SOData.query.filter_by(so_item=so_item_val).first()
             if so:
                 if col_plan:
-                    d = parse_date(df_val(row, col_plan))
-                    if d: so.delivery_plan_date = d
+                    # Column exists, so a blank cell intentionally clears the old plan date.
+                    so.delivery_plan_date = parse_date(df_val(row, col_plan))
                 if col_rem:
-                    r = clean(df_val(row, col_rem))
-                    if r: so.remarks = r
+                    # Column exists, so a blank cell intentionally clears the old remarks.
+                    so.remarks = clean(df_val(row, col_rem)) or ''
                 updated += 1
             else:
                 not_found += 1
@@ -4551,139 +4500,6 @@ def export_po_without_so():
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             as_attachment=True, download_name=f"PO_Without_SO_{datetime.now().strftime('%Y%m%d')}.xlsx")
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/template/hide', methods=['GET'])
-def download_hide_template():
-    """Download Excel template for batch hide requests."""
-    hide_type = request.args.get('type', 'PO').upper()  # 'PO' or 'SO'
-    wb = Workbook()
-    ws = wb.active
-
-    if hide_type == 'SO':
-        ws.title = "Hide SO Template"
-        headers = ['SO Item', 'Reason']
-        ws.append(headers)
-        # Header: yellow background, bold, centered
-        header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-        for i, cell in enumerate(ws[1], 1):
-            cell.fill = header_fill
-            cell.font = Font(bold=True, color="000000")
-            cell.alignment = Alignment(horizontal='center')
-            ws.column_dimensions[get_column_letter(i)].width = 35 if i == 1 else 50
-        # Row 2: example row in red font
-        ws.append(['9008988017-10', 'Reason why this SO Item should be hidden'])
-        example_font = Font(color="FF0000")
-        for cell in ws[2]:
-            cell.font = example_font
-    else:
-        ws.title = "Hide PO HLI Template"
-        headers = ['NO PO HLI (PO Number-Item No)', 'Reason']
-        ws.append(headers)
-        # Header: yellow background, bold, centered
-        header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-        for i, cell in enumerate(ws[1], 1):
-            cell.fill = header_fill
-            cell.font = Font(bold=True, color="000000")
-            cell.alignment = Alignment(horizontal='center')
-            ws.column_dimensions[get_column_letter(i)].width = 35 if i == 1 else 50
-        # Row 2: example row in red font
-        ws.append(['4502358819-10', 'Reason why this PO HLI should be hidden'])
-        example_font = Font(color="FF0000")
-        for cell in ws[2]:
-            cell.font = example_font
-
-    output = io.BytesIO()
-    wb.save(output)
-    output.seek(0)
-    fname = f"Template_Hide_{'SO' if hide_type == 'SO' else 'PO_HLI'}.xlsx"
-    return send_file(output,
-        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        as_attachment=True, download_name=fname)
-
-
-@app.route('/api/upload/hide-batch', methods=['POST'])
-def upload_hide_batch():
-    """Process batch hide Excel file. Supports both PO HLI and SO hide templates."""
-    try:
-        if 'file' not in request.files:
-            return jsonify({'error': 'No file uploaded'}), 400
-        file = request.files['file']
-        hide_type = request.form.get('type', 'PO').upper()
-
-        df = pd.read_excel(file, engine='openpyxl', skiprows=[1])
-        df.columns = [str(c).strip() for c in df.columns]
-
-        # Detect column names
-        if hide_type == 'SO':
-            col_ref = find_column(df, ['SO Item', 'SO Item No', 'SO Number', 'SO No', 'SO Number-Item No'])
-        else:
-            col_ref = find_column(df, [
-                'NO PO HLI (PO Number-Item No)', 'NO PO HLI', 'PO HLI',
-                'PO Number-Item No', 'PO HLI Number', 'PO Number'
-            ])
-
-        col_reason = find_column(df, ['Reason', 'Alasan', 'Keterangan'])
-
-        if not col_ref:
-            return jsonify({'error': f'Reference number column not found. Available columns: {df.columns.tolist()}'}), 400
-        if not col_reason:
-            return jsonify({'error': f'Reason column not found. Available columns: {df.columns.tolist()}'}), 400
-
-        success_count = 0
-        skipped = []
-        errors = []
-
-        for idx, row in df.iterrows():
-            ref_number = clean(df_val(row, col_ref))
-            reason = clean(df_val(row, col_reason))
-
-            # Skip header-like rows (instructions)
-            if not ref_number or ref_number.upper().startswith('PETUNJUK') or ref_number.upper().startswith('INSTRUCTIONS'):
-                continue
-            # Skip example rows
-            if reason and (reason.lower().startswith('alasan kenapa') or reason.lower().startswith('reason why')):
-                continue
-
-            if not reason:
-                errors.append(f"Row {idx+2}: Reason is empty for {ref_number}")
-                continue
-
-            # Check if already hidden
-            existing = DeleteRequest.query.filter_by(
-                ref_type=hide_type, ref_number=ref_number, is_hidden=True
-            ).first()
-            if existing:
-                skipped.append(ref_number)
-                continue
-
-            req = DeleteRequest(
-                ref_type=hide_type,
-                ref_number=ref_number,
-                reason=reason,
-                is_hidden=True
-            )
-            db.session.add(req)
-            success_count += 1
-
-        db.session.commit()
-
-        msg = f'{success_count} items successfully hidden'
-        if skipped:
-            msg += f'. {len(skipped)} were already hidden: {", ".join(skipped[:5])}'
-        if errors:
-            msg += f'. {len(errors)} error: {"; ".join(errors[:3])}'
-
-        return jsonify({
-            'message': msg,
-            'hidden': success_count,
-            'skipped': len(skipped),
-            'errors': errors
-        })
-    except Exception as e:
-        db.session.rollback()
-        import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
@@ -5057,6 +4873,7 @@ def completed_margin_detail():
                 'margin_pct': round(m / float(s.sales_amount) * 100, 1) if s.sales_amount else None,
                 'date': s.so_create_date.isoformat() if s.so_create_date else None,
                 'so_status': s.so_status,
+                'pic_name': canonical_pending_pic(s.pic_name, s.operation_unit_name),
                 'operation_unit_name': s.operation_unit_name,
             })
 
@@ -5293,6 +5110,7 @@ def get_item_registration_data():
         search = request.args.get('search', '').strip()
         req_numbers = [n.strip() for n in request.args.getlist('req_no') if n.strip()]
         clients = selected_clients()
+        global_pics = [p.strip() for p in request.args.getlist('global_pic') if p.strip()]
         item_clients = [c.strip() for c in request.args.getlist('item_client') if c.strip()]
         categories = [c.strip() for c in request.args.getlist('category') if c.strip()]
         pics = [p.strip() for p in request.args.getlist('pic') if p.strip()]
@@ -5304,6 +5122,7 @@ def get_item_registration_data():
         q = ItemRegistration.query
         if clients:
             q = q.filter(ItemRegistration.client_name.in_(clients))
+        q = apply_item_registration_pic_filter(q, global_pics)
         if item_clients:
             q = q.filter(ItemRegistration.client_name.in_(item_clients))
         if categories:
@@ -5366,6 +5185,7 @@ def get_item_registration_data():
         option_q = ItemRegistration.query
         if clients:
             option_q = option_q.filter(ItemRegistration.client_name.in_(clients))
+        option_q = apply_item_registration_pic_filter(option_q, global_pics)
         option_rows = option_q.with_entities(
             ItemRegistration.client_name,
             ItemRegistration.category,
@@ -5460,6 +5280,7 @@ def apply_item_registration_request_filters(query):
     search = request.args.get('search', '').strip()
     req_numbers = [n.strip() for n in request.args.getlist('req_no') if n.strip()]
     clients = selected_clients()
+    global_pics = [p.strip() for p in request.args.getlist('global_pic') if p.strip()]
     item_clients = [c.strip() for c in request.args.getlist('item_client') if c.strip()]
     categories = [c.strip() for c in request.args.getlist('category') if c.strip()]
     pics = [p.strip() for p in request.args.getlist('pic') if p.strip()]
@@ -5469,6 +5290,7 @@ def apply_item_registration_request_filters(query):
     existing_owners = [s.strip() for s in request.args.getlist('existing_owner') if s.strip()]
     if clients:
         query = query.filter(ItemRegistration.client_name.in_(clients))
+    query = apply_item_registration_pic_filter(query, global_pics)
     if item_clients:
         query = query.filter(ItemRegistration.client_name.in_(item_clients))
     if categories:
@@ -5654,9 +5476,9 @@ def _lookup_pic(product_id_str):
         return None
     pid = str(product_id_str).strip()
     prod = db.session.query(ProductIDDB).filter_by(product_id=pid).first()
-    if not prod or not prod.category_id:
+    if not prod:
         return None
-    return _lookup_pic_by_category_id(prod.category_id)
+    return _lookup_pic_by_category(prod.category_id, prod.category_name)
 
 
 @app.route('/api/upload/product-id-json', methods=['POST'])
@@ -5699,6 +5521,7 @@ def upload_product_id():
                     'product_status': clean(df_val(row, col['product_status'])),
                     'specification': clean(df_val(row, col['specification'])),
                     'manufacturer_name': clean(df_val(row, col['manufacturer_name'])),
+                    'vendor_name': clean(df_val(row, col['vendor_name'])),
                     'order_unit': clean(df_val(row, col['order_unit'])),
                     'hub_handling_check': clean(df_val(row, col['hub_handling_check'])),
                     'tax_type': clean(df_val(row, col['tax_type'])),
@@ -5723,23 +5546,24 @@ def upload_product_id():
         global _SIMILARITY_CACHE
         _SIMILARITY_CACHE = {}
 
-        # After upserting ProductIDDB, refresh pic_name on SO rows that have a product_id
+        # After upserting ProductIDDB, refresh pic_name on SO rows that have a product_id.
+        # Master PIC is now keyed by Category Name, with Category ID kept only as
+        # a backward-compatible fallback.
         so_rows = db.session.query(SOData).filter(
             SOData.product_id.isnot(None), SOData.product_id != ''
         ).all()
         refreshed = 0
         for s in so_rows:
-            cat_id_key = None
             prod = db.session.query(ProductIDDB).filter_by(product_id=str(s.product_id).strip()).first()
-            if prod and prod.category_id:
-                cat_id_key = normalize_category_id(prod.category_id)
-            if cat_id_key:
-                if cat_id_key not in pic_cache:
-                    pic_cache[cat_id_key] = _lookup_pic_by_category_id(cat_id_key)
-                new_pic = pic_cache[cat_id_key]
-                if s.pic_name != new_pic:
-                    s.pic_name = new_pic
-                    refreshed += 1
+            if not prod:
+                continue
+            cache_key = (normalize_category_id(prod.category_id), normalize_category_name(prod.category_name))
+            if cache_key not in pic_cache:
+                pic_cache[cache_key] = _lookup_pic_by_category(prod.category_id, prod.category_name)
+            new_pic = pic_cache[cache_key]
+            if s.pic_name != new_pic:
+                s.pic_name = new_pic
+                refreshed += 1
         db.session.commit()
         clear_runtime_caches()
 
@@ -5763,17 +5587,19 @@ def upload_product_id():
 @app.route('/api/upload/master-pic-json', methods=['POST'])
 @app.route('/api/upload/master-pic', methods=['POST'])
 def upload_master_pic():
-    """Upload Master PIC Excel. Upserts category_id → PIC mapping, then refreshes SO pic_name."""
+    """Upload Master PIC Excel. Upserts Category Name → PIC mapping, then refreshes SO pic_name."""
     try:
         uploads, upload_mode = request_upload_dataframes('master_pic')
         if not uploads:
             return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
 
-        added = updated = 0
+        added = updated = unchanged = 0
         expected = [
-            ('category_id', 'Category ID'), ('category_name', 'Category Name'), ('pic', 'PIC')
+            ('category_name', 'Category Name'),
+            ('pic', 'PIC'),
+            ('pic_update', 'Update New PIC'),
         ]
-        required = [('category_id', 'Category ID'), ('pic', 'PIC')]
+        required = [('category_name', 'Category Name')]
 
         for upload in uploads:
             df = upload['df']
@@ -5782,38 +5608,78 @@ def upload_master_pic():
             validate_upload_columns(upload['filename'], 'Update PIC', col, expected, required)
 
             for _, row in df.iterrows():
-                cat_id = normalize_category_id(df_val(row, col['category_id']))
-                if not cat_id:
+                cat_name = source_category_level1(df_val(row, col['category_name']))
+                if not cat_name:
                     continue
-                cat_name = clean(df_val(row, col['category_name']))
-                pic_name = clean(df_val(row, col['pic']))
 
-                existing = db.session.query(MasterPIC).filter_by(category_id=cat_id).first()
+                current_pic = clean(df_val(row, col['pic']))
+                update_pic = clean(df_val(row, col['pic_update']))
+                pic_name = update_pic or current_pic
+
+                # Template rows with blank Update New PIC and blank current PIC are
+                # informational only; skip them instead of clearing the mapping.
+                if not pic_name:
+                    continue
+
+                existing = find_master_pic_by_category_name(cat_name)
                 if existing:
-                    existing.category_name = cat_name
-                    existing.pic_name = pic_name
-                    existing.updated_at = datetime.utcnow()
-                    updated += 1
+                    # If older data still contains several Category ID rows for
+                    # the same Category Name, update all of them to the same PIC
+                    # so Category Name behaves as the single business key.
+                    norm_cat_name = normalize_category_name(cat_name)
+                    targets = [
+                        m for m in db.session.query(MasterPIC).all()
+                        if normalize_category_name(m.category_name) == norm_cat_name
+                    ]
+                    if existing not in targets:
+                        targets.append(existing)
+
+                    changed = False
+                    for target in targets:
+                        new_key = master_pic_category_key(cat_name) or target.category_id
+                        if (
+                            normalize_category_name(target.category_name) != norm_cat_name
+                            or clean(target.pic_name) != pic_name
+                            or (str(target.category_id or '').startswith('CATNAME_') and target.category_id != new_key)
+                        ):
+                            changed = True
+                        target.category_name = cat_name
+                        if str(target.category_id or '').startswith('CATNAME_'):
+                            target.category_id = new_key
+                        target.pic_name = pic_name
+                        target.updated_at = datetime.utcnow()
+                    if changed:
+                        updated += 1
+                    else:
+                        unchanged += 1
                 else:
                     db.session.add(MasterPIC(
-                        category_id=cat_id, category_name=cat_name,
-                        pic_name=pic_name, updated_at=datetime.utcnow()
+                        category_id=master_pic_category_key(cat_name),
+                        category_name=cat_name,
+                        pic_name=pic_name,
+                        updated_at=datetime.utcnow()
                     ))
                     added += 1
         db.session.commit()
         invalidate_master_pic_cache()
 
-        # Rebuild pic_cache from DB for refreshing SO rows
-        pic_map = {normalize_category_id(m.category_id): m.pic_name for m in db.session.query(MasterPIC).all()}
-        prod_map = {p.product_id: normalize_category_id(p.category_id) for p in db.session.query(ProductIDDB).all()}
-
+        # Refresh SO rows using ProductIDDB Category Name first, Category ID as fallback.
+        prod_map = {
+            str(p.product_id).strip(): (p.category_id, p.category_name)
+            for p in db.session.query(ProductIDDB).all()
+            if p.product_id
+        }
+        pic_cache = {}
         so_rows = db.session.query(SOData).filter(
             SOData.product_id.isnot(None), SOData.product_id != ''
         ).all()
         refreshed = 0
         for s in so_rows:
-            cat_id_key = prod_map.get(str(s.product_id).strip())
-            new_pic = pic_map.get(cat_id_key) if cat_id_key else None
+            cat_id, cat_name = prod_map.get(str(s.product_id).strip(), (None, None))
+            cache_key = (normalize_category_id(cat_id), normalize_category_name(cat_name))
+            if cache_key not in pic_cache:
+                pic_cache[cache_key] = _lookup_pic_by_category(cat_id, cat_name)
+            new_pic = pic_cache[cache_key]
             if s.pic_name != new_pic:
                 s.pic_name = new_pic
                 refreshed += 1
@@ -5825,9 +5691,11 @@ def upload_master_pic():
             'status': 'ok',
             'files': len(uploads),
             'mode': upload_mode,
-            'added': added, 'updated': updated,
+            'added': added,
+            'updated': updated,
+            'unchanged': unchanged,
             'so_pic_refreshed': refreshed,
-            'total_categories': db.session.query(MasterPIC).count()
+            'total_categories': master_pic_unique_category_count()
         })
     except ValueError as e:
         db.session.rollback()
@@ -5844,7 +5712,7 @@ def master_pic_status():
     try:
         total_pid = db.session.query(ProductIDDB).count()
         last_pid = db.session.query(func.max(ProductIDDB.updated_at)).scalar()
-        total_pic = db.session.query(MasterPIC).count()
+        total_pic = master_pic_unique_category_count()
         last_pic = db.session.query(func.max(MasterPIC.updated_at)).scalar()
         return jsonify({
             'product_id_count': total_pid,
@@ -6019,9 +5887,6 @@ def get_rfq_data():
         purchase_pics = [clean(v) for v in request.args.getlist('purchase_pic') if clean(v)]
         vendors = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
         checks = [clean(v).lower() for v in request.args.getlist('check') if clean(v)]
-        sort_order = request.args.get('sort_order', 'newest')
-        if sort_order not in ('newest', 'oldest'):
-            sort_order = 'newest'
         include_similarity = str(request.args.get('similarity', '')).lower() in ('1', 'true', 'yes')
 
         rows, fetched_at = rfq_rows_with_edits(force=force)
@@ -6058,7 +5923,7 @@ def get_rfq_data():
 
         if purchase_pics:
             rows = [row for row in rows if clean(row.get('purchase_pic')) in purchase_pics]
-        sort_rfq_rows(rows, sort_order)
+        # Keep RFQ order identical to the sheet.
 
         if pic:
             rows = [row for row in rows if clean(row.get('purchase_pic')) == pic and clean(row.get('check')) == 'open' and row.get('unit_price_missing') and not clean_product_id(row.get('product_id'))]
@@ -6101,9 +5966,6 @@ def rfq_filtered_rows_from_request(force=False):
     purchase_pics = [clean(v) for v in request.args.getlist('purchase_pic') if clean(v)]
     vendors = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
     checks = [clean(v).lower() for v in request.args.getlist('check') if clean(v)]
-    sort_order = request.args.get('sort_order', 'newest')
-    if sort_order not in ('newest', 'oldest'):
-        sort_order = 'newest'
     rows, fetched_at = rfq_rows_with_edits(force=force)
     if search:
         rows = filter_rfq_rows_by_multiline_search(rows, search)
@@ -6119,7 +5981,7 @@ def rfq_filtered_rows_from_request(force=False):
         rows = [row for row in rows if clean(row.get('check')) and clean(row.get('check')).lower() in checks]
     if pic:
         rows = [row for row in rows if clean(row.get('purchase_pic')) == pic and clean(row.get('check')) == 'open' and row.get('unit_price_missing') and not clean_product_id(row.get('product_id'))]
-    sort_rfq_rows(rows, sort_order)
+    # Keep RFQ order identical to the sheet.
     return rows, fetched_at
 
 @app.route('/api/rfq/template', methods=['GET'])
@@ -6204,6 +6066,60 @@ def batch_upload_rfq():
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+def _style_rfq_export_sheet(ws, headers, editable_start_col=19):
+    last_col = len(headers)
+    last_col_letter = get_column_letter(last_col)
+    ref_end_col = editable_start_col - 1
+
+    ws.freeze_panes = 'A3'
+    ws.auto_filter.ref = f'A2:{last_col_letter}{ws.max_row}'
+
+    ref_header_fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
+    ref_body_fill = PatternFill(start_color='EDEDED', end_color='EDEDED', fill_type='solid')
+    input_header_fill = PatternFill(start_color='2563EB', end_color='2563EB', fill_type='solid')
+    note_font = Font(color='0070C0')
+    ref_header_font = Font(bold=True, color='000000')
+    input_header_font = Font(bold=True, color='FFFFFF')
+    thin_border = Border(
+        left=Side(style='thin', color='D9E2EF'),
+        right=Side(style='thin', color='D9E2EF'),
+        top=Side(style='thin', color='D9E2EF'),
+        bottom=Side(style='thin', color='D9E2EF'),
+    )
+
+    # Instruction row, starts exactly at the first editable quotation column.
+    note_cell = ws.cell(row=1, column=editable_start_col)
+    note_cell.value = 'Silahkan isi penawaran di Kolom Biru / Kindly fill in your quotation in the blue columns'
+    note_cell.font = note_font
+
+    for cell in ws[2]:
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        cell.border = thin_border
+        if cell.column <= ref_end_col:
+            cell.fill = ref_header_fill
+            cell.font = ref_header_font
+        else:
+            cell.fill = input_header_fill
+            cell.font = input_header_font
+
+    for row in ws.iter_rows(min_row=3, max_row=ws.max_row, min_col=1, max_col=last_col):
+        for cell in row:
+            cell.alignment = Alignment(vertical='center', wrap_text=True)
+            cell.border = thin_border
+            if cell.column <= ref_end_col:
+                cell.fill = ref_body_fill
+
+    widths = [
+        10, 10, 10, 7, 55, 14, 18, 12, 28, 14, 24, 42, 20, 8, 8, 24, 18, 20,
+        17, 18, 18, 18, 24, 42, 18, 12, 12, 18, 18, 28, 50, 32, 32
+    ]
+    for i, width in enumerate(widths[:last_col], 1):
+        ws.column_dimensions[get_column_letter(i)].width = width
+
+    for row_idx in range(3, ws.max_row + 1):
+        ws.row_dimensions[row_idx].height = 30
+    ws.row_dimensions[2].height = 26
+
 @app.route('/api/export/rfq', methods=['GET'])
 def export_rfq():
     try:
@@ -6212,10 +6128,11 @@ def export_rfq():
         ws = wb.active
         ws.title = 'RFQ'
         headers = [label for _, label in RFQ_TEMPLATE_COLUMNS]
-        _style_wb(ws, headers, num_cols=[19, 20])
-        widths = [10, 10, 10, 28, 14, 14, 18, 24, 42, 22, 10, 10, 24, 28, 18, 18, 18, 20, 28, 18, 18, 24, 42, 18, 14, 14, 18, 18, 28, 50]
-        for i, width in enumerate(widths, 1):
-            ws.column_dimensions[get_column_letter(i)].width = width
+
+        # Row 1 = instruction note. Row 2 = header. Row 3+ = data, matching
+        # the RFQ example file style and preserving the sheet order.
+        ws.append([''] * len(headers))
+        ws.append(headers)
         for row in rows:
             values = []
             for field, _label in RFQ_TEMPLATE_COLUMNS:
@@ -6226,6 +6143,9 @@ def export_rfq():
                 else:
                     values.append(row.get(field) or '')
             ws.append(values)
+
+        _style_rfq_export_sheet(ws, headers, editable_start_col=19)
+
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)
@@ -6236,6 +6156,7 @@ def export_rfq():
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/rfq/batch-cells', methods=['PUT'])
 def update_rfq_cells_batch():
@@ -6317,103 +6238,115 @@ def update_rfq_cell(row_key):
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+def base_all_registered_items_query():
+    return db.session.query(ProductIDDB).filter(db.or_(
+        ProductIDDB.product_status.is_(None),
+        ProductIDDB.product_status == '',
+        func.lower(ProductIDDB.product_status) == 'use'
+    ))
+
+
+def apply_all_registered_items_filters(q, args):
+    search = (args.get('search', '') or '').strip()
+    prod_ids = [clean_product_id(p) for p in args.getlist('prod_id') if clean_product_id(p)]
+    date_filter = args.get('date_filter', 'all')
+    date_from = args.get('date_from', '')
+    date_to = args.get('date_to', '')
+    pic_name = (args.get('pic_name', '') or '').strip()
+    mfr_names = [clean(v) for v in args.getlist('mfr_name') if clean(v)]
+    vendor_names = [clean(v) for v in args.getlist('vendor_name') if clean(v)]
+
+    if date_filter != 'all':
+        today = datetime.now().date()
+        if date_filter == 'today':
+            q = q.filter(func.date(ProductIDDB.registration_date) == today)
+        elif date_filter == 'week':
+            week_start = today - timedelta(days=today.weekday())
+            q = q.filter(ProductIDDB.registration_date >= week_start)
+        elif date_filter == 'month':
+            q = q.filter(ProductIDDB.registration_date >= today.replace(day=1))
+        elif date_filter == 'year':
+            q = q.filter(ProductIDDB.registration_date >= today.replace(month=1, day=1))
+        elif date_filter == 'custom':
+            if date_from:
+                q = q.filter(ProductIDDB.registration_date >= date_from)
+            if date_to:
+                q = q.filter(ProductIDDB.registration_date <= date_to)
+
+    if pic_name:
+        q = q.filter(ProductIDDB.product_registry_pic.ilike(f'%{pic_name}%'))
+    if prod_ids:
+        q = q.filter(ProductIDDB.product_id.in_(prod_ids))
+    if mfr_names:
+        q = q.filter(ProductIDDB.manufacturer_name.in_(mfr_names))
+    if vendor_names:
+        q = q.filter(ProductIDDB.vendor_name.in_(vendor_names))
+
+    if search:
+        terms = rfq_multiline_search_terms(search)
+        term_filters = []
+        for term in terms:
+            pattern = f'%{term}%'
+            term_filters.append(db.or_(
+                ProductIDDB.product_id.ilike(pattern),
+                ProductIDDB.product_name.ilike(pattern),
+                ProductIDDB.specification.ilike(pattern),
+                ProductIDDB.manufacturer_name.ilike(pattern),
+                ProductIDDB.vendor_name.ilike(pattern),
+                ProductIDDB.category_name.ilike(pattern),
+            ))
+        if term_filters:
+            q = q.filter(db.or_(*term_filters))
+    return q
+
+
+def serialize_registered_product(row, pic_map=None):
+    pic_map = pic_map or {}
+    cat_id = normalize_category_id(row.category_id)
+    return {
+        'id': row.id,
+        'prod_id': clean_product_id(row.product_id),
+        'category': source_category_level1(row.category_name),
+        'pic': pic_map.get(cat_id) or '',
+        'prod_name': row.product_name or '',
+        'spec': row.specification or '',
+        'mfr_name': row.manufacturer_name or '',
+        'vendor_name': row.vendor_name or '',
+        'odr_unit': row.order_unit or '',
+        'hub_handling_check': row.hub_handling_check or '',
+        'tax_type': row.tax_type or '',
+        'registration_date': row.registration_date.isoformat() if row.registration_date else '',
+        'product_registry_pic': row.product_registry_pic or '',
+        'client_name': '',
+        'req_no': '',
+        'proc_status': row.product_status or '',
+        'prod_price': 0,
+        'curr': '',
+        'batch_grp_no': '',
+    }
+
+
 @app.route('/api/all-registered-items', methods=['GET'])
 def get_all_registered_items():
     """Return all registered items from uploaded Prod ID master data."""
     try:
         page = int(request.args.get('page', 1))
         per_page = int(request.args.get('per_page', 10))
-        search = request.args.get('search', '').strip()
-        prod_ids = [clean_product_id(p) for p in request.args.getlist('prod_id') if clean_product_id(p)]
-        
-        # Date filter parameters
-        date_filter = request.args.get('date_filter', 'all')  # all, today, week, month, year, custom
-        date_from = request.args.get('date_from', '')
-        date_to = request.args.get('date_to', '')
-        
-        # Client and PIC filters. Prod ID master has no client column; PIC is
-        # matched against the product registry PIC text and resolved Master PIC.
-        client_name = request.args.get('client_name', '').strip()
-        pic_name = request.args.get('pic_name', '').strip()
-        
-        q = db.session.query(ProductIDDB).filter(db.or_(
-            ProductIDDB.product_status.is_(None),
-            ProductIDDB.product_status == '',
-            func.lower(ProductIDDB.product_status) == 'use'
-        ))
-        
-        # Apply date filter
-        if date_filter != 'all':
-            from datetime import datetime, timedelta
-            today = datetime.now().date()
-            
-            if date_filter == 'today':
-                q = q.filter(func.date(ProductIDDB.registration_date) == today)
-            elif date_filter == 'week':
-                week_start = today - timedelta(days=today.weekday())
-                q = q.filter(ProductIDDB.registration_date >= week_start)
-            elif date_filter == 'month':
-                month_start = today.replace(day=1)
-                q = q.filter(ProductIDDB.registration_date >= month_start)
-            elif date_filter == 'year':
-                year_start = today.replace(month=1, day=1)
-                q = q.filter(ProductIDDB.registration_date >= year_start)
-            elif date_filter == 'custom':
-                if date_from:
-                    q = q.filter(ProductIDDB.registration_date >= date_from)
-                if date_to:
-                    q = q.filter(ProductIDDB.registration_date <= date_to)
-        
-        if pic_name:
-            q = q.filter(ProductIDDB.product_registry_pic.ilike(f'%{pic_name}%'))
-        if prod_ids:
-            q = q.filter(ProductIDDB.product_id.in_(prod_ids))
-        
-        if search:
-            pattern = f'%{search}%'
-            q = q.filter(db.or_(
-                ProductIDDB.product_id.ilike(pattern),
-                ProductIDDB.product_name.ilike(pattern),
-                ProductIDDB.specification.ilike(pattern),
-                ProductIDDB.manufacturer_name.ilike(pattern),
-                ProductIDDB.category_name.ilike(pattern),
-            ))
-        
+        q = apply_all_registered_items_filters(base_all_registered_items_query(), request.args)
         total = q.count()
-
         rows = q.order_by(ProductIDDB.registration_date.desc(), ProductIDDB.product_id.asc()).offset((page-1)*per_page).limit(per_page).all()
         pic_map = {normalize_category_id(m.category_id): m.pic_name for m in db.session.query(MasterPIC).all()}
-        
-        data = []
-        for row in rows:
-            cat_id = normalize_category_id(row.category_id)
-            data.append({
-                'id': row.id,
-                'prod_id': clean_product_id(row.product_id),
-                'category': source_category_level1(row.category_name),
-                'pic': pic_map.get(cat_id) or '',
-                'prod_name': row.product_name or '',
-                'spec': row.specification or '',
-                'mfr_name': row.manufacturer_name or '',
-                'odr_unit': row.order_unit or '',
-                'hub_handling_check': row.hub_handling_check or '',
-                'tax_type': row.tax_type or '',
-                'registration_date': row.registration_date.isoformat() if row.registration_date else '',
-                'product_registry_pic': row.product_registry_pic or '',
-                'client_name': '',
-                'vendor_name': '',
-                'req_no': '',
-                'proc_status': row.product_status or '',
-                'prod_price': 0,
-                'curr': '',
-                'batch_grp_no': '',
-            })
-        
+        option_q = base_all_registered_items_query()
+        data = [serialize_registered_product(row, pic_map) for row in rows]
         return jsonify({
             'data': data,
             'total': total,
             'page': page,
             'per_page': per_page,
+            'filters': {
+                'mfr_names': sorted([r[0] for r in option_q.with_entities(ProductIDDB.manufacturer_name).distinct().all() if r[0]]),
+                'vendor_names': sorted([r[0] for r in option_q.with_entities(ProductIDDB.vendor_name).distinct().all() if r[0]]),
+            }
         })
     except Exception as e:
         import traceback; traceback.print_exc()
@@ -6424,98 +6357,37 @@ def get_all_registered_items():
 def export_all_registered_items():
     """Export all registered items with current filters to Excel."""
     try:
-        # Apply same filters as get_all_registered_items
-        date_filter = request.args.get('date_filter', 'all')
-        date_from = request.args.get('date_from', '')
-        date_to = request.args.get('date_to', '')
-        pic_name = request.args.get('pic_name', '').strip()
-        search = request.args.get('search', '').strip()
-        prod_ids = [clean_product_id(p) for p in request.args.getlist('prod_id') if clean_product_id(p)]
-        
-        q = db.session.query(ProductIDDB).filter(db.or_(
-            ProductIDDB.product_status.is_(None),
-            ProductIDDB.product_status == '',
-            func.lower(ProductIDDB.product_status) == 'use'
-        ))
-        
-        # Apply date filter
-        if date_filter != 'all':
-            from datetime import datetime, timedelta
-            today = datetime.now().date()
-            
-            if date_filter == 'today':
-                q = q.filter(func.date(ProductIDDB.registration_date) == today)
-            elif date_filter == 'week':
-                week_start = today - timedelta(days=today.weekday())
-                q = q.filter(ProductIDDB.registration_date >= week_start)
-            elif date_filter == 'month':
-                month_start = today.replace(day=1)
-                q = q.filter(ProductIDDB.registration_date >= month_start)
-            elif date_filter == 'year':
-                year_start = today.replace(month=1, day=1)
-                q = q.filter(ProductIDDB.registration_date >= year_start)
-            elif date_filter == 'custom':
-                if date_from:
-                    q = q.filter(ProductIDDB.registration_date >= date_from)
-                if date_to:
-                    q = q.filter(ProductIDDB.registration_date <= date_to)
-        
-        if pic_name:
-            q = q.filter(ProductIDDB.product_registry_pic.ilike(f'%{pic_name}%'))
-        if prod_ids:
-            q = q.filter(ProductIDDB.product_id.in_(prod_ids))
-        if search:
-            pattern = f'%{search}%'
-            q = q.filter(db.or_(
-                ProductIDDB.product_id.ilike(pattern),
-                ProductIDDB.product_name.ilike(pattern),
-                ProductIDDB.specification.ilike(pattern),
-                ProductIDDB.manufacturer_name.ilike(pattern),
-                ProductIDDB.category_name.ilike(pattern),
-            ))
-        
+        q = apply_all_registered_items_filters(base_all_registered_items_query(), request.args)
         rows = q.order_by(ProductIDDB.registration_date.desc(), ProductIDDB.product_id.asc()).all()
         pic_map = {normalize_category_id(m.category_id): m.pic_name for m in db.session.query(MasterPIC).all()}
-        
         wb = Workbook()
         ws = wb.active
-        ws.title = "All Registered Items"
-        headers = [
-            'Product ID', 'Category', 'PIC', 'Product Name', 'Specification',
-            'Manufacturer Name', 'Order Unit', 'HUB Handling Check', 'Tax Type',
-            'Registration Date', 'Product Registry PIC'
-        ]
-        _style_wb(ws, headers)
-        widths = [18, 24, 16, 28, 48, 24, 14, 20, 16, 18, 20]
+        ws.title = 'All Registered Items'
+        headers = ['Product ID', 'Category', 'PIC', 'Product Name', 'Specification', 'Manufacturer Name', 'Vendor Name', 'Order Unit', 'Hub Handling Check', 'Tax Type', 'Registration Date', 'Registry PIC', 'Status']
+        ws.append(headers)
+        header_fill = PatternFill(start_color="1D4ED8", end_color="1D4ED8", fill_type="solid")
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.alignment = Alignment(horizontal='center')
+        for row in rows:
+            item = serialize_registered_product(row, pic_map)
+            ws.append([
+                item['prod_id'], item['category'], item['pic'], item['prod_name'], item['spec'],
+                item['mfr_name'], item['vendor_name'], item['odr_unit'], item['hub_handling_check'],
+                item['tax_type'], item['registration_date'], item['product_registry_pic'], item['proc_status']
+            ])
+        widths = [18, 28, 18, 35, 45, 28, 28, 14, 20, 14, 18, 24, 16]
         for i, width in enumerate(widths, 1):
             ws.column_dimensions[get_column_letter(i)].width = width
-        
-        for row in rows:
-            cat_id = normalize_category_id(row.category_id)
-            ws.append([
-                clean_product_id(row.product_id),
-                source_category_level1(row.category_name),
-                pic_map.get(cat_id) or '',
-                row.product_name or '',
-                row.specification or '',
-                row.manufacturer_name or '',
-                row.order_unit or '',
-                row.hub_handling_check or '',
-                row.tax_type or '',
-                row.registration_date.isoformat() if row.registration_date else '',
-                row.product_registry_pic or '',
-            ])
-        
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)
-        return send_file(output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name=f"All_Registered_Items_{datetime.now().strftime('%Y%m%d')}.xlsx")
+        return send_file(output, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', as_attachment=True, download_name=f"All_Registered_Items_{datetime.now().strftime('%Y%m%d')}.xlsx")
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
 
 
 @app.route('/api/dashboard/status-detail', methods=['GET'])
@@ -6523,48 +6395,40 @@ def get_dashboard_status_detail():
     """Return detailed SO list for a specific status from dashboard/heatmap."""
     try:
         status = request.args.get('status', '').strip()
-        month = request.args.get('month', '').strip()  # e.g., "Jan 2026"
-        
+        month = request.args.get('month', '').strip()
         hidden_so = get_hidden_so_items()
         date_year, date_from, date_to = parse_so_date_args()
         clients = selected_clients()
         pics = selected_pics()
-        
+
         def so_q(*extra_filters):
             q = db.session.query(SOData).filter(*extra_filters) if extra_filters else db.session.query(SOData)
             q = apply_so_client_filter(q, clients)
             q = apply_so_pic_filter(q, pics)
             return apply_so_create_date_filter(q, date_year, date_from, date_to)
-        
+
         q = so_q(open_so_filter())
-        
         if status:
             q = q.filter(SOData.so_status == status)
-        
         if month:
-            # Parse month like "Jan 2026"
             try:
-                from datetime import datetime
                 month_date = datetime.strptime(month, '%b %Y')
-                q = q.filter(
-                    func.strftime('%Y-%m', SOData.so_create_date) == month_date.strftime('%Y-%m')
-                )
-            except:
+                q = q.filter(func.strftime('%Y-%m', SOData.so_create_date) == month_date.strftime('%Y-%m'))
+            except Exception:
                 pass
-        
+
         rows = q.all()
-        
         result = []
         for s in rows:
             if s.so_item in hidden_so or s.so_number in hidden_so:
                 continue
             if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
                 continue
-            
             result.append({
                 'so_item': s.so_item,
                 'so_number': s.so_number,
                 'so_status': s.so_status,
+                'pic_name': canonical_pending_pic(s.pic_name, s.operation_unit_name),
                 'operation_unit_name': s.operation_unit_name,
                 'vendor_name': s.vendor_name,
                 'product_name': s.product_name,
@@ -6577,7 +6441,6 @@ def get_dashboard_status_detail():
                 'delivery_plan_date': s.delivery_plan_date.isoformat() if s.delivery_plan_date else None,
                 'remarks': s.remarks,
             })
-        
         return jsonify(result)
     except Exception as e:
         import traceback; traceback.print_exc()
@@ -6660,83 +6523,79 @@ def get_pic_kpi():
 
 @app.route('/api/template/master-pic', methods=['GET'])
 def download_master_pic_template():
-    """Generate and download Master PIC Excel template."""
+    """Generate Master PIC update template using Category Name as the unique key."""
     try:
         wb = Workbook()
         ws = wb.active
         ws.title = 'Master PIC'
-        
-        # Header styling
-        header_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
-        header_font = Font(bold=True, color='FFFFFF', size=11)
-        header_align = Alignment(horizontal='center', vertical='center')
-        
-        # Headers
-        headers = ['Category ID', 'Category Name', 'PIC']
-        for col_idx, header in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=col_idx, value=header)
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = header_align
-        
-        # Column widths
-        ws.column_dimensions['A'].width = 15
-        ws.column_dimensions['B'].width = 40
-        ws.column_dimensions['C'].width = 25
-        
-        # Sample data rows
-        sample_data = [
-            ['CAT001', 'Electronics', 'John Doe'],
-            ['CAT002', 'Mechanical Parts', 'Jane Smith'],
-            ['CAT003', 'Chemical Supplies', 'Bob Johnson'],
-        ]
-        
-        for row_idx, row_data in enumerate(sample_data, 2):
-            for col_idx, value in enumerate(row_data, 1):
-                cell = ws.cell(row=row_idx, column=col_idx, value=value)
-                cell.alignment = Alignment(horizontal='left', vertical='center')
-        
-        # Instructions sheet
-        ws_inst = wb.create_sheet('Instructions')
-        instructions = [
-            ['Master PIC Template - Instructions'],
-            [''],
-            ['Column Descriptions:'],
-            ['1. Category ID: Unique identifier for the product category (required)'],
-            ['2. Category Name: Name of the product category (optional)'],
-            ['3. PIC: Person In Charge name for this category (required)'],
-            [''],
-            ['How to use:'],
-            ['1. Fill in the Category ID and PIC columns (required)'],
-            ['2. Category Name is optional but recommended for clarity'],
-            ['3. Delete the sample data rows before uploading'],
-            ['4. Upload the filled template via Manual Update > Update PIC'],
-            [''],
-            ['Notes:'],
-            ['- Existing categories will be updated with new PIC names'],
-            ['- New categories will be added to the database'],
-            ['- After upload, SO rows will automatically refresh their PIC assignments'],
-        ]
-        
-        for row_idx, row_data in enumerate(instructions, 1):
-            cell = ws_inst.cell(row=row_idx, column=1, value=row_data[0])
-            if row_idx == 1:
-                cell.font = Font(bold=True, size=14, color='4472C4')
-            elif 'Column Descriptions:' in row_data[0] or 'How to use:' in row_data[0] or 'Notes:' in row_data[0]:
-                cell.font = Font(bold=True, size=11)
-        
-        ws_inst.column_dimensions['A'].width = 80
-        
-        # Save to BytesIO
+
+        headers = ['Category Name', 'PIC', 'Update New PIC']
+        ws.append(headers)
+        ws.freeze_panes = 'A2'
+
+        # Match the uploaded example: Category/PIC are reference columns,
+        # Update New PIC is the editable blue column.
+        ref_header_fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
+        input_header_fill = PatternFill(start_color='0070C0', end_color='0070C0', fill_type='solid')
+        input_font = Font(bold=True, color='FFFFFF', size=10)
+        ref_font = Font(bold=True, color='000000', size=10)
+        body_font = Font(size=10)
+        center = Alignment(horizontal='center', vertical='center')
+        left = Alignment(horizontal='left', vertical='center')
+
+        for cell in ws[1]:
+            cell.alignment = center
+            if cell.column <= 2:
+                cell.fill = ref_header_fill
+                cell.font = ref_font
+            else:
+                cell.fill = input_header_fill
+                cell.font = input_font
+
+        # Existing Master PIC categories plus ProductIDDB categories that have not
+        # been mapped yet. User can append a new Category Name manually too.
+        category_rows = {}
+        for m in db.session.query(MasterPIC).order_by(MasterPIC.category_name).all():
+            cat_name = source_category_level1(m.category_name)
+            norm = normalize_category_name(cat_name)
+            if norm:
+                category_rows[norm] = {'category_name': cat_name, 'pic': clean(m.pic_name)}
+        for (cat_name_raw,) in db.session.query(ProductIDDB.category_name).filter(
+            ProductIDDB.category_name.isnot(None), ProductIDDB.category_name != ''
+        ).distinct().all():
+            cat_name = source_category_level1(cat_name_raw)
+            norm = normalize_category_name(cat_name)
+            if norm and norm not in category_rows:
+                category_rows[norm] = {'category_name': cat_name, 'pic': _lookup_pic_by_category(None, cat_name) or ''}
+
+        for item in sorted(category_rows.values(), key=lambda x: x['category_name'].lower()):
+            ws.append([item['category_name'], item['pic'], ''])
+
+        # Add blank rows so new categories can be inserted without changing format.
+        min_rows = max(20, len(category_rows) + 5)
+        while ws.max_row < min_rows:
+            ws.append(['', '', ''])
+
+        for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=3):
+            for cell in row:
+                cell.font = body_font
+                cell.alignment = left if cell.column == 1 else center
+                cell.number_format = '@'
+
+        ws.column_dimensions['A'].width = 32
+        ws.column_dimensions['B'].width = 12
+        ws.column_dimensions['C'].width = 20
+        ws.auto_filter.ref = f'A1:C{ws.max_row}'
+
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)
-        
+
         return send_file(
             output,
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             as_attachment=True,
-            download_name='Template_Master_PIC.xlsx'
+            download_name='Master_PIC_Update_Template.xlsx'
         )
     except Exception as e:
         import traceback; traceback.print_exc()
