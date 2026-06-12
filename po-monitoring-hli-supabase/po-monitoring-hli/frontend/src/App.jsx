@@ -15,6 +15,7 @@ import axios from 'axios';
 import { format, parseISO } from 'date-fns';
 import * as XLSX from 'xlsx';
 import { saveAs } from 'file-saver';
+import { useLocation, useNavigate } from 'react-router-dom';
 
 const BACKEND = import.meta.env.VITE_API_URL || 'http://127.0.0.1:5001';
 const api = axios.create({ baseURL: BACKEND, timeout: 600000 });
@@ -24,6 +25,19 @@ const PIE_COLORS = ['#2563EB','#14B8A6','#22C55E','#EF4444','#06B6D4',
 
 const AGING_LABELS = ['0-30','30-90','90-180','180+'];
 const AGING_COLORS = { '0-30':'#10B981','30-90':'#0EA5E9','90-180':'#F43F5E','180+':'#EF4444' };
+
+const PAGE_PATHS = {
+  dashboard: '/',
+  'all-so': '/Pending_Delivery',
+  'item-registration': '/Item_Registration',
+  rfq: '/RFQ',
+  'vendor-control': '/Vendor_Control',
+  'all-registered-items': '/Registered_Items',
+};
+
+const PATH_PAGES = Object.fromEntries(
+  Object.entries(PAGE_PATHS).map(([page, path]) => [path.toLowerCase(), page])
+);
 
 const localISODate = (d) => {
   const dt = new Date(d);
@@ -934,8 +948,13 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
 // MAIN APP
 // ═══════════════════════════════════════════════════════════════════
 const App = () => {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [darkMode, setDarkMode] = useState(false);
-  const [activePage, setActivePage] = useState('dashboard');
+  const activePage = PATH_PAGES[location.pathname.toLowerCase()] || 'dashboard';
+  const setActivePage = useCallback((page) => {
+    navigate(PAGE_PATHS[page] || '/', { replace: false });
+  }, [navigate]);
   const [showUploadDropdown, setShowUploadDropdown] = useState(false);
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
   const uploadDropdownRef = useRef(null);
