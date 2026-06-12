@@ -1194,9 +1194,9 @@ RFQ_SHEET_COLUMN_BY_FIELD = {
     'valid_period': 'AF',
     'photo_url': 'AG',
     'remarks': 'AH',
-    'private_remarks_1': 'AI',
-    'private_remarks_2': 'AJ',
 }
+
+RFQ_DASHBOARD_ONLY_FIELDS = {'private_remarks_1', 'private_remarks_2'}
 
 def rfq_label(field):
     return dict(RFQ_TEMPLATE_COLUMNS).get(field, field)
@@ -1389,8 +1389,10 @@ def fetch_rfq_rows(force=False):
             'valid_period': rfq_cell(src, 31),
             'photo_url': rfq_cell(src, 32),
             'remarks': rfq_cell(src, 33),
-            'private_remarks_1': rfq_cell(src, 34),
-            'private_remarks_2': rfq_cell(src, 35),
+            # Private remarks are dashboard-only notes. Do not read them from
+            # Google Sheet columns, even if old sheet exports still contain AI/AJ.
+            'private_remarks_1': '',
+            'private_remarks_2': '',
             'source_code': rfq_cell(src, 38),
         }
         data['purchase_pic'] = canonical_rfq_pic(data)
@@ -1623,6 +1625,8 @@ def google_sheets_values_batch_update(spreadsheet_id, ranges):
 
 def sync_rfq_cell_to_google_sheet(row, field, value):
     column = RFQ_SHEET_COLUMN_BY_FIELD.get(field)
+    if field in RFQ_DASHBOARD_ONLY_FIELDS:
+        return {'synced': False, 'local_only': True, 'reason': 'Dashboard-only field'}
     if not column:
         return {'synced': False, 'reason': 'Field is not mapped to RFQ sheet column'}
     sheet_row = row.get('sheet_row')
@@ -1636,10 +1640,14 @@ def sync_rfq_cell_to_google_sheet(row, field, value):
 
 def sync_rfq_cells_to_google_sheet(updates):
     ranges = []
+    local_only_count = 0
     for item in updates:
         row = item.get('row') or {}
         field = item.get('field')
         value = item.get('value')
+        if field in RFQ_DASHBOARD_ONLY_FIELDS:
+            local_only_count += 1
+            continue
         column = RFQ_SHEET_COLUMN_BY_FIELD.get(field)
         sheet_row = row.get('sheet_row')
         if column and sheet_row:
@@ -1648,11 +1656,13 @@ def sync_rfq_cells_to_google_sheet(updates):
                 'values': [[value or '']]
             })
     if not ranges:
+        if local_only_count:
+            return {'synced': False, 'local_only': True, 'reason': 'Dashboard-only fields'}
         return {'synced': False, 'reason': 'No mapped RFQ sheet cells to sync'}
 
     google_sheets_values_batch_update(RFQ_SHEET_ID, ranges)
     RFQ_CACHE['expires_at'] = None
-    return {'synced': True, 'ranges': len(ranges)}
+    return {'synced': True, 'ranges': len(ranges), 'local_only': local_only_count}
 
 def column_letter_from_index(index):
     result = ''
