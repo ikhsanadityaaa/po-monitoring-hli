@@ -998,6 +998,7 @@ const App = () => {
   const [rfqSimilarAction, setRfqSimilarAction] = useState(null);
   const [rfqLastUpdated, setRfqLastUpdated] = useState(null);
   const [rfqEditedRowKeys, setRfqEditedRowKeys] = useState(new Set());
+  const rfqDashboardOnlyFields = new Set(['private_remarks_1', 'private_remarks_2']);
 
   // All Registered Items
   const [registeredItemsData, setRegisteredItemsData] = useState([]);
@@ -1876,7 +1877,7 @@ const App = () => {
     applyRFQLocalUpdates([{ row_key: rowKey, field, value }]);
     try {
       const res = await api.put(`/api/rfq/${encodeURIComponent(rowKey)}`, { field, value });
-      if (!quiet && res.data?.sheet_sync && res.data.sheet_sync.synced === false) {
+      if (!quiet && res.data?.sheet_sync && res.data.sheet_sync.synced === false && !res.data.sheet_sync.local_only && !rfqDashboardOnlyFields.has(field)) {
         addToast(`RFQ updated locally. Sheet sync not active: ${res.data.sheet_sync.reason}`, 'warning');
       }
       const parseNumber = (v) => {
@@ -1943,7 +1944,8 @@ const App = () => {
     applyRFQLocalUpdates(cleanUpdates);
     try {
       const res = await api.put('/api/rfq/batch-cells', { updates: cleanUpdates });
-      if (res.data?.sheet_sync && res.data.sheet_sync.synced === false) {
+      const onlyDashboardOnly = cleanUpdates.every(item => rfqDashboardOnlyFields.has(item.field));
+      if (res.data?.sheet_sync && res.data.sheet_sync.synced === false && !res.data.sheet_sync.local_only && !onlyDashboardOnly) {
         addToast(`RFQ batch updated locally. Sheet sync not active: ${res.data.sheet_sync.reason}`, 'warning');
       }
       if (res.data?.skipped?.length) {
@@ -3439,6 +3441,10 @@ const App = () => {
   };
 
   const renderItemRegistration = () => {
+    const fmtDateShort = (d) => {
+      if (!d) return '-';
+      try { return String(d).slice(0, 10); } catch { return d; }
+    };
     const baseColumns = [
       ['Proc. Status', 'proc_status'], ['Req. Date', 'req_date'], ['Existing Owner', 'existing_owner'], ['Client Nm.', 'client_name'], ['Category', 'category'], ['PIC', 'pic'],
       ['Req. No', 'req_no'], ['Prod. ID', 'prod_id'], ['Prod. Nm.', 'prod_name'],
