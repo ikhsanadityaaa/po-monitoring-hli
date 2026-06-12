@@ -1250,6 +1250,14 @@ const App = () => {
     return val;
   };
   const filterValues = (val) => Array.isArray(val) ? val : [];
+  const looksLikeProdRegStatusFile = (name) => {
+    const s = String(name || '').toLowerCase().replace(/[+_\-]+/g, ' ');
+    return s.includes('prod') && s.includes('reg') && s.includes('status');
+  };
+  const looksLikeProcessPurInfoRegFile = (name) => {
+    const s = String(name || '').toLowerCase().replace(/[+_\-]+/g, ' ');
+    return s.includes('process') && s.includes('pur') && s.includes('info') && s.includes('reg');
+  };
 
   const fetchSOData = useCallback(async (filters, page, perPage, searchNums, marginFilter, dateFilter, sortOrder = soSortOrder, kpiPic = pendingPicHighlight) => {
     setLoading(true);
@@ -1629,6 +1637,9 @@ const App = () => {
   const handleUploadItemRegistration = async (e) => {
     const files = Array.from(e.target.files || []); if (!files.length) return;
     e.target.value = '';
+    // Do not validate by filename. SAP export filenames can be encoded or renamed.
+    // Backend validates the actual Excel columns and returns a user-facing error
+    // without deleting existing data when the source file is wrong.
     const fd = new FormData(); files.forEach(file => fd.append('file', file));
     const label = files.length > 1 ? `Item Registration (${files.length} files)` : 'Item Registration';
     setUploadProgress({ label, pct: 0 });
@@ -4431,7 +4442,7 @@ const App = () => {
             <p className={`mt-0.5 text-sm ${txt2}`}>
               {activePage==='dashboard'?'Purchase Orders & Sales Orders Summary'
                :activePage==='all-so'?'Pending Delivery monitoring and detail records'
-               :activePage==='item-registration'?'Product Registration Status data'
+               :activePage==='item-registration'?'Process Pur. Info. Reg. data'
                :activePage==='rfq'?'Sales Submit-RFQ live data and quotation updates'
                :activePage==='vendor-control'?'Vendor account access and credential control'
                :activePage==='all-registered-items'?'All registered product master data'
