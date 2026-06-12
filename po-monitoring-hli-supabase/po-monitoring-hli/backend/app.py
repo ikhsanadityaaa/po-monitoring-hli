@@ -2293,46 +2293,50 @@ def _item_registration_columns(df):
     }
 
 def validate_item_registration_source_file(df, filename='Item Registration'):
-    """Accept only SAP Process Pur. Info. Reg. exports for Item Registration.
+    """Validate by Excel structure, not filename.
 
-    Prod. Reg. Status is a different SAP export with similar registration-looking
-    columns. It must be rejected here because the Item Registration page is built
-    from Process Pur. Info. Reg. data.
+    Item Registration must use SAP Process Pur. Info. Reg. exports. SAP file
+    names can be URL-encoded, renamed, or translated, so rejecting by filename is
+    unsafe. The guard below checks source-specific columns before any cleanup or
+    delete operation can run.
     """
     marker_cols = {str(c).strip().lower() for c in df.columns}
-    filename_l = str(filename or '').lower()
 
-    process_markers = {
-        'unified vendor', 'bid/quo.', 'multi. bidding required',
-        'bid no.', 'deadline', 'pur. info. proc. compl. date',
-        'vendor confirm req. detail', 'vendor confirm proc. detail',
+    process_required_markers = {
+        'unified vendor',
+        'bid/quo.',
+        'multi. bidding required',
+        'pur. info. proc. compl. date',
+        'vendor confirm req. detail',
+        'vendor confirm proc. detail',
     }
-    prod_reg_markers = {
+    process_support_markers = {
+        'bid no.', 'deadline', 'pur. info. rcvd. by', 'pur. info. proc. by',
+        'proc. compl. date of export corp.', 'advance quotation: number'
+    }
+    prod_reg_only_markers = {
         'register request',
         'prod. req. skip reason',
         'prod. reg. req. compl. date',
         'prod. reg. req. reject date',
+        'prod. reg. req. reject memo',
     }
 
-    matched_process = sorted(process_markers & marker_cols)
-    matched_prod_reg = sorted(prod_reg_markers & marker_cols)
-    filename_looks_process = 'process' in filename_l and 'pur' in filename_l and 'info' in filename_l
-    filename_looks_prod_reg = 'prod' in filename_l and 'reg' in filename_l and 'status' in filename_l
+    matched_required = sorted(process_required_markers & marker_cols)
+    matched_support = sorted(process_support_markers & marker_cols)
+    matched_prod_reg = sorted(prod_reg_only_markers & marker_cols)
 
-    if matched_prod_reg and not matched_process:
+    if matched_prod_reg and len(matched_required) < 2:
         raise ValueError(
-            f'File "{filename}" salah untuk Item Registration. Upload yang benar adalah file Process Pur. Info. Reg., bukan Prod. Reg. Status.'
+            f'File "{filename}" salah untuk Item Registration. File ini terlihat seperti Prod. Reg. Status. '
+            'Upload yang benar adalah SAP Process Pur. Info. Reg.'
         )
 
-    if filename_looks_prod_reg and not matched_process:
+    if len(matched_required) < 3 or (len(matched_required) + len(matched_support)) < 5:
         raise ValueError(
-            f'File "{filename}" ditolak. Item Registration sekarang hanya menerima file Process Pur. Info. Reg.'
-        )
-
-    if not matched_process and not filename_looks_process:
-        raise ValueError(
-            f'File "{filename}" tidak terlihat seperti Process Pur. Info. Reg. '
-            'Pastikan upload file SAP Process Pur. Info. Reg. yang benar.'
+            f'File "{filename}" tidak terlihat seperti SAP Process Pur. Info. Reg. '
+            f'Kolom penanda yang ditemukan: {matched_required + matched_support}. '
+            'Upload dibatalkan dan database lama tidak diubah.'
         )
 
 
@@ -7282,6 +7286,23 @@ def upload_delivery_monitoring():
             return jsonify({'error': f'Kolom "PO No." tidak ditemukan. Kolom tersedia: {df.columns.tolist()}'}), 400
         if not col_pocreate:
             return jsonify({'error': f'Kolom "PO Create Date" tidak ditemukan. Pastikan file yang diupload adalah Search PO Details.'}), 400
+
+        # Strong source validation before any cleanup/delete. This endpoint is destructive
+        # because a valid upload is treated as the latest full snapshot. Therefore,
+        # require multiple Search PO Details-specific columns, not just PO No.
+        delivery_signature_cols = [
+            col_so, col_postatus, col_sostatus, col_vid, col_vnm, col_pid, col_pnm,
+            col_opid, col_opnm, col_dtype, col_ppic, col_spic, col_porcvd, col_shodr,
+            col_shcompl, col_hubrcv, col_hubship, col_dlvcompl, col_dlvdue, col_dlvposs
+        ]
+        delivery_signature_count = sum(1 for c in delivery_signature_cols if c)
+        if delivery_signature_count < 8:
+            return jsonify({
+                'error': (
+                    f'File "{file.filename}" tidak terlihat seperti Search PO Details / Delivery Monitoring. '
+                    f'Hanya {delivery_signature_count} kolom penanda yang cocok. Upload dibatalkan dan database lama tidak diubah.'
+                )
+            }), 400
 
         # Check for in-file duplicates
         file_po_counts = df[col_po].dropna().astype(str).value_counts()
