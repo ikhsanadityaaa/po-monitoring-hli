@@ -2336,6 +2336,7 @@ def import_item_registration_dataframe(df, filename='Item Registration'):
         'added': added,
         'updated': updated,
         'removed_duplicates': removed_duplicates,
+        'keys': list(incoming.keys()),
     }
 
 def ensure_default_item_registration_loaded():
@@ -3536,6 +3537,164 @@ def preview_exchange_rate():
 
 CHUNK_SIZE = 200
 
+
+# Source-table cleanup helpers. Full Excel uploads are treated as the latest
+# snapshot: rows with the same business key are merged, duplicates from older
+# logic are deleted, and rows not present in the latest full upload are removed.
+def _norm_key(v):
+    return str(v or '').strip()
+
+def _latest_row(rows, timestamp_fields=('uploaded_at', 'updated_at')):
+    def score(row):
+        ts = None
+        for field in timestamp_fields:
+            val = getattr(row, field, None)
+            if val is not None:
+                ts = val
+                break
+        return (ts or datetime.min, getattr(row, 'id', 0) or 0)
+    return max(rows, key=score)
+
+def _latest_nonblank_value(rows, field, timestamp_fields=('uploaded_at', 'updated_at')):
+    candidates = [r for r in rows if str(getattr(r, field, '') or '').strip()]
+    if not candidates:
+        return None
+    return getattr(_latest_row(candidates, timestamp_fields), field)
+
+def cleanup_source_table_snapshot(model, key_attr, valid_keys=None, *, manual_fields=(), timestamp_fields=('uploaded_at', 'updated_at'), delete_blank=True, key_normalizer=_norm_key):
+    """Clean a source table by its business key.
+
+    If valid_keys is provided, the table becomes an exact snapshot of those keys.
+    If valid_keys is None, only old duplicate rows and blank-key rows are removed.
+    Returns {'removed_duplicates': n, 'removed_stale': n, 'removed_blank': n}.
+    """
+    valid_set = None if valid_keys is None else {key_normalizer(k) for k in valid_keys if key_normalizer(k)}
+    groups = {}
+    blank_rows = []
+    for row in db.session.query(model).order_by(model.id.asc()).all():
+        key = key_normalizer(getattr(row, key_attr, None))
+        if not key:
+            blank_rows.append(row)
+            continue
+        groups.setdefault(key, []).append(row)
+
+    removed_duplicates = removed_stale = removed_blank = 0
+
+    if delete_blank:
+        for row in blank_rows:
+            db.session.delete(row)
+            removed_blank += 1
+
+    for key, rows in groups.items():
+        if valid_set is not None and key not in valid_set:
+            for row in rows:
+                db.session.delete(row)
+                removed_stale += 1
+            continue
+
+        if len(rows) <= 1:
+            continue
+
+        winner = _latest_row(rows, timestamp_fields)
+        for field in manual_fields or ():
+            val = _latest_nonblank_value(rows, field, timestamp_fields)
+            if val is not None:
+                setattr(winner, field, val)
+
+        for row in rows:
+            if row is winner:
+                continue
+            db.session.delete(row)
+            removed_duplicates += 1
+
+    return {
+        'removed_duplicates': removed_duplicates,
+        'removed_stale': removed_stale,
+        'removed_blank': removed_blank,
+    }
+
+def cleanup_master_pic_by_category_name(valid_category_names=None):
+    valid_set = None if valid_category_names is None else {normalize_category_name(x) for x in valid_category_names if normalize_category_name(x)}
+    groups = {}
+    blank_rows = []
+    for row in db.session.query(MasterPIC).order_by(MasterPIC.id.asc()).all():
+        key = normalize_category_name(row.category_name)
+        if not key:
+            blank_rows.append(row)
+            continue
+        groups.setdefault(key, []).append(row)
+
+    removed_duplicates = removed_stale = removed_blank = 0
+    for row in blank_rows:
+        db.session.delete(row)
+        removed_blank += 1
+
+    for key, rows in groups.items():
+        if valid_set is not None and key not in valid_set:
+            for row in rows:
+                db.session.delete(row)
+                removed_stale += 1
+            continue
+        if len(rows) <= 1:
+            continue
+        winner = _latest_row(rows, ('updated_at', 'uploaded_at'))
+        pic = _latest_nonblank_value(rows, 'pic_name', ('updated_at', 'uploaded_at'))
+        if pic is not None:
+            winner.pic_name = pic
+        # Keep the newest visible Category Name spelling, but normalize generated category_id.
+        winner.category_name = source_category_level1(winner.category_name)
+        if str(winner.category_id or '').startswith('CATNAME_'):
+            winner.category_id = master_pic_category_key(winner.category_name)
+        for row in rows:
+            if row is winner:
+                continue
+            db.session.delete(row)
+            removed_duplicates += 1
+    return {'removed_duplicates': removed_duplicates, 'removed_stale': removed_stale, 'removed_blank': removed_blank}
+
+def cleanup_item_registration_duplicates_only():
+    return cleanup_source_table_snapshot(ItemRegistration, 'req_no', None, timestamp_fields=('uploaded_at',), delete_blank=True)
+
+
+def _po_business_key(po_number, item_no):
+    return f"{_norm_key(po_number)}||{_norm_key(item_no)}"
+
+def cleanup_po_snapshot(valid_keys=None):
+    valid_set = None if valid_keys is None else {k for k in valid_keys if k and k != '||'}
+    groups = {}
+    blank_rows = []
+    for row in db.session.query(POData).order_by(POData.id.asc()).all():
+        key = _po_business_key(row.po_number, row.item_no)
+        if key == '||':
+            blank_rows.append(row)
+            continue
+        groups.setdefault(key, []).append(row)
+
+    removed_duplicates = removed_stale = removed_blank = 0
+    for row in blank_rows:
+        db.session.delete(row)
+        removed_blank += 1
+
+    for key, rows in groups.items():
+        if valid_set is not None and key not in valid_set:
+            for row in rows:
+                db.session.delete(row)
+                removed_stale += 1
+            continue
+        if len(rows) <= 1:
+            continue
+        winner = _latest_row(rows, ('uploaded_at',))
+        for field in ('delivery_plan_date', 'remarks'):
+            val = _latest_nonblank_value(rows, field, ('uploaded_at',))
+            if val is not None:
+                setattr(winner, field, val)
+        for row in rows:
+            if row is winner:
+                continue
+            db.session.delete(row)
+            removed_duplicates += 1
+    return {'removed_duplicates': removed_duplicates, 'removed_stale': removed_stale, 'removed_blank': removed_blank}
+
 # Legacy PO List upload is intentionally no longer exposed from Manual Update.
 def upload_po_list():
     try:
@@ -3586,6 +3745,8 @@ def upload_po_list():
         col_pm   = find_column(df, ['Purchase Member','Purchasing Member','PIC','Buyer'])
         col_rdd  = find_column(df, ['Request Delivery Date','Delivery Date','Req Delivery'])
 
+        cleanup_pre = cleanup_po_snapshot(None)
+        db.session.flush()
         existing_po = {}
         for p in POData.query.all():
             key = (p.po_number, p.item_no)
@@ -3593,6 +3754,9 @@ def upload_po_list():
 
         new_keys_in_file = set()
         count = 0
+        removed_duplicates = cleanup_pre.get('removed_duplicates', 0)
+        removed_stale = cleanup_pre.get('removed_stale', 0)
+        removed_blank = cleanup_pre.get('removed_blank', 0)
         for _, row in df.iterrows():
             po_num = clean(df_val(row, col_po))
             if not po_num: continue
@@ -3635,12 +3799,21 @@ def upload_po_list():
             if count % CHUNK_SIZE == 0:
                 db.session.flush()
 
-        # FIX: Do not delete old PO data (preserve history)
-        # keys_to_delete logic removed
+        db.session.flush()
+        cleanup_post = cleanup_po_snapshot({_po_business_key(po, item) for po, item in new_keys_in_file})
+        removed_duplicates += cleanup_post.get('removed_duplicates', 0)
+        removed_stale += cleanup_post.get('removed_stale', 0)
+        removed_blank += cleanup_post.get('removed_blank', 0)
 
         db.session.add(UploadLog(file_type='PO', filename=file.filename, records_count=count))
         db.session.commit()
-        return jsonify({'message': f'Berhasil upload {count} PO items', 'uploaded': count})
+        return jsonify({
+            'message': f'Berhasil upload {count} PO items, {removed_duplicates} duplicate lama dihapus, {removed_stale} PO lama dibuang',
+            'uploaded': count,
+            'removed_duplicates': removed_duplicates,
+            'removed_stale': removed_stale,
+            'removed_blank': removed_blank,
+        })
     except Exception as e:
         db.session.rollback(); import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
@@ -3670,8 +3843,24 @@ def upload_smro():
             'SO Create Date': ['SO Create Date', 'Order Date', 'SO Date', 'Create Date', 'Create Sales Order Date'],
         }
 
+        # Build an existing map while merging possible duplicate SO Item rows
+        # from old append logic. The latest row wins, manual Plan Date/Remarks
+        # are preserved from the latest non-blank duplicate.
+        cleanup_pre = cleanup_source_table_snapshot(
+            SOData,
+            'so_item',
+            None,
+            manual_fields=('delivery_plan_date', 'remarks'),
+            timestamp_fields=('uploaded_at',),
+            delete_blank=True,
+        )
+        db.session.flush()
         existing_so = {s.so_item: s for s in SOData.query.all() if s.so_item}
         total_count = total_updated = total_inserted = 0
+        total_removed_duplicates = cleanup_pre.get('removed_duplicates', 0)
+        total_removed_stale = cleanup_pre.get('removed_stale', 0)
+        total_removed_blank = cleanup_pre.get('removed_blank', 0)
+        latest_so_items = set()
         diagnostics_by_file = []
 
         for upload in uploads:
@@ -3763,6 +3952,9 @@ def upload_smro():
                     # Upload Excel lama: primary dari kolom SO Number
                     so_val = primary_val
                     so_item_val = so_val  # tidak ada SO Item terpisah, pakai SO Number sebagai so_item
+
+                if so_item_val:
+                    latest_so_items.add(so_item_val)
 
                 spec_val = clean(df_val(row, col_spec)) if col_spec else None
                 pid_val = clean(df_val(row, col_pid)) if col_pid else None
@@ -3884,6 +4076,23 @@ def upload_smro():
                 diagnostics['warning'] = ' '.join(warnings)
             diagnostics_by_file.append(diagnostics)
 
+        # Full Search Client Odr upload is the latest snapshot. Remove
+        # duplicate SO Item rows and stale SO Items that are no longer present
+        # in the uploaded file(s), while keeping manual plan date/remarks on
+        # rows that remain.
+        db.session.flush()
+        cleanup_post = cleanup_source_table_snapshot(
+            SOData,
+            'so_item',
+            latest_so_items,
+            manual_fields=('delivery_plan_date', 'remarks'),
+            timestamp_fields=('uploaded_at',),
+            delete_blank=True,
+        )
+        total_removed_duplicates += cleanup_post.get('removed_duplicates', 0)
+        total_removed_stale += cleanup_post.get('removed_stale', 0)
+        total_removed_blank += cleanup_post.get('removed_blank', 0)
+
         db.session.commit()
 
         # Convert and persist new/changed USD/EUR transactions once during the
@@ -3911,12 +4120,15 @@ def upload_smro():
             diagnostics = {**diagnostics, 'files': diagnostics_by_file}
 
         return jsonify({
-            'message': f'Berhasil upload {len(uploads)} file: {total_inserted} SO baru ditambahkan, {total_updated} SO diperbarui. Data lama yang tidak ada di file ini tetap dipertahankan.',
+            'message': f'Berhasil upload {len(uploads)} file: {total_inserted} SO baru ditambahkan, {total_updated} SO diperbarui, {total_removed_duplicates} duplicate lama dihapus, {total_removed_stale} SO lama dibuang.',
             'uploaded': total_count,
             'files': len(uploads),
             'mode': upload_mode,
             'inserted': total_inserted,
             'updated': total_updated,
+            'removed_duplicates': total_removed_duplicates,
+            'removed_stale': total_removed_stale,
+            'removed_blank': total_removed_blank,
             'fx_converted': converted_fx_rows,
             'fx_warning': fx_warning,
             'diagnostics': diagnostics,
@@ -5140,6 +5352,20 @@ def find_similar_registered_items(item, registered_items=None):
 def get_item_registration_data():
     try:
         ensure_default_item_registration_loaded()
+        # Safe auto-clean for old append bugs: duplicates with the same Req. No
+        # are merged before the page count is calculated. Stale rows with a
+        # different Req. No are cleaned on the next full Item Registration upload.
+        try:
+            total_rows = db.session.query(func.count(ItemRegistration.id)).scalar() or 0
+            distinct_req = db.session.query(func.count(func.distinct(ItemRegistration.req_no))).filter(
+                ItemRegistration.req_no.isnot(None), func.trim(ItemRegistration.req_no) != ''
+            ).scalar() or 0
+            if total_rows > distinct_req:
+                cleanup_item_registration_duplicates_only()
+                db.session.commit()
+                clear_runtime_caches()
+        except Exception:
+            db.session.rollback()
         page = int(request.args.get('page', 1))
         per_page = int(request.args.get('per_page', 10))
         search = request.args.get('search', '').strip()
@@ -5269,18 +5495,37 @@ def upload_item_registration():
         if not uploads:
             return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
 
-        summary = {'processed': 0, 'added': 0, 'updated': 0, 'removed_duplicates': 0}
+        summary = {'processed': 0, 'added': 0, 'updated': 0, 'removed_duplicates': 0, 'removed_stale': 0, 'removed_blank': 0}
+        latest_req_numbers = set()
         for upload in uploads:
             df = upload['df']
             result = import_item_registration_dataframe(df, upload['filename'])
+            latest_req_numbers.update(result.get('keys', []))
             for key in summary:
                 summary[key] += result.get(key, 0)
+
+        # Full Item Registration upload is the latest snapshot. Remove duplicate
+        # rows left by old append logic and remove rows whose Req. No is no longer
+        # present in the latest uploaded file(s).
+        db.session.flush()
+        cleanup = cleanup_source_table_snapshot(
+            ItemRegistration,
+            'req_no',
+            latest_req_numbers,
+            timestamp_fields=('uploaded_at',),
+            delete_blank=True,
+        )
+        for key, value in cleanup.items():
+            summary[key] = summary.get(key, 0) + value
+
         db.session.commit()
         clear_runtime_caches()
         return jsonify({
             'message': (
                 f'Berhasil upload {len(uploads)} file Item Registration: '
-                f'+{summary["added"]} added, {summary["updated"]} updated'
+                f'+{summary["added"]} added, {summary["updated"]} updated, '
+                f'{summary["removed_duplicates"]} duplicate lama dihapus, '
+                f'{summary["removed_stale"]} data lama dibuang'
             ),
             'uploaded': summary['processed'],
             'files': len(uploads),
@@ -5528,7 +5773,19 @@ def upload_product_id():
         if not uploads:
             return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
 
+        cleanup_pre = cleanup_source_table_snapshot(
+            ProductIDDB,
+            'product_id',
+            None,
+            timestamp_fields=('updated_at',),
+            delete_blank=True,
+        )
+        db.session.flush()
         added = updated = 0
+        removed_duplicates = cleanup_pre.get('removed_duplicates', 0)
+        removed_stale = cleanup_pre.get('removed_stale', 0)
+        removed_blank = cleanup_pre.get('removed_blank', 0)
+        latest_product_ids = set()
         pic_cache = {}  # category_id → pic_name
 
         expected = [
@@ -5551,6 +5808,7 @@ def upload_product_id():
                 pid = clean_product_id(df_val(row, col['product_id']))
                 if not pid:
                     continue
+                latest_product_ids.add(pid)
                 cat_id = normalize_category_id(df_val(row, col['category_id']))
                 payload = {
                     'category_id': cat_id,
@@ -5576,6 +5834,18 @@ def upload_product_id():
                 else:
                     db.session.add(ProductIDDB(product_id=pid, **payload))
                     added += 1
+
+        db.session.flush()
+        cleanup_post = cleanup_source_table_snapshot(
+            ProductIDDB,
+            'product_id',
+            latest_product_ids,
+            timestamp_fields=('updated_at',),
+            delete_blank=True,
+        )
+        removed_duplicates += cleanup_post.get('removed_duplicates', 0)
+        removed_stale += cleanup_post.get('removed_stale', 0)
+        removed_blank += cleanup_post.get('removed_blank', 0)
 
         db.session.commit()
         _pid_category_cache_invalidate()
@@ -5610,6 +5880,9 @@ def upload_product_id():
             'files': len(uploads),
             'mode': upload_mode,
             'added': added, 'updated': updated,
+            'removed_duplicates': removed_duplicates,
+            'removed_stale': removed_stale,
+            'removed_blank': removed_blank,
             'so_pic_refreshed': refreshed,
             'total_in_db': db.session.query(ProductIDDB).count()
         })
@@ -5631,7 +5904,13 @@ def upload_master_pic():
         if not uploads:
             return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
 
+        cleanup_pre = cleanup_master_pic_by_category_name(None)
+        db.session.flush()
         added = updated = unchanged = 0
+        removed_duplicates = cleanup_pre.get('removed_duplicates', 0)
+        removed_stale = cleanup_pre.get('removed_stale', 0)
+        removed_blank = cleanup_pre.get('removed_blank', 0)
+        latest_category_names = set()
         expected = [
             ('category_name', 'Category Name'),
             ('pic', 'PIC'),
@@ -5659,6 +5938,7 @@ def upload_master_pic():
                 if not pic_name:
                     continue
 
+                latest_category_names.add(cat_name)
                 existing = find_master_pic_by_category_name(cat_name)
                 if existing:
                     # If older data still contains several Category ID rows for
@@ -5698,6 +5978,13 @@ def upload_master_pic():
                         updated_at=datetime.utcnow()
                     ))
                     added += 1
+
+        db.session.flush()
+        cleanup_post = cleanup_master_pic_by_category_name(latest_category_names)
+        removed_duplicates += cleanup_post.get('removed_duplicates', 0)
+        removed_stale += cleanup_post.get('removed_stale', 0)
+        removed_blank += cleanup_post.get('removed_blank', 0)
+
         db.session.commit()
         invalidate_master_pic_cache()
 
@@ -5732,6 +6019,9 @@ def upload_master_pic():
             'added': added,
             'updated': updated,
             'unchanged': unchanged,
+            'removed_duplicates': removed_duplicates,
+            'removed_stale': removed_stale,
+            'removed_blank': removed_blank,
             'so_pic_refreshed': refreshed,
             'total_categories': master_pic_unique_category_count()
         })
@@ -6907,16 +7197,29 @@ def upload_delivery_monitoring():
                 'error': f'File mengandung {len(in_file_dupes)} PO duplikat: {", ".join(in_file_dupes.index[:5].tolist())}{"..." if len(in_file_dupes) > 5 else ""}. Harap periksa file dan hapus data duplikat.'
             }), 400
 
-        # Load existing records
-        existing = {r.po_number: r for r in DeliveryMonitoring.query.all()}
+        # Load existing records after cleaning duplicate PO No rows from old append logic.
+        cleanup_pre = cleanup_source_table_snapshot(
+            DeliveryMonitoring,
+            'po_number',
+            None,
+            timestamp_fields=('uploaded_at',),
+            delete_blank=True,
+        )
+        db.session.flush()
+        existing = {r.po_number: r for r in DeliveryMonitoring.query.all() if r.po_number}
 
         count = 0
         skipped = 0
+        latest_po_numbers = set()
+        removed_duplicates = cleanup_pre.get('removed_duplicates', 0)
+        removed_stale = cleanup_pre.get('removed_stale', 0)
+        removed_blank = cleanup_pre.get('removed_blank', 0)
         for _, row in df.iterrows():
             po_num = str(row[col_po]).strip() if col_po and pd.notna(row[col_po]) else None
             if not po_num or po_num.lower() in ('nan', ''):
                 skipped += 1
                 continue
+            latest_po_numbers.add(po_num)
 
             def gv(col):
                 if col is None: return None
@@ -6968,9 +7271,28 @@ def upload_delivery_monitoring():
             if count % 200 == 0:
                 db.session.flush()
 
+        db.session.flush()
+        cleanup_post = cleanup_source_table_snapshot(
+            DeliveryMonitoring,
+            'po_number',
+            latest_po_numbers,
+            timestamp_fields=('uploaded_at',),
+            delete_blank=True,
+        )
+        removed_duplicates += cleanup_post.get('removed_duplicates', 0)
+        removed_stale += cleanup_post.get('removed_stale', 0)
+        removed_blank += cleanup_post.get('removed_blank', 0)
+
         db.session.add(UploadLog(file_type='DELIVERY', filename=file.filename, records_count=count))
         db.session.commit()
-        return jsonify({'message': f'Berhasil upload {count} data delivery monitoring (skip: {skipped})', 'uploaded': count, 'skipped': skipped})
+        return jsonify({
+            'message': f'Berhasil upload {count} data delivery monitoring (skip: {skipped}), {removed_duplicates} duplicate lama dihapus, {removed_stale} data lama dibuang',
+            'uploaded': count,
+            'skipped': skipped,
+            'removed_duplicates': removed_duplicates,
+            'removed_stale': removed_stale,
+            'removed_blank': removed_blank,
+        })
     except Exception as e:
         db.session.rollback()
         import traceback; traceback.print_exc()
