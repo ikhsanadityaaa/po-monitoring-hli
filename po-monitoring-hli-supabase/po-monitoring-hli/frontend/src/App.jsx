@@ -1279,10 +1279,11 @@ const App = () => {
     } finally { setLoading(false); }
   }, [addToast, soSortOrder, pendingPicHighlight, globalClientFilter, globalPicFilter]);
 
-  const fetchItemRegistration = useCallback(async (page = itemRegPage, perPage = itemRegPerPage, search = itemRegAppliedSearch, filters = itemRegFilters, kpiPic = itemRegPicHighlight) => {
+  const fetchItemRegistration = useCallback(async (page = itemRegPage, perPage = itemRegPerPage, search = itemRegAppliedSearch, filters = itemRegFilters, kpiPic = itemRegPicHighlight, dateFilter = globalDateFilter) => {
     setLoading(true);
     try {
       const params = new URLSearchParams({ page, per_page: perPage });
+      Object.entries(dateFilterParams(dateFilter)).forEach(([key, value]) => { if (value) params.append(key, value); });
       appendMultiParam(params, 'client', globalClientFilter);
       appendMultiParam(params, 'global_pic', globalPicFilter);
       if (Array.isArray(search)) search.forEach(v => params.append('req_no', v));
@@ -1311,7 +1312,7 @@ const App = () => {
     } catch (e) {
       addToast(`Failed to load Item Registration: ${e.response?.data?.error || e.message}`, 'error');
     } finally { setLoading(false); }
-  }, [addToast, itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters, itemRegPicHighlight, globalClientFilter, globalPicFilter]);
+  }, [addToast, itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters, itemRegPicHighlight, globalDateFilter, globalClientFilter, globalPicFilter]);
 
   const fetchRegisteredItems = useCallback(async (
     page = registeredItemsPage,
@@ -1423,9 +1424,9 @@ const App = () => {
 
   useEffect(() => {
     if (activePage === 'item-registration') {
-      fetchItemRegistration(itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters);
+      fetchItemRegistration(itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters, itemRegPicHighlight, globalDateFilter);
     }
-  }, [activePage, itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters, itemRegPicHighlight, globalClientFilter, globalPicFilter, fetchItemRegistration]);
+  }, [activePage, itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters, itemRegPicHighlight, globalDateFilter, globalClientFilter, globalPicFilter, fetchItemRegistration]);
 
   useEffect(() => {
     if (activePage === 'rfq') {
@@ -1710,6 +1711,7 @@ const App = () => {
 
   const downloadItemRegistrationTemplate = () => {
     const p = new URLSearchParams();
+    Object.entries(dateFilterParams(globalDateFilter)).forEach(([key, value]) => { if (value) p.append(key, value); });
     appendMultiParam(p, 'client', globalClientFilter);
     appendMultiParam(p, 'global_pic', globalPicFilter);
     (itemRegAppliedSearch || []).forEach(v => p.append('req_no', v));
@@ -1725,6 +1727,7 @@ const App = () => {
 
   const downloadItemRegistrationExcel = () => {
     const p = new URLSearchParams();
+    Object.entries(dateFilterParams(globalDateFilter)).forEach(([key, value]) => { if (value) p.append(key, value); });
     appendMultiParam(p, 'client', globalClientFilter);
     appendMultiParam(p, 'global_pic', globalPicFilter);
     (itemRegAppliedSearch || []).forEach(v => p.append('req_no', v));
@@ -2398,7 +2401,7 @@ const App = () => {
   const globalSlicerPages = new Set(['dashboard', 'all-so', 'item-registration']);
   const renderGlobalSlicer = () => {
     if (!globalSlicerPages.has(activePage)) return null;
-    const showDateFilter = activePage !== 'item-registration';
+    const showDateFilter = true;
     const slicerClientOptions = activePage === 'item-registration' ? (itemRegOptions.clients || []) : (dashboardFilterOptions.clients || []);
     const slicerPicOptions = activePage === 'item-registration' ? (itemRegOptions.pics || []) : (dashboardFilterOptions.pics || []);
     return (
@@ -2412,7 +2415,7 @@ const App = () => {
             value={globalDateFilter}
             label="Filter SO Create Date"
             compact
-            onFilter={(f) => setGlobalDateFilter(f)}
+            onFilter={(f) => { setGlobalDateFilter(f); if (activePage === 'item-registration') setItemRegPage(1); }}
           />
         )}
         <div className={`grid min-h-[64px] w-full grid-cols-1 gap-3 px-5 py-3 rounded-xl ${card} shadow sm:grid-cols-[minmax(220px,1fr)_minmax(200px,0.85fr)_120px] sm:items-end ${showDateFilter ? '' : '2xl:max-w-[720px]'}`}>
