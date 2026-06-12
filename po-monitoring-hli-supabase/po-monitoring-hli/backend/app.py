@@ -1026,6 +1026,31 @@ def apply_so_create_date_filter(query, date_year='', date_from='', date_to='', i
     return query
 
 
+def apply_item_registration_date_filter(query, date_year='', date_from='', date_to=''):
+    """Apply the global date slicer to Item Registration.
+
+    Item Registration does not have SO Create Date, so the shared dashboard
+    slicer is applied to Req. Date (request date) for this page. Rows without
+    Req. Date are included only when the date slicer is set to All.
+    """
+    if date_year:
+        try:
+            yr = int(date_year)
+            if 'sqlite' in app.config.get('SQLALCHEMY_DATABASE_URI', ''):
+                return query.filter(func.strftime('%Y', ItemRegistration.req_date) == str(yr))
+            return query.filter(func.extract('year', ItemRegistration.req_date) == yr)
+        except (ValueError, TypeError):
+            return query
+
+    df = parse_date(date_from) if date_from else None
+    dt = parse_date(date_to) if date_to else None
+    if df:
+        query = query.filter(ItemRegistration.req_date >= df)
+    if dt:
+        query = query.filter(ItemRegistration.req_date <= dt)
+    return query
+
+
 def utc_isoformat(dt):
     """Serialize a (naive UTC) datetime as an ISO-8601 string with a trailing
     'Z' so JS Date() parses it as UTC and the browser converts to local time.
@@ -5119,6 +5144,7 @@ def get_item_registration_data():
         per_page = int(request.args.get('per_page', 10))
         search = request.args.get('search', '').strip()
         req_numbers = [n.strip() for n in request.args.getlist('req_no') if n.strip()]
+        date_year, date_from, date_to = parse_so_date_args()
         clients = selected_clients()
         global_pics = [p.strip() for p in request.args.getlist('global_pic') if p.strip()]
         item_clients = [c.strip() for c in request.args.getlist('item_client') if c.strip()]
@@ -5129,7 +5155,7 @@ def get_item_registration_data():
         mfr_names = [s.strip() for s in request.args.getlist('mfr_name') if s.strip()]
         existing_owners = [s.strip() for s in request.args.getlist('existing_owner') if s.strip()]
 
-        q = ItemRegistration.query
+        q = apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to)
         if clients:
             q = q.filter(ItemRegistration.client_name.in_(clients))
         q = apply_item_registration_pic_filter(q, global_pics)
@@ -5192,7 +5218,7 @@ def get_item_registration_data():
 
         total = q.count()
         rows = q.order_by(ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()).offset((page-1)*per_page).limit(per_page).all()
-        option_q = ItemRegistration.query
+        option_q = apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to)
         if clients:
             option_q = option_q.filter(ItemRegistration.client_name.in_(clients))
         option_q = apply_item_registration_pic_filter(option_q, global_pics)
@@ -5289,6 +5315,7 @@ def update_item_registration(item_id):
 def apply_item_registration_request_filters(query):
     search = request.args.get('search', '').strip()
     req_numbers = [n.strip() for n in request.args.getlist('req_no') if n.strip()]
+    date_year, date_from, date_to = parse_so_date_args()
     clients = selected_clients()
     global_pics = [p.strip() for p in request.args.getlist('global_pic') if p.strip()]
     item_clients = [c.strip() for c in request.args.getlist('item_client') if c.strip()]
@@ -5298,6 +5325,7 @@ def apply_item_registration_request_filters(query):
     proc_statuses = [s.strip() for s in request.args.getlist('proc_status') if s.strip()]
     mfr_names = [s.strip() for s in request.args.getlist('mfr_name') if s.strip()]
     existing_owners = [s.strip() for s in request.args.getlist('existing_owner') if s.strip()]
+    query = apply_item_registration_date_filter(query, date_year, date_from, date_to)
     if clients:
         query = query.filter(ItemRegistration.client_name.in_(clients))
     query = apply_item_registration_pic_filter(query, global_pics)
