@@ -257,6 +257,7 @@ const SOModal = ({ title, data, onClose, darkMode, onUpdateCell }) => {
     { header: 'SO Item', value: s => s.so_item || '', width: 18 },
     ...(!hasSoItem ? [{ header: 'SO Number', value: s => s.so_number || '', width: 18 }] : []),
     { header: 'Status', value: s => s.so_status || '', width: 24 },
+    { header: 'PIC', value: s => s.pic_name || '', width: 16 },
     { header: 'Op Unit', value: s => s.operation_unit_name || '', width: 30 },
     { header: 'Vendor', value: s => s.vendor_name || '', width: 24 },
     { header: 'Product', value: s => s.product_name || '', width: 34 },
@@ -309,6 +310,7 @@ const SOModal = ({ title, data, onClose, darkMode, onUpdateCell }) => {
                   <td className="px-3 py-2 text-blue-600 font-medium whitespace-nowrap">{s.so_item||'-'}</td>
                   {!hasSoItem && <td className="px-3 py-2 whitespace-nowrap">{s.so_number}</td>}
                   <td className="px-3 py-2 whitespace-nowrap"><span className={`px-2 py-0.5 rounded-full text-xs font-medium ${s.so_status==='Delivery Completed'?'bg-green-100 text-green-700':s.so_status==='SO Cancel'?'bg-red-100 text-red-700':'bg-blue-100 text-blue-700'}`}>{s.so_status||'-'}</span></td>
+                  <td className="px-3 py-2 whitespace-nowrap text-center font-semibold text-slate-600">{s.pic_name||'-'}</td>
                   <td className="px-3 py-2 whitespace-nowrap min-w-[180px]">{s.operation_unit_name}</td>
                   <td className="px-3 py-2 whitespace-nowrap max-w-[140px] truncate">{s.vendor_name}</td>
                   <td className="px-3 py-2 max-w-[160px] truncate">{s.product_name}</td>
@@ -651,8 +653,17 @@ const SearchInput = ({ placeholder, onSearch, darkMode, txt2, label }) => {
   );
 };
 
-// ─── RFQ multiline search dropdown ────────────────────────────────────────
-const RFQMultiSearch = ({ value, onChange, onSearch, darkMode, txt2 }) => {
+// ─── Multiline search dropdown ────────────────────────────────────────────
+const RFQMultiSearch = ({
+  value,
+  onChange,
+  onSearch,
+  darkMode,
+  txt2,
+  label = 'Search',
+  description = 'Enter one Request Number, Item Name, or Spec per line. Results match any entered value.',
+  placeholder = 'REQ-0001\nBearing SKF\nStainless steel 304',
+}) => {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
 
@@ -684,7 +695,7 @@ const RFQMultiSearch = ({ value, onChange, onSearch, darkMode, txt2 }) => {
 
   return (
     <div className="relative w-full min-w-0" ref={ref}>
-      <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search</label>
+      <label className={`block text-xs font-semibold mb-1 ${txt2}`}>{label}</label>
       <button
         type="button"
         onClick={() => setOpen(current => !current)}
@@ -701,7 +712,7 @@ const RFQMultiSearch = ({ value, onChange, onSearch, darkMode, txt2 }) => {
         <span className="flex min-w-0 items-center gap-2">
           <Search className="w-4 h-4 flex-shrink-0" />
           <span className="truncate">
-            {searchValues.length ? `${searchValues.length} value${searchValues.length > 1 ? 's' : ''}` : 'Search'}
+            {searchValues.length ? `${searchValues.length} value${searchValues.length > 1 ? 's' : ''}` : label}
           </span>
         </span>
         <ChevronDown className="w-4 h-4 flex-shrink-0" />
@@ -710,7 +721,7 @@ const RFQMultiSearch = ({ value, onChange, onSearch, darkMode, txt2 }) => {
       {open && (
         <div className={`absolute left-0 top-full z-[80] mt-1 w-[min(440px,calc(100vw-32px))] rounded-xl border p-3 shadow-2xl ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-200'}`}>
           <p className={`mb-2 text-xs leading-relaxed ${txt2}`}>
-            Enter one Request Number, Item Name, or Spec per line. Results match any entered value.
+            {description}
           </p>
           <textarea
             value={value}
@@ -839,121 +850,6 @@ const StatusPie = ({ data, darkMode }) => {
 };
 
 
-// ─── Delete Request Modal ──────────────────────────────────────────────────
-const DeleteRequestModal = ({ darkMode, onClose, deleteForm, setDeleteForm, deleteFormError, onSubmit }) => {
-  const bg = darkMode ? 'bg-gray-800 text-white' : 'bg-white text-gray-900';
-  const inp = darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-gray-50 border-gray-300 text-gray-800';
-  return (
-    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
-      <div className={`rounded-2xl shadow-2xl w-full max-w-md ${bg}`} onClick={e=>e.stopPropagation()}>
-        <div className={`flex justify-between items-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-200'}`}>
-          <div className="flex items-center gap-2">
-            <EyeOff className="w-5 h-5 text-slate-600"/>
-            <h3 className="font-bold text-base">Hide from Summary</h3>
-          </div>
-          <button onClick={onClose} className={`p-1.5 rounded-lg ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`}><X className="w-5 h-5"/></button>
-        </div>
-        <div className="px-6 py-5 space-y-4">
-          <div>
-            <label className={`block text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>Data Type</label>
-            <div className="flex gap-3">
-              {['PO','SO'].map(t=>(
-                <label key={t} className="flex items-center gap-2 cursor-pointer">
-                  <input type="radio" name="ref_type" value={t} checked={deleteForm.ref_type===t}
-                    onChange={()=>setDeleteForm(f=>({...f,ref_type:t}))} className="accent-blue-600"/>
-                  <span className="text-sm font-medium">{t === 'PO' ? 'PO' : 'SO (Sales Order)'}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-          <div>
-            <label className={`block text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>
-              {deleteForm.ref_type === 'PO' ? 'PO Number' : 'SO Number / SO Item'}
-            </label>
-            <input
-              type="text"
-              value={deleteForm.ref_number}
-              onChange={e=>setDeleteForm(f=>({...f,ref_number:e.target.value}))}
-              placeholder={deleteForm.ref_type==='PO' ? 'e.g. 4570226161' : 'e.g. 9008988017-10'}
-              className={`w-full px-3 py-2 rounded-lg text-sm border ${inp}`}
-            />
-          </div>
-          <div>
-            <label className={`block text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>Reason</label>
-            <textarea
-              value={deleteForm.reason}
-              onChange={e=>setDeleteForm(f=>({...f,reason:e.target.value}))}
-              placeholder="Enter reason why this data should be hidden from dashboard..."
-              rows={3}
-              className={`w-full px-3 py-2 rounded-lg text-sm border resize-none ${inp}`}
-            />
-          </div>
-          {deleteFormError && (
-            <div className="flex items-center gap-2 text-red-500 text-sm bg-red-50 rounded-lg px-3 py-2">
-              <AlertCircle className="w-4 h-4 flex-shrink-0"/>{deleteFormError}
-            </div>
-          )}
-        </div>
-        <div className={`px-6 py-4 border-t flex justify-end gap-3 ${darkMode?'border-gray-700':'border-gray-200'}`}>
-          <button onClick={onClose} className={`px-4 py-2 rounded-lg text-sm font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>Cancel</button>
-          <button onClick={onSubmit} className="px-5 py-2 bg-slate-600 hover:bg-slate-700 text-white rounded-lg text-sm font-semibold flex items-center gap-2">
-            <EyeOff className="w-4 h-4"/>Hide
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// ─── Hidden Items Panel ────────────────────────────────────────────────────
-const HiddenItemsPanel = ({ darkMode, requests, onRestore, onClose }) => {
-  const bg = darkMode ? 'bg-gray-800 text-white' : 'bg-white text-gray-900';
-  const txt2 = darkMode ? 'text-gray-400' : 'text-gray-500';
-  const hidden = requests.filter(r=>r.is_hidden);
-  const fmtDt = (iso) => { try { return new Date(iso).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); } catch { return iso; } };
-  return (
-    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
-      <div className={`rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col ${bg}`} onClick={e=>e.stopPropagation()}>
-        <div className={`flex justify-between items-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-200'}`}>
-          <div className="flex items-center gap-2">
-            <Eye className="w-5 h-5 text-blue-500"/>
-            <h3 className="font-bold text-base">Items Hidden from Summary</h3>
-            <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${darkMode?'bg-gray-700 text-gray-300':'bg-gray-100 text-gray-600'}`}>{hidden.length} item</span>
-          </div>
-          <button onClick={onClose} className={`p-1.5 rounded-lg ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`}><X className="w-5 h-5"/></button>
-        </div>
-        <div className="overflow-auto flex-1 p-4">
-          {hidden.length === 0 ? (
-            <div className={`text-center py-12 ${txt2}`}>
-              <Eye className="w-10 h-10 mx-auto mb-2 opacity-40"/>
-              <p className="text-sm">No hidden data</p>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {hidden.map(r=>(
-                <div key={r.id} className={`flex items-start justify-between gap-4 p-4 rounded-xl border ${darkMode?'bg-gray-700 border-gray-600':'bg-gray-50 border-gray-200'}`}>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className={`px-2 py-0.5 rounded text-xs font-bold ${r.ref_type==='PO'?'bg-red-100 text-red-700':'bg-slate-100 text-slate-700'}`}>{r.ref_type}</span>
-                      <span className="font-semibold text-sm">{r.ref_number}</span>
-                    </div>
-                    <p className={`text-xs ${txt2} mb-1`}><span className="font-medium">Reason:</span> {r.reason}</p>
-                    <p className={`text-xs ${txt2}`}>📅 {fmtDt(r.requested_at)}</p>
-                  </div>
-                  <button onClick={()=>onRestore(r)}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-xs font-semibold flex-shrink-0">
-                    <RotateCcw className="w-3.5 h-3.5"/>Restore
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-};
-
 // ─── Date Range Filter ────────────────────────────────────────────────────
 const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = 'Filter SO Create Date', compact = false }) => {
   const [mode, setMode] = useState(value?.mode || 'all'); // all | today | week | month | year | range
@@ -1078,8 +974,8 @@ const App = () => {
   const [itemRegSearch, setItemRegSearch] = useState([]);
   const [itemRegAppliedSearch, setItemRegAppliedSearch] = useState([]);
   const [itemRegLastUpdated, setItemRegLastUpdated] = useState(null);
-  const [itemRegFilters, setItemRegFilters] = useState({ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [], existing_owners: [] });
-  const [itemRegOptions, setItemRegOptions] = useState({ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [], existing_owners: [] });
+  const [itemRegFilters, setItemRegFilters] = useState({ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] });
+  const [itemRegOptions, setItemRegOptions] = useState({ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] });
   const [itemRegMissingPicKpis, setItemRegMissingPicKpis] = useState([]);
   const [itemRegPicHighlight, setItemRegPicHighlight] = useState('');
 
@@ -1088,7 +984,6 @@ const App = () => {
   const [rfqTotal, setRfqTotal] = useState(0);
   const [rfqPage, setRfqPage] = useState(1);
   const [rfqPerPage, setRfqPerPage] = useState(10);
-  const [rfqSortOrder, setRfqSortOrder] = useState('newest');
   const [rfqSearch, setRfqSearch] = useState('');
   const [rfqAppliedSearch, setRfqAppliedSearch] = useState('');
   const [rfqColumns, setRfqColumns] = useState([]);
@@ -1103,6 +998,7 @@ const App = () => {
   const [rfqSimilarAction, setRfqSimilarAction] = useState(null);
   const [rfqLastUpdated, setRfqLastUpdated] = useState(null);
   const [rfqEditedRowKeys, setRfqEditedRowKeys] = useState(new Set());
+  const rfqDashboardOnlyFields = new Set(['private_remarks_1', 'private_remarks_2']);
 
   // All Registered Items
   const [registeredItemsData, setRegisteredItemsData] = useState([]);
@@ -1113,6 +1009,8 @@ const App = () => {
   const [registeredItemsAppliedSearch, setRegisteredItemsAppliedSearch] = useState('');
   const [registeredItemsProdIds, setRegisteredItemsProdIds] = useState([]);
   const [registeredItemsAppliedProdIds, setRegisteredItemsAppliedProdIds] = useState([]);
+  const [registeredItemsFilters, setRegisteredItemsFilters] = useState({ mfr_names: [], vendor_names: [] });
+  const [registeredItemsOptions, setRegisteredItemsOptions] = useState({ mfr_names: [], vendor_names: [] });
 
   // Vendor Control
   const [vendorControlData, setVendorControlData] = useState([]);
@@ -1135,18 +1033,10 @@ const App = () => {
   const [editingCell, setEditingCell] = useState(null);
   const [editValue, setEditValue] = useState('');
   const [downloadToast, setDownloadToast] = useState(null);
-
-  // Delete request / hide feature
-  const [deleteRequests, setDeleteRequests] = useState([]);
-  const [showDeleteModal, setShowDeleteModal] = useState(false);
-  const [showHiddenPanel, setShowHiddenPanel] = useState(false);
-  const [deleteForm, setDeleteForm] = useState({ ref_type: 'PO', ref_number: '', reason: '' });
-  const [deleteFormError, setDeleteFormError] = useState('');
   const [completedData, setCompletedData] = useState(null);
   const [completedYear, setCompletedYear] = useState('all');
   const [completedLoading, setCompletedLoading] = useState(false);
   const [completedLoaded, setCompletedLoaded] = useState(false);
-  const [showHideMenu, setShowHideMenu] = useState(false);
   const [marginDetailModal, setMarginDetailModal] = useState(null); // {category, data}
   const [picDbStatus, setPicDbStatus] = useState(null); // {product_id_count, master_pic_count, last_product_id_upload, last_pic_update}
   const [picUploadMsg, setPicUploadMsg] = useState(''); // feedback message for PIC uploads
@@ -1239,8 +1129,6 @@ const App = () => {
       }
     `)
     .join('\n'), [frozenColumns]);
-  const hideMenuRef = useRef(null);
-
   // ── Global SO Create Date filter (shared across Dashboard / All SO / Delivery Completed)
   const [globalDateFilter, setGlobalDateFilter] = useState({ mode: 'all' });
   const [globalClientFilter, setGlobalClientFilter] = useState([]);
@@ -1255,11 +1143,6 @@ const App = () => {
   const setCompletedDateFilter = setGlobalDateFilter;
 
   // Click-outside handlers
-  useEffect(() => {
-    const handler = (e) => { if (hideMenuRef.current && !hideMenuRef.current.contains(e.target)) setShowHideMenu(false); };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
 
   useEffect(() => {
     const handler = (e) => { if (uploadDropdownRef.current && !uploadDropdownRef.current.contains(e.target)) setShowUploadDropdown(false); };
@@ -1396,10 +1279,13 @@ const App = () => {
     } finally { setLoading(false); }
   }, [addToast, soSortOrder, pendingPicHighlight, globalClientFilter, globalPicFilter]);
 
-  const fetchItemRegistration = useCallback(async (page = itemRegPage, perPage = itemRegPerPage, search = itemRegAppliedSearch, filters = itemRegFilters, kpiPic = itemRegPicHighlight) => {
+  const fetchItemRegistration = useCallback(async (page = itemRegPage, perPage = itemRegPerPage, search = itemRegAppliedSearch, filters = itemRegFilters, kpiPic = itemRegPicHighlight, dateFilter = globalDateFilter) => {
     setLoading(true);
     try {
       const params = new URLSearchParams({ page, per_page: perPage });
+      Object.entries(dateFilterParams(dateFilter)).forEach(([key, value]) => { if (value) params.append(key, value); });
+      appendMultiParam(params, 'client', globalClientFilter);
+      appendMultiParam(params, 'global_pic', globalPicFilter);
       if (Array.isArray(search)) search.forEach(v => params.append('req_no', v));
       else if (search) params.append('search', search);
       resolveFilter(filters.clients).forEach(v => params.append('item_client', v));
@@ -1407,7 +1293,6 @@ const App = () => {
       resolveFilter(filters.pics).forEach(v => params.append('pic', v));
       resolveFilter(filters.proc_statuses).forEach(v => params.append('proc_status', v));
       resolveFilter(filters.mfr_names).forEach(v => params.append('mfr_name', v));
-      resolveFilter(filters.existing_owners).forEach(v => params.append('existing_owner', v));
       if (kpiPic) params.append('kpi_pic', kpiPic);
       const res = await api.get(`/api/item-registration/data?${params}`);
       const rows = Array.isArray(res.data.data) ? res.data.data : [];
@@ -1420,28 +1305,31 @@ const App = () => {
         categories: res.data.category_options || [],
         pics: res.data.pic_options || [],
         proc_statuses: res.data.proc_status_options || [],
-        mfr_names: res.data.mfr_name_options || [],
-        existing_owners: res.data.existing_owner_options || []
+        mfr_names: res.data.mfr_name_options || []
       });
     } catch (e) {
       addToast(`Failed to load Item Registration: ${e.response?.data?.error || e.message}`, 'error');
     } finally { setLoading(false); }
-  }, [addToast, itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters, itemRegPicHighlight]);
+  }, [addToast, itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters, itemRegPicHighlight, globalDateFilter, globalClientFilter, globalPicFilter]);
 
   const fetchRegisteredItems = useCallback(async (
     page = registeredItemsPage,
     perPage = registeredItemsPerPage,
     search = registeredItemsAppliedSearch,
-    prodIds = registeredItemsAppliedProdIds
+    prodIds = registeredItemsAppliedProdIds,
+    filters = registeredItemsFilters
   ) => {
     setLoading(true);
     try {
       const params = new URLSearchParams({ page, per_page: perPage });
       if (search) params.append('search', search);
       (prodIds || []).forEach(v => params.append('prod_id', v));
+      resolveFilter(filters.mfr_names).forEach(v => params.append('mfr_name', v));
+      resolveFilter(filters.vendor_names).forEach(v => params.append('vendor_name', v));
       const res = await api.get(`/api/all-registered-items?${params}`);
       setRegisteredItemsData(Array.isArray(res.data.data) ? res.data.data : []);
       setRegisteredItemsTotal(res.data.total || 0);
+      setRegisteredItemsOptions(res.data.filters || { mfr_names: [], vendor_names: [] });
     } catch (e) {
       addToast(`Failed to load All Registered Items: ${e.response?.data?.error || e.message}`, 'error');
     } finally { setLoading(false); }
@@ -1450,16 +1338,16 @@ const App = () => {
     registeredItemsPage,
     registeredItemsPerPage,
     registeredItemsAppliedSearch,
-    registeredItemsAppliedProdIds
+    registeredItemsAppliedProdIds,
+    registeredItemsFilters
   ]);
 
-  const fetchRFQData = useCallback(async (page = rfqPage, perPage = rfqPerPage, search = rfqAppliedSearch, refresh = false, filters = rfqFilters, pic = rfqPicFilter, showSimilarity = rfqShowSimilarity, sortOrder = rfqSortOrder) => {
+  const fetchRFQData = useCallback(async (page = rfqPage, perPage = rfqPerPage, search = rfqAppliedSearch, refresh = false, filters = rfqFilters, pic = rfqPicFilter, showSimilarity = rfqShowSimilarity) => {
     setRfqEditedRowKeys(new Set());
     setLoading(true);
     try {
       const params = new URLSearchParams({ page, per_page: perPage });
       if (search) params.append('search', search);
-      if (sortOrder) params.append('sort_order', sortOrder);
       if (refresh) params.append('refresh', '1');
       if (pic) params.append('pic', pic);
       if (showSimilarity) params.append('similarity', '1');
@@ -1486,7 +1374,7 @@ const App = () => {
     } catch (e) {
       addToast(`Failed to load RFQ: ${e.response?.data?.error || e.message}`, 'error');
     } finally { setLoading(false); }
-  }, [addToast, rfqPage, rfqPerPage, rfqAppliedSearch, rfqFilters, rfqPicFilter, rfqShowSimilarity, rfqSortOrder]);
+  }, [addToast, rfqPage, rfqPerPage, rfqAppliedSearch, rfqFilters, rfqPicFilter, rfqShowSimilarity]);
 
   const fetchVendorControl = useCallback(async (page = vendorControlPage, perPage = vendorControlPerPage, search = vendorControlAppliedSearch, refresh = false, vendors = vendorControlAppliedVendors) => {
     setLoading(true);
@@ -1525,42 +1413,7 @@ const App = () => {
     window.open(`${BACKEND}/api/vendor-control/login/${encodeURIComponent(row.row_key)}`, '_blank', 'noopener,noreferrer');
   };
 
-  // ─── Delete Request API functions ────────────────────────────────────────
-  const fetchDeleteRequests = useCallback(async () => {
-    try {
-      const res = await api.get('/api/delete-requests');
-      setDeleteRequests(Array.isArray(res.data) ? res.data : []);
-    } catch (e) { /* silent */ }
-  }, []);
-
-  const submitDeleteRequest = async () => {
-    setDeleteFormError('');
-    if (!deleteForm.ref_number.trim()) { setDeleteFormError('Reference number is required'); return; }
-    if (!deleteForm.reason.trim()) { setDeleteFormError('Reason is required'); return; }
-    try {
-      await api.post('/api/delete-requests', deleteForm);
-      addToast(`✅ ${deleteForm.ref_type} ${deleteForm.ref_number} successfully hidden from dashboard`, 'success');
-      setDeleteForm({ ref_type: 'PO', ref_number: '', reason: '' });
-      setShowDeleteModal(false);
-      fetchDeleteRequests();
-      fetchDashboard();
-    } catch (e) {
-      setDeleteFormError(e.response?.data?.error || e.message);
-    }
-  };
-
-  const restoreDeleteRequest = async (req) => {
-    try {
-      await api.put(`/api/delete-requests/${req.id}/restore`);
-      addToast(`✅ ${req.ref_type} ${req.ref_number} successfully restored`, 'success');
-      fetchDeleteRequests();
-      fetchDashboard();
-    } catch (e) {
-      addToast(`❌ Failed to restore: ${e.response?.data?.error || e.message}`, 'error');
-    }
-  };
-
-  useEffect(() => { fetchDashboard(); fetchDeleteRequests(); fetchPicDbStatus(); }, []);
+  useEffect(() => { fetchDashboard(); fetchPicDbStatus(); }, []);
   useEffect(() => {
     if (activePage === 'all-so') {
       fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter, soSortOrder);
@@ -1569,9 +1422,9 @@ const App = () => {
 
   useEffect(() => {
     if (activePage === 'item-registration') {
-      fetchItemRegistration(itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters);
+      fetchItemRegistration(itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters, itemRegPicHighlight, globalDateFilter);
     }
-  }, [activePage, itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters, itemRegPicHighlight, fetchItemRegistration]);
+  }, [activePage, itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters, itemRegPicHighlight, globalDateFilter, globalClientFilter, globalPicFilter, fetchItemRegistration]);
 
   useEffect(() => {
     if (activePage === 'rfq') {
@@ -1642,48 +1495,6 @@ const App = () => {
     e.target.value = '';
     const label = files.length > 1 ? `SO - Search Client Odr (${files.length} files)` : 'SO - Search Client Odr';
     const endpoint = '/api/upload/smro';
-
-    // ── Client-side header validation ──────────────────────────────────
-    const REQUIRED_HEADERS = {
-      scor: {
-        'SO Number':      ['so number','so no','so no.','so','sales order','sales order number','no so','nomor so'],
-        'SO Item':        ['so item no','item no','line','so line','so item'],
-        'SO Status':      ['so status','status','order status'],
-        'Operation Unit': ['operation unit name','op unit','client name','client','operation unit'],
-        'Vendor Name':    ['vendor name','vendor','supplier'],
-        'Customer PO':    ['customer po number','customer po','po ref','po reference'],
-        'Sales Amount':   ['sales amount(exclude tax)','sales amount','amount','total'],
-        'SO Create Date': ['so create date','order date','so date','create date'],
-      }
-    };
-
-    try {
-      for (const file of files) {
-        const arrayBuffer = await file.arrayBuffer();
-        const wb = XLSX.read(arrayBuffer, { type: 'array' });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        const jsonData = XLSX.utils.sheet_to_json(ws, { header: 1 });
-        const headerRow = (jsonData[0] || []).map(h => String(h || '').trim().toLowerCase());
-
-        const reqHeaders = REQUIRED_HEADERS[type];
-        const missing = [];
-        for (const [friendlyName, aliases] of Object.entries(reqHeaders)) {
-          const found = aliases.some(alias => headerRow.includes(alias.toLowerCase()));
-          if (!found) missing.push(friendlyName);
-        }
-        if (missing.length > 3) {
-          addToast(
-            `❌ Invalid file ${file.name} — ${missing.length} required columns not found: ${missing.join(', ')}. Please check the ${label} file is correct and try again.`,
-            'error'
-          );
-          return;
-        }
-      }
-    } catch (readErr) {
-      addToast(`❌ Failed to read file: ${readErr.message}`, 'error');
-      return;
-    }
-    // ── End client-side header validation ──────────────────────────────
 
     const fd = new FormData(); files.forEach(file => fd.append('file', file));
     setUploadProgress({ label, pct: 0 });
@@ -1762,7 +1573,7 @@ const App = () => {
       });
       const d = res.data;
       setUploadProgress(null);
-      setPicUploadMsg(`✅ Master PIC (${d.files || files.length} file): +${d.added} added, ${d.updated} updated (total categories: ${d.total_categories}). SO rows updated: ${d.so_pic_refreshed}.`);
+      setPicUploadMsg(`✅ Master PIC (${d.files || files.length} file): +${d.added} added, ${d.updated} updated${d.unchanged ? `, ${d.unchanged} unchanged` : ''} (total category names: ${d.total_categories}). SO rows updated: ${d.so_pic_refreshed}.`);
       fetchPicDbStatus();
       fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
     } catch (err) {
@@ -1850,28 +1661,36 @@ const App = () => {
     }
   };
 
+  const downloadMasterPICTemplate = () => {
+    downloadBlob('/api/template/master-pic', `Master_PIC_Update_Template_${new Date().toISOString().slice(0,10)}.xlsx`, 'Master PIC Update Template');
+  };
+
   const downloadItemRegistrationTemplate = () => {
     const p = new URLSearchParams();
+    Object.entries(dateFilterParams(globalDateFilter)).forEach(([key, value]) => { if (value) p.append(key, value); });
+    appendMultiParam(p, 'client', globalClientFilter);
+    appendMultiParam(p, 'global_pic', globalPicFilter);
     (itemRegAppliedSearch || []).forEach(v => p.append('req_no', v));
     resolveFilter(itemRegFilters.clients).forEach(v => p.append('item_client', v));
     resolveFilter(itemRegFilters.categories).forEach(v => p.append('category', v));
     resolveFilter(itemRegFilters.pics).forEach(v => p.append('pic', v));
     resolveFilter(itemRegFilters.proc_statuses).forEach(v => p.append('proc_status', v));
     resolveFilter(itemRegFilters.mfr_names).forEach(v => p.append('mfr_name', v));
-    resolveFilter(itemRegFilters.existing_owners).forEach(v => p.append('existing_owner', v));
     if (itemRegPicHighlight) p.append('kpi_pic', itemRegPicHighlight);
     downloadBlob(`/api/item-registration/template?${p}`, `Template_ItemRegistration_BatchUpload_${new Date().toISOString().slice(0,10)}.xlsx`, 'Item Registration Batch Upload Template');
   };
 
   const downloadItemRegistrationExcel = () => {
     const p = new URLSearchParams();
+    Object.entries(dateFilterParams(globalDateFilter)).forEach(([key, value]) => { if (value) p.append(key, value); });
+    appendMultiParam(p, 'client', globalClientFilter);
+    appendMultiParam(p, 'global_pic', globalPicFilter);
     (itemRegAppliedSearch || []).forEach(v => p.append('req_no', v));
     resolveFilter(itemRegFilters.clients).forEach(v => p.append('item_client', v));
     resolveFilter(itemRegFilters.categories).forEach(v => p.append('category', v));
     resolveFilter(itemRegFilters.pics).forEach(v => p.append('pic', v));
     resolveFilter(itemRegFilters.proc_statuses).forEach(v => p.append('proc_status', v));
     resolveFilter(itemRegFilters.mfr_names).forEach(v => p.append('mfr_name', v));
-    resolveFilter(itemRegFilters.existing_owners).forEach(v => p.append('existing_owner', v));
     if (itemRegPicHighlight) p.append('kpi_pic', itemRegPicHighlight);
     downloadBlob(`/api/export/item-registration?${p}`, `Item_Registration_${new Date().toISOString().slice(0,10)}.xlsx`, 'Item Registration Excel');
   };
@@ -1889,34 +1708,6 @@ const App = () => {
     } catch(e) { addToast(`❌ Failed to load completed data: ${e.message}`, 'error'); }
     finally { setCompletedLoading(false); }
   }, []);
-
-  const downloadHideTemplate = (type) => {
-    setShowHideMenu(false);
-    downloadBlob(`/api/template/hide?type=${type}`, `Template_Hide_${type === 'SO' ? 'SO' : 'PO'}.xlsx`, `Template Hide ${type}`);
-  };
-
-  const handleHideBatchUpload = async (e, type) => {
-    const file = e.target.files[0]; if (!file) return;
-    e.target.value = '';
-    setShowHideMenu(false);
-    const fd = new FormData();
-    fd.append('file', file);
-    fd.append('type', type);
-    setUploadProgress({ label: `Hide ${type} Batch`, pct: 0 });
-    try {
-      const res = await api.post('/api/upload/hide-batch', fd, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        onUploadProgress: (ev) => setUploadProgress({ label: `Hide ${type} Batch`, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
-      });
-      setUploadProgress(null);
-      addToast(`✅ ${res.data.message}`, 'success');
-      fetchDeleteRequests();
-      fetchDashboard();
-    } catch (e) {
-      setUploadProgress(null);
-      addToast(`❌ Failed to upload hide batch: ${e.response?.data?.error || e.message}`, 'error');
-    }
-  };
 
   const downloadSOExcel = () => {
     const p = new URLSearchParams();
@@ -2043,7 +1834,7 @@ const App = () => {
     applyRFQLocalUpdates([{ row_key: rowKey, field, value }]);
     try {
       const res = await api.put(`/api/rfq/${encodeURIComponent(rowKey)}`, { field, value });
-      if (!quiet && res.data?.sheet_sync && res.data.sheet_sync.synced === false) {
+      if (!quiet && res.data?.sheet_sync && res.data.sheet_sync.synced === false && !res.data.sheet_sync.local_only && !rfqDashboardOnlyFields.has(field)) {
         addToast(`RFQ updated locally. Sheet sync not active: ${res.data.sheet_sync.reason}`, 'warning');
       }
       const parseNumber = (v) => {
@@ -2110,7 +1901,8 @@ const App = () => {
     applyRFQLocalUpdates(cleanUpdates);
     try {
       const res = await api.put('/api/rfq/batch-cells', { updates: cleanUpdates });
-      if (res.data?.sheet_sync && res.data.sheet_sync.synced === false) {
+      const onlyDashboardOnly = cleanUpdates.every(item => rfqDashboardOnlyFields.has(item.field));
+      if (res.data?.sheet_sync && res.data.sheet_sync.synced === false && !res.data.sheet_sync.local_only && !onlyDashboardOnly) {
         addToast(`RFQ batch updated locally. Sheet sync not active: ${res.data.sheet_sync.reason}`, 'warning');
       }
       if (res.data?.skipped?.length) {
@@ -2560,29 +2352,34 @@ const App = () => {
   // ══════════════════════════════════════════════════════════════
   // RENDER DASHBOARD
   // ══════════════════════════════════════════════════════════════
-  const globalSlicerPages = new Set(['dashboard', 'all-so']);
+  const globalSlicerPages = new Set(['dashboard', 'all-so', 'item-registration']);
   const renderGlobalSlicer = () => {
     if (!globalSlicerPages.has(activePage)) return null;
+    const showDateFilter = true;
+    const slicerClientOptions = activePage === 'item-registration' ? (itemRegOptions.clients || []) : (dashboardFilterOptions.clients || []);
+    const slicerPicOptions = activePage === 'item-registration' ? (itemRegOptions.pics || []) : (dashboardFilterOptions.pics || []);
     return (
-      <div className="mb-5 grid grid-cols-1 gap-3 2xl:grid-cols-[minmax(560px,1fr)_minmax(560px,1fr)]">
-        <DateRangeFilter
-          darkMode={darkMode}
-          txt={txt}
-          txt2={txt2}
-          card={card}
-          value={globalDateFilter}
-          label="Filter SO Create Date"
-          compact
-          onFilter={(f) => setGlobalDateFilter(f)}
-        />
-        <div className={`grid min-h-[64px] grid-cols-1 gap-3 px-5 py-3 rounded-xl ${card} shadow sm:grid-cols-[minmax(220px,1fr)_minmax(200px,0.85fr)_120px] sm:items-end`}>
+      <div className={showDateFilter ? "mb-5 grid grid-cols-1 gap-3 2xl:grid-cols-[minmax(560px,1fr)_minmax(560px,1fr)]" : "mb-5 flex justify-end"}>
+        {showDateFilter && (
+          <DateRangeFilter
+            darkMode={darkMode}
+            txt={txt}
+            txt2={txt2}
+            card={card}
+            value={globalDateFilter}
+            label="Filter SO Create Date"
+            compact
+            onFilter={(f) => { setGlobalDateFilter(f); if (activePage === 'item-registration') setItemRegPage(1); }}
+          />
+        )}
+        <div className={`grid min-h-[64px] w-full grid-cols-1 gap-3 px-5 py-3 rounded-xl ${card} shadow sm:grid-cols-[minmax(220px,1fr)_minmax(200px,0.85fr)_120px] sm:items-end ${showDateFilter ? '' : '2xl:max-w-[720px]'}`}>
           <div className="min-w-0">
             <label className={`mb-1 block text-xs font-semibold ${txt}`}>Client Nm.</label>
-            <MultiSelect label="Client Nm." options={dashboardFilterOptions.clients || []} selected={globalClientFilter} onChange={setGlobalClientFilter} darkMode={darkMode} txt2={txt2} hideLabel />
+            <MultiSelect label="Client Nm." options={slicerClientOptions} selected={globalClientFilter} onChange={setGlobalClientFilter} darkMode={darkMode} txt2={txt2} hideLabel />
           </div>
           <div className="min-w-0">
             <label className={`mb-1 block text-xs font-semibold ${txt}`}>PIC Name</label>
-            <MultiSelect label="PIC Name" options={dashboardFilterOptions.pics || []} selected={globalPicFilter} onChange={setGlobalPicFilter} darkMode={darkMode} txt2={txt2} hideLabel />
+            <MultiSelect label="PIC Name" options={slicerPicOptions} selected={globalPicFilter} onChange={setGlobalPicFilter} darkMode={darkMode} txt2={txt2} hideLabel />
           </div>
           <button
             type="button"
@@ -2963,6 +2760,7 @@ const App = () => {
       ['Product Name', 'prod_name'],
       ['Specification', 'spec'],
       ['Manufacturer Name', 'mfr_name'],
+      ['Vendor Name', 'vendor_name'],
       ['Order Unit', 'odr_unit'],
       ['HUB Handling Check', 'hub_handling_check'],
       ['Tax Type', 'tax_type'],
@@ -2975,14 +2773,18 @@ const App = () => {
       setRegisteredItemsAppliedSearch('');
       setRegisteredItemsProdIds([]);
       setRegisteredItemsAppliedProdIds([]);
+      const emptyFilters = { mfr_names: [], vendor_names: [] };
+      setRegisteredItemsFilters(emptyFilters);
       setRegisteredItemsPage(1);
-      fetchRegisteredItems(1, registeredItemsPerPage, '', []);
+      fetchRegisteredItems(1, registeredItemsPerPage, '', [], emptyFilters);
     };
 
     const downloadRegisteredExcel = () => {
       const p = new URLSearchParams();
       if (registeredItemsAppliedSearch) p.append('search', registeredItemsAppliedSearch);
       (registeredItemsAppliedProdIds || []).forEach(v => p.append('prod_id', v));
+      resolveFilter(registeredItemsFilters.mfr_names).forEach(v => p.append('mfr_name', v));
+      resolveFilter(registeredItemsFilters.vendor_names).forEach(v => p.append('vendor_name', v));
       downloadBlob(`/api/export/all-registered-items?${p}`, `All_Registered_Items_${new Date().toISOString().slice(0,10)}.xlsx`, 'All Registered Items');
     };
 
@@ -3009,38 +2811,18 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="flex flex-wrap gap-2 items-end">
-            <div className="w-full sm:w-[280px]">
-              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search</label>
-              <input
-                value={registeredItemsSearch}
-                onChange={e => setRegisteredItemsSearch(e.target.value)}
-                placeholder="Name, spec, manufacturer..."
-                className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}
-              />
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-[minmax(240px,1fr)_170px_minmax(180px,1fr)_minmax(180px,1fr)_90px_110px] items-end">
+            <div className="min-w-0">
+              <RFQMultiSearch value={registeredItemsSearch} onChange={setRegisteredItemsSearch} onSearch={(next) => { setRegisteredItemsAppliedSearch(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, next, registeredItemsAppliedProdIds, registeredItemsFilters); }} darkMode={darkMode} txt2={txt2} label="Search" description="Enter Product ID, Product Name, Specification, Manufacturer, or Vendor per line. Results match any entered value." placeholder={'8381684\nBearing SKF\nVendor ABC'} />
             </div>
-            <div className="w-full sm:w-[170px]">
+            <div className="min-w-0">
               <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Prod ID</label>
-              <SearchInput
-                key={`registered-prod-id-${registeredItemsProdIds.join('|')}`}
-                placeholder={'8381684\n8382076'}
-                label="Prod ID"
-                darkMode={darkMode}
-                txt2={txt2}
-                onSearch={(nums) => {
-                  setRegisteredItemsProdIds(nums);
-                  setRegisteredItemsAppliedProdIds(nums);
-                  setRegisteredItemsPage(1);
-                  fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, nums);
-                }}
-              />
+              <SearchInput key={`registered-prod-id-${registeredItemsProdIds.join('|')}`} placeholder={'8381684\n8382076'} label="Prod ID" darkMode={darkMode} txt2={txt2} onSearch={(nums) => { setRegisteredItemsProdIds(nums); setRegisteredItemsAppliedProdIds(nums); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, nums, registeredItemsFilters); }} />
             </div>
-            <button onClick={() => { setRegisteredItemsAppliedSearch(registeredItemsSearch); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsSearch, registeredItemsAppliedProdIds); }} className="w-[90px] h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">
-              Search
-            </button>
-            <button onClick={handleClear} className={`w-[110px] h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>
-              Clear
-            </button>
+            <MultiSelect label="Manufacturer Name" options={registeredItemsOptions.mfr_names || []} selected={registeredItemsFilters.mfr_names} onChange={v => setRegisteredItemsFilters(f => ({ ...f, mfr_names: v }))} darkMode={darkMode} txt2={txt2} />
+            <MultiSelect label="Vendor Name" options={registeredItemsOptions.vendor_names || []} selected={registeredItemsFilters.vendor_names} onChange={v => setRegisteredItemsFilters(f => ({ ...f, vendor_names: v }))} darkMode={darkMode} txt2={txt2} />
+            <button onClick={() => { setRegisteredItemsAppliedSearch(registeredItemsSearch); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsSearch, registeredItemsAppliedProdIds, registeredItemsFilters); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">Search</button>
+            <button onClick={handleClear} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
         </FilterPanel>
 
@@ -3052,6 +2834,7 @@ const App = () => {
               <col style={{minWidth:'80px'}}/>
               <col style={{minWidth:'160px'}}/>
               <col style={{minWidth:'280px'}}/>
+              <col style={{minWidth:'180px'}}/>
               <col style={{minWidth:'180px'}}/>
               <col style={{minWidth:'80px'}}/>
               <col style={{minWidth:'100px'}}/>
@@ -3086,6 +2869,7 @@ const App = () => {
                   <td className={`px-2 py-2 max-w-[160px] truncate ${txt}`} title={row.prod_name}>{row.prod_name || '-'}</td>
                   <td className={`px-2 py-2 max-w-[280px] truncate ${txt2}`} title={row.spec}>{row.spec || '-'}</td>
                   <td className={`px-2 py-2 max-w-[180px] truncate ${txt2}`} title={row.mfr_name}>{row.mfr_name || '-'}</td>
+                  <td className={`px-2 py-2 max-w-[180px] truncate ${txt2}`} title={row.vendor_name}>{row.vendor_name || '-'}</td>
                   <td className={`px-2 py-2 text-center whitespace-nowrap ${txt2}`}>{row.odr_unit || '-'}</td>
                   <td className={`px-2 py-2 text-center whitespace-nowrap ${txt2}`}>{row.hub_handling_check || '-'}</td>
                   <td className={`px-2 py-2 text-center whitespace-nowrap ${txt2}`}>{row.tax_type || '-'}</td>
@@ -3104,8 +2888,8 @@ const App = () => {
           totalPages={totalPages}
           total={registeredItemsTotal}
           perPage={registeredItemsPerPage}
-          onPageChange={(p) => { setRegisteredItemsPage(p); fetchRegisteredItems(p, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds); }}
-          onPerPageChange={(next) => { setRegisteredItemsPerPage(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, next, registeredItemsAppliedSearch, registeredItemsAppliedProdIds); }}
+          onPageChange={(p) => { setRegisteredItemsPage(p); fetchRegisteredItems(p, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, registeredItemsFilters); }}
+          onPerPageChange={(next) => { setRegisteredItemsPerPage(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, next, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, registeredItemsFilters); }}
         />
       </div>
     );
@@ -3147,7 +2931,7 @@ const App = () => {
       category_id: 180, category_name: 150, product_id: 120, request_number: 150, purchase_pic: 120,
       same_replacement: 92, vendor_name: 200, unit_price_idr: 130, amt_idr: 130, quoted_item_name: 180,
       quoted_spec: 150, quoted_brand: 130, quoted_unit: 58, moq: 62, lead_time_days: 78,
-      valid_period: 82, photo_url: 92, remarks: 360,
+      valid_period: 82, photo_url: 92, remarks: 360, private_remarks_1: 220, private_remarks_2: 220,
       similar_prod_ids: 150, similar_prod_name: 220, similar_spec: 280, similar_mfr_name: 140, similar_odr_unit: 78, similar_score: 96
     }[field] || 140);
     const colStyle = (field) => {
@@ -3218,17 +3002,15 @@ const App = () => {
       setRfqSearch('');
       setRfqAppliedSearch('');
       setRfqPicFilter('');
-      setRfqSortOrder('newest');
       const nextFilters = { checks: [], clients: [], brands: [], purchase_pics: [], vendors: [] };
       setRfqFilters(nextFilters);
       setRfqPage(1);
-      fetchRFQData(1, rfqPerPage, '', false, nextFilters, '', rfqShowSimilarity, 'newest');
+      fetchRFQData(1, rfqPerPage, '', false, nextFilters, '', rfqShowSimilarity);
     };
     const rfqParams = () => {
       const p = new URLSearchParams();
       if (rfqAppliedSearch) p.append('search', rfqAppliedSearch);
       if (rfqPicFilter) p.append('pic', rfqPicFilter);
-      if (rfqSortOrder) p.append('sort_order', rfqSortOrder);
       resolveFilter(rfqFilters.checks).forEach(v => p.append('check', v));
       resolveFilter(rfqFilters.clients).forEach(v => p.append('client_name', v));
       resolveFilter(rfqFilters.brands).forEach(v => p.append('brand_manufacturer', v));
@@ -3249,7 +3031,12 @@ const App = () => {
         const res = await api.post('/api/rfq/batch-upload', fd, {
           onUploadProgress: (ev) => setUploadProgress({ label: files.length > 1 ? `RFQ Batch (${files.length} files)` : 'RFQ Batch', pct: Math.round(ev.loaded * 100 / (ev.total || ev.loaded)) })
         });
-        addToast(`RFQ batch: ${res.data.updated || 0} cells updated${res.data.not_found ? `, ${res.data.not_found} No not found` : ''}`, 'success');
+        const syncInfo = res.data?.sheet_sync;
+        if (syncInfo && syncInfo.synced === false) {
+          addToast(`RFQ batch updated locally but Sheet sync failed: ${syncInfo.reason || 'unknown error'}`, 'warning');
+        } else {
+          addToast(`RFQ batch: ${res.data.updated || 0} cells updated${res.data.sheet_updates ? `, ${res.data.sheet_updates} synced to Sheet` : ''}${res.data.not_found ? `, ${res.data.not_found} No not found` : ''}`, 'success');
+        }
         fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, true, rfqFilters, rfqPicFilter);
       } catch (err) {
         addToast(`Failed to upload RFQ batch: ${err.response?.data?.error || err.message}`, 'error');
@@ -3299,7 +3086,9 @@ const App = () => {
     const startRFQFill = (event, rowIndex, field) => {
       event.preventDefault();
       event.stopPropagation();
+      document.body.classList.add('rfq-fill-dragging');
       const onUp = (upEvent) => {
+        document.body.classList.remove('rfq-fill-dragging');
         document.removeEventListener('mouseup', onUp);
         const target = document.elementFromPoint(upEvent.clientX, upEvent.clientY)?.closest('[data-rfq-cell="true"]');
         const endRowIndex = Number(target?.getAttribute('data-row-index'));
@@ -3370,19 +3159,7 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[110px_minmax(170px,1fr)_115px_repeat(4,minmax(120px,1fr))_84px] items-end">
-            <div className="min-w-0">
-              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>↕ RFQ Date</label>
-              <select
-                value={rfqSortOrder}
-                onChange={e => { const next = e.target.value; setRfqSortOrder(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter, rfqShowSimilarity, next); }}
-                title="Sort RFQ Date"
-                className={`w-full h-10 px-2 py-2 rounded-xl text-sm border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-200 text-gray-800'}`}
-              >
-                <option value="newest">Newest ↓</option>
-                <option value="oldest">Oldest ↑</option>
-              </select>
-            </div>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[minmax(170px,1fr)_115px_repeat(4,minmax(120px,1fr))_84px] items-end">
             <div className="min-w-0">
               <RFQMultiSearch
                 value={rfqSearch}
@@ -3546,7 +3323,7 @@ const App = () => {
                             return <span className={`inline-flex max-w-full truncate px-2 py-0.5 rounded-full text-[11px] font-semibold ${c ? `${c.bg} ${c.text}` : 'bg-gray-100 text-gray-700'}`}>{value}</span>;
                           })() : hasValue ? renderValue(value, sourceStyle ? txt2 : 'text-blue-600') : <span>{field === 'photo_url' ? '' : '\u00a0'}</span>}
                         </div>
-                        <button type="button" aria-label="Fill down" title="Drag down to copy" onMouseDown={e => startRFQFill(e, rowIndex, field)} className="absolute bottom-0 right-0 h-2.5 w-2.5 translate-x-1/2 translate-y-1/2 border border-blue-600 bg-blue-600 opacity-0 group-hover:opacity-100 focus:opacity-100" />
+                        <button type="button" aria-label="Fill down" title="Drag down to copy" onMouseDown={e => startRFQFill(e, rowIndex, field)} className="rfq-fill-handle absolute bottom-0 right-0 h-3 w-3 translate-x-1/2 translate-y-1/2 border border-blue-600 bg-blue-600 opacity-0 group-hover:opacity-100 focus:opacity-100" />
                       </td>;
                     }
                     if (field === 'amt_idr') {
@@ -3626,8 +3403,12 @@ const App = () => {
   };
 
   const renderItemRegistration = () => {
+    const fmtDateShort = (d) => {
+      if (!d) return '-';
+      try { return String(d).slice(0, 10); } catch { return d; }
+    };
     const baseColumns = [
-      ['Proc. Status', 'proc_status'], ['Existing Owner', 'existing_owner'], ['Client Nm.', 'client_name'], ['Category', 'category'], ['PIC', 'pic'],
+      ['Proc. Status', 'proc_status'], ['Req. Date', 'req_date'], ['Client Nm.', 'client_name'], ['Category', 'category'], ['PIC', 'pic'],
       ['Req. No', 'req_no'], ['Prod. ID', 'prod_id'], ['Prod. Nm.', 'prod_name'],
       ['Spec.', 'spec'], ['Mfr. Nm.', 'mfr_name'], ['Unit', 'odr_unit'],
       ['Prod. Price', 'prod_price'], ['Curr.', 'curr']
@@ -3650,7 +3431,7 @@ const App = () => {
     ];
     const itemRegKpiCols = Math.max(1, itemRegPicKpis.length);
     const colWidth = (key) => ({
-      proc_status: 150, existing_owner: 120, client_name: 180, category: 170, pic: 90, req_no: 150, prod_id: 110,
+      proc_status: 150, req_date: 110, client_name: 180, category: 170, pic: 90, req_no: 150, prod_id: 110,
       prod_name: 240, spec: 220, mfr_name: 150, odr_unit: 80,
       prod_price: 120, curr: 70, remarks: 560
     }[key] || 140);
@@ -3714,7 +3495,7 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[170px_repeat(6,minmax(150px,1fr))_120px] items-end">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[170px_repeat(5,minmax(150px,1fr))_120px] items-end">
             <div className="min-w-0">
               <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Req No.</label>
               <SearchInput
@@ -3736,10 +3517,6 @@ const App = () => {
                 onChange={v=>{ const next={...itemRegFilters, proc_statuses:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
             <div className="min-w-0">
-              <MultiSelect label="Existing Owner" options={itemRegOptions.existing_owners} selected={itemRegFilters.existing_owners}
-                onChange={v=>{ const next={...itemRegFilters, existing_owners:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
-            </div>
-            <div className="min-w-0">
               <MultiSelect label="Client Name" options={itemRegOptions.clients} selected={itemRegFilters.clients}
                 onChange={v=>{ const next={...itemRegFilters, clients:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
@@ -3755,7 +3532,7 @@ const App = () => {
               <MultiSelect label="Mfr. Nm." options={itemRegOptions.mfr_names} selected={itemRegFilters.mfr_names}
                 onChange={v=>{ const next={...itemRegFilters, mfr_names:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <button onClick={() => { const next={ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [], existing_owners: [] }; setItemRegSearch([]); setItemRegAppliedSearch([]); setItemRegPicHighlight(''); setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1, itemRegPerPage, [], next, ''); }}
+            <button onClick={() => { const next={ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] }; setItemRegSearch([]); setItemRegAppliedSearch([]); setItemRegPicHighlight(''); setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1, itemRegPerPage, [], next, ''); }}
               className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
         </FilterPanel>
@@ -3769,7 +3546,7 @@ const App = () => {
               : itemRegData.map(row => {
                 return <tr key={row.id} className={`${trHov} transition-colors`}>
                 {columns.map(([, key]) => {
-                  const value = key === 'prod_price' ? fmtNum(row[key]) : (row[key] || '-');
+                  const value = key === 'prod_price' ? fmtNum(row[key]) : key === 'req_date' ? fmtDateShort(row[key]) : (row[key] || '-');
                   if (key === 'proc_status') return <td key={key} className="px-2 py-2"><span className={`inline-flex max-w-full items-center px-2 py-0.5 rounded-full border text-[11px] font-semibold leading-snug truncate ${statusClass(row[key])}`}>{value}</span></td>;
                   if (key === 'pic') {
                     const c = getPicColor(row.pic);
@@ -3785,7 +3562,7 @@ const App = () => {
                   ) : (
                     <span className="cursor-pointer text-blue-600 hover:underline" onClick={()=>{setEditingCell({id:row.id,field:'item_remarks'});setEditValue(row.remarks||'');}}>{row.remarks||'Add'}</span>
                   )}</td>;
-                  return <td key={key} className={`px-2 py-2 ${['req_no','prod_name'].includes(key) ? '' : 'truncate'} ${key === 'prod_price' ? `text-right font-semibold ${kpiValue}` : txt2} ${['req_no','prod_id','prod_name','odr_unit','curr'].includes(key) ? 'whitespace-nowrap' : ''}`} title={row[key]}>{value}</td>;
+                  return <td key={key} className={`px-2 py-2 ${['req_no','prod_name'].includes(key) ? '' : 'truncate'} ${key === 'prod_price' ? `text-right font-semibold ${kpiValue}` : txt2} ${['req_date','req_no','prod_id','prod_name','odr_unit','curr'].includes(key) ? 'whitespace-nowrap' : ''}`} title={row[key]}>{value}</td>;
                 })}
               </tr>;})}
             </tbody>
@@ -3818,7 +3595,6 @@ const App = () => {
     const statusMonthlyRows = stats?.so_status_monthly || [];
     const itemRegProcStatus = stats?.item_registration_proc_status || [];
     const itemRegClients = stats?.item_registration_clients || [];
-    const itemRegExistingOwners = stats?.item_registration_existing_owners || [];
     const pendingVendors = stats?.top_vendors || [];
     const sumRows = (rows, key) => (rows || []).reduce((sum, row) => sum + (Number(row?.[key]) || 0), 0);
     const pendingMonthlyTotal = sumRows(pendingMonthly, 'so_count');
@@ -4061,7 +3837,6 @@ const App = () => {
            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
             {itemRegCategoryChart(itemRegProcStatus, 'Proc. Status')}
             {itemRegCategoryChart(itemRegClients, 'Client Nm.')}
-            {itemRegCategoryChart(itemRegExistingOwners, 'Existing Owner')}
           </div>
         </div>
       </div>
@@ -4108,7 +3883,7 @@ const App = () => {
               const activePic = !p.isTotal && pendingPicHighlight === p.pic;
               const applyPicKpiFilter = () => {
                 const nextHighlight = p.isTotal || activePic ? '' : p.pic;
-                const nextFilters = { ...soFilters, pics: nextHighlight ? [nextHighlight] : [] };
+                const nextFilters = { ...soFilters };
                 setPendingPicHighlight(nextHighlight);
                 setSoFilters(nextFilters);
                 setSoPage(1);
@@ -4503,6 +4278,8 @@ const App = () => {
           cursor: pointer !important;
         }
         button:disabled { cursor: not-allowed !important; opacity: 0.5; }
+        .rfq-fill-handle { cursor: crosshair !important; }
+        body.rfq-fill-dragging, body.rfq-fill-dragging * { cursor: crosshair !important; }
         .reference-card {
           border-radius: 24px;
           box-shadow: 0 18px 45px rgba(15, 23, 42, 0.06);
@@ -4587,7 +4364,7 @@ const App = () => {
             <Building2 className="w-5 h-5 flex-shrink-0"/>
             <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-44 opacity-100':'max-w-0 opacity-0'}`}>Vendor Control</span>
           </button>
-          <button onClick={()=>{ setActivePage('all-registered-items'); setRegisteredItemsPage(1); fetchRegisteredItems(1,registeredItemsPerPage,registeredItemsAppliedSearch,registeredItemsAppliedProdIds); window.scrollTo({top:0,behavior:'smooth'}); }}
+          <button onClick={()=>{ setActivePage('all-registered-items'); setRegisteredItemsPage(1); fetchRegisteredItems(1,registeredItemsPerPage,registeredItemsAppliedSearch,registeredItemsAppliedProdIds,registeredItemsFilters); window.scrollTo({top:0,behavior:'smooth'}); }}
             className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='all-registered-items'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="All Registered Items">
             <FileText className="w-5 h-5 flex-shrink-0"/>
             <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-44 opacity-100':'max-w-0 opacity-0'}`}>All Registered Items</span>
@@ -4612,7 +4389,7 @@ const App = () => {
             <p className={`mt-0.5 text-sm ${txt2}`}>
               {activePage==='dashboard'?'Purchase Orders & Sales Orders Summary'
                :activePage==='all-so'?'Pending Delivery monitoring and detail records'
-               :activePage==='item-registration'?'Process Purchase Info Registration data'
+               :activePage==='item-registration'?'Product Registration Status data'
                :activePage==='rfq'?'Sales Submit-RFQ live data and quotation updates'
                :activePage==='vendor-control'?'Vendor account access and credential control'
                :activePage==='all-registered-items'?'All registered product master data'
@@ -4643,7 +4420,7 @@ const App = () => {
                     <Upload className="w-4 h-4 text-blue-500"/>
                     <div>
                       <span className={`text-sm font-medium ${txt}`}>Upload Item Registration</span>
-                      <p className={`text-xs ${txt2}`}>Update Process Purchase Info Registration</p>
+                      <p className={`text-xs ${txt2}`}>Upload SAP Process Pur. Info. Reg. only</p>
                     </div>
                     <input type="file" accept=".xlsx,.xls" multiple onChange={e=>{handleUploadItemRegistration(e); setShowUploadDropdown(false);}} className="hidden"/>
                   </label>
@@ -4657,11 +4434,19 @@ const App = () => {
                     <input type="file" accept=".xlsx,.xls" multiple onChange={e=>{handleUploadProductID(e); setShowUploadDropdown(false);}} className="hidden"/>
                   </label>
                   <div className={`${darkMode?'border-t border-gray-700':'border-t border-gray-100'}`}></div>
+                  <button type="button" onClick={()=>{ downloadMasterPICTemplate(); setShowUploadDropdown(false); }} className={`w-full flex items-center gap-2 px-4 py-3 text-left transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-indigo-50'}`}>
+                    <Download className="w-4 h-4 text-indigo-500"/>
+                    <div>
+                      <span className={`text-sm font-medium ${txt}`}>Master PIC Update Template</span>
+                      <p className={`text-xs ${txt2}`}>Category Name, PIC, Update New PIC</p>
+                    </div>
+                  </button>
+                  <div className={`${darkMode?'border-t border-gray-700':'border-t border-gray-100'}`}></div>
                   <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-indigo-50'}`}>
                     <Upload className="w-4 h-4 text-indigo-500"/>
                     <div>
                       <span className={`text-sm font-medium ${txt}`}>Update PIC</span>
-                      <p className={`text-xs ${txt2}`}>Update PIC by category</p>
+                      <p className={`text-xs ${txt2}`}>Update PIC by Category Name</p>
                     </div>
                     <input type="file" accept=".xlsx,.xls" multiple onChange={e=>{handleUpdatePIC(e); setShowUploadDropdown(false);}} className="hidden"/>
                   </label>
@@ -4669,66 +4454,6 @@ const App = () => {
               )}
               </div>
 
-              <div className="relative" ref={hideMenuRef}>
-              <button data-tour="hide-menu" onClick={()=>setShowHideMenu(o=>!o)}
-                className="flex items-center gap-2 px-4 py-2.5 rounded-xl shadow-sm transition-all bg-slate-600 hover:bg-slate-700 text-white">
-                <EyeOff className="w-4 h-4"/><span className="text-sm font-medium">Hide</span>
-                <ChevronDown className="w-3.5 h-3.5"/>
-                {deleteRequests.filter(r=>r.is_hidden).length > 0 && (
-                  <span className="px-1.5 py-0.5 bg-white text-slate-700 rounded-full text-xs font-bold">
-                    {deleteRequests.filter(r=>r.is_hidden).length}
-                  </span>
-                )}
-              </button>
-              {showHideMenu && (
-                <div className={`absolute right-0 mt-2 z-50 rounded-xl shadow-2xl border w-80 p-3 ${darkMode?'bg-gray-800 border-gray-700 text-white':'bg-white border-gray-200'}`}>
-                  {/* View Hidden History */}
-                  <button onClick={()=>{ setShowHideMenu(false); fetchDeleteRequests(); setShowHiddenPanel(true); }}
-                    className={`w-full flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold mb-3 ${darkMode?'bg-gray-700 hover:bg-gray-600 text-white':'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>
-                    <Eye className="w-4 h-4 text-blue-500"/>
-                    View Hide History
-                    {deleteRequests.filter(r=>r.is_hidden).length > 0 && (
-                      <span className="ml-auto px-2 py-0.5 bg-slate-600 text-white rounded-full text-xs font-bold">
-                        {deleteRequests.filter(r=>r.is_hidden).length}
-                      </span>
-                    )}
-                  </button>
-                  <p className={`text-xs font-semibold mb-2 px-1 ${darkMode?'text-gray-300':'text-gray-600'}`}>
-                    Hide data from dashboard via Excel template
-                  </p>
-                  {/* PO */}
-                  <div className={`mb-2 p-3 rounded-lg ${darkMode?'bg-gray-700':'bg-slate-50'}`}>
-                    <p className="text-xs font-bold mb-1 text-slate-700 flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-slate-700"/><span>PO HLI</span></p>
-                    <p className={`text-xs mb-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>Format: PO Number-Item No (e.g. 4502358819-10)</p>
-                    <div className="flex gap-2">
-                      <button onClick={()=>downloadHideTemplate('PO')}
-                        className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-slate-600 hover:bg-slate-700 text-white rounded-lg text-xs font-semibold">
-                        <Download className="w-3 h-3"/>Download Template
-                      </button>
-                      <label className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold cursor-pointer">
-                        <Upload className="w-3 h-3"/>Upload Filled
-                        <input type="file" accept=".xlsx,.xls" onChange={e=>handleHideBatchUpload(e,'PO')} className="hidden"/>
-                      </label>
-                    </div>
-                  </div>
-                  {/* SO */}
-                  <div className={`p-3 rounded-lg ${darkMode?'bg-gray-700':'bg-blue-50'}`}>
-                    <p className="text-xs font-bold mb-1 text-blue-700 flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-blue-600"/><span>SO</span></p>
-                    <p className={`text-xs mb-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>Format: SO Number or SO Number-Item No</p>
-                    <div className="flex gap-2">
-                      <button onClick={()=>downloadHideTemplate('SO')}
-                        className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold">
-                        <Download className="w-3 h-3"/>Download Template
-                      </button>
-                      <label className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold cursor-pointer">
-                        <Upload className="w-3 h-3"/>Upload Filled
-                        <input type="file" accept=".xlsx,.xls" onChange={e=>handleHideBatchUpload(e,'SO')} className="hidden"/>
-                      </label>
-                    </div>
-                  </div>
-                </div>
-              )}
-              </div>
             </div>
             <div className={`max-w-full text-right text-xs ${txt2}`}>
               <span className="font-semibold">Updates:</span>{' '}
@@ -4832,15 +4557,6 @@ const App = () => {
             </div>
           </div>
         </div>
-      )}
-
-      {showHiddenPanel && (
-        <HiddenItemsPanel
-          darkMode={darkMode}
-          requests={deleteRequests}
-          onRestore={restoreDeleteRequest}
-          onClose={()=>setShowHiddenPanel(false)}
-        />
       )}
 
       {uploadProgress && (
