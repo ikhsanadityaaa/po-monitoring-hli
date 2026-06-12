@@ -1435,12 +1435,36 @@ def fetch_rfq_rows(force=False):
     })
     return rows, fetched_at
 
+def cleanup_rfq_sheet_backed_edits(commit=False):
+    """Remove stale local RFQ edits for fields whose source of truth is Google Sheet.
+
+    Private Remarks stay local-only in RFQCellEdit. Unit Price, Vendor, Remarks,
+    and other mapped quotation fields must be read from and written to the RFQ
+    Google Sheet, otherwise old local edits can mask newer sheet values.
+    """
+    try:
+        deleted = RFQCellEdit.query.filter(~RFQCellEdit.field.in_(list(RFQ_DASHBOARD_ONLY_FIELDS))).delete(synchronize_session=False)
+        if commit and deleted:
+            db.session.commit()
+        return deleted or 0
+    except Exception:
+        if commit:
+            db.session.rollback()
+        return 0
+
+
 def rfq_rows_with_edits(force=False, prefer_stale_cache=False):
     if prefer_stale_cache and not force and RFQ_CACHE.get('rows'):
         rows, fetched_at = RFQ_CACHE['rows'], RFQ_CACHE['fetched_at']
     else:
         rows, fetched_at = fetch_rfq_rows(force=force)
-    edits = RFQCellEdit.query.all()
+
+    # Clean up old local RFQ edits created before the sheet-sync fix. Only
+    # Private Remarks are dashboard-only; all other RFQ fields come from the
+    # Google Sheet so Unit Price and quotation data never get masked by stale DB values.
+    cleanup_rfq_sheet_backed_edits(commit=True)
+
+    edits = RFQCellEdit.query.filter(RFQCellEdit.field.in_(list(RFQ_DASHBOARD_ONLY_FIELDS))).all()
     edit_map = {}
     for edit in edits:
         edit_map.setdefault(edit.row_key, {})[edit.field] = edit.value
@@ -1448,8 +1472,7 @@ def rfq_rows_with_edits(force=False, prefer_stale_cache=False):
     for row in rows:
         item = dict(row)
         for field, value in edit_map.get(item['row_key'], {}).items():
-            if field in RFQ_EDITABLE_FIELDS or field in RFQ_DIRECT_UPDATE_FIELDS:
-                item[field] = clean_product_id(value) if field == 'product_id' else value
+            item[field] = value
         apply_rfq_computed_fields(item)
         merged.append(item)
     return merged, fetched_at
@@ -2197,6 +2220,24 @@ def resolve_item_registration_pic(row):
 def is_existing_owner_pur_pic(value):
     return (clean(value) or '').strip().lower() == 'pur. pic'
 
+ITEM_REG_KPI_EXCLUDED_STATUSES = {
+    'sales pic terminate(pur. pic)',
+    'purchase exception termination',
+    'sales pic confirmation req.(pur. pic)',
+    'pre-reg. prod. proc.(pur.)',
+}
+
+def item_registration_kpi_status_expr():
+    return func.lower(func.trim(func.coalesce(ItemRegistration.proc_status, '')))
+
+def apply_item_registration_kpi_status_filter(query):
+    """KPI Item Registration counts only active pending rows.
+
+Excluded statuses are business-stop / confirmation / pre-registration process
+statuses that should remain visible in the table but not inflate PIC KPI cards.
+"""
+    return query.filter(~item_registration_kpi_status_expr().in_(list(ITEM_REG_KPI_EXCLUDED_STATUSES)))
+
 def refresh_item_registration_mappings():
     rows = ItemRegistration.query.all()
     changed = False
@@ -2251,8 +2292,53 @@ def _item_registration_columns(df):
         ]),
     }
 
+def validate_item_registration_source_file(df, filename='Item Registration'):
+    """Accept only SAP Process Pur. Info. Reg. exports for Item Registration.
+
+    Prod. Reg. Status is a different SAP export with similar registration-looking
+    columns. It must be rejected here because the Item Registration page is built
+    from Process Pur. Info. Reg. data.
+    """
+    marker_cols = {str(c).strip().lower() for c in df.columns}
+    filename_l = str(filename or '').lower()
+
+    process_markers = {
+        'unified vendor', 'bid/quo.', 'multi. bidding required',
+        'bid no.', 'deadline', 'pur. info. proc. compl. date',
+        'vendor confirm req. detail', 'vendor confirm proc. detail',
+    }
+    prod_reg_markers = {
+        'register request',
+        'prod. req. skip reason',
+        'prod. reg. req. compl. date',
+        'prod. reg. req. reject date',
+    }
+
+    matched_process = sorted(process_markers & marker_cols)
+    matched_prod_reg = sorted(prod_reg_markers & marker_cols)
+    filename_looks_process = 'process' in filename_l and 'pur' in filename_l and 'info' in filename_l
+    filename_looks_prod_reg = 'prod' in filename_l and 'reg' in filename_l and 'status' in filename_l
+
+    if matched_prod_reg and not matched_process:
+        raise ValueError(
+            f'File "{filename}" salah untuk Item Registration. Upload yang benar adalah file Process Pur. Info. Reg., bukan Prod. Reg. Status.'
+        )
+
+    if filename_looks_prod_reg and not matched_process:
+        raise ValueError(
+            f'File "{filename}" ditolak. Item Registration sekarang hanya menerima file Process Pur. Info. Reg.'
+        )
+
+    if not matched_process and not filename_looks_process:
+        raise ValueError(
+            f'File "{filename}" tidak terlihat seperti Process Pur. Info. Reg. '
+            'Pastikan upload file SAP Process Pur. Info. Reg. yang benar.'
+        )
+
+
 def import_item_registration_dataframe(df, filename='Item Registration'):
     df.columns = [str(c).strip() for c in df.columns]
+    validate_item_registration_source_file(df, filename)
     col = _item_registration_columns(df)
     expected = [
         ('proc_status', 'Proc. Status'), ('client_name', 'Client Nm.'),
@@ -2597,10 +2683,7 @@ def get_dashboard_stats():
             key=lambda x: x['total'], reverse=True
         )
 
-        item_reg_base_q = db.session.query(ItemRegistration)
-        item_reg_base_q = item_reg_base_q.filter(
-            func.coalesce(func.nullif(func.trim(ItemRegistration.proc_status), ''), '(Kosong)') != 'Purchasing Process Complete'
-        )
+        item_reg_base_q = apply_item_registration_kpi_status_filter(db.session.query(ItemRegistration))
         if clients:
             item_reg_base_q = item_reg_base_q.filter(ItemRegistration.client_name.in_(clients))
 
@@ -2618,7 +2701,6 @@ def get_dashboard_stats():
 
         item_registration_proc_status = item_registration_distribution(ItemRegistration.proc_status)
         item_registration_clients = item_registration_distribution(ItemRegistration.client_name, limit=10)
-        item_registration_existing_owners = item_registration_distribution(ItemRegistration.existing_owner)
 
         options_q = apply_so_create_date_filter(
             db.session.query(SOData).filter(open_so_filter()),
@@ -2740,7 +2822,6 @@ def get_dashboard_stats():
             'status_months': sorted_months,
             'item_registration_proc_status': item_registration_proc_status,
             'item_registration_clients': item_registration_clients,
-            'item_registration_existing_owners': item_registration_existing_owners,
             'filters': {
                 'clients': client_options,
                 'pics': pic_options,
@@ -5379,8 +5460,6 @@ def get_item_registration_data():
         kpi_pic = (request.args.get('kpi_pic') or '').strip()
         proc_statuses = [s.strip() for s in request.args.getlist('proc_status') if s.strip()]
         mfr_names = [s.strip() for s in request.args.getlist('mfr_name') if s.strip()]
-        existing_owners = [s.strip() for s in request.args.getlist('existing_owner') if s.strip()]
-
         q = apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to)
         if clients:
             q = q.filter(ItemRegistration.client_name.in_(clients))
@@ -5393,8 +5472,6 @@ def get_item_registration_data():
             q = q.filter(ItemRegistration.proc_status.in_(proc_statuses))
         if mfr_names:
             q = q.filter(ItemRegistration.mfr_name.in_(mfr_names))
-        if existing_owners:
-            q = q.filter(ItemRegistration.existing_owner.in_(existing_owners))
         if req_numbers:
             q = q.filter(ItemRegistration.req_no.in_(req_numbers))
         if search:
@@ -5413,15 +5490,9 @@ def get_item_registration_data():
         # the table data.
         kpi_q = q
 
-        owner_has_data = kpi_q.filter(
-            ItemRegistration.existing_owner.isnot(None),
-            func.trim(ItemRegistration.existing_owner) != ''
-        ).count() > 0
-        missing_q = kpi_q.filter(
+        missing_q = apply_item_registration_kpi_status_filter(kpi_q).filter(
             db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-')
         )
-        if owner_has_data:
-            missing_q = missing_q.filter(func.lower(func.trim(ItemRegistration.existing_owner)).in_(['pur. pic', 'pur.pic', 'pur pic']))
         missing_prod_rows = missing_q.all()
         missing_by_pic = {}
         for r in missing_prod_rows:
@@ -5439,8 +5510,6 @@ def get_item_registration_data():
         if kpi_pic:
             q = apply_item_registration_pic_filter(q, [kpi_pic])
             q = q.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-'))
-            if owner_has_data:
-                q = q.filter(func.lower(func.trim(ItemRegistration.existing_owner)).in_(['pur. pic', 'pur.pic', 'pur pic']))
 
         total = q.count()
         rows = q.order_by(ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()).offset((page-1)*per_page).limit(per_page).all()
@@ -5455,14 +5524,12 @@ def get_item_registration_data():
             ItemRegistration.pic,
             ItemRegistration.proc_status,
             ItemRegistration.mfr_name,
-            ItemRegistration.existing_owner,
         ).all()
         all_clients = sorted({r.client_name for r in option_rows if r.client_name})
         all_categories = sorted({r.category for r in option_rows if r.category})
         all_pics = sorted({resolve_item_registration_pic(r) for r in option_rows if resolve_item_registration_pic(r) != 'Unassigned'})
         all_proc_statuses = sorted({r.proc_status for r in option_rows if r.proc_status})
         all_mfr_names = sorted({r.mfr_name for r in option_rows if r.mfr_name})
-        all_existing_owners = sorted({r.existing_owner for r in option_rows if r.existing_owner})
         last_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'ITEM_REG').scalar()
 
         response_rows = [item_registration_dict(r, include_similarity=False) for r in rows]
@@ -5477,7 +5544,6 @@ def get_item_registration_data():
             'pic_options': all_pics,
             'proc_status_options': all_proc_statuses,
             'mfr_name_options': all_mfr_names,
-            'existing_owner_options': all_existing_owners,
             'missing_prod_id_by_pic': missing_prod_id_by_pic,
             'last_updated': utc_isoformat(last_upload),
         })
@@ -5569,7 +5635,6 @@ def apply_item_registration_request_filters(query):
     kpi_pic = (request.args.get('kpi_pic') or '').strip()
     proc_statuses = [s.strip() for s in request.args.getlist('proc_status') if s.strip()]
     mfr_names = [s.strip() for s in request.args.getlist('mfr_name') if s.strip()]
-    existing_owners = [s.strip() for s in request.args.getlist('existing_owner') if s.strip()]
     query = apply_item_registration_date_filter(query, date_year, date_from, date_to)
     if clients:
         query = query.filter(ItemRegistration.client_name.in_(clients))
@@ -5583,8 +5648,6 @@ def apply_item_registration_request_filters(query):
         query = query.filter(ItemRegistration.proc_status.in_(proc_statuses))
     if mfr_names:
         query = query.filter(ItemRegistration.mfr_name.in_(mfr_names))
-    if existing_owners:
-        query = query.filter(ItemRegistration.existing_owner.in_(existing_owners))
     if req_numbers:
         query = query.filter(ItemRegistration.req_no.in_(req_numbers))
     if search:
@@ -5598,14 +5661,9 @@ def apply_item_registration_request_filters(query):
             ItemRegistration.remarks.ilike(pattern),
         ))
     if kpi_pic:
-        owner_has_data = query.filter(
-            ItemRegistration.existing_owner.isnot(None),
-            func.trim(ItemRegistration.existing_owner) != ''
-        ).count() > 0
         query = apply_item_registration_pic_filter(query, [kpi_pic])
+        query = apply_item_registration_kpi_status_filter(query)
         query = query.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-'))
-        if owner_has_data:
-            query = query.filter(func.lower(func.trim(ItemRegistration.existing_owner)).in_(['pur. pic', 'pur.pic', 'pur pic']))
     return query
 
 
@@ -5673,17 +5731,16 @@ def export_item_registration():
         ws = wb.active
         ws.title = "Item Registration"
         headers = [
-            'Proc. Status', 'Existing Owner', 'Client Nm.', 'Category', 'PIC', 'Req. No', 'Prod. ID',
+            'Proc. Status', 'Client Nm.', 'Category', 'PIC', 'Req. No', 'Prod. ID',
             'Prod. Nm.', 'Spec.', 'Mfr. Nm.', 'Odr. Unit', 'Prod. Price', 'Curr.', 'Remarks'
         ]
-        _style_wb(ws, headers, num_cols=[12])
-        widths = [26, 18, 34, 24, 16, 18, 18, 28, 48, 24, 14, 16, 12, 60]
+        _style_wb(ws, headers, num_cols=[11])
+        widths = [26, 34, 24, 16, 18, 18, 28, 48, 24, 14, 16, 12, 60]
         for i, width in enumerate(widths, 1):
             ws.column_dimensions[get_column_letter(i)].width = width
         for row in rows:
             ws.append([
                 row.proc_status or '',
-                row.existing_owner or '',
                 row.client_name or '',
                 source_category_level1(row.category),
                 row.pic or '',
@@ -6352,13 +6409,17 @@ def batch_upload_rfq():
             return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
         rows, _ = rfq_rows_with_edits(force=True)
         no_map = {}
+        row_by_key = {}
         for row in rows:
+            row_by_key[row['row_key']] = row
             no = clean(row.get('no'))
             if no:
                 no_map.setdefault(no, []).append(row['row_key'])
 
         updated = 0
         not_found = 0
+        sheet_updates = []
+        local_updates = 0
         for upload in uploads:
             df = upload['df']
             df.columns = [str(c).strip() for c in df.columns]
@@ -6379,16 +6440,39 @@ def batch_upload_rfq():
                         continue
                     value = clean(df_val(src, col)) or ''
                     for row_key in keys:
-                        edit = RFQCellEdit.query.filter_by(row_key=row_key, field=field).first()
-                        if not edit:
-                            edit = RFQCellEdit(row_key=row_key, field=field)
-                            db.session.add(edit)
-                        edit.value = str(value)
-                        edit.updated_at = datetime.utcnow()
+                        if field in RFQ_DASHBOARD_ONLY_FIELDS:
+                            edit = RFQCellEdit.query.filter_by(row_key=row_key, field=field).first()
+                            if not edit:
+                                edit = RFQCellEdit(row_key=row_key, field=field)
+                                db.session.add(edit)
+                            edit.value = str(value)
+                            edit.updated_at = datetime.utcnow()
+                            local_updates += 1
+                        else:
+                            base_row = row_by_key.get(row_key)
+                            if base_row:
+                                sheet_updates.append({'row': base_row, 'field': field, 'value': str(value)})
                         updated += 1
+
+        # Remove legacy local edits for sheet-backed RFQ fields before syncing.
+        cleanup_rfq_sheet_backed_edits(commit=False)
         db.session.commit()
+
+        try:
+            sheet_sync = sync_rfq_cells_to_google_sheet(sheet_updates) if sheet_updates else {'synced': True, 'updated_ranges': 0}
+        except Exception as sync_error:
+            sheet_sync = {'synced': False, 'reason': str(sync_error)}
+
         clear_runtime_caches()
-        return jsonify({'updated': updated, 'not_found': not_found, 'files': len(uploads), 'mode': upload_mode})
+        return jsonify({
+            'updated': updated,
+            'sheet_updates': len(sheet_updates),
+            'local_updates': local_updates,
+            'not_found': not_found,
+            'files': len(uploads),
+            'mode': upload_mode,
+            'sheet_sync': sheet_sync,
+        })
     except Exception as e:
         db.session.rollback()
         import traceback; traceback.print_exc()
@@ -6515,19 +6599,22 @@ def update_rfq_cells_batch():
                 continue
 
             clean_value = clean_product_id(value) if field == 'product_id' else ('' if value is None else str(value))
-            edit = RFQCellEdit.query.filter_by(row_key=row_key, field=field).first()
-            if not edit:
-                edit = RFQCellEdit(row_key=row_key, field=field)
-                db.session.add(edit)
-            edit.value = clean_value
-            edit.updated_at = datetime.utcnow()
-            sheet_updates.append({'row': base_row, 'field': field, 'value': clean_value})
+            if field in RFQ_DASHBOARD_ONLY_FIELDS:
+                edit = RFQCellEdit.query.filter_by(row_key=row_key, field=field).first()
+                if not edit:
+                    edit = RFQCellEdit(row_key=row_key, field=field)
+                    db.session.add(edit)
+                edit.value = clean_value
+                edit.updated_at = datetime.utcnow()
+            else:
+                sheet_updates.append({'row': base_row, 'field': field, 'value': clean_value})
             updated += 1
 
+        cleanup_rfq_sheet_backed_edits(commit=False)
         db.session.commit()
         clear_runtime_caches()
         try:
-            sheet_sync = sync_rfq_cells_to_google_sheet(sheet_updates)
+            sheet_sync = sync_rfq_cells_to_google_sheet(sheet_updates) if sheet_updates else {'synced': True, 'local_only': True}
         except Exception as sync_error:
             sheet_sync = {'synced': False, 'reason': str(sync_error)}
         return jsonify({'success': True, 'updated': updated, 'skipped': skipped, 'sheet_sync': sheet_sync})
@@ -6548,19 +6635,26 @@ def update_rfq_cell(row_key):
         base_row = next((row for row in base_rows if row.get('row_key') == row_key), None)
         if not base_row:
             return jsonify({'error': 'RFQ row not found'}), 404
-        edit = RFQCellEdit.query.filter_by(row_key=row_key, field=field).first()
-        if not edit:
-            edit = RFQCellEdit(row_key=row_key, field=field)
-            db.session.add(edit)
-        edit.value = clean_product_id(value) if field == 'product_id' else ('' if value is None else str(value))
-        edit.updated_at = datetime.utcnow()
-        db.session.commit()
-        clear_runtime_caches()
-        try:
-            sheet_sync = sync_rfq_cell_to_google_sheet(base_row, field, edit.value)
-        except Exception as sync_error:
-            sheet_sync = {'synced': False, 'reason': str(sync_error)}
-        return jsonify({'success': True, 'row_key': row_key, 'field': field, 'value': edit.value, 'sheet_sync': sheet_sync})
+        clean_value = clean_product_id(value) if field == 'product_id' else ('' if value is None else str(value))
+        if field in RFQ_DASHBOARD_ONLY_FIELDS:
+            edit = RFQCellEdit.query.filter_by(row_key=row_key, field=field).first()
+            if not edit:
+                edit = RFQCellEdit(row_key=row_key, field=field)
+                db.session.add(edit)
+            edit.value = clean_value
+            edit.updated_at = datetime.utcnow()
+            db.session.commit()
+            clear_runtime_caches()
+            sheet_sync = {'synced': True, 'local_only': True}
+        else:
+            RFQCellEdit.query.filter_by(row_key=row_key, field=field).delete()
+            db.session.commit()
+            try:
+                sheet_sync = sync_rfq_cell_to_google_sheet(base_row, field, clean_value)
+            except Exception as sync_error:
+                sheet_sync = {'synced': False, 'reason': str(sync_error)}
+            clear_runtime_caches()
+        return jsonify({'success': True, 'row_key': row_key, 'field': field, 'value': clean_value, 'sheet_sync': sheet_sync})
     except Exception as e:
         db.session.rollback()
         import traceback; traceback.print_exc()
