@@ -974,8 +974,8 @@ const App = () => {
   const [itemRegSearch, setItemRegSearch] = useState([]);
   const [itemRegAppliedSearch, setItemRegAppliedSearch] = useState([]);
   const [itemRegLastUpdated, setItemRegLastUpdated] = useState(null);
-  const [itemRegFilters, setItemRegFilters] = useState({ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [], existing_owners: [] });
-  const [itemRegOptions, setItemRegOptions] = useState({ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [], existing_owners: [] });
+  const [itemRegFilters, setItemRegFilters] = useState({ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] });
+  const [itemRegOptions, setItemRegOptions] = useState({ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] });
   const [itemRegMissingPicKpis, setItemRegMissingPicKpis] = useState([]);
   const [itemRegPicHighlight, setItemRegPicHighlight] = useState('');
 
@@ -1293,7 +1293,6 @@ const App = () => {
       resolveFilter(filters.pics).forEach(v => params.append('pic', v));
       resolveFilter(filters.proc_statuses).forEach(v => params.append('proc_status', v));
       resolveFilter(filters.mfr_names).forEach(v => params.append('mfr_name', v));
-      resolveFilter(filters.existing_owners).forEach(v => params.append('existing_owner', v));
       if (kpiPic) params.append('kpi_pic', kpiPic);
       const res = await api.get(`/api/item-registration/data?${params}`);
       const rows = Array.isArray(res.data.data) ? res.data.data : [];
@@ -1306,8 +1305,7 @@ const App = () => {
         categories: res.data.category_options || [],
         pics: res.data.pic_options || [],
         proc_statuses: res.data.proc_status_options || [],
-        mfr_names: res.data.mfr_name_options || [],
-        existing_owners: res.data.existing_owner_options || []
+        mfr_names: res.data.mfr_name_options || []
       });
     } catch (e) {
       addToast(`Failed to load Item Registration: ${e.response?.data?.error || e.message}`, 'error');
@@ -1720,7 +1718,6 @@ const App = () => {
     resolveFilter(itemRegFilters.pics).forEach(v => p.append('pic', v));
     resolveFilter(itemRegFilters.proc_statuses).forEach(v => p.append('proc_status', v));
     resolveFilter(itemRegFilters.mfr_names).forEach(v => p.append('mfr_name', v));
-    resolveFilter(itemRegFilters.existing_owners).forEach(v => p.append('existing_owner', v));
     if (itemRegPicHighlight) p.append('kpi_pic', itemRegPicHighlight);
     downloadBlob(`/api/item-registration/template?${p}`, `Template_ItemRegistration_BatchUpload_${new Date().toISOString().slice(0,10)}.xlsx`, 'Item Registration Batch Upload Template');
   };
@@ -1736,7 +1733,6 @@ const App = () => {
     resolveFilter(itemRegFilters.pics).forEach(v => p.append('pic', v));
     resolveFilter(itemRegFilters.proc_statuses).forEach(v => p.append('proc_status', v));
     resolveFilter(itemRegFilters.mfr_names).forEach(v => p.append('mfr_name', v));
-    resolveFilter(itemRegFilters.existing_owners).forEach(v => p.append('existing_owner', v));
     if (itemRegPicHighlight) p.append('kpi_pic', itemRegPicHighlight);
     downloadBlob(`/api/export/item-registration?${p}`, `Item_Registration_${new Date().toISOString().slice(0,10)}.xlsx`, 'Item Registration Excel');
   };
@@ -3077,7 +3073,12 @@ const App = () => {
         const res = await api.post('/api/rfq/batch-upload', fd, {
           onUploadProgress: (ev) => setUploadProgress({ label: files.length > 1 ? `RFQ Batch (${files.length} files)` : 'RFQ Batch', pct: Math.round(ev.loaded * 100 / (ev.total || ev.loaded)) })
         });
-        addToast(`RFQ batch: ${res.data.updated || 0} cells updated${res.data.not_found ? `, ${res.data.not_found} No not found` : ''}`, 'success');
+        const syncInfo = res.data?.sheet_sync;
+        if (syncInfo && syncInfo.synced === false) {
+          addToast(`RFQ batch updated locally but Sheet sync failed: ${syncInfo.reason || 'unknown error'}`, 'warning');
+        } else {
+          addToast(`RFQ batch: ${res.data.updated || 0} cells updated${res.data.sheet_updates ? `, ${res.data.sheet_updates} synced to Sheet` : ''}${res.data.not_found ? `, ${res.data.not_found} No not found` : ''}`, 'success');
+        }
         fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, true, rfqFilters, rfqPicFilter);
       } catch (err) {
         addToast(`Failed to upload RFQ batch: ${err.response?.data?.error || err.message}`, 'error');
@@ -3449,7 +3450,7 @@ const App = () => {
       try { return String(d).slice(0, 10); } catch { return d; }
     };
     const baseColumns = [
-      ['Proc. Status', 'proc_status'], ['Req. Date', 'req_date'], ['Existing Owner', 'existing_owner'], ['Client Nm.', 'client_name'], ['Category', 'category'], ['PIC', 'pic'],
+      ['Proc. Status', 'proc_status'], ['Req. Date', 'req_date'], ['Client Nm.', 'client_name'], ['Category', 'category'], ['PIC', 'pic'],
       ['Req. No', 'req_no'], ['Prod. ID', 'prod_id'], ['Prod. Nm.', 'prod_name'],
       ['Spec.', 'spec'], ['Mfr. Nm.', 'mfr_name'], ['Unit', 'odr_unit'],
       ['Prod. Price', 'prod_price'], ['Curr.', 'curr']
@@ -3472,7 +3473,7 @@ const App = () => {
     ];
     const itemRegKpiCols = Math.max(1, itemRegPicKpis.length);
     const colWidth = (key) => ({
-      proc_status: 150, req_date: 110, existing_owner: 120, client_name: 180, category: 170, pic: 90, req_no: 150, prod_id: 110,
+      proc_status: 150, req_date: 110, client_name: 180, category: 170, pic: 90, req_no: 150, prod_id: 110,
       prod_name: 240, spec: 220, mfr_name: 150, odr_unit: 80,
       prod_price: 120, curr: 70, remarks: 560
     }[key] || 140);
@@ -3536,7 +3537,7 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[170px_repeat(6,minmax(150px,1fr))_120px] items-end">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[170px_repeat(5,minmax(150px,1fr))_120px] items-end">
             <div className="min-w-0">
               <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Req No.</label>
               <SearchInput
@@ -3558,10 +3559,6 @@ const App = () => {
                 onChange={v=>{ const next={...itemRegFilters, proc_statuses:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
             <div className="min-w-0">
-              <MultiSelect label="Existing Owner" options={itemRegOptions.existing_owners} selected={itemRegFilters.existing_owners}
-                onChange={v=>{ const next={...itemRegFilters, existing_owners:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
-            </div>
-            <div className="min-w-0">
               <MultiSelect label="Client Name" options={itemRegOptions.clients} selected={itemRegFilters.clients}
                 onChange={v=>{ const next={...itemRegFilters, clients:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
@@ -3577,7 +3574,7 @@ const App = () => {
               <MultiSelect label="Mfr. Nm." options={itemRegOptions.mfr_names} selected={itemRegFilters.mfr_names}
                 onChange={v=>{ const next={...itemRegFilters, mfr_names:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <button onClick={() => { const next={ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [], existing_owners: [] }; setItemRegSearch([]); setItemRegAppliedSearch([]); setItemRegPicHighlight(''); setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1, itemRegPerPage, [], next, ''); }}
+            <button onClick={() => { const next={ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] }; setItemRegSearch([]); setItemRegAppliedSearch([]); setItemRegPicHighlight(''); setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1, itemRegPerPage, [], next, ''); }}
               className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
         </FilterPanel>
@@ -3640,7 +3637,6 @@ const App = () => {
     const statusMonthlyRows = stats?.so_status_monthly || [];
     const itemRegProcStatus = stats?.item_registration_proc_status || [];
     const itemRegClients = stats?.item_registration_clients || [];
-    const itemRegExistingOwners = stats?.item_registration_existing_owners || [];
     const pendingVendors = stats?.top_vendors || [];
     const sumRows = (rows, key) => (rows || []).reduce((sum, row) => sum + (Number(row?.[key]) || 0), 0);
     const pendingMonthlyTotal = sumRows(pendingMonthly, 'so_count');
@@ -3883,7 +3879,6 @@ const App = () => {
            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
             {itemRegCategoryChart(itemRegProcStatus, 'Proc. Status')}
             {itemRegCategoryChart(itemRegClients, 'Client Nm.')}
-            {itemRegCategoryChart(itemRegExistingOwners, 'Existing Owner')}
           </div>
         </div>
       </div>
@@ -4436,7 +4431,7 @@ const App = () => {
             <p className={`mt-0.5 text-sm ${txt2}`}>
               {activePage==='dashboard'?'Purchase Orders & Sales Orders Summary'
                :activePage==='all-so'?'Pending Delivery monitoring and detail records'
-               :activePage==='item-registration'?'Process Purchase Info Registration data'
+               :activePage==='item-registration'?'Product Registration Status data'
                :activePage==='rfq'?'Sales Submit-RFQ live data and quotation updates'
                :activePage==='vendor-control'?'Vendor account access and credential control'
                :activePage==='all-registered-items'?'All registered product master data'
@@ -4467,7 +4462,7 @@ const App = () => {
                     <Upload className="w-4 h-4 text-blue-500"/>
                     <div>
                       <span className={`text-sm font-medium ${txt}`}>Upload Item Registration</span>
-                      <p className={`text-xs ${txt2}`}>Update Process Purchase Info Registration</p>
+                      <p className={`text-xs ${txt2}`}>Upload SAP Process Pur. Info. Reg. only</p>
                     </div>
                     <input type="file" accept=".xlsx,.xls" multiple onChange={e=>{handleUploadItemRegistration(e); setShowUploadDropdown(false);}} className="hidden"/>
                   </label>
