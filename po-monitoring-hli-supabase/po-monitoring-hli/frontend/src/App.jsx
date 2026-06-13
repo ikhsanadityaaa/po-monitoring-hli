@@ -9,7 +9,7 @@ import {
   ChevronRight, Moon, Sun, FileText, BarChart3, FileSpreadsheet,
   Filter, X, ChevronDown, ChevronUp, Building2, Search, Loader2,
   EyeOff, Eye, Trash2, RotateCcw, Plus, Coins, Wallet, Mail, Minus,
-  Clock, Wrench, Check, Link as LinkIcon, Pin, PinOff
+  Clock, Wrench, Check, Link as LinkIcon, Pin, PinOff, Ship
 } from 'lucide-react';
 import axios from 'axios';
 import { format, parseISO } from 'date-fns';
@@ -31,6 +31,7 @@ const PAGE_PATHS = {
   'all-so': '/Pending_Delivery',
   'item-registration': '/Item_Registration',
   rfq: '/RFQ',
+  import: '/Import',
   'vendor-control': '/Vendor_Control',
   'all-registered-items': '/Registered_Items',
 };
@@ -808,6 +809,151 @@ const PagePagination = ({ darkMode, txt2, page, totalPages, total, perPage, onPa
   );
 };
 
+const FloatingTableScrollbar = ({ targetRef, darkMode }) => {
+  const barRef = useRef(null);
+  const syncingRef = useRef(false);
+  const [state, setState] = useState({ visible: false, left: 0, width: 0, scrollWidth: 0 });
+
+  useEffect(() => {
+    const target = targetRef.current;
+    if (!target) return undefined;
+
+    const update = () => {
+      const rect = target.getBoundingClientRect();
+      const hasOverflow = target.scrollWidth > target.clientWidth + 2;
+      const inView = rect.bottom > 96 && rect.top < window.innerHeight - 42;
+      setState({
+        visible: hasOverflow && inView,
+        left: Math.max(8, rect.left),
+        width: Math.min(rect.width, window.innerWidth - Math.max(8, rect.left) - 8),
+        scrollWidth: target.scrollWidth,
+      });
+      if (barRef.current && barRef.current.scrollLeft !== target.scrollLeft) {
+        barRef.current.scrollLeft = target.scrollLeft;
+      }
+    };
+
+    const syncFromTarget = () => {
+      if (syncingRef.current) return;
+      syncingRef.current = true;
+      if (barRef.current) barRef.current.scrollLeft = target.scrollLeft;
+      syncingRef.current = false;
+      update();
+    };
+
+    update();
+    target.addEventListener('scroll', syncFromTarget, { passive: true });
+    window.addEventListener('scroll', update, { passive: true });
+    window.addEventListener('resize', update);
+    const resizeObserver = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null;
+    resizeObserver?.observe(target);
+
+    return () => {
+      target.removeEventListener('scroll', syncFromTarget);
+      window.removeEventListener('scroll', update);
+      window.removeEventListener('resize', update);
+      resizeObserver?.disconnect();
+    };
+  }, [targetRef]);
+
+  if (!state.visible) return null;
+
+  return (
+    <div
+      ref={barRef}
+      className={`floating-table-scrollbar ${darkMode ? 'floating-table-scrollbar-dark' : ''}`}
+      style={{ left: state.left, width: state.width }}
+      onScroll={(e) => {
+        const target = targetRef.current;
+        if (!target || syncingRef.current) return;
+        syncingRef.current = true;
+        target.scrollLeft = e.currentTarget.scrollLeft;
+        syncingRef.current = false;
+      }}
+    >
+      <div style={{ width: state.scrollWidth, height: 1 }} />
+    </div>
+  );
+};
+
+const FloatingTableHeader = ({ targetRef, darkMode }) => {
+  const [state, setState] = useState({
+    visible: false,
+    left: 0,
+    width: 0,
+    tableWidth: 0,
+    headerHtml: '',
+    scrollLeft: 0,
+  });
+
+  useEffect(() => {
+    const target = targetRef.current;
+    if (!target) return undefined;
+
+    const update = () => {
+      const table = target.querySelector('table');
+      const thead = table?.querySelector('thead');
+      if (!table || !thead) return;
+      const rect = target.getBoundingClientRect();
+      const tableRect = table.getBoundingClientRect();
+      const shouldFloat = rect.top < 0 && rect.bottom > thead.offsetHeight + 8;
+      const left = Math.max(8, rect.left);
+      const width = Math.min(rect.width, window.innerWidth - left - 8);
+      const colgroup = table.querySelector('colgroup')?.outerHTML || '';
+      setState({
+        visible: shouldFloat,
+        left,
+        width,
+        tableWidth: Math.max(table.scrollWidth, tableRect.width),
+        headerHtml: `${colgroup}${thead.outerHTML}`,
+        scrollLeft: target.scrollLeft,
+      });
+    };
+
+    const onScroll = () => update();
+    update();
+    target.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('resize', onScroll);
+    const resizeObserver = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(onScroll) : null;
+    resizeObserver?.observe(target);
+
+    return () => {
+      target.removeEventListener('scroll', onScroll);
+      window.removeEventListener('scroll', onScroll);
+      window.removeEventListener('resize', onScroll);
+      resizeObserver?.disconnect();
+    };
+  }, [targetRef]);
+
+  if (!state.visible || !state.headerHtml) return null;
+
+  return (
+    <div
+      className={`floating-table-header ${darkMode ? 'floating-table-header-dark' : ''}`}
+      style={{ left: state.left, width: state.width }}
+      aria-hidden="true"
+    >
+      <table
+        className="table-fixed text-xs border-collapse"
+        style={{ width: state.tableWidth, minWidth: state.tableWidth, transform: `translateX(${-state.scrollLeft}px)` }}
+        dangerouslySetInnerHTML={{ __html: state.headerHtml }}
+      />
+    </div>
+  );
+};
+
+const DataTableScroll = ({ children, className = '', darkMode }) => {
+  const ref = useRef(null);
+  return (
+    <>
+      <div ref={ref} className={`data-table-scroll data-table-scroll-frame overflow-x-auto ${className}`}>{children}</div>
+      <FloatingTableHeader targetRef={ref} darkMode={darkMode} />
+      <FloatingTableScrollbar targetRef={ref} darkMode={darkMode} />
+    </>
+  );
+};
+
 // ─── SO Status Pie ─────────────────────────────────────────────────────────
 const StatusPie = ({ data, darkMode }) => {
   const [etcHover, setEtcHover] = useState(false);
@@ -869,6 +1015,7 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
   const [mode, setMode] = useState(value?.mode || 'all'); // all | today | week | month | year | range
   const [startDate, setStartDate] = useState(value?.start || '');
   const [endDate, setEndDate] = useState(value?.end || '');
+  const [rangeOpen, setRangeOpen] = useState(false);
 
   // Keep internal state in sync when the controlled `value` changes externally
   // (e.g. user changes filter on another page that shares the same global state).
@@ -886,6 +1033,8 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
         : mode === 'range'
         ? { mode: 'range', start: startDate, end: endDate }
         : { mode };
+
+    if (mode === 'range') return;
 
     const current =
       !value || value.mode === 'all'
@@ -906,40 +1055,82 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
   const reset = () => {
     setMode('all');
     setStartDate(''); setEndDate('');
+    setRangeOpen(false);
     onFilter({ mode: 'all' });
   };
 
+  const applyRange = () => {
+    if (!startDate || !endDate) return;
+    onFilter({ mode: 'range', start: startDate, end: endDate });
+    setRangeOpen(false);
+  };
+
+  const formatRangeLabel = (start, end) => {
+    if (!start || !end) return '';
+    try {
+      return `${format(parseISO(start), 'dd/MM/yyyy')} - ${format(parseISO(end), 'dd/MM/yyyy')}`;
+    } catch {
+      return `${start} - ${end}`;
+    }
+  };
+
+  const appliedRangeLabel = value?.mode === 'range' ? formatRangeLabel(value.start, value.end) : '';
+
   return (
-    <div data-tour="date-filter" className={`relative flex min-h-[64px] flex-wrap items-center gap-3 px-5 py-3 rounded-xl ${card} shadow ${compact ? 'mb-0' : 'mb-4'}`}>
-      <Calendar className="w-4 h-4 text-blue-500 flex-shrink-0"/>
-      <span className={`text-sm font-semibold ${txt} flex-shrink-0`}>{label}:</span>
+    <div data-tour="date-filter" className={`relative flex min-h-[64px] flex-col items-start gap-2 px-5 py-3 rounded-xl ${card} shadow ${compact ? 'mb-0' : 'mb-4'}`}>
+      <div className="flex items-center gap-3">
+        <Calendar className="w-4 h-4 text-blue-500 flex-shrink-0"/>
+        <span className={`text-sm font-semibold ${txt} flex-shrink-0`}>{label}:</span>
+      </div>
       {/* Mode selector */}
-      <div className="relative flex flex-wrap gap-1">
+      <div className="relative flex w-full flex-wrap items-start gap-1.5">
         {[
           ['all','All'], ['today','Today'], ['week','This Week'],
           ['month','This Month'], ['year','This Year'], ['range','Custom Date Range']
-        ].map(([m, lbl]) => (
-          <button key={m} onClick={() => setMode(m)}
-            className={`px-3 py-1 rounded-full text-xs font-semibold transition-all
-              ${mode === m ? 'bg-blue-600 text-white shadow' : darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-100 text-gray-600 hover:bg-blue-100'}`}>
-            {lbl}
-          </button>
-        ))}
-        {mode === 'range' && (
+        ].map(([m, lbl]) => {
+          const isRange = m === 'range';
+          return (
+            <div key={m} className={isRange ? 'flex flex-col items-start gap-0.5' : ''}>
+              <button
+                type="button"
+                onClick={() => {
+                  setMode(m);
+                  setRangeOpen(isRange ? true : false);
+                }}
+                className={`px-3 py-1 rounded-full text-xs font-semibold transition-all
+                  ${mode === m ? 'bg-blue-600 text-white shadow' : darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-100 text-gray-600 hover:bg-blue-100'}`}
+              >
+                {lbl}
+              </button>
+              {isRange && appliedRangeLabel && (
+                <span className={`pl-3 whitespace-nowrap text-[11px] font-semibold leading-tight ${txt2}`}>{appliedRangeLabel}</span>
+              )}
+            </div>
+          );
+        })}
+        {mode === 'range' && rangeOpen && (
           <div className={`absolute left-0 top-full z-50 mt-2 flex items-center gap-2 rounded-xl border p-3 shadow-xl ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-200'}`}>
             <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
               className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300'}`}/>
             <span className={`text-xs ${txt2}`}>to</span>
             <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)}
               className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300'}`}/>
+            <button
+              type="button"
+              disabled={!startDate || !endDate}
+              onClick={applyRange}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${!startDate || !endDate ? 'opacity-50 cursor-not-allowed' : ''} ${darkMode ? 'bg-blue-600 text-white hover:bg-blue-500' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
+            >
+              Set
+            </button>
           </div>
         )}
+        {mode !== 'all' && (
+          <button onClick={reset} className={`px-3 py-1 rounded-lg text-xs font-medium ${darkMode ? 'bg-gray-600 text-gray-200 hover:bg-gray-500' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}>
+            Reset
+          </button>
+        )}
       </div>
-      {mode !== 'all' && (
-        <button onClick={reset} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${darkMode ? 'bg-gray-600 text-gray-200 hover:bg-gray-500' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}>
-          Reset
-        </button>
-      )}
     </div>
   );
 };
@@ -1011,11 +1202,23 @@ const App = () => {
   const [rfqEditableFields, setRfqEditableFields] = useState([]);
   const [rfqPicKpis, setRfqPicKpis] = useState([]);
   const [rfqPicFilter, setRfqPicFilter] = useState('');
-  const [rfqFilters, setRfqFilters] = useState({ checks: [], clients: [], brands: [], purchase_pics: [], vendors: [] });
-  const [rfqOptions, setRfqOptions] = useState({ checks: [], clients: [], brands: [], purchase_pics: [], vendors: [] });
+  const [rfqFilters, setRfqFilters] = useState({ checks: [], clients: [], rfq_numbers: [], brands: [], purchase_pics: [], vendors: [] });
+  const [rfqOptions, setRfqOptions] = useState({ checks: [], clients: [], rfq_numbers: [], brands: [], purchase_pics: [], vendors: [] });
   const [rfqSelectedCell, setRfqSelectedCell] = useState(null);
   const [rfqSimilarAction, setRfqSimilarAction] = useState(null);
   const [rfqLastUpdated, setRfqLastUpdated] = useState(null);
+
+  // Import
+  const [importData, setImportData] = useState([]);
+  const [importColumns, setImportColumns] = useState([]);
+  const [importTotal, setImportTotal] = useState(0);
+  const [importPage, setImportPage] = useState(1);
+  const [importPerPage, setImportPerPage] = useState(25);
+  const [importSearch, setImportSearch] = useState('');
+  const [importAppliedSearch, setImportAppliedSearch] = useState('');
+  const [importVendorCount, setImportVendorCount] = useState(0);
+  const [importEditingCell, setImportEditingCell] = useState(null);
+  const [importEditValue, setImportEditValue] = useState('');
   const [rfqEditedRowKeys, setRfqEditedRowKeys] = useState(new Set());
   const rfqDashboardOnlyFields = new Set(['private_remarks_1', 'private_remarks_2']);
 
@@ -1054,6 +1257,8 @@ const App = () => {
   const [downloadToast, setDownloadToast] = useState(null);
   const [completedData, setCompletedData] = useState(null);
   const [completedYear, setCompletedYear] = useState('all');
+  const [dashboardMarginData, setDashboardMarginData] = useState(null);
+  const [vendorPurchaseType, setVendorPurchaseType] = useState('all');
   const [completedLoading, setCompletedLoading] = useState(false);
   const [completedLoaded, setCompletedLoaded] = useState(false);
   const [marginDetailModal, setMarginDetailModal] = useState(null); // {category, data}
@@ -1192,19 +1397,29 @@ const App = () => {
       appendMultiParam(params, 'pic', globalPicFilter);
       const qs = params.toString() ? `?${params}` : '';
       const completedParams = new URLSearchParams();
-      if (!f || f.mode === 'all') completedParams.set('date_year', String(new Date().getFullYear()));
       params.forEach((value, key) => completedParams.append(key, value));
       const completedQs = completedParams.toString();
+      const currentYear = String(new Date().getFullYear());
+      const marginDateParams = (!f || f.mode === 'all')
+        ? { date_year: currentYear, yoy_base_year: currentYear }
+        : dateFilterParams(f);
+      const marginParams = new URLSearchParams();
+      Object.entries(marginDateParams).forEach(([key, value]) => { if (value) marginParams.append(key, value); });
+      const marginBaseYear = marginDateParams.date_year || marginDateParams.date_from?.slice(0, 4) || currentYear;
+      if (marginBaseYear) marginParams.set('yoy_base_year', marginBaseYear);
+      appendMultiParam(marginParams, 'client', globalClientFilter);
+      appendMultiParam(marginParams, 'pic', globalPicFilter);
       const pendingParams = new URLSearchParams();
       Object.entries(dateFilterParams(f)).forEach(([key, value]) => { if (value) pendingParams.append(key, value); });
       appendMultiParam(pendingParams, 'client', globalClientFilter);
       appendMultiParam(pendingParams, 'global_pic', globalPicFilter);
       pendingParams.set('page', '1');
       pendingParams.set('per_page', '1');
-      const [sRes, aRes, cRes, pendingRes] = await Promise.all([
+      const [sRes, aRes, cRes, marginRes, pendingRes] = await Promise.all([
         api.get(`/api/dashboard/stats${qs}`),
         api.get(`/api/data/aging${qs}`),
         api.get(`/api/completed/summary?${completedQs}`),
+        api.get(`/api/completed/summary?${marginParams}`),
         api.get(`/api/data/all-so?${pendingParams}`)
       ]);
       setStats(sRes.data);
@@ -1212,6 +1427,7 @@ const App = () => {
       setDashboardFilterOptions(sRes.data?.filters || { clients: [], pics: [] });
       setAgingData(Array.isArray(aRes.data) ? aRes.data : []);
       setCompletedData(cRes.data);
+      setDashboardMarginData(marginRes.data);
       setCompletedLoaded(true);
     } catch (e) {
       addToast(`Error: ${e.response?.data?.error || e.message}`, 'error');
@@ -1372,6 +1588,7 @@ const App = () => {
       if (showSimilarity) params.append('similarity', '1');
       resolveFilter(filters.checks).forEach(v => params.append('check', v));
       resolveFilter(filters.clients).forEach(v => params.append('client_name', v));
+      resolveFilter(filters.rfq_numbers).forEach(v => params.append('rfq_no', v));
       resolveFilter(filters.brands).forEach(v => params.append('brand_manufacturer', v));
       resolveFilter(filters.purchase_pics)
         .filter(v => String(v || '').trim().toLowerCase() !== 'unassigned')
@@ -1384,7 +1601,7 @@ const App = () => {
       setRfqSimilarityColumns(Array.isArray(res.data.similarity_columns) ? res.data.similarity_columns : []);
       setRfqEditableFields(Array.isArray(res.data.editable_fields) ? res.data.editable_fields : []);
       setRfqPicKpis(Array.isArray(res.data.pic_kpis) ? res.data.pic_kpis : []);
-      const nextOptions = res.data.filters || { checks: [], clients: [], brands: [], purchase_pics: [], vendors: [] };
+      const nextOptions = res.data.filters || { checks: [], clients: [], rfq_numbers: [], brands: [], purchase_pics: [], vendors: [] };
       setRfqOptions({
         ...nextOptions,
         purchase_pics: (nextOptions.purchase_pics || []).filter(v => String(v || '').trim().toLowerCase() !== 'unassigned')
@@ -1394,6 +1611,36 @@ const App = () => {
       addToast(`Failed to load RFQ: ${e.response?.data?.error || e.message}`, 'error');
     } finally { setLoading(false); }
   }, [addToast, rfqPage, rfqPerPage, rfqAppliedSearch, rfqFilters, rfqPicFilter, rfqShowSimilarity]);
+
+  const fetchImportData = useCallback(async (page = importPage, perPage = importPerPage, search = importAppliedSearch, refresh = false) => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ page, per_page: perPage });
+      if (search) params.append('search', search);
+      if (refresh) params.append('refresh', '1');
+      const res = await api.get(`/api/import/data?${params}`);
+      setImportData(Array.isArray(res.data.data) ? res.data.data : []);
+      setImportColumns(Array.isArray(res.data.columns) ? res.data.columns : []);
+      setImportTotal(res.data.total || 0);
+      setImportVendorCount(res.data.vendor_count || 0);
+    } catch (e) {
+      addToast(`Failed to load Import data: ${e.response?.data?.error || e.message}`, 'error');
+    } finally { setLoading(false); }
+  }, [addToast, importPage, importPerPage, importAppliedSearch]);
+
+  const updateImportCell = async (rowKey, field, value) => {
+    setImportEditingCell(null);
+    const previousRows = importData;
+    setImportData(prev => prev.map(row => row._row_key === rowKey ? { ...row, [field]: value } : row));
+    try {
+      await api.put('/api/import/cell', { row_key: rowKey, field, value });
+      return true;
+    } catch (e) {
+      setImportData(previousRows);
+      addToast(`Failed to update Import sheet: ${e.response?.data?.error || e.message}`, 'error');
+      return false;
+    }
+  };
 
   const fetchVendorControl = useCallback(async (page = vendorControlPage, perPage = vendorControlPerPage, search = vendorControlAppliedSearch, refresh = false, vendors = vendorControlAppliedVendors) => {
     setLoading(true);
@@ -1448,6 +1695,12 @@ const App = () => {
   useEffect(() => {
     if (activePage === 'rfq') {
       fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter, rfqShowSimilarity);
+    }
+  }, [activePage]);
+
+  useEffect(() => {
+    if (activePage === 'import') {
+      fetchImportData(importPage, importPerPage, importAppliedSearch);
     }
   }, [activePage]);
 
@@ -2378,7 +2631,7 @@ const App = () => {
     const slicerClientOptions = activePage === 'item-registration' ? (itemRegOptions.clients || []) : (dashboardFilterOptions.clients || []);
     const slicerPicOptions = activePage === 'item-registration' ? (itemRegOptions.pics || []) : (dashboardFilterOptions.pics || []);
     return (
-      <div className={showDateFilter ? "mb-5 grid grid-cols-1 gap-3 2xl:grid-cols-[minmax(560px,1fr)_minmax(560px,1fr)]" : "mb-5 flex justify-end"}>
+      <div className={showDateFilter ? "mb-5 grid grid-cols-1 gap-3 2xl:grid-cols-[minmax(760px,1.15fr)_minmax(500px,0.85fr)]" : "mb-5 flex justify-end"}>
         {showDateFilter && (
           <DateRangeFilter
             darkMode={darkMode}
@@ -2391,7 +2644,7 @@ const App = () => {
             onFilter={(f) => { setGlobalDateFilter(f); if (activePage === 'item-registration') setItemRegPage(1); }}
           />
         )}
-        <div className={`grid min-h-[64px] w-full grid-cols-1 gap-3 px-5 py-3 rounded-xl ${card} shadow sm:grid-cols-[minmax(220px,1fr)_minmax(200px,0.85fr)_120px] sm:items-end ${showDateFilter ? '' : '2xl:max-w-[720px]'}`}>
+        <div className={`grid min-h-[64px] w-full grid-cols-1 gap-3 px-5 py-3 rounded-xl ${card} shadow lg:grid-cols-[minmax(180px,1fr)_minmax(170px,0.9fr)_minmax(96px,0.4fr)] lg:items-end ${showDateFilter ? '' : '2xl:max-w-[720px]'}`}>
           <div className="min-w-0">
             <label className={`mb-1 block text-xs font-semibold ${txt}`}>Client Nm.</label>
             <MultiSelect label="Client Nm." options={slicerClientOptions} selected={globalClientFilter} onChange={setGlobalClientFilter} darkMode={darkMode} txt2={txt2} hideLabel />
@@ -2403,7 +2656,7 @@ const App = () => {
           <button
             type="button"
             onClick={() => { setGlobalDateFilter({ mode: 'all' }); setGlobalClientFilter([]); setGlobalPicFilter([]); }}
-            className={`h-10 w-full px-4 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}
+            className={`h-10 w-full min-w-0 px-3 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}
           >
             Clear
           </button>
@@ -2414,17 +2667,47 @@ const App = () => {
 
   const renderDashboardOverview = () => {
     const d = completedData || {};
+    const marginD = dashboardMarginData || {};
     
-    // Create full 12-month array for current year
+    // Create month buckets from the global SO Create Date filter. KPI remains
+    // all-data when filter is All; monthly chart/table defaults to current year.
     const currentYear = new Date().getFullYear();
     const monthlyDataMap = {};
-    (d.monthly_trend || []).forEach(m => {
+    (marginD.monthly_trend || []).forEach(m => {
       if (m.month) monthlyDataMap[m.month] = m;
     });
+
+    const parseLocalISO = (iso) => {
+      const [year, month, day] = String(iso || '').split('-').map(Number);
+      return Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)
+        ? new Date(year, month - 1, day)
+        : null;
+    };
+    const monthWindow = (() => {
+      const bounds = dateFilterParams(globalDateFilter);
+      const fallbackStart = new Date(currentYear, 0, 1);
+      const fallbackEnd = new Date(currentYear, 11, 1);
+      let start = parseLocalISO(bounds.date_from) || parseLocalISO(bounds.date_to) || fallbackStart;
+      let end = parseLocalISO(bounds.date_to) || parseLocalISO(bounds.date_from) || fallbackEnd;
+      if (start > end) [start, end] = [end, start];
+      start = new Date(start.getFullYear(), start.getMonth(), 1);
+      end = new Date(end.getFullYear(), end.getMonth(), 1);
+      const months = [];
+      const cursor = new Date(start);
+      while (cursor <= end && months.length < 36) {
+        months.push({ year: cursor.getFullYear(), monthIndex: cursor.getMonth() });
+        cursor.setMonth(cursor.getMonth() + 1);
+      }
+      const sameYear = start.getFullYear() === end.getFullYear();
+      const label = sameYear
+        ? String(start.getFullYear())
+        : `${format(start, 'MMM yyyy')} - ${format(end, 'MMM yyyy')}`;
+      return { months, sameYear, label };
+    })();
     
-    const monthlyCompleted = Array.from({ length: 12 }, (_, i) => {
-      const monthKey = `${currentYear}-${String(i + 1).padStart(2, '0')}`;
-      const monthName = format(new Date(currentYear, i, 1), 'MMMM');
+    const monthlyCompleted = monthWindow.months.map(({ year, monthIndex }) => {
+      const monthKey = `${year}-${String(monthIndex + 1).padStart(2, '0')}`;
+      const monthName = format(new Date(year, monthIndex, 1), monthWindow.sameYear ? 'MMMM' : 'MMM yy');
       const existing = monthlyDataMap[monthKey];
       
       if (existing) {
@@ -2447,16 +2730,13 @@ const App = () => {
         count: null
       };
     });
-    const completedPoCountThisYear = monthlyCompleted.reduce((sum, m) => sum + (Number(m.count) || 0), 0);
-    const completedPoAmountThisYear = monthlyCompleted.reduce((sum, m) => sum + (Number(m.purchase_amount) || 0), 0);
-    
     const marginPct = d.total_sales ? ((d.total_margin || 0) / d.total_sales * 100) : null;
     const fmtM = (v) => v >= 1e9 ? `${(v/1e9).toFixed(1)}B` : v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `${(v/1e3).toFixed(0)}K` : String(Math.round(v || 0));
-    const purchaseYoyYears = (d.purchase_yoy_years && d.purchase_yoy_years.length)
-      ? d.purchase_yoy_years
+    const purchaseYoyYears = (marginD.purchase_yoy_years && marginD.purchase_yoy_years.length)
+      ? marginD.purchase_yoy_years
       : [currentYear - 1, currentYear - 2];
-    const purchaseYoyData = (d.purchase_yoy_trend && d.purchase_yoy_trend.length)
-      ? d.purchase_yoy_trend
+    const purchaseYoyData = (marginD.purchase_yoy_trend && marginD.purchase_yoy_trend.length)
+      ? marginD.purchase_yoy_trend
       : Array.from({ length: 12 }, (_, i) => ({
           month: i + 1,
           month_label: format(new Date(currentYear, i, 1), 'MMMM'),
@@ -2465,8 +2745,9 @@ const App = () => {
     const activePurchaseYoyYears = purchaseYoyYears.filter(year =>
       purchaseYoyData.some(row => Number(row[`purchase_${year}`] || 0) > 0)
     );
-    const completedTrendData = monthlyCompleted.map((m, i) => {
-      const yoyRow = purchaseYoyData[i] || {};
+    const completedTrendData = monthlyCompleted.map((m) => {
+      const monthNum = Number(String(m.month || '').slice(5, 7));
+      const yoyRow = purchaseYoyData.find(row => Number(row.month) === monthNum) || {};
       const yoyValues = purchaseYoyYears.reduce((acc, year) => {
         const value = Number(yoyRow[`purchase_${year}`] || 0);
         acc[`purchase_${year}`] = value > 0 ? value : null;
@@ -2486,12 +2767,17 @@ const App = () => {
       })),
     ];
     const sumRows = (rows, key) => (rows || []).reduce((sum, row) => sum + (Number(row?.[key]) || 0), 0);
+    const vendorRows = vendorPurchaseType === 'local'
+      ? (d.top_vendors_local || [])
+      : vendorPurchaseType === 'import'
+      ? (d.top_vendors_import || [])
+      : (d.top_vendors || []);
     const barList = (rows, labelKey, valueKey, label, color) => (
       <ResponsiveContainer width="100%" height={260}>
-        <BarChart data={(rows || []).map(r => ({...r, shortLabel: String(r[labelKey] || '-').slice(0, 32)}))} layout="vertical" margin={{top: 8, right: 18, left: 8, bottom: 8}}>
+        <BarChart data={(rows || []).map(r => ({...r, shortLabel: String(r[labelKey] || '-').slice(0, 34)}))} layout="vertical" margin={{top: 8, right: 18, left: 24, bottom: 8}}>
           <CartesianGrid strokeDasharray="3 3" horizontal={true} stroke={darkMode?'#374151':'#E5E7EB'}/>
           <XAxis type="number" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={12} tickFormatter={fmtM}/>
-          <YAxis type="category" dataKey="shortLabel" width={190} stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={12} tick={{fontSize: 12, textAnchor: 'end'}} tickMargin={8}/>
+          <YAxis type="category" dataKey="shortLabel" width={220} stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={12} tick={{fontSize: 12, textAnchor: 'end'}} tickMargin={8}/>
           <Tooltip formatter={(v)=>[fmtCur(v), label]} labelFormatter={(_, payload)=>payload?.[0]?.payload?.[labelKey] || '-'} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
           <Bar dataKey={valueKey} name={label} fill={color} radius={[0,6,6,0]} isAnimationActive={false}/>
         </BarChart>
@@ -2502,8 +2788,8 @@ const App = () => {
       <div className="space-y-5">
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
           {[
-            { label:'Total PO', value: fmtNum(completedPoCountThisYear), sub: `Delivery Complete ${currentYear}`, icon:<FileText className="w-5 h-5"/> },
-            { label:'PO Amount', value: fmtCurShort(completedPoAmountThisYear), sub: fmtCur(completedPoAmountThisYear), icon:<Coins className="w-5 h-5"/> },
+            { label:'Total PO', value: fmtNum(d.total_count || 0), sub: 'Delivery Complete records', icon:<FileText className="w-5 h-5"/> },
+            { label:'PO Amount', value: fmtCurShort(d.total_purchase || 0), sub: fmtCur(d.total_purchase || 0), icon:<Coins className="w-5 h-5"/> },
             { label:'Sales Amount', value: fmtCurShort(d.total_sales), sub: fmtCur(d.total_sales), icon:<Wallet className="w-5 h-5"/> },
             { label:'Margin', value: fmtCurShort(d.total_margin), sub: marginPct == null ? 'Avg margin -' : `Avg margin ${marginPct.toFixed(1)}%`, icon:<TrendingUp className="w-5 h-5"/> },
             { label:'Total Pending Delivery', value: fmtNum(summaryPendingTotal ?? stats?.total_so_count), sub: 'Pending delivery records', icon:<Clock className="w-5 h-5"/>, goPending:true },
@@ -2514,7 +2800,7 @@ const App = () => {
         </div>
         <div className={`p-5 rounded-2xl ${card}`}>
           <h3 className={`text-base font-bold mb-1 ${txt}`}>Monthly Trend Delivery Complete</h3>
-          <p className={`text-xs mb-4 ${txt2}`}>Current year sales and purchase amount, with YoY purchase amount lines.</p>
+          <p className={`text-xs mb-4 ${txt2}`}>{monthWindow.label} sales and purchase amount, with comparison purchase amount lines.</p>
           <ResponsiveContainer width="100%" height={320}>
             <ComposedChart data={completedTrendData} barGap={2} margin={{ top: 8, right: 20, left: 0, bottom: 4 }}>
               <CartesianGrid strokeDasharray="3 3" stroke={darkMode?'#374151':'#E5E7EB'}/>
@@ -2542,7 +2828,10 @@ const App = () => {
           </ResponsiveContainer>
         </div>
         <div className={`p-3 rounded-2xl ${card}`}>
-          <h3 className={`text-sm font-bold mb-1.5 ${txt}`}>Margin by Month</h3>
+          <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+            <h3 className={`text-sm font-bold ${txt}`}>Gross Margin by Month</h3>
+            <span className={`text-xs font-semibold ${txt2}`}>{monthWindow.label}</span>
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full text-[11px] leading-tight">
               <thead className={tblHd}>
@@ -2554,13 +2843,37 @@ const App = () => {
               <tbody className={`divide-y ${tblDv}`}>
                 <tr className={trHov}><td className={`px-2 py-0.5 font-semibold ${txt}`}>Sales Amount</td>{monthlyCompleted.map((m,i)=><td key={i} className={`px-1.5 py-0.5 text-center ${kpiValue}`}>{m.sales_amount != null ? fmtCurShort(m.sales_amount) : '-'}</td>)}</tr>
                 <tr className={trHov}><td className={`px-2 py-0.5 font-semibold ${txt}`}>PO Amount</td>{monthlyCompleted.map((m,i)=><td key={i} className={`px-1.5 py-0.5 text-center ${kpiValue}`}>{m.purchase_amount != null ? fmtCurShort(m.purchase_amount) : '-'}</td>)}</tr>
-                <tr className={trHov}><td className={`px-2 py-0.5 font-semibold ${txt}`}>Margin</td>{monthlyCompleted.map((m,i)=><td key={i} className={`px-1.5 py-0.5 text-center font-semibold ${m.margin != null ? (m.margin < 0 ? 'text-red-600' : 'text-green-600') : txt2}`}>{m.margin != null ? fmtCurShort(m.margin) : '-'}</td>)}</tr>
-                <tr className={trHov}><td className={`px-2 py-0.5 font-semibold ${txt}`}>Margin %</td>{monthlyCompleted.map((m,i)=><td key={i} className={`px-1.5 py-0.5 text-center font-semibold ${m.margin_pct != null ? (m.margin < 0 ? 'text-red-600' : 'text-green-600') : txt2}`}>{m.margin_pct != null ? `${m.margin_pct.toFixed(1)}%` : '-'}</td>)}</tr>
+                <tr className={trHov}><td className={`px-2 py-0.5 font-semibold ${txt}`}>Gross Margin</td>{monthlyCompleted.map((m,i)=><td key={i} className={`px-1.5 py-0.5 text-center font-semibold ${m.margin != null ? (m.margin < 0 ? 'text-red-600' : 'text-green-600') : txt2}`}>{m.margin != null ? fmtCurShort(m.margin) : '-'}</td>)}</tr>
+                <tr className={trHov}><td className={`px-2 py-0.5 font-semibold ${txt}`}>Gross Margin %</td>{monthlyCompleted.map((m,i)=><td key={i} className={`px-1.5 py-0.5 text-center font-semibold ${m.margin_pct != null ? (m.margin < 0 ? 'text-red-600' : 'text-green-600') : txt2}`}>{m.margin_pct != null ? `${m.margin_pct.toFixed(1)}%` : '-'}</td>)}</tr>
               </tbody>
             </table>
           </div>
         </div>
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-5"><div className={`p-5 rounded-2xl ${card}`}><h3 className={`text-base font-bold ${txt}`}>Top 5 Vendor PO Amount</h3><p className={`text-xs mb-4 ${txt2}`}>Total: {fmtCurShort(sumRows(d.top_vendors, 'purchase_amount'))}</p>{barList(d.top_vendors, 'vendor', 'purchase_amount', 'PO Amount', '#2563EB')}</div><div className={`p-5 rounded-2xl ${card}`}><h3 className={`text-base font-bold ${txt}`}>Top 5 Client Sales Amount</h3><p className={`text-xs mb-4 ${txt2}`}>Total: {fmtCurShort(sumRows(d.top_clients, 'sales_amount'))}</p>{barList(d.top_clients, 'client', 'sales_amount', 'Sales Amount', '#14B8A6')}</div></div>
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+          <div className={`p-5 rounded-2xl ${card}`}>
+            <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className={`text-base font-bold ${txt}`}>Top 5 Vendor PO Amount</h3>
+                <p className={`text-xs ${txt2}`}>Total: {fmtCurShort(sumRows(vendorRows, 'purchase_amount'))}</p>
+              </div>
+              <select
+                value={vendorPurchaseType}
+                onChange={e => setVendorPurchaseType(e.target.value)}
+                className={`rounded-lg border px-2 py-1 text-xs font-semibold ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200 text-slate-700'}`}
+              >
+                <option value="all">All</option>
+                <option value="local">Local</option>
+                <option value="import">Import</option>
+              </select>
+            </div>
+            {barList(vendorRows, 'vendor', 'purchase_amount', 'PO Amount', '#2563EB')}
+          </div>
+          <div className={`p-5 rounded-2xl ${card}`}>
+            <h3 className={`text-base font-bold ${txt}`}>Top 5 Client Sales Amount</h3>
+            <p className={`text-xs mb-4 ${txt2}`}>Total: {fmtCurShort(sumRows(d.top_clients, 'sales_amount'))}</p>
+            {barList(d.top_clients, 'client', 'sales_amount', 'Sales Amount', '#14B8A6')}
+          </div>
+        </div>
         {renderPendingDeliverySummary()}
       </div>
     );
@@ -2724,7 +3037,7 @@ const App = () => {
           )}
         </FilterPanel>
 
-        <div className="overflow-x-auto">
+        <DataTableScroll darkMode={darkMode}>
           <table className="w-full text-sm min-w-[860px]">
             <thead className={tblHd}>
               <tr>
@@ -2754,7 +3067,7 @@ const App = () => {
               ))}
             </tbody>
           </table>
-        </div>
+        </DataTableScroll>
 
         <PagePagination
           darkMode={darkMode}
@@ -2845,7 +3158,7 @@ const App = () => {
           </div>
         </FilterPanel>
 
-        <div className="overflow-x-auto">
+        <DataTableScroll darkMode={darkMode}>
           <table className="freeze-table-all-registered-items w-full text-xs">
             <colgroup>
               <col style={{minWidth:'120px'}}/>
@@ -2898,7 +3211,7 @@ const App = () => {
               ))}
             </tbody>
           </table>
-        </div>
+        </DataTableScroll>
 
         <PagePagination
           darkMode={darkMode}
@@ -2921,7 +3234,7 @@ const App = () => {
       { field: 'check', label: 'Check' }, { field: 'sheet_status', label: 'Status' }, { field: 'days_left', label: 'Days Left' }, { field: 'no', label: 'No' }, { field: 'client_name', label: 'Nama Client' },
       { field: 'rfq_date', label: 'RFQ Date' }, { field: 'closing_date', label: 'Closing Date' }, { field: 'sales_pic', label: 'Sales PIC' },
       { field: 'category_name', label: 'Category Name' }, { field: 'purchase_pic', label: 'Purchase PIC' },
-      { field: 'item_name', label: 'Item Name' }, { field: 'detail_spec', label: 'Detail Spec' }, { field: 'brand_manufacturer', label: 'Brand/Manufaktur' },
+      { field: 'rfq_code', label: 'No. RFQ / KODE' }, { field: 'item_name', label: 'Item Name' }, { field: 'detail_spec', label: 'Detail Spec' }, { field: 'brand_manufacturer', label: 'Brand/Manufaktur' },
       { field: 'qty', label: 'Qty' }, { field: 'unit', label: 'Unit' }, { field: 'remark', label: 'Remark' },
       { field: 'product_id', label: 'Product ID' }, { field: 'request_number', label: 'Request Number' },
       { field: 'same_replacement', label: 'Same/Replacement' }, { field: 'vendor_name', label: 'Vendor Name' },
@@ -2941,12 +3254,12 @@ const App = () => {
     const columns = rfqShowSimilarity ? [...baseColumns, ...similarityColumns] : baseColumns;
     const rfqSourceStyleFields = new Set([
       'check', 'sheet_status', 'days_left', 'no', 'client_name', 'rfq_date', 'closing_date', 'sales_pic',
-      'category_name', 'purchase_pic', 'item_name', 'detail_spec', 'brand_manufacturer', 'qty', 'unit', 'remark',
+      'category_name', 'purchase_pic', 'rfq_code', 'item_name', 'detail_spec', 'brand_manufacturer', 'qty', 'unit', 'remark',
       'similar_prod_ids', 'similar_prod_name', 'similar_spec', 'similar_mfr_name', 'similar_odr_unit', 'similar_score'
     ]);
     const colWidth = (field) => ({
       check: 64, sheet_status: 90, days_left: 76, no: 70, client_name: 160, rfq_date: 110, closing_date: 110, sales_pic: 120,
-      item_name: 180, detail_spec: 620, brand_manufacturer: 160, qty: 80, unit: 80, remark: 380,
+      rfq_code: 150, item_name: 180, detail_spec: 620, brand_manufacturer: 160, qty: 80, unit: 80, remark: 380,
       category_id: 180, category_name: 150, product_id: 120, request_number: 150, purchase_pic: 120,
       same_replacement: 92, vendor_name: 200, unit_price_idr: 130, amt_idr: 130, quoted_item_name: 180,
       quoted_spec: 150, quoted_brand: 130, quoted_unit: 58, moq: 62, lead_time_days: 78,
@@ -3021,7 +3334,7 @@ const App = () => {
       setRfqSearch('');
       setRfqAppliedSearch('');
       setRfqPicFilter('');
-      const nextFilters = { checks: [], clients: [], brands: [], purchase_pics: [], vendors: [] };
+      const nextFilters = { checks: [], clients: [], rfq_numbers: [], brands: [], purchase_pics: [], vendors: [] };
       setRfqFilters(nextFilters);
       setRfqPage(1);
       fetchRFQData(1, rfqPerPage, '', false, nextFilters, '', rfqShowSimilarity);
@@ -3032,6 +3345,7 @@ const App = () => {
       if (rfqPicFilter) p.append('pic', rfqPicFilter);
       resolveFilter(rfqFilters.checks).forEach(v => p.append('check', v));
       resolveFilter(rfqFilters.clients).forEach(v => p.append('client_name', v));
+      resolveFilter(rfqFilters.rfq_numbers).forEach(v => p.append('rfq_no', v));
       resolveFilter(rfqFilters.brands).forEach(v => p.append('brand_manufacturer', v));
       resolveFilter(rfqFilters.purchase_pics).forEach(v => p.append('purchase_pic', v));
       resolveFilter(rfqFilters.vendors).forEach(v => p.append('vendor_name', v));
@@ -3178,7 +3492,7 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[minmax(170px,1fr)_115px_repeat(4,minmax(120px,1fr))_84px] items-end">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[minmax(160px,1fr)_105px_minmax(130px,0.95fr)_minmax(130px,0.95fr)_repeat(3,minmax(115px,0.9fr))_84px] items-end">
             <div className="min-w-0">
               <RFQMultiSearch
                 value={rfqSearch}
@@ -3201,6 +3515,10 @@ const App = () => {
                 onChange={v=>{ const next={...rfqFilters, clients:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
             <div className="min-w-0">
+              <MultiSelect label="No. RFQ" options={rfqOptions.rfq_numbers || []} selected={rfqFilters.rfq_numbers}
+                onChange={v=>{ const next={...rfqFilters, rfq_numbers:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="min-w-0">
               <MultiSelect label="Brand/Manufaktur" options={rfqOptions.brands || []} selected={rfqFilters.brands}
                 onChange={v=>{ const next={...rfqFilters, brands:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
@@ -3218,12 +3536,12 @@ const App = () => {
           </div>
         </FilterPanel>
 
-        <div className="overflow-x-auto">
+        <DataTableScroll darkMode={darkMode}>
           <table className="freeze-table-rfq table-fixed text-xs border-collapse" style={{ width: `${rfqTableWidth}px`, minWidth: `${rfqTableWidth}px` }}>
             <colgroup>{columns.map(col => <col key={col.field} style={colStyle(col.field)}/>)}</colgroup>
             <thead className={tblHd}>
               <tr>{columns.map((col, index) => {
-                const darkHeaderCols = ['check', 'sheet_status', 'days_left', 'no', 'client_name', 'rfq_date', 'closing_date', 'sales_pic', 'category_name', 'purchase_pic', 'item_name', 'detail_spec', 'brand_manufacturer', 'qty', 'unit', 'remark', 'similar_prod_ids', 'similar_prod_name', 'similar_spec', 'similar_mfr_name', 'similar_odr_unit', 'similar_score'];
+                const darkHeaderCols = ['check', 'sheet_status', 'days_left', 'no', 'client_name', 'rfq_date', 'closing_date', 'sales_pic', 'category_name', 'purchase_pic', 'rfq_code', 'item_name', 'detail_spec', 'brand_manufacturer', 'qty', 'unit', 'remark', 'similar_prod_ids', 'similar_prod_name', 'similar_spec', 'similar_mfr_name', 'similar_odr_unit', 'similar_score'];
                 const isDarkHeader = darkHeaderCols.includes(col.field);
                 return <th key={col.field} className={`px-2 py-2 text-center font-bold whitespace-nowrap border-r ${isDarkHeader ? 'bg-slate-200 text-slate-700' : darkMode ? 'bg-gray-800/60 border-gray-700 text-gray-200' : 'bg-slate-50 border-gray-200 text-gray-700'} ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>{renderFreezeHeader('rfq', index + 1, col.label)}</th>;
               })}</tr>
@@ -3395,7 +3713,7 @@ const App = () => {
                       const c = getPicColor(value);
                       return <td key={field} className={`px-2 py-2 text-center truncate border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'}`}>{value ? <span className={`inline-flex max-w-full truncate px-2 py-0.5 rounded-full text-[11px] font-semibold ${c ? `${c.bg} ${c.text}` : 'bg-gray-100 text-gray-700'}`}>{value}</span> : <span className={txt2}>-</span>}</td>;
                     }
-                    const darkDataCols = ['sheet_status', 'no', 'client_name', 'rfq_date', 'closing_date', 'sales_pic', 'category_name', 'purchase_pic', 'item_name', 'detail_spec', 'brand_manufacturer', 'qty', 'unit', 'remark', 'similar_prod_ids', 'similar_prod_name', 'similar_spec', 'similar_mfr_name', 'similar_odr_unit', 'similar_score'];
+                    const darkDataCols = ['sheet_status', 'no', 'client_name', 'rfq_date', 'closing_date', 'sales_pic', 'category_name', 'purchase_pic', 'rfq_code', 'item_name', 'detail_spec', 'brand_manufacturer', 'qty', 'unit', 'remark', 'similar_prod_ids', 'similar_prod_name', 'similar_spec', 'similar_mfr_name', 'similar_odr_unit', 'similar_score'];
                     const isDarkDataCol = darkDataCols.includes(field);
                     return <td key={field} className={`px-2 py-2 align-top border-r ${isDarkDataCol ? (darkMode ? 'bg-gray-800/60 border-gray-700 text-gray-100' : 'bg-slate-50 border-gray-200 text-black') : (darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-white border-gray-200')} ${['detail_spec','remark','category_name','similar_spec'].includes(field) ? '' : 'truncate'} ${['qty','amt_idr','similar_score'].includes(field) ? 'text-right font-semibold' : ''} ${isDarkDataCol ? '' : txt2}`}>
                       {renderValue(value)}
@@ -3405,7 +3723,7 @@ const App = () => {
               );})}
             </tbody>
           </table>
-        </div>
+        </DataTableScroll>
 
         <PagePagination
           darkMode={darkMode}
@@ -3417,6 +3735,82 @@ const App = () => {
           onPageChange={(p) => { setRfqPage(p); fetchRFQData(p, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter); }}
           onPerPageChange={(next) => { setRfqPerPage(next); setRfqPage(1); fetchRFQData(1, next, rfqAppliedSearch, false, rfqFilters, rfqPicFilter); }}
         />
+      </div>
+    );
+  };
+
+  const renderImport = () => {
+    const totalPages = Math.max(1, Math.ceil(importTotal / importPerPage));
+    const columns = importColumns || [];
+    const colWidth = (col) => {
+      const label = String(col.label || '').toLowerCase();
+      if (label.includes('spec') || label.includes('remark')) return 280;
+      if (label.includes('vendor address')) return 260;
+      if (label.includes('item name')) return 220;
+      if (label.includes('vendor')) return 190;
+      if (label.includes('status')) return 120;
+      if (label.includes('date') || label.includes('actual')) return 120;
+      return 130;
+    };
+    const tableWidth = columns.reduce((sum, col) => sum + colWidth(col), 0);
+    const handleVendorUpload = async (e) => {
+      const files = Array.from(e.target.files || []);
+      e.target.value = '';
+      if (!files.length) return;
+      const fd = new FormData();
+      files.forEach(file => fd.append('file', file));
+      try {
+        const res = await api.post('/api/import/vendors/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+        addToast(res.data?.message || 'Import vendors updated', 'success');
+        setImportPage(1);
+        fetchImportData(1, importPerPage, importAppliedSearch, true);
+      } catch (err) {
+        addToast(`Failed to upload import vendors: ${err.response?.data?.error || err.message}`, 'error');
+      }
+    };
+    const renderImportCell = (row, col) => {
+      const key = `${row._row_key}:${col.field}`;
+      const editing = importEditingCell === key;
+      const value = row[col.field] ?? '';
+      if (editing) {
+        return <input autoFocus className={`w-full rounded border px-2 py-1 text-xs ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-blue-300 text-slate-800'}`} value={importEditValue} onChange={e=>setImportEditValue(e.target.value)} onBlur={()=>updateImportCell(row._row_key, col.field, importEditValue)} onKeyDown={e=>{ if(e.key==='Enter') updateImportCell(row._row_key, col.field, importEditValue); if(e.key==='Escape') setImportEditingCell(null); }} />;
+      }
+      return <button type="button" className="block w-full truncate text-left" title={String(value || '-')} onClick={()=>{ setImportEditingCell(key); setImportEditValue(String(value || '')); }}>{value || '-'}</button>;
+    };
+
+    return (
+      <div className={`rounded-2xl overflow-hidden ${card}`}>
+        <div className={`px-5 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+          <div className="flex items-center gap-2 min-w-0">
+            <Ship className="w-5 h-5 text-blue-500 flex-shrink-0" />
+            <h2 className={`text-lg font-bold ${txt}`}>Import</h2>
+            <span className={`text-sm ${txt2}`}>({fmtNum(importTotal)} records)</span>
+            <span className={`text-xs ${txt2}`}>Vendor Import: {fmtNum(importVendorCount)}</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <DownloadButton onClick={() => downloadBlob('/api/import/vendor-template', `Import_Vendor_Template_${new Date().toISOString().slice(0,10)}.xlsx`, 'Import Vendor Template')} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><Download className="w-4 h-4"/>Template Vendor</DownloadButton>
+            <label className="flex items-center gap-2 px-3 py-2.5 bg-slate-600 hover:bg-slate-700 text-white rounded-xl text-sm font-semibold shadow-sm cursor-pointer"><FileSpreadsheet className="w-4 h-4"/>Upload Vendor Import<input type="file" accept=".xlsx,.xls,.csv" multiple onChange={handleVendorUpload} className="hidden"/></label>
+            <button onClick={() => fetchImportData(importPage, importPerPage, importAppliedSearch, true)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><RotateCcw className="w-4 h-4"/>Refresh</button>
+          </div>
+        </div>
+
+        <FilterPanel darkMode={darkMode}>
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-[minmax(240px,1fr)_100px_100px] items-end">
+            <div className="min-w-0"><label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Import</label><input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode?'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400':'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/></div>
+            <button onClick={()=>{ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">Search</button>
+            <button onClick={()=>{ setImportSearch(''); setImportAppliedSearch(''); setImportPage(1); fetchImportData(1, importPerPage, ''); }} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
+          </div>
+        </FilterPanel>
+
+        <DataTableScroll darkMode={darkMode}>
+          <table className="table-fixed text-xs border-collapse" style={{ width: `${tableWidth}px`, minWidth: `${tableWidth}px` }}>
+            <colgroup>{columns.map(col => <col key={col.field} style={{ width: `${colWidth(col)}px` }} />)}</colgroup>
+            <thead className={tblHd}><tr>{columns.map(col => <th key={col.field} className={`px-2 py-2 text-center font-bold border-r ${darkMode?'border-gray-700 text-gray-200':'border-gray-200 text-slate-700'}`}>{col.label}</th>)}</tr></thead>
+            <tbody className={`divide-y ${tblDv}`}>{importData.length === 0 ? <tr><td colSpan={Math.max(1, columns.length)} className={`px-4 py-12 text-center ${txt2}`}><Ship className="w-10 h-10 mx-auto mb-2 opacity-40"/>No import data</td></tr> : importData.map(row => <tr key={row._row_key} className={trHov}>{columns.map(col => <td key={col.field} className={`px-2 py-2 align-top border-r ${darkMode?'border-gray-700':'border-gray-200'} ${txt2}`}>{renderImportCell(row, col)}</td>)}</tr>)}</tbody>
+          </table>
+        </DataTableScroll>
+
+        <PagePagination darkMode={darkMode} txt2={txt2} page={importPage} totalPages={totalPages} total={importTotal} perPage={importPerPage} onPageChange={(p)=>{ setImportPage(p); fetchImportData(p, importPerPage, importAppliedSearch); }} onPerPageChange={(next)=>{ setImportPerPage(next); setImportPage(1); fetchImportData(1, next, importAppliedSearch); }} />
       </div>
     );
   };
@@ -3556,7 +3950,7 @@ const App = () => {
           </div>
         </FilterPanel>
 
-        <div className="overflow-x-auto">
+        <DataTableScroll darkMode={darkMode}>
           <table className="freeze-table-item-registration table-fixed text-xs" style={{ width: `${itemRegTableWidth}px`, minWidth: `${itemRegTableWidth}px` }}>
             <colgroup>{columns.map(([, key]) => <col key={key} style={colStyle(key)}/>)}</colgroup>
             <thead className={tblHd}><tr>{columns.map(([label], index) => <th key={label} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{renderFreezeHeader('item-registration', index + 1, label)}</th>)}</tr></thead>
@@ -3586,7 +3980,7 @@ const App = () => {
               </tr>;})}
             </tbody>
           </table>
-        </div>
+        </DataTableScroll>
 
         <PagePagination
           darkMode={darkMode}
@@ -3635,29 +4029,29 @@ const App = () => {
       const pieColors = ['#2563EB', '#14B8A6', '#DC2626', '#60A5FA', '#5EEAD4', '#94A3B8'];
       return (
         <div className={`p-4 rounded-2xl ${card}`}>
-          <h3 className={`text-base font-bold ${txt}`}>{title}</h3>
-          <p className={`text-xs mb-4 ${txt2}`}>Total: {fmtNum(total)} Req. No</p>
+          <h3 className={`text-sm font-bold ${txt}`}>{title}</h3>
+          <p className={`text-xs mb-2 ${txt2}`}>Total: {fmtNum(total)} Req. No</p>
           {data.length === 0 ? (
             <div className={`h-[180px] flex items-center justify-center text-sm ${txt2}`}>No Item Registration data</div>
           ) : (
-            <div className="flex flex-col gap-3 md:flex-row md:items-start">
-              <div className="h-[200px] w-full min-w-0 pt-5 md:w-[210px] md:flex-none">
+            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-center md:gap-8 xl:gap-10">
+              <div className="h-[190px] w-full min-w-0 md:w-[220px] md:flex-none">
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart margin={{ top: 4, right: 4, bottom: 4, left: 4 }}>
-                    <Pie data={data} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={38} outerRadius={72} labelLine={false} label={renderPctLabel} isAnimationActive={false}>
+                    <Pie data={data} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={38} outerRadius={76} labelLine={false} label={renderPctLabel} isAnimationActive={false}>
                       {data.map((_, i) => <Cell key={i} fill={pieColors[i % pieColors.length]} />)}
                     </Pie>
                     <Tooltip formatter={(v, n) => [`${fmtNum(v)} Req. No`, n]} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
                   </PieChart>
                 </ResponsiveContainer>
               </div>
-              <div className="w-full md:w-[190px] space-y-2">
+              <div className="w-full md:w-[250px] space-y-2">
                 {data.map((item, i) => (
                   <div key={item.name} className="flex items-start gap-2 text-xs">
                     <span className="mt-1 h-2.5 w-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: pieColors[i % pieColors.length] }} />
                     <div className="min-w-0 flex-1">
                       <p className={`font-semibold leading-snug break-words ${txt}`} title={item.name}>{item.name}</p>
-                      <p className={txt2}>{fmtNum(item.value)} | {total ? ((item.value / total) * 100).toFixed(1) : '0.0'}%</p>
+                      <p className={`leading-tight ${txt2}`}>{fmtNum(item.value)} | {total ? ((item.value / total) * 100).toFixed(1) : '0.0'}%</p>
                     </div>
                   </div>
                 ))}
@@ -3853,7 +4247,7 @@ const App = () => {
           <h3 className={`text-base font-bold ${txt} flex items-center gap-2`}>
             <Wrench className="w-5 h-5 text-blue-600"/> Pending Item Registration
           </h3>
-           <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
             {itemRegCategoryChart(itemRegProcStatus, 'Proc. Status')}
             {itemRegCategoryChart(itemRegClients, 'Client Nm.')}
           </div>
@@ -4111,7 +4505,7 @@ const App = () => {
         </FilterPanel>
 
         {/* Detail Pending Delivery table follows the downloadable Excel layout. */}
-        <div className="overflow-x-auto rounded-lg border border-gray-200">
+        <DataTableScroll darkMode={darkMode} className="rounded-lg border border-gray-200">
           <table className="freeze-table-pending-delivery w-full text-sm">
             <colgroup>
               <col style={{minWidth:'76px', width:'76px', maxWidth:'76px'}}/>
@@ -4119,7 +4513,7 @@ const App = () => {
               <col style={{minWidth:'110px'}}/>
               <col style={{minWidth:'100px'}}/>
               <col style={{minWidth:'100px'}}/>
-              <col style={{minWidth:'130px'}}/>
+              <col style={{minWidth:'170px', width:'170px', maxWidth:'170px'}}/>
               <col style={{minWidth:'120px'}}/>
               <col style={{minWidth:'80px'}}/>
               <col style={{minWidth:'100px'}}/>
@@ -4179,8 +4573,8 @@ const App = () => {
                   <td className={`px-3 py-2 text-center text-xs ${txt2} whitespace-nowrap`}>{so.so_create_date||'-'}</td>
                   <td className="px-3 py-2 text-blue-600 font-medium whitespace-nowrap">{so.so_item}</td>
                   <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{so.svo_po || '-'}</td>
-                  <td className="px-3 py-2 whitespace-nowrap">
-                    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                  <td className="px-3 py-2 w-[170px] max-w-[170px] whitespace-nowrap">
+                    <span title={so.so_status || '-'} className={`inline-block max-w-[150px] truncate align-middle px-2 py-0.5 rounded-full text-xs font-medium ${
                       so.so_status==='Delivery Completed'?'bg-green-100 text-green-700':
                       so.so_status==='SO Cancel'?'bg-red-100 text-red-700':'bg-blue-100 text-blue-700'}`}>
                       {so.so_status||'-'}
@@ -4263,7 +4657,7 @@ const App = () => {
               })()}
             </tbody>
           </table>
-        </div>
+        </DataTableScroll>
 
         <PagePagination
           darkMode={darkMode}
@@ -4309,6 +4703,86 @@ const App = () => {
         .data-table-page table th,
         .data-table-page table td {
           border-right: 1px solid rgba(148, 163, 184, 0.28);
+        }
+        .data-table-scroll thead th {
+          position: sticky;
+          top: 0;
+          z-index: 35;
+          box-shadow: 0 1px 0 rgba(148, 163, 184, 0.28);
+        }
+        .data-table-scroll-frame {
+          border: 1px solid rgba(148, 163, 184, 0.32);
+          border-radius: 10px;
+          background: ${darkMode ? '#111827' : '#ffffff'};
+        }
+        .floating-table-header {
+          position: fixed;
+          top: 0;
+          overflow: hidden;
+          z-index: 95;
+          pointer-events: none;
+          border-left: 1px solid rgba(148, 163, 184, 0.32);
+          border-right: 1px solid rgba(148, 163, 184, 0.32);
+          box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
+        }
+        .floating-table-header table {
+          border-collapse: collapse;
+        }
+        .floating-table-header thead th {
+          position: static !important;
+          top: auto !important;
+          z-index: auto !important;
+        }
+        .floating-table-header th {
+          border-right: 1px solid rgba(148, 163, 184, 0.28);
+          border-bottom: 1px solid rgba(148, 163, 184, 0.34);
+        }
+        .floating-table-header-dark {
+          border-left-color: rgba(75, 85, 99, 0.85);
+          border-right-color: rgba(75, 85, 99, 0.85);
+          box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35);
+        }
+        .floating-table-scrollbar {
+          position: fixed;
+          bottom: 12px;
+          height: 24px;
+          overflow-x: auto;
+          overflow-y: hidden;
+          z-index: 90;
+          opacity: 0.18;
+          border-radius: 999px;
+          background: rgba(15, 23, 42, 0.08);
+          backdrop-filter: blur(6px);
+          transition: opacity 140ms ease, background-color 140ms ease;
+        }
+        .floating-table-scrollbar:hover,
+        .floating-table-scrollbar:focus-within {
+          opacity: 0.78;
+          background: rgba(15, 23, 42, 0.16);
+        }
+        .floating-table-scrollbar-dark {
+          background: rgba(255, 255, 255, 0.10);
+        }
+        .floating-table-scrollbar-dark:hover,
+        .floating-table-scrollbar-dark:focus-within {
+          background: rgba(255, 255, 255, 0.20);
+        }
+        .floating-table-scrollbar::-webkit-scrollbar {
+          height: 22px;
+        }
+        .floating-table-scrollbar::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        .floating-table-scrollbar::-webkit-scrollbar-thumb {
+          border-radius: 999px;
+          background: rgba(71, 85, 105, 0.52);
+          border: 4px solid transparent;
+          background-clip: padding-box;
+        }
+        .floating-table-scrollbar-dark::-webkit-scrollbar-thumb {
+          background: rgba(226, 232, 240, 0.52);
+          border: 4px solid transparent;
+          background-clip: padding-box;
         }
         .data-table-page table th {
           white-space: normal !important;
@@ -4378,6 +4852,11 @@ const App = () => {
             <Mail className="w-5 h-5 flex-shrink-0"/>
             <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-44 opacity-100':'max-w-0 opacity-0'}`}>RFQ</span>
           </button>
+          <button onClick={()=>{ setActivePage('import'); setImportPage(1); window.scrollTo({top:0,behavior:'smooth'}); }}
+            className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='import'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="Import">
+            <Ship className="w-5 h-5 flex-shrink-0"/>
+            <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-44 opacity-100':'max-w-0 opacity-0'}`}>Import</span>
+          </button>
           <button onClick={()=>{ setActivePage('vendor-control'); setVendorControlPage(1); window.scrollTo({top:0,behavior:'smooth'}); }}
             className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='vendor-control'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="Vendor Control">
             <Building2 className="w-5 h-5 flex-shrink-0"/>
@@ -4410,6 +4889,7 @@ const App = () => {
                :activePage==='all-so'?'Pending Delivery monitoring and detail records'
                :activePage==='item-registration'?'Product Registration Status data'
                :activePage==='rfq'?'Sales Submit-RFQ live data and quotation updates'
+               :activePage==='import'?'Import shipment and vendor import tracking'
                :activePage==='vendor-control'?'Vendor account access and credential control'
                :activePage==='all-registered-items'?'All registered product master data'
                :'Manage Pending Delivery records'}
@@ -4526,6 +5006,7 @@ const App = () => {
         {activePage==='dashboard' ? renderDashboardOverview()
           : activePage==='item-registration' ? renderItemRegistration()
           : activePage==='rfq' ? renderRFQ()
+          : activePage==='import' ? renderImport()
           : activePage==='vendor-control' ? renderVendorControl()
           : activePage==='all-registered-items' ? renderAllRegisteredItems()
           : renderAllSO()}
