@@ -798,6 +798,17 @@ CLOSED_STATUSES = {
     'Return Complete(Vendor)', 'Customer PO Reject'
 }
 
+# Statuses that are safe to discard entirely from the DB — they are closed,
+# never queried by any analytics endpoint, and only inflate storage.
+# 'Delivery Completed' is intentionally NOT here because it is used by
+# Delivery Analytics and YoY margin reporting.
+DISCARDABLE_STATUSES = {
+    'SO Cancel',
+    'Approval Apply', 'Approval Complete Step', 'Approval Reject', 'Approval Hold',
+    'Return Complete(Vendor)', 'Return Complete(HUB)',
+    'Customer PO Reject', 'Ship. Order Reject', 'PO Received Reject',
+}
+
 EXCLUDED_OP_UNITS = {'HLI GREEN POWER (CONSUMABLE)'}
 
 # ─── PO HLI extraction patterns ──────────────────────────────────────────
@@ -3511,6 +3522,15 @@ def upload_smro():
                 if not primary_val:
                     continue
 
+                # Skip rows whose status is never used by any analytics endpoint.
+                # Storing them only wastes disk space. If the row already exists
+                # in DB from an older upload, delete it now.
+                row_status = clean(df_val(row, col_status)) if col_status else None
+                if row_status and row_status in DISCARDABLE_STATUSES:
+                    if primary_val in existing_so:
+                        db.session.delete(existing_so.pop(primary_val))
+                    continue
+
                 # so_item = primary key DB (format "8061874935-10")
                 # so_number = prefix sebelum "-" (auto-derive jika tidak ada kolom SO Number terpisah)
                 if col_soitem:
@@ -3664,6 +3684,14 @@ def upload_smro():
 
         db.session.commit()
 
+        # WAL checkpoint after every large upload so the WAL file stays small
+        # on PythonAnywhere's shared hosting where workers are short-lived.
+        try:
+            db.session.execute(text('PRAGMA wal_checkpoint(TRUNCATE)'))
+            db.session.commit()
+        except Exception:
+            pass
+
         # Convert and persist new/changed USD/EUR transactions once during the
         # upload flow. Dashboard endpoints only read the stored IDR amount.
         fx_warning = None
@@ -3705,6 +3733,36 @@ def upload_smro():
         })
     except Exception as e:
         db.session.rollback(); import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/admin/cleanup-discardable', methods=['POST'])
+def admin_cleanup_discardable():
+    """One-time (and periodic) cleanup: delete SO rows whose status is in
+    DISCARDABLE_STATUSES. These are closed statuses that are never queried
+    by any analytics endpoint and only waste storage.
+
+    Safe to call at any time — Delivery Completed is NOT in DISCARDABLE_STATUSES
+    so delivery analytics data is preserved.
+    """
+    try:
+        deleted = db.session.query(SOData).filter(
+            SOData.so_status.in_(list(DISCARDABLE_STATUSES))
+        ).delete(synchronize_session=False)
+        db.session.commit()
+
+        # Checkpoint WAL and reclaim freed pages
+        db.session.execute(text('PRAGMA wal_checkpoint(TRUNCATE)'))
+        db.session.commit()
+
+        clear_runtime_caches()
+        return jsonify({
+            'deleted': deleted,
+            'message': f'{deleted} SO rows dengan status discardable berhasil dihapus.',
+        })
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
