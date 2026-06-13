@@ -369,6 +369,12 @@ class RFQCellEdit(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.utcnow)
     __table_args__ = (db.UniqueConstraint('row_key', 'field', name='uq_rfq_cell_edit_row_field'),)
 
+class ImportVendor(db.Model):
+    __tablename__ = 'import_vendor'
+    id = db.Column(db.Integer, primary_key=True)
+    vendor_name = db.Column(db.String(300), unique=True, nullable=False, index=True)
+    uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
+
 
 # ─── Exchange rate helpers ─────────────────────────────────────────────────
 _RATE_CACHE = {}   # {date: float} in-process cache for USD -> IDR
@@ -794,8 +800,8 @@ with app.app_context():
 
 CLOSED_STATUSES = {
     'Delivery Completed', 'SO Cancel',
-    'Approval Apply', 'Approval Complete Step', 'Approval Reject', 'Approval Hold',
-    'Return Complete(Vendor)', 'Customer PO Reject'
+    'Approval Apply', 'Approval Complete', 'Approval Complete Step', 'Approval Reject', 'Approval Hold',
+    'Return Complete(Vendor)', 'Return Complete(HUB)', 'Customer PO Reject'
 }
 
 # Statuses that are safe to discard entirely from the DB — they are closed,
@@ -1048,6 +1054,7 @@ RFQ_TEMPLATE_COLUMNS = [
     ('sales_pic', 'Sales PIC'),
     ('category_name', 'Category Name'),
     ('purchase_pic', 'Purchase PIC'),
+    ('rfq_code', 'No. RFQ / KODE'),
     ('item_name', 'Item Name'),
     ('detail_spec', 'Detail Spec'),
     ('brand_manufacturer', 'Brand/Manufaktur'),
@@ -1124,6 +1131,151 @@ RFQ_SHEET_COLUMN_BY_FIELD = {
     'photo_url': 'AG',
     'remarks': 'AH',
 }
+
+IMPORT_LAYOUT_SHEET_ID = '1i0N4VdF_vMHjr_0gjrUdS7nCKUpxPYvDWW-HOWSanEM'
+IMPORT_LAYOUT_GID = '73188127'
+IMPORT_SOURCE_SHEETS = [
+    {'key': 'source_1', 'spreadsheet_id': '1OSISIb3-D_-oxj2LXH4Q3jcG2IZWnjFGWAmTmdcPBJg', 'gid': '0', 'label': 'Source 1'},
+    {'key': 'source_2', 'spreadsheet_id': '17P7_JsUGF5mqlz-j2fdvFZ9-gX8l-WGPqZABjng5Hnc', 'gid': '0', 'label': 'Source 2'},
+]
+IMPORT_LAYOUT_VENDOR_COLUMNS = (5, 28)
+IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS = (16,)
+
+def google_csv_url(spreadsheet_id, gid='0'):
+    return f'https://docs.google.com/spreadsheets/d/{spreadsheet_id}/gviz/tq?tqx=out:csv&gid={gid}'
+
+def read_public_sheet_csv(spreadsheet_id, gid='0', nrows=None):
+    return pd.read_csv(google_csv_url(spreadsheet_id, gid), header=None, dtype=str, keep_default_na=False, nrows=nrows)
+
+def import_clean_header(value, fallback):
+    label = (clean(value) or '').replace('\r', '').replace('\n', ' / ')
+    return label or fallback
+
+def import_header_key(value):
+    return re.sub(r'[^a-z0-9]+', '', (clean(value) or '').lower())
+
+def import_layout_columns():
+    df = read_public_sheet_csv(IMPORT_LAYOUT_SHEET_ID, IMPORT_LAYOUT_GID, nrows=3)
+    header_row = df.iloc[1] if len(df) > 1 else (df.iloc[0] if len(df) else [])
+    columns = []
+    seen = {}
+    for idx, raw in enumerate(list(header_row)):
+        label = import_clean_header(raw, '')
+        if not label:
+            continue
+        base = re.sub(r'[^a-z0-9]+', '_', label.lower()).strip('_') or f'col_{idx}'
+        count = seen.get(base, 0) + 1
+        seen[base] = count
+        field = base if count == 1 else f'{base}_{count}'
+        columns.append({'field': field, 'label': label, 'col_idx': idx})
+    return columns
+
+def import_default_vendors_from_layout():
+    try:
+        df = read_public_sheet_csv(IMPORT_LAYOUT_SHEET_ID, IMPORT_LAYOUT_GID)
+    except Exception:
+        return []
+    vendors = set()
+    for row_idx in range(2, len(df)):
+        for col_idx in IMPORT_LAYOUT_VENDOR_COLUMNS:
+            if col_idx >= df.shape[1]:
+                continue
+            name = clean(df.iloc[row_idx, col_idx])
+            if not name or name.lower() in ('vendor', 'vendor name'):
+                continue
+            vendors.add(name)
+    return sorted(vendors, key=lambda s: s.lower())
+
+def import_vendor_names():
+    rows = ImportVendor.query.order_by(ImportVendor.vendor_name.asc()).all()
+    uploaded = [r.vendor_name for r in rows if clean(r.vendor_name)]
+    return uploaded or import_default_vendors_from_layout()
+
+def import_detect_data_start(df):
+    for idx in range(min(len(df), 12)):
+        item = clean(df.iloc[idx, 7]) if df.shape[1] > 7 else ''
+        vendor = clean(df.iloc[idx, 16]) if df.shape[1] > 16 else ''
+        qty = clean(df.iloc[idx, 12]) if df.shape[1] > 12 else ''
+        if item and item.lower() != 'item name' and (vendor or qty):
+            return idx
+    return 3
+
+def import_detect_header_row(df):
+    for idx in range(min(len(df), 12)):
+        labels = [import_header_key(v) for v in df.iloc[idx].tolist()]
+        if 'itemname' in labels and ('vendorname' in labels or 'posementara' in labels):
+            return idx
+    return max(import_detect_data_start(df) - 1, 0)
+
+def import_source_column_map(df, columns):
+    header_idx = import_detect_header_row(df)
+    header_values = list(df.iloc[header_idx]) if len(df) else []
+    by_key = {}
+    for idx, raw in enumerate(header_values):
+        key = import_header_key(raw)
+        if key and key not in by_key:
+            by_key[key] = idx
+
+    aliases = {
+        'site': ['siteidnkrg'],
+        'vendor': ['vendorname'],
+        'so': ['noso'],
+        'purchaseprice': ['purchaseprice', 'price', 'unitprice'],
+        'deliverystatus': ['deliverystatus', 'createsopodeliverycompletefelix'],
+        'importcheck': ['importcheck', 'importautoinput'],
+        'happycall': ['happycall', 'poconfirmhappycall'],
+    }
+
+    source_map = {}
+    for col in columns:
+        keys = [import_header_key(col.get('label')), import_header_key(col.get('field'))]
+        keys.extend(aliases.get(keys[0], []))
+        source_idx = next((by_key[key] for key in keys if key in by_key), None)
+        if source_idx is not None:
+            source_map[col['field']] = source_idx
+    return source_map
+
+def import_row_vendor_candidates(values, source_map, columns):
+    candidates = []
+    for field in ('vendor_name', 'vendor'):
+        col_idx = source_map.get(field)
+        if col_idx is not None and col_idx < len(values):
+            candidates.append(values[col_idx])
+    for col_idx in IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS:
+        if col_idx < len(values):
+            candidates.append(values[col_idx])
+    return [clean(v) for v in candidates if clean(v)]
+
+def import_sheet_rows():
+    columns = import_layout_columns()
+    vendor_set = {v.strip().lower() for v in import_vendor_names() if v.strip()}
+    rows = []
+    for source in IMPORT_SOURCE_SHEETS:
+        df = read_public_sheet_csv(source['spreadsheet_id'], source['gid'])
+        source_map = import_source_column_map(df, columns)
+        start_idx = import_detect_data_start(df)
+        for idx in range(start_idx, len(df)):
+            values = [clean(v) or '' for v in df.iloc[idx].tolist()]
+            vendor_candidates = import_row_vendor_candidates(values, source_map, columns)
+            row_vendor = next((v for v in vendor_candidates if v), '')
+            if vendor_set and not any(v.strip().lower() in vendor_set for v in vendor_candidates if v):
+                continue
+            row = {
+                '_row_key': f"{source['key']}:{idx + 1}",
+                '_source_key': source['key'],
+                '_source_label': source['label'],
+                '_spreadsheet_id': source['spreadsheet_id'],
+                '_gid': source['gid'],
+                '_sheet_row': idx + 1,
+                '_vendor_name': row_vendor,
+            }
+            for col in columns:
+                col_idx = source_map.get(col['field'])
+                row[col['field']] = values[col_idx] if col_idx is not None and col_idx < len(values) else ''
+            if not any(row.get(col['field']) for col in columns):
+                continue
+            rows.append(row)
+    return columns, rows
 
 RFQ_DASHBOARD_ONLY_FIELDS = {'private_remarks_1', 'private_remarks_2'}
 
@@ -1202,7 +1354,7 @@ def sort_rfq_rows(rows, sort_order='newest'):
     rows.sort(key=key)
     return rows
 
-RFQ_SEARCH_FIELDS = ('request_number', 'item_name', 'detail_spec')
+RFQ_SEARCH_FIELDS = ('rfq_code', 'request_number', 'item_name', 'detail_spec')
 
 
 def rfq_multiline_search_terms(value):
@@ -1293,6 +1445,7 @@ def fetch_rfq_rows(force=False):
             'rfq_date': rfq_cell(src, 4),
             'closing_date': rfq_cell(src, 5),
             'sales_pic': rfq_cell(src, 6),
+            'rfq_code': rfq_cell(src, 7),
             'item_name': rfq_cell(src, 8),
             'detail_spec': rfq_cell(src, 9),
             'brand_manufacturer': rfq_cell(src, 10),
@@ -2150,7 +2303,14 @@ def apply_item_registration_kpi_status_filter(query):
 Excluded statuses are business-stop / confirmation / pre-registration process
 statuses that should remain visible in the table but not inflate PIC KPI cards.
 """
-    return query.filter(~item_registration_kpi_status_expr().in_(list(ITEM_REG_KPI_EXCLUDED_STATUSES)))
+    status_expr = item_registration_kpi_status_expr()
+    return query.filter(
+        ~status_expr.in_(list(ITEM_REG_KPI_EXCLUDED_STATUSES)),
+        ~status_expr.like('%sales%')
+    )
+
+def apply_item_registration_visible_status_filter(query):
+    return query.filter(~item_registration_kpi_status_expr().like('%sales%'))
 
 def refresh_item_registration_mappings():
     rows = ItemRegistration.query.all()
@@ -3009,7 +3169,7 @@ def get_all_so():
             else:
                 all_sos = [s for s in all_sos if calc_margin(s) >= 0]
 
-        approval_statuses = {'Approval Apply', 'Approval Complete Step', 'Approval Reject'}
+        approval_statuses = {'Approval Apply', 'Approval Reject'}
         approval_q = SOData.query.filter(SOData.so_status.in_(list(approval_statuses)))
         approval_q = apply_so_client_filter(approval_q, clients)
         approval_q = apply_so_pic_filter(approval_q, global_pics)
@@ -4212,6 +4372,7 @@ def completed_summary():
         date_year   = request.args.get('date_year', '')
         date_from   = request.args.get('date_from', '')
         date_to     = request.args.get('date_to', '')
+        yoy_base_year = request.args.get('yoy_base_year', '')
         is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
         clients = selected_clients()
         pics = selected_pics()
@@ -4285,7 +4446,7 @@ def completed_summary():
 
         # Persist missing converted purchase amounts once. Subsequent page loads
         # reuse so_data.purchasing_amount_idr instead of converting every row.
-        converted_count = ensure_purchase_amount_idr_cache(rows)
+        converted_count = ensure_purchase_amount_idr_cache(rows, fetch_missing=True)
 
         def po_amt_of(s):
             return purchase_amount_idr(s)
@@ -4319,12 +4480,25 @@ def completed_summary():
 
         monthly_trend = sorted(monthly.values(), key=lambda x: x['month'])
 
-        # Year-on-year purchase amount for the two years before the current
-        # calendar year. It intentionally uses a separate completed-delivery
-        # query so the current-year KPI/bar chart can be filtered without
-        # wiping out the prior-year line series.
+        # Year-on-year purchase amount for the other two years in the latest
+        # three-year window. The base year follows the selected bar/range year.
         current_year = datetime.utcnow().year
-        yoy_years = [current_year - 1, current_year - 2]
+        def _int_year(value):
+            try:
+                return int(str(value)[:4])
+            except (TypeError, ValueError):
+                return None
+
+        base_year = (
+            _int_year(yoy_base_year)
+            or _int_year(effective_year)
+            or _int_year(date_from)
+            or current_year
+        )
+        latest_three_years = sorted({current_year, current_year - 1, current_year - 2})
+        yoy_years = [year for year in latest_three_years if year != base_year]
+        if len(yoy_years) > 2:
+            yoy_years = yoy_years[-2:]
         yoy_fields = {year: f'purchase_{year}' for year in yoy_years}
         purchase_yoy_trend = []
         purchase_yoy_by_month = {}
@@ -4338,7 +4512,7 @@ def completed_summary():
             purchase_yoy_trend.append(row)
             purchase_yoy_by_month[month_num] = row
 
-        ensure_purchase_amount_idr_cache(yoy_rows)
+        ensure_purchase_amount_idr_cache(yoy_rows, fetch_missing=True)
         for s in yoy_rows:
             if not s.so_create_date:
                 continue
@@ -4352,17 +4526,30 @@ def completed_summary():
                 row[field] = round(row[field], 2)
 
         # Vendor summary (top 5 by sales)
+        def currency_bucket(s):
+            cur = (s.purchasing_currency or 'IDR').strip().upper()
+            return 'local' if cur in ('', 'IDR') else 'import'
+
+        def add_vendor(target, s, po_amt, sales, m):
+            v = s.vendor_name or 'Unknown'
+            if v not in target:
+                target[v] = {'vendor': v, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0, 'margin': 0.0}
+            target[v]['count'] += 1
+            target[v]['sales_amount'] += sales
+            target[v]['purchase_amount'] += po_amt
+            if m is not None:
+                target[v]['margin'] += m
+
         vendor_map = {}
+        vendor_local_map = {}
+        vendor_import_map = {}
         client_map = {}
         for s, po_amt, sales, m in enriched:
-            v = s.vendor_name or 'Unknown'
-            if v not in vendor_map:
-                vendor_map[v] = {'vendor': v, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0, 'margin': 0.0}
-            vendor_map[v]['count'] += 1
-            vendor_map[v]['sales_amount'] += sales
-            vendor_map[v]['purchase_amount'] += po_amt
-            if m is not None:
-                vendor_map[v]['margin'] += m
+            add_vendor(vendor_map, s, po_amt, sales, m)
+            if currency_bucket(s) == 'local':
+                add_vendor(vendor_local_map, s, po_amt, sales, m)
+            else:
+                add_vendor(vendor_import_map, s, po_amt, sales, m)
 
             client = s.operation_unit_name or 'Unknown'
             if client not in client_map:
@@ -4373,7 +4560,16 @@ def completed_summary():
             if m is not None:
                 client_map[client]['margin'] += m
 
-        top_vendors = sorted(vendor_map.values(), key=lambda x: x['sales_amount'], reverse=True)[:5]
+        def top_purchase_vendors(mapping):
+            return sorted(
+                (row for row in mapping.values() if float(row.get('purchase_amount') or 0) > 0),
+                key=lambda x: x['purchase_amount'],
+                reverse=True
+            )[:5]
+
+        top_vendors = top_purchase_vendors(vendor_map)
+        top_vendors_local = top_purchase_vendors(vendor_local_map)
+        top_vendors_import = top_purchase_vendors(vendor_import_map)
         top_clients = sorted(client_map.values(), key=lambda x: x['sales_amount'], reverse=True)[:5]
 
         # Margin distribution + totals (KPI cards)
@@ -4469,6 +4665,8 @@ def completed_summary():
             'purchase_yoy_years': yoy_years,
             'purchase_yoy_trend': purchase_yoy_trend,
             'top_vendors': top_vendors,
+            'top_vendors_local': top_vendors_local,
+            'top_vendors_import': top_vendors_import,
             'top_clients': top_clients,
             'top_items': top_items,
             'worst_margin_vendors': worst_margin_vendors,
@@ -4831,7 +5029,9 @@ def get_item_registration_data():
         kpi_pic = (request.args.get('kpi_pic') or '').strip()
         proc_statuses = [s.strip() for s in request.args.getlist('proc_status') if s.strip()]
         mfr_names = [s.strip() for s in request.args.getlist('mfr_name') if s.strip()]
-        q = apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to)
+        q = apply_item_registration_visible_status_filter(
+            apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to)
+        )
         if clients:
             q = q.filter(ItemRegistration.client_name.in_(clients))
         q = apply_item_registration_pic_filter(q, global_pics)
@@ -4884,7 +5084,9 @@ def get_item_registration_data():
 
         total = q.count()
         rows = q.order_by(ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()).offset((page-1)*per_page).limit(per_page).all()
-        option_q = apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to)
+        option_q = apply_item_registration_visible_status_filter(
+            apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to)
+        )
         if clients:
             option_q = option_q.filter(ItemRegistration.client_name.in_(clients))
         option_q = apply_item_registration_pic_filter(option_q, global_pics)
@@ -5643,6 +5845,7 @@ def get_rfq_data():
         search = clean(request.args.get('search')) or ''
         pic = clean(request.args.get('pic')) or ''
         clients = [clean(v) for v in request.args.getlist('client_name') if clean(v)]
+        rfq_numbers = [clean(v) for v in request.args.getlist('rfq_no') if clean(v)]
         brands = [clean(v) for v in request.args.getlist('brand_manufacturer') if clean(v)]
         purchase_pics = [clean(v) for v in request.args.getlist('purchase_pic') if clean(v)]
         vendors = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
@@ -5656,6 +5859,8 @@ def get_rfq_data():
         option_rows = rows
         if clients:
             rows = [row for row in rows if clean(row.get('client_name')) in clients]
+        if rfq_numbers:
+            rows = [row for row in rows if clean(row.get('rfq_code')) in rfq_numbers]
         if brands:
             rows = [row for row in rows if clean(row.get('brand_manufacturer')) in brands]
         if vendors:
@@ -5705,6 +5910,7 @@ def get_rfq_data():
             'pic_kpis': pic_kpis,
             'filters': {
                 'clients': sorted({clean(row.get('client_name')) for row in option_rows if clean(row.get('client_name'))}),
+                'rfq_numbers': sorted({clean(row.get('rfq_code')) for row in option_rows if clean(row.get('rfq_code'))}),
                 'brands': sorted({clean(row.get('brand_manufacturer')) for row in option_rows if clean(row.get('brand_manufacturer'))}),
                 'purchase_pics': sorted({clean(row.get('purchase_pic')) for row in option_rows if clean(row.get('purchase_pic')) and clean(row.get('purchase_pic')).lower() != 'unassigned'}),
                 'vendors': sorted({clean(row.get('vendor_name')) for row in option_rows if clean(row.get('vendor_name'))}),
@@ -5722,6 +5928,7 @@ def rfq_filtered_rows_from_request(force=False):
     search = clean(request.args.get('search')) or ''
     pic = clean(request.args.get('pic')) or ''
     clients = [clean(v) for v in request.args.getlist('client_name') if clean(v)]
+    rfq_numbers = [clean(v) for v in request.args.getlist('rfq_no') if clean(v)]
     brands = [clean(v) for v in request.args.getlist('brand_manufacturer') if clean(v)]
     purchase_pics = [clean(v) for v in request.args.getlist('purchase_pic') if clean(v)]
     vendors = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
@@ -5731,6 +5938,8 @@ def rfq_filtered_rows_from_request(force=False):
         rows = filter_rfq_rows_by_multiline_search(rows, search)
     if clients:
         rows = [row for row in rows if clean(row.get('client_name')) in clients]
+    if rfq_numbers:
+        rows = [row for row in rows if clean(row.get('rfq_code')) in rfq_numbers]
     if brands:
         rows = [row for row in rows if clean(row.get('brand_manufacturer')) in brands]
     if purchase_pics:
@@ -6030,6 +6239,135 @@ def update_rfq_cell(row_key):
                 sheet_sync = {'synced': False, 'reason': str(sync_error)}
             clear_runtime_caches()
         return jsonify({'success': True, 'row_key': row_key, 'field': field, 'value': clean_value, 'sheet_sync': sheet_sync})
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+def import_sheet_title_for_gid(spreadsheet_id, gid):
+    metadata = google_sheets_metadata(spreadsheet_id)
+    gid_int = int(gid)
+    for sheet in metadata.get('sheets', []):
+        props = sheet.get('properties', {})
+        if props.get('sheetId') == gid_int:
+            return props.get('title')
+    raise RuntimeError(f'Sheet gid {gid} not found')
+
+@app.route('/api/import/data', methods=['GET'])
+def get_import_data():
+    try:
+        force = str(request.args.get('refresh', '')).lower() in ('1', 'true', 'yes')
+        page = max(int(request.args.get('page', 1)), 1)
+        per_page = min(max(int(request.args.get('per_page', 25)), 1), 500)
+        search = clean(request.args.get('search')) or ''
+        cache_key = ('import_sheet_rows',)
+        cached = None if force else runtime_cache_get(cache_key)
+        if cached is None:
+            columns, rows = import_sheet_rows()
+            vendor_count = len(import_vendor_names())
+            runtime_cache_set(cache_key, {'columns': columns, 'rows': rows, 'vendor_count': vendor_count}, ttl_seconds=300)
+        else:
+            columns = cached['columns']
+            rows = cached['rows']
+            vendor_count = cached['vendor_count']
+        if search:
+            terms = [t.strip().lower() for t in re.split(r'[\n,]+', search) if t.strip()]
+            if terms:
+                rows = [row for row in rows if any(term in ' '.join(str(v or '').lower() for v in row.values()) for term in terms)]
+        total = len(rows)
+        start = (page - 1) * per_page
+        paged = rows[start:start + per_page]
+        return jsonify({
+            'data': paged,
+            'columns': columns,
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'vendor_count': vendor_count,
+            'sources': [{'key': s['key'], 'label': s['label']} for s in IMPORT_SOURCE_SHEETS],
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/import/cell', methods=['PUT'])
+def update_import_cell():
+    try:
+        payload = request.get_json(silent=True) or {}
+        row_key = clean(payload.get('row_key'))
+        field = clean(payload.get('field'))
+        value = '' if payload.get('value') is None else str(payload.get('value'))
+        if not row_key or not field:
+            return jsonify({'error': 'row_key and field are required'}), 400
+        columns = import_layout_columns()
+        column = next((col for col in columns if col['field'] == field), None)
+        if not column:
+            return jsonify({'error': 'Unknown import column'}), 400
+        source_key, _, sheet_row_raw = row_key.partition(':')
+        source = next((s for s in IMPORT_SOURCE_SHEETS if s['key'] == source_key), None)
+        if not source or not sheet_row_raw.isdigit():
+            return jsonify({'error': 'Invalid import row key'}), 400
+        df = read_public_sheet_csv(source['spreadsheet_id'], source['gid'])
+        source_map = import_source_column_map(df, columns)
+        source_col_idx = source_map.get(field)
+        if source_col_idx is None:
+            return jsonify({'error': 'This column is not available in the source sheet'}), 400
+        sheet_title = import_sheet_title_for_gid(source['spreadsheet_id'], source['gid'])
+        range_name = f"'{sheet_title}'!{get_column_letter(source_col_idx + 1)}{int(sheet_row_raw)}"
+        google_sheets_values_update(source['spreadsheet_id'], range_name, [[value]])
+        clear_runtime_caches()
+        return jsonify({'success': True, 'row_key': row_key, 'field': field, 'value': value, 'sheet_sync': {'synced': True, 'range': range_name}})
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e), 'sheet_sync': {'synced': False, 'reason': str(e)}}), 500
+
+@app.route('/api/import/vendor-template', methods=['GET'])
+def download_import_vendor_template():
+    try:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'Import Vendors'
+        ws.append(['Vendor Name'])
+        for vendor in import_vendor_names():
+            ws.append([vendor])
+        ws.column_dimensions['A'].width = 42
+        ws['A1'].font = Font(bold=True, color='FFFFFF')
+        ws['A1'].fill = PatternFill('solid', fgColor='2563EB')
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return send_file(output, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', as_attachment=True, download_name='Import_Vendor_Template.xlsx')
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/import/vendors/upload', methods=['POST'])
+def upload_import_vendors():
+    try:
+        files = request.files.getlist('file') or request.files.getlist('files')
+        if not files:
+            return jsonify({'error': 'No file uploaded'}), 400
+        vendors = set()
+        for file in files:
+            name = (file.filename or '').lower()
+            if name.endswith('.csv'):
+                df = pd.read_csv(file, dtype=str, keep_default_na=False)
+            else:
+                df = pd.read_excel(file, dtype=str, keep_default_na=False)
+            if df.empty:
+                continue
+            col = next((c for c in df.columns if str(c).strip().lower() in ('vendor name', 'vendor', 'vendor_name')), df.columns[0])
+            for value in df[col].tolist():
+                vendor = clean(value)
+                if vendor and vendor.lower() not in ('vendor', 'vendor name'):
+                    vendors.add(vendor)
+        ImportVendor.query.delete()
+        now = datetime.utcnow()
+        for vendor in sorted(vendors, key=lambda s: s.lower()):
+            db.session.add(ImportVendor(vendor_name=vendor, uploaded_at=now))
+        db.session.commit()
+        clear_runtime_caches()
+        return jsonify({'success': True, 'count': len(vendors), 'message': f'Import vendor list updated: {len(vendors)} vendors'})
     except Exception as e:
         db.session.rollback()
         import traceback; traceback.print_exc()
