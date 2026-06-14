@@ -1177,7 +1177,7 @@ const App = () => {
   const [importColumns, setImportColumns] = useState([]);
   const [importTotal, setImportTotal] = useState(0);
   const [importPage, setImportPage] = useState(1);
-  const [importPerPage, setImportPerPage] = useState(25);
+  const [importPerPage, setImportPerPage] = useState(10);
   const [importSearch, setImportSearch] = useState('');
   const [importAppliedSearch, setImportAppliedSearch] = useState('');
   const [importVendorCount, setImportVendorCount] = useState(0);
