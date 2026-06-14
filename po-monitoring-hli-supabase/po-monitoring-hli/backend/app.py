@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify, send_file, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 import pandas as pd
+import numpy as np
 import re
 import os
 import json
@@ -164,6 +165,23 @@ def _holiday_set():
     _HOLIDAY_CACHE_KEY = cache_key
     return s
 
+_HOLIDAY_ARRAY_CACHE = None
+_HOLIDAY_ARRAY_CACHE_KEY = None
+
+def _holiday_array():
+    """numpy datetime64[D] array mirroring _holiday_set(), used by
+    count_workdays() for a vectorised/C-speed business-day count."""
+    global _HOLIDAY_ARRAY_CACHE, _HOLIDAY_ARRAY_CACHE_KEY
+    holiday_set = _holiday_set()
+    cache_key = (_HOLIDAY_CACHE_KEY, len(holiday_set))
+    if _HOLIDAY_ARRAY_CACHE is not None and _HOLIDAY_ARRAY_CACHE_KEY == cache_key:
+        return _HOLIDAY_ARRAY_CACHE
+    arr = (np.array(sorted(holiday_set), dtype='datetime64[D]')
+           if holiday_set else np.array([], dtype='datetime64[D]'))
+    _HOLIDAY_ARRAY_CACHE = arr
+    _HOLIDAY_ARRAY_CACHE_KEY = cache_key
+    return arr
+
 def is_workday(d):
     """Return True if date is a working day (Mon–Fri, not a public holiday)."""
     return d.weekday() < 5 and d not in _holiday_set()
@@ -171,28 +189,21 @@ def is_workday(d):
 def count_workdays(start, end):
     """Count working days between start and end (exclusive of end).
     Returns negative if end < start (overdue).
+
+    Implemented with numpy.busday_count (C-speed) instead of a day-by-day
+    Python loop. Dashboard endpoints call this once per SO/PO row to compute
+    aging/leadtime, and rows often span hundreds of calendar days — a pure
+    Python loop there scales as O(rows x days), which is the main reason
+    dashboard data takes a long time to load on large datasets.
     """
     if start is None or end is None:
         return None
     if start == end:
         return 0
+    holidays = _holiday_array()
     if end > start:
-        count = 0
-        cur = start
-        while cur < end:
-            if is_workday(cur):
-                count += 1
-            cur += timedelta(days=1)
-        return count
-    else:
-        # overdue — count negatively
-        count = 0
-        cur = end
-        while cur < start:
-            if is_workday(cur):
-                count += 1
-            cur += timedelta(days=1)
-        return -count
+        return int(np.busday_count(start, end, holidays=holidays))
+    return -int(np.busday_count(end, start, holidays=holidays))
 
 def workdays_since(past_date, today=None):
     """Count working days from past_date to today (aging)."""
