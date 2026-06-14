@@ -19,6 +19,34 @@ import { useLocation, useNavigate } from 'react-router-dom';
 
 const BACKEND = import.meta.env.VITE_API_URL || 'http://127.0.0.1:5001';
 const api = axios.create({ baseURL: BACKEND, timeout: 600000 });
+const DASHBOARD_SUMMARY_CACHE_PREFIX = 'po-monitoring:dashboard-summary:';
+
+const readDashboardSummaryCache = (url) => {
+  try {
+    const raw = sessionStorage.getItem(`${DASHBOARD_SUMMARY_CACHE_PREFIX}${url}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed?.data || null;
+  } catch {
+    return null;
+  }
+};
+
+const writeDashboardSummaryCache = (url, data) => {
+  try {
+    sessionStorage.setItem(`${DASHBOARD_SUMMARY_CACHE_PREFIX}${url}`, JSON.stringify({ at: Date.now(), data }));
+  } catch {
+    // Storage can be unavailable in private/locked-down contexts; network data still renders.
+  }
+};
+
+const clearDashboardSummaryCache = () => {
+  try {
+    Object.keys(sessionStorage)
+      .filter((key) => key.startsWith(DASHBOARD_SUMMARY_CACHE_PREFIX))
+      .forEach((key) => sessionStorage.removeItem(key));
+  } catch {}
+};
 
 const PIE_COLORS = ['#2563EB','#14B8A6','#22C55E','#EF4444','#06B6D4',
                     '#84CC16','#EC4899','#0EA5E9','#F43F5E','#94A3B8'];
@@ -238,18 +266,14 @@ const Toast = ({ message, type, onClose }) => {
 
 // ─── Download Button with press animation ─────────────────────────────────
 const DownloadButton = ({ onClick, className, children, disabled }) => {
-  const [pressed, setPressed] = useState(false);
   const handleClick = () => {
-    setPressed(true);
-    setTimeout(() => setPressed(false), 200);
     onClick && onClick();
   };
   return (
     <button
       onClick={handleClick}
       disabled={disabled}
-      className={`${className} transition-all duration-100 ${pressed ? 'scale-95 brightness-90 shadow-inner' : 'scale-100'}`}
-      style={{ transform: pressed ? 'scale(0.95)' : 'scale(1)' }}
+      className={className}
     >
       {children}
     </button>
@@ -821,9 +845,10 @@ const FloatingTableScrollbar = ({ targetRef, darkMode }) => {
     const update = () => {
       const rect = target.getBoundingClientRect();
       const hasOverflow = target.scrollWidth > target.clientWidth + 2;
-      const inView = rect.bottom > 96 && rect.top < window.innerHeight - 42;
+      const tableVisible = rect.bottom > 96 && rect.top < window.innerHeight - 42;
+      const nativeBottomScrollbarVisible = rect.bottom <= window.innerHeight - 12;
       setState({
-        visible: hasOverflow && inView,
+        visible: hasOverflow && tableVisible && !nativeBottomScrollbarVisible,
         left: Math.max(8, rect.left),
         width: Math.min(rect.width, window.innerWidth - Math.max(8, rect.left) - 8),
         scrollWidth: target.scrollWidth,
@@ -876,79 +901,11 @@ const FloatingTableScrollbar = ({ targetRef, darkMode }) => {
   );
 };
 
-const FloatingTableHeader = ({ targetRef, darkMode }) => {
-  const [state, setState] = useState({
-    visible: false,
-    left: 0,
-    width: 0,
-    tableWidth: 0,
-    headerHtml: '',
-    scrollLeft: 0,
-  });
-
-  useEffect(() => {
-    const target = targetRef.current;
-    if (!target) return undefined;
-
-    const update = () => {
-      const table = target.querySelector('table');
-      const thead = table?.querySelector('thead');
-      if (!table || !thead) return;
-      const rect = target.getBoundingClientRect();
-      const tableRect = table.getBoundingClientRect();
-      const shouldFloat = rect.top < 0 && rect.bottom > thead.offsetHeight + 8;
-      const left = Math.max(8, rect.left);
-      const width = Math.min(rect.width, window.innerWidth - left - 8);
-      const colgroup = table.querySelector('colgroup')?.outerHTML || '';
-      setState({
-        visible: shouldFloat,
-        left,
-        width,
-        tableWidth: Math.max(table.scrollWidth, tableRect.width),
-        headerHtml: `${colgroup}${thead.outerHTML}`,
-        scrollLeft: target.scrollLeft,
-      });
-    };
-
-    const onScroll = () => update();
-    update();
-    target.addEventListener('scroll', onScroll, { passive: true });
-    window.addEventListener('scroll', onScroll, { passive: true });
-    window.addEventListener('resize', onScroll);
-    const resizeObserver = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(onScroll) : null;
-    resizeObserver?.observe(target);
-
-    return () => {
-      target.removeEventListener('scroll', onScroll);
-      window.removeEventListener('scroll', onScroll);
-      window.removeEventListener('resize', onScroll);
-      resizeObserver?.disconnect();
-    };
-  }, [targetRef]);
-
-  if (!state.visible || !state.headerHtml) return null;
-
-  return (
-    <div
-      className={`floating-table-header ${darkMode ? 'floating-table-header-dark' : ''}`}
-      style={{ left: state.left, width: state.width }}
-      aria-hidden="true"
-    >
-      <table
-        className="table-fixed text-xs border-collapse"
-        style={{ width: state.tableWidth, minWidth: state.tableWidth, transform: `translateX(${-state.scrollLeft}px)` }}
-        dangerouslySetInnerHTML={{ __html: state.headerHtml }}
-      />
-    </div>
-  );
-};
-
 const DataTableScroll = ({ children, className = '', darkMode }) => {
   const ref = useRef(null);
   return (
     <>
       <div ref={ref} className={`data-table-scroll data-table-scroll-frame overflow-x-auto ${className}`}>{children}</div>
-      <FloatingTableHeader targetRef={ref} darkMode={darkMode} />
       <FloatingTableScrollbar targetRef={ref} darkMode={darkMode} />
     </>
   );
@@ -1146,9 +1103,16 @@ const App = () => {
   const setActivePage = useCallback((page) => {
     navigate(PAGE_PATHS[page] || '/', { replace: false });
   }, [navigate]);
+  const openPage = useCallback((event, page, reset = () => {}) => {
+    event.preventDefault();
+    reset();
+    setActivePage(page);
+    window.scrollTo({ top: 0 });
+  }, [setActivePage]);
   const [showUploadDropdown, setShowUploadDropdown] = useState(false);
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
   const uploadDropdownRef = useRef(null);
+  const dashboardRequestSeq = useRef(0);
   const [frozenColumns, setFrozenColumns] = useState({});
 
   const [stats, setStats] = useState(null);
@@ -1248,7 +1212,7 @@ const App = () => {
   const [vendorControlLastUpdated, setVendorControlLastUpdated] = useState(null);
   const [vendorPasswordVisible, setVendorPasswordVisible] = useState({});
 
-  const [loading, setLoading] = useState(false);
+  const [, setLoading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(null);
   const [toasts, setToasts] = useState([]);
   const [modal, setModal] = useState(null);
@@ -1388,50 +1352,90 @@ const App = () => {
   }
 
   const fetchDashboard = useCallback(async (dateFilter) => {
+    const requestId = dashboardRequestSeq.current + 1;
+    dashboardRequestSeq.current = requestId;
+    const isCurrent = () => dashboardRequestSeq.current === requestId;
+    const f = dateFilter || globalDateFilter;
+    const params = new URLSearchParams();
+    Object.entries(dateFilterParams(f)).forEach(([key, value]) => { if (value) params.append(key, value); });
+    appendMultiParam(params, 'client', globalClientFilter);
+    appendMultiParam(params, 'pic', globalPicFilter);
+    const qs = params.toString() ? `?${params}` : '';
+
+    const completedParams = new URLSearchParams();
+    params.forEach((value, key) => completedParams.append(key, value));
+    const currentYear = String(new Date().getFullYear());
+    const marginDateParams = (!f || f.mode === 'all')
+      ? { date_year: currentYear, yoy_base_year: currentYear }
+      : dateFilterParams(f);
+    const marginParams = new URLSearchParams();
+    Object.entries(marginDateParams).forEach(([key, value]) => { if (value) marginParams.append(key, value); });
+    const marginBaseYear = marginDateParams.date_year || marginDateParams.date_from?.slice(0, 4) || currentYear;
+    if (marginBaseYear) marginParams.set('yoy_base_year', marginBaseYear);
+    appendMultiParam(marginParams, 'client', globalClientFilter);
+    appendMultiParam(marginParams, 'pic', globalPicFilter);
+
+    const summaryUrl = (summaryParams) => {
+      const summaryQs = summaryParams.toString();
+      return summaryQs ? `/api/completed/summary?${summaryQs}` : '/api/completed/summary';
+    };
+    const completedUrl = summaryUrl(completedParams);
+    const marginUrl = summaryUrl(marginParams);
+    const cachedCompleted = readDashboardSummaryCache(completedUrl);
+    const cachedMargin = completedUrl === marginUrl ? cachedCompleted : readDashboardSummaryCache(marginUrl);
+    const hasSummaryCache = Boolean(cachedCompleted && cachedMargin);
+
     setLoading(true);
+    setCompletedLoading(!hasSummaryCache);
+    setCompletedLoaded(hasSummaryCache);
+    setCompletedData(hasSummaryCache ? cachedCompleted : null);
+    setDashboardMarginData(hasSummaryCache ? cachedMargin : null);
+
     try {
-      const params = new URLSearchParams();
-      const f = dateFilter || globalDateFilter;
-      Object.entries(dateFilterParams(f)).forEach(([key, value]) => { if (value) params.append(key, value); });
-      appendMultiParam(params, 'client', globalClientFilter);
-      appendMultiParam(params, 'pic', globalPicFilter);
-      const qs = params.toString() ? `?${params}` : '';
-      const completedParams = new URLSearchParams();
-      params.forEach((value, key) => completedParams.append(key, value));
-      const completedQs = completedParams.toString();
-      const currentYear = String(new Date().getFullYear());
-      const marginDateParams = (!f || f.mode === 'all')
-        ? { date_year: currentYear, yoy_base_year: currentYear }
-        : dateFilterParams(f);
-      const marginParams = new URLSearchParams();
-      Object.entries(marginDateParams).forEach(([key, value]) => { if (value) marginParams.append(key, value); });
-      const marginBaseYear = marginDateParams.date_year || marginDateParams.date_from?.slice(0, 4) || currentYear;
-      if (marginBaseYear) marginParams.set('yoy_base_year', marginBaseYear);
-      appendMultiParam(marginParams, 'client', globalClientFilter);
-      appendMultiParam(marginParams, 'pic', globalPicFilter);
-      const pendingParams = new URLSearchParams();
-      Object.entries(dateFilterParams(f)).forEach(([key, value]) => { if (value) pendingParams.append(key, value); });
-      appendMultiParam(pendingParams, 'client', globalClientFilter);
-      appendMultiParam(pendingParams, 'global_pic', globalPicFilter);
-      pendingParams.set('page', '1');
-      pendingParams.set('per_page', '1');
-      const [sRes, aRes, cRes, marginRes, pendingRes] = await Promise.all([
+      const [sRes, aRes, pendingRes] = await Promise.all([
         api.get(`/api/dashboard/stats${qs}`),
         api.get(`/api/data/aging${qs}`),
-        api.get(`/api/completed/summary?${completedQs}`),
-        api.get(`/api/completed/summary?${marginParams}`),
-        api.get(`/api/data/all-so?${pendingParams}`)
+        api.get(`/api/dashboard/pending-total${qs}`)
       ]);
+      if (!isCurrent()) return;
       setStats(sRes.data);
       setSummaryPendingTotal(Number(pendingRes.data?.total) || 0);
       setDashboardFilterOptions(sRes.data?.filters || { clients: [], pics: [] });
       setAgingData(Array.isArray(aRes.data) ? aRes.data : []);
-      setCompletedData(cRes.data);
-      setDashboardMarginData(marginRes.data);
+    } catch (e) {
+      if (isCurrent()) {
+        addToast(`Error: ${e.response?.data?.error || e.message}`, 'error');
+        setCompletedLoading(false);
+      }
+      return;
+    } finally {
+      if (isCurrent()) setLoading(false);
+    }
+
+    try {
+      if (completedUrl === marginUrl) {
+        const res = await api.get(completedUrl);
+        if (!isCurrent()) return;
+        writeDashboardSummaryCache(completedUrl, res.data);
+        setCompletedData(res.data);
+        setDashboardMarginData(res.data);
+      } else {
+        const [cRes, marginRes] = await Promise.all([
+          api.get(completedUrl),
+          api.get(marginUrl)
+        ]);
+        if (!isCurrent()) return;
+        writeDashboardSummaryCache(completedUrl, cRes.data);
+        writeDashboardSummaryCache(marginUrl, marginRes.data);
+        setCompletedData(cRes.data);
+        setDashboardMarginData(marginRes.data);
+      }
       setCompletedLoaded(true);
     } catch (e) {
-      addToast(`Error: ${e.response?.data?.error || e.message}`, 'error');
-    } finally { setLoading(false); }
+      if (isCurrent()) addToast(`Error: ${e.response?.data?.error || e.message}`, 'error');
+    } finally {
+      if (isCurrent()) setCompletedLoading(false);
+    }
   }, [addToast, globalDateFilter, globalClientFilter, globalPicFilter]);
 
   // Helper: filter array of objects by date field using a DateRangeFilter config
@@ -1623,6 +1627,10 @@ const App = () => {
       setImportColumns(Array.isArray(res.data.columns) ? res.data.columns : []);
       setImportTotal(res.data.total || 0);
       setImportVendorCount(res.data.vendor_count || 0);
+      if (refresh && res.data.sync) {
+        const added = Number(res.data.sync.added || 0);
+        addToast(added ? `Copied ${added} new Import rows from sheet` : 'No new Import rows found in sheet', 'success');
+      }
     } catch (e) {
       addToast(`Failed to load Import data: ${e.response?.data?.error || e.message}`, 'error');
     } finally { setLoading(false); }
@@ -1637,7 +1645,7 @@ const App = () => {
       return true;
     } catch (e) {
       setImportData(previousRows);
-      addToast(`Failed to update Import sheet: ${e.response?.data?.error || e.message}`, 'error');
+      addToast(`Failed to update Import data: ${e.response?.data?.error || e.message}`, 'error');
       return false;
     }
   };
@@ -1679,7 +1687,10 @@ const App = () => {
     window.open(`${BACKEND}/api/vendor-control/login/${encodeURIComponent(row.row_key)}`, '_blank', 'noopener,noreferrer');
   };
 
-  useEffect(() => { fetchDashboard(); fetchPicDbStatus(); }, []);
+  useEffect(() => { fetchPicDbStatus(); }, []);
+  useEffect(() => {
+    if (activePage === 'dashboard') fetchDashboard(globalDateFilter);
+  }, [activePage, globalDateFilter, globalClientFilter, globalPicFilter, fetchDashboard]);
   useEffect(() => {
     if (activePage === 'all-so') {
       fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter, soSortOrder);
@@ -1754,14 +1765,6 @@ const App = () => {
     fetchRegisteredItems
   ]);
 
-  // Refetch dashboard whenever the global SO Create Date filter changes
-  // (skip the very first run since the mount effect above already fetched).
-  const skipFirstFilterRefetch = useRef(true);
-  useEffect(() => {
-    if (skipFirstFilterRefetch.current) { skipFirstFilterRefetch.current = false; return; }
-    fetchDashboard(globalDateFilter);
-  }, [globalDateFilter, globalClientFilter, globalPicFilter, fetchDashboard]);
-
   const handleUpload = async (e, type) => {
     const files = Array.from(e.target.files || []); if (!files.length) return;
     e.target.value = '';
@@ -1790,7 +1793,8 @@ const App = () => {
         if (diag.warning) toastKind = 'warning';
       }
       addToast(toastMsg, toastKind);
-      fetchDashboard();
+      clearDashboardSummaryCache();
+      if (activePage === 'dashboard') fetchDashboard();
       if (activePage === 'all-so') fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
       setSoPage(1);
     } catch (e) {
@@ -1821,6 +1825,7 @@ const App = () => {
       const d = res.data;
       setUploadProgress(null);
       setPicUploadMsg(`✅ Prod ID (${d.files || files.length} file): +${d.added} added, ${d.updated} updated (total: ${d.total_in_db}). SO PIC refreshed: ${d.so_pic_refreshed} rows.`);
+      clearDashboardSummaryCache();
       fetchPicDbStatus();
       fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
     } catch (err) {
@@ -1846,6 +1851,7 @@ const App = () => {
       const d = res.data;
       setUploadProgress(null);
       setPicUploadMsg(`✅ Master PIC (${d.files || files.length} file): +${d.added} added, ${d.updated} updated${d.unchanged ? `, ${d.unchanged} unchanged` : ''} (total category names: ${d.total_categories}). SO rows updated: ${d.so_pic_refreshed}.`);
+      clearDashboardSummaryCache();
       fetchPicDbStatus();
       fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
     } catch (err) {
@@ -1869,9 +1875,10 @@ const App = () => {
       });
       setUploadProgress(null);
       addToast(`✅ ${res.data.message || 'Item Registration uploaded successfully'}`, 'success');
+      clearDashboardSummaryCache();
       setItemRegPage(1);
-      fetchDashboard();
-      fetchItemRegistration(1, itemRegPerPage, itemRegAppliedSearch, itemRegFilters);
+      if (activePage === 'dashboard') fetchDashboard();
+      if (activePage === 'item-registration') fetchItemRegistration(1, itemRegPerPage, itemRegAppliedSearch, itemRegFilters);
     } catch (err) {
       setUploadProgress(null);
       addToast(`❌ Failed to upload Item Registration: ${err?.response?.data?.error || err.message}`, 'error');
@@ -1890,6 +1897,7 @@ const App = () => {
       });
       setUploadProgress(null);
       addToast(`✅ Batch update: ${res.data.updated} records updated`, 'success');
+      clearDashboardSummaryCache();
       fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
     } catch (e) {
       setUploadProgress(null);
@@ -1909,6 +1917,7 @@ const App = () => {
       });
       setUploadProgress(null);
       addToast(`Item Registration batch: ${res.data.updated} records updated${res.data.not_found ? `, ${res.data.not_found} Req. No not found` : ''}`, 'success');
+      clearDashboardSummaryCache();
       fetchItemRegistration(itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters);
     } catch (e) {
       setUploadProgress(null);
@@ -2210,8 +2219,7 @@ const App = () => {
     setSoFilters(next);
     setSoPage(1);
     setActivePage('all-so');
-    fetchSOData(next, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    window.scrollTo({ top: 0 });
   };
 
   const sortedApprovalSOData = [...approvalSOData]
@@ -2668,6 +2676,7 @@ const App = () => {
   const renderDashboardOverview = () => {
     const d = completedData || {};
     const marginD = dashboardMarginData || {};
+    const summaryLoading = completedLoading || !completedLoaded;
     
     // Create month buckets from the global SO Create Date filter. KPI remains
     // all-data when filter is All; monthly chart/table defaults to current year.
@@ -2788,16 +2797,22 @@ const App = () => {
       <div className="space-y-5">
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
           {[
-            { label:'Total PO', value: fmtNum(d.total_count || 0), sub: 'Delivery Complete records', icon:<FileText className="w-5 h-5"/> },
-            { label:'PO Amount', value: fmtCurShort(d.total_purchase || 0), sub: fmtCur(d.total_purchase || 0), icon:<Coins className="w-5 h-5"/> },
-            { label:'Sales Amount', value: fmtCurShort(d.total_sales), sub: fmtCur(d.total_sales), icon:<Wallet className="w-5 h-5"/> },
-            { label:'Margin', value: fmtCurShort(d.total_margin), sub: marginPct == null ? 'Avg margin -' : `Avg margin ${marginPct.toFixed(1)}%`, icon:<TrendingUp className="w-5 h-5"/> },
+            { label:'Total PO', value: summaryLoading ? '...' : fmtNum(d.total_count || 0), sub: summaryLoading ? 'Loading completed records' : 'Delivery Complete records', icon:<FileText className="w-5 h-5"/> },
+            { label:'PO Amount', value: summaryLoading ? '...' : fmtCurShort(d.total_purchase || 0), sub: summaryLoading ? 'Loading completed amount' : fmtCur(d.total_purchase || 0), icon:<Coins className="w-5 h-5"/> },
+            { label:'Sales Amount', value: summaryLoading ? '...' : fmtCurShort(d.total_sales), sub: summaryLoading ? 'Loading completed amount' : fmtCur(d.total_sales), icon:<Wallet className="w-5 h-5"/> },
+            { label:'Margin', value: summaryLoading ? '...' : fmtCurShort(d.total_margin), sub: summaryLoading ? 'Loading margin' : (marginPct == null ? 'Avg margin -' : `Avg margin ${marginPct.toFixed(1)}%`), icon:<TrendingUp className="w-5 h-5"/> },
             { label:'Total Pending Delivery', value: fmtNum(summaryPendingTotal ?? stats?.total_so_count), sub: 'Pending delivery records', icon:<Clock className="w-5 h-5"/>, goPending:true },
           ].map((k,i)=>{
             const Wrapper = k.goPending ? 'button' : 'div';
-            return <Wrapper key={i} type={k.goPending ? 'button' : undefined} onClick={k.goPending ? () => { setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter); window.scrollTo({top:0, behavior:'smooth'}); } : undefined} className={`p-5 rounded-2xl text-left ${card} ${k.goPending ? 'cursor-pointer transition-all hover:border-blue-300' : ''}`}><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className={`text-sm font-medium ${txt2}`}>{k.label}</p><h3 className={`text-2xl font-bold mt-1 ${kpiValue}`}>{k.value}</h3><p className={`text-xs mt-1 ${txt2}`}>{k.sub}</p></div><div className={`p-2.5 rounded-xl ${neutralIcon}`}>{k.icon}</div></div></Wrapper>;
+            return <Wrapper key={i} type={k.goPending ? 'button' : undefined} onClick={k.goPending ? () => { setActivePage('all-so'); setSoPage(1); window.scrollTo({top:0}); } : undefined} className={`p-5 rounded-2xl text-left ${card} ${k.goPending ? 'cursor-pointer hover:border-blue-300' : ''}`}><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className={`text-sm font-medium ${txt2}`}>{k.label}</p><h3 className={`text-2xl font-bold mt-1 ${kpiValue}`}>{k.value}</h3><p className={`text-xs mt-1 ${txt2}`}>{k.sub}</p></div><div className={`p-2.5 rounded-xl ${neutralIcon}`}>{k.icon}</div></div></Wrapper>;
           })}
         </div>
+        {summaryLoading && (
+          <div className={`flex items-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold ${card} ${txt2}`}>
+            <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
+            Loading delivery completed summary...
+          </div>
+        )}
         <div className={`p-5 rounded-2xl ${card}`}>
           <h3 className={`text-base font-bold mb-1 ${txt}`}>Monthly Trend Delivery Complete</h3>
           <p className={`text-xs mb-4 ${txt2}`}>{monthWindow.label} sales and purchase amount, with comparison purchase amount lines.</p>
@@ -3370,7 +3385,7 @@ const App = () => {
         } else {
           addToast(`RFQ batch: ${res.data.updated || 0} cells updated${res.data.sheet_updates ? `, ${res.data.sheet_updates} synced to Sheet` : ''}${res.data.not_found ? `, ${res.data.not_found} No not found` : ''}`, 'success');
         }
-        fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, true, rfqFilters, rfqPicFilter);
+        fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter);
       } catch (err) {
         addToast(`Failed to upload RFQ batch: ${err.response?.data?.error || err.message}`, 'error');
       } finally {
@@ -3790,7 +3805,7 @@ const App = () => {
           <div className="flex flex-wrap items-center gap-2">
             <DownloadButton onClick={() => downloadBlob('/api/import/vendor-template', `Import_Vendor_Template_${new Date().toISOString().slice(0,10)}.xlsx`, 'Import Vendor Template')} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><Download className="w-4 h-4"/>Template Vendor</DownloadButton>
             <label className="flex items-center gap-2 px-3 py-2.5 bg-slate-600 hover:bg-slate-700 text-white rounded-xl text-sm font-semibold shadow-sm cursor-pointer"><FileSpreadsheet className="w-4 h-4"/>Upload Vendor Import<input type="file" accept=".xlsx,.xls,.csv" multiple onChange={handleVendorUpload} className="hidden"/></label>
-            <button onClick={() => fetchImportData(importPage, importPerPage, importAppliedSearch, true)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><RotateCcw className="w-4 h-4"/>Refresh</button>
+            <button onClick={() => fetchImportData(importPage, importPerPage, importAppliedSearch, true)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><RotateCcw className="w-4 h-4"/>Copy Sheet</button>
           </div>
         </div>
 
@@ -4680,11 +4695,11 @@ const App = () => {
   return (
     <div className={`min-h-screen font-sans ${darkMode?'bg-gray-900':'bg-[#edf2f1]'} ${darkMode?'':'text-[#1f2937]'}`} style={{fontFamily: "'Inter', 'Plus Jakarta Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"}}>
     <style>{`
-        @keyframes slide-in {
-          from { transform: translateX(100%); opacity: 0; }
-          to   { transform: translateX(0);    opacity: 1; }
+        *, *::before, *::after {
+          animation: none !important;
+          transition: none !important;
+          scroll-behavior: auto !important;
         }
-        .animate-slide-in { animation: slide-in 0.25s ease-out forwards; }
         /* Global: all buttons, links, selects, labels with checkboxes → pointer cursor */
         button, [role="button"], select, label[for], a,
         input[type="checkbox"], input[type="radio"] {
@@ -4693,6 +4708,10 @@ const App = () => {
         button:disabled { cursor: not-allowed !important; opacity: 0.5; }
         .rfq-fill-handle { cursor: crosshair !important; }
         body.rfq-fill-dragging, body.rfq-fill-dragging * { cursor: crosshair !important; }
+        .backdrop-blur-sm, .backdrop-blur-xl {
+          backdrop-filter: none !important;
+          -webkit-backdrop-filter: none !important;
+        }
         .reference-card {
           border-radius: 24px;
           box-shadow: 0 18px 45px rgba(15, 23, 42, 0.06);
@@ -4715,33 +4734,6 @@ const App = () => {
           border-radius: 10px;
           background: ${darkMode ? '#111827' : '#ffffff'};
         }
-        .floating-table-header {
-          position: fixed;
-          top: 0;
-          overflow: hidden;
-          z-index: 95;
-          pointer-events: none;
-          border-left: 1px solid rgba(148, 163, 184, 0.32);
-          border-right: 1px solid rgba(148, 163, 184, 0.32);
-          box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
-        }
-        .floating-table-header table {
-          border-collapse: collapse;
-        }
-        .floating-table-header thead th {
-          position: static !important;
-          top: auto !important;
-          z-index: auto !important;
-        }
-        .floating-table-header th {
-          border-right: 1px solid rgba(148, 163, 184, 0.28);
-          border-bottom: 1px solid rgba(148, 163, 184, 0.34);
-        }
-        .floating-table-header-dark {
-          border-left-color: rgba(75, 85, 99, 0.85);
-          border-right-color: rgba(75, 85, 99, 0.85);
-          box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35);
-        }
         .floating-table-scrollbar {
           position: fixed;
           bottom: 12px;
@@ -4749,23 +4741,12 @@ const App = () => {
           overflow-x: auto;
           overflow-y: hidden;
           z-index: 90;
-          opacity: 0.18;
+          opacity: 0.72;
           border-radius: 999px;
-          background: rgba(15, 23, 42, 0.08);
-          backdrop-filter: blur(6px);
-          transition: opacity 140ms ease, background-color 140ms ease;
-        }
-        .floating-table-scrollbar:hover,
-        .floating-table-scrollbar:focus-within {
-          opacity: 0.78;
-          background: rgba(15, 23, 42, 0.16);
+          background: rgba(148, 163, 184, 0.18);
         }
         .floating-table-scrollbar-dark {
           background: rgba(255, 255, 255, 0.10);
-        }
-        .floating-table-scrollbar-dark:hover,
-        .floating-table-scrollbar-dark:focus-within {
-          background: rgba(255, 255, 255, 0.20);
         }
         .floating-table-scrollbar::-webkit-scrollbar {
           height: 22px;
@@ -4832,41 +4813,41 @@ const App = () => {
         className={`fixed left-0 top-0 h-full ${sidebarExpanded?'lg:w-60':'lg:w-16'} w-16 flex flex-col items-stretch py-5 shadow-[0_8px_24px_rgba(15,23,42,0.08)] z-40 overflow-hidden transition-[width,background-color,border-color] duration-200 ease-out ${darkMode?'bg-gray-800 border-r border-gray-700':'bg-white/95 border-r border-gray-200/80 backdrop-blur-xl'}`}
       >
         <nav className={`flex-1 flex flex-col gap-2 w-full ${sidebarExpanded?'lg:px-3':'lg:px-2'} px-2 pt-0`}>
-          <button onClick={()=>setActivePage('dashboard')}
+          <a href={PAGE_PATHS.dashboard} onClick={(e)=>openPage(e, 'dashboard')}
             className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='dashboard'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="Summary">
             <BarChart3 className="w-5 h-5 flex-shrink-0"/>
             <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-40 opacity-100':'max-w-0 opacity-0'}`}>Summary</span>
-          </button>
-          <button data-tour="open-so-nav" onClick={()=>{ setActivePage('all-so'); setSoPage(1); fetchSOData(soFilters,1,soPerPage,soSearchNums,soMarginFilter,soDateFilter); window.scrollTo({top:0, behavior:'smooth'}); }}
+          </a>
+          <a href={PAGE_PATHS['all-so']} data-tour="open-so-nav" onClick={(e)=>openPage(e, 'all-so', () => setSoPage(1))}
             className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='all-so'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="Pending Delivery">
             <Clock className="w-5 h-5 flex-shrink-0"/>
             <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-40 opacity-100':'max-w-0 opacity-0'}`}>Pending Delivery</span>
-          </button>
-          <button onClick={()=>{ setActivePage('item-registration'); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,itemRegFilters); window.scrollTo({top:0,behavior:'smooth'}); }}
+          </a>
+          <a href={PAGE_PATHS['item-registration']} onClick={(e)=>openPage(e, 'item-registration', () => setItemRegPage(1))}
             className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='item-registration'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="Item Registration">
             <Wrench className="w-5 h-5 flex-shrink-0"/>
             <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-44 opacity-100':'max-w-0 opacity-0'}`}>Item Registration</span>
-          </button>
-          <button onClick={()=>{ setActivePage('rfq'); setRfqPage(1); window.scrollTo({top:0,behavior:'smooth'}); }}
+          </a>
+          <a href={PAGE_PATHS.rfq} onClick={(e)=>openPage(e, 'rfq', () => setRfqPage(1))}
             className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='rfq'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="RFQ">
             <Mail className="w-5 h-5 flex-shrink-0"/>
             <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-44 opacity-100':'max-w-0 opacity-0'}`}>RFQ</span>
-          </button>
-          <button onClick={()=>{ setActivePage('import'); setImportPage(1); window.scrollTo({top:0,behavior:'smooth'}); }}
+          </a>
+          <a href={PAGE_PATHS.import} onClick={(e)=>openPage(e, 'import', () => setImportPage(1))}
             className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='import'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="Import">
             <Ship className="w-5 h-5 flex-shrink-0"/>
             <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-44 opacity-100':'max-w-0 opacity-0'}`}>Import</span>
-          </button>
-          <button onClick={()=>{ setActivePage('vendor-control'); setVendorControlPage(1); window.scrollTo({top:0,behavior:'smooth'}); }}
+          </a>
+          <a href={PAGE_PATHS['vendor-control']} onClick={(e)=>openPage(e, 'vendor-control', () => setVendorControlPage(1))}
             className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='vendor-control'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="Vendor Control">
             <Building2 className="w-5 h-5 flex-shrink-0"/>
             <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-44 opacity-100':'max-w-0 opacity-0'}`}>Vendor Control</span>
-          </button>
-          <button onClick={()=>{ setActivePage('all-registered-items'); setRegisteredItemsPage(1); fetchRegisteredItems(1,registeredItemsPerPage,registeredItemsAppliedSearch,registeredItemsAppliedProdIds,registeredItemsFilters); window.scrollTo({top:0,behavior:'smooth'}); }}
+          </a>
+          <a href={PAGE_PATHS['all-registered-items']} onClick={(e)=>openPage(e, 'all-registered-items', () => setRegisteredItemsPage(1))}
             className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='all-registered-items'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="All Registered Items">
             <FileText className="w-5 h-5 flex-shrink-0"/>
             <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-44 opacity-100':'max-w-0 opacity-0'}`}>All Registered Items</span>
-          </button>
+          </a>
         </nav>
         <div className={`flex flex-col gap-2 w-full ${sidebarExpanded?'lg:px-3':'lg:px-2'} px-2`}>
           <button onClick={()=>setDarkMode(d=>!d)} className={`p-3 rounded-xl transition-all flex items-center gap-3 justify-start whitespace-nowrap ${darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`}>
@@ -5075,14 +5056,6 @@ const App = () => {
         </div>
       )}
 
-      {loading && !uploadProgress && (
-        <div className="fixed inset-0 bg-black/30 z-[55] flex items-center justify-center">
-          <div className={`${darkMode?'bg-gray-800':'bg-white'} px-6 py-4 rounded-xl shadow-xl flex items-center gap-3`}>
-            <div className="w-6 h-6 border-3 border-blue-600 border-t-transparent rounded-full animate-spin"/>
-            <p className={`text-sm font-semibold ${txt}`}>Loading data...</p>
-          </div>
-        </div>
-      )}
     </div>
   );
 };
