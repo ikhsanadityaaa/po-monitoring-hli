@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 import pandas as pd
@@ -12,6 +12,7 @@ import io
 import threading
 from sqlalchemy import func, text, event
 from sqlalchemy.engine import Engine
+from sqlalchemy.orm import load_only
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -42,6 +43,7 @@ _MASTER_PIC_LOCK = threading.Lock()
 # immediately while uploads/changed rows naturally invalidate the cache.
 _COMPLETED_SUMMARY_CACHE = {}
 _COMPLETED_SUMMARY_CACHE_TTL_SECONDS = 300
+_RUNTIME_CACHE_VERSION = 0
 
 # Similarity check cache for Item Registration
 # Stores similarity results keyed by (req_no, line_no) to avoid recalculating
@@ -104,7 +106,9 @@ def runtime_cache_key(namespace):
     return (namespace, request.query_string.decode('utf-8', errors='ignore'))
 
 def clear_runtime_caches():
+    global _RUNTIME_CACHE_VERSION
     with _READ_CACHE_LOCK:
+        _RUNTIME_CACHE_VERSION += 1
         _READ_RESPONSE_CACHE.clear()
     with _COMPLETED_CACHE_LOCK:
         _COMPLETED_SUMMARY_CACHE.clear()
@@ -369,11 +373,43 @@ class RFQCellEdit(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.utcnow)
     __table_args__ = (db.UniqueConstraint('row_key', 'field', name='uq_rfq_cell_edit_row_field'),)
 
+class RFQDashboardRow(db.Model):
+    __tablename__ = 'rfq_dashboard_row'
+    id = db.Column(db.Integer, primary_key=True)
+    row_key = db.Column(db.String(200), unique=True, nullable=False, index=True)
+    sheet_row = db.Column(db.Integer, index=True)
+    data_json = db.Column(db.Text, nullable=False, default='{}')
+    dirty_fields_json = db.Column(db.Text, nullable=False, default='[]')
+    first_seen_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    last_seen_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+
 class ImportVendor(db.Model):
     __tablename__ = 'import_vendor'
     id = db.Column(db.Integer, primary_key=True)
     vendor_name = db.Column(db.String(300), unique=True, nullable=False, index=True)
     uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class ImportDashboardRow(db.Model):
+    __tablename__ = 'import_dashboard_row'
+    id = db.Column(db.Integer, primary_key=True)
+    row_key = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    source_key = db.Column(db.String(50), nullable=False, index=True)
+    source_label = db.Column(db.String(100))
+    source_uid = db.Column(db.String(50), nullable=False, index=True)
+    sheet_row = db.Column(db.Integer)
+    vendor_name = db.Column(db.String(300), index=True)
+    data_json = db.Column(db.Text, nullable=False, default='{}')
+    first_seen_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    last_seen_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class ImportDashboardMeta(db.Model):
+    __tablename__ = 'import_dashboard_meta'
+    id = db.Column(db.Integer, primary_key=True)
+    meta_key = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    value_json = db.Column(db.Text, nullable=False, default='null')
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
 # ─── Exchange rate helpers ─────────────────────────────────────────────────
@@ -1038,7 +1074,7 @@ def clean_request_number(val):
 RFQ_SHEET_ID = '1JrdsYWhv1mzeXB-jbukDxDYxBgaeISzpiVKEKdgfQvw'
 RFQ_SHEET_NAME = 'Sales Submit-RFQ'
 RFQ_CACHE = {'expires_at': None, 'rows': [], 'fetched_at': None}
-RFQ_CACHE_TTL_SECONDS = 300
+RFQ_CACHE_TTL_SECONDS = 3600
 VENDOR_CONTROL_SHEET_ID = '1N0Jr_h5InHH1X2TyLxRf2SMXgDzAXIJnhswzMv5Wf4E'
 VENDOR_CONTROL_SHEET_GID = 723367207
 VENDOR_CONTROL_CACHE = {'expires_at': None, 'rows': [], 'fetched_at': None, 'sheet_name': None, 'columns': {}}
@@ -1141,6 +1177,24 @@ IMPORT_SOURCE_SHEETS = [
 IMPORT_LAYOUT_VENDOR_COLUMNS = (5, 28)
 IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS = (16,)
 
+def import_meta_get(key):
+    row = ImportDashboardMeta.query.filter_by(meta_key=key).first()
+    if not row:
+        return None
+    try:
+        return json.loads(row.value_json or 'null')
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+def import_meta_set(key, value):
+    row = ImportDashboardMeta.query.filter_by(meta_key=key).first()
+    if not row:
+        row = ImportDashboardMeta(meta_key=key)
+        db.session.add(row)
+    row.value_json = json.dumps(value, ensure_ascii=False)
+    row.updated_at = datetime.utcnow()
+    db.session.commit()
+
 def google_csv_url(spreadsheet_id, gid='0'):
     return f'https://docs.google.com/spreadsheets/d/{spreadsheet_id}/gviz/tq?tqx=out:csv&gid={gid}'
 
@@ -1154,7 +1208,15 @@ def import_clean_header(value, fallback):
 def import_header_key(value):
     return re.sub(r'[^a-z0-9]+', '', (clean(value) or '').lower())
 
-def import_layout_columns():
+def import_layout_columns(force=False):
+    cache_key = ('import_layout_columns',)
+    cached = None if force else runtime_cache_get(cache_key)
+    if cached is not None:
+        return cached
+    cached = None if force else import_meta_get('layout_columns')
+    if cached is not None:
+        runtime_cache_set(cache_key, cached, ttl_seconds=900)
+        return cached
     df = read_public_sheet_csv(IMPORT_LAYOUT_SHEET_ID, IMPORT_LAYOUT_GID, nrows=3)
     header_row = df.iloc[1] if len(df) > 1 else (df.iloc[0] if len(df) else [])
     columns = []
@@ -1168,9 +1230,19 @@ def import_layout_columns():
         seen[base] = count
         field = base if count == 1 else f'{base}_{count}'
         columns.append({'field': field, 'label': label, 'col_idx': idx})
+    import_meta_set('layout_columns', columns)
+    runtime_cache_set(cache_key, columns, ttl_seconds=900)
     return columns
 
-def import_default_vendors_from_layout():
+def import_default_vendors_from_layout(force=False):
+    cache_key = ('import_default_vendors_from_layout',)
+    cached = None if force else runtime_cache_get(cache_key)
+    if cached is not None:
+        return cached
+    cached = None if force else import_meta_get('default_vendors')
+    if cached is not None:
+        runtime_cache_set(cache_key, cached, ttl_seconds=900)
+        return cached
     try:
         df = read_public_sheet_csv(IMPORT_LAYOUT_SHEET_ID, IMPORT_LAYOUT_GID)
     except Exception:
@@ -1184,12 +1256,15 @@ def import_default_vendors_from_layout():
             if not name or name.lower() in ('vendor', 'vendor name'):
                 continue
             vendors.add(name)
-    return sorted(vendors, key=lambda s: s.lower())
+    vendors = sorted(vendors, key=lambda s: s.lower())
+    import_meta_set('default_vendors', vendors)
+    runtime_cache_set(cache_key, vendors, ttl_seconds=900)
+    return vendors
 
-def import_vendor_names():
+def import_vendor_names(force_default=False):
     rows = ImportVendor.query.order_by(ImportVendor.vendor_name.asc()).all()
     uploaded = [r.vendor_name for r in rows if clean(r.vendor_name)]
-    return uploaded or import_default_vendors_from_layout()
+    return uploaded or import_default_vendors_from_layout(force=force_default)
 
 def import_detect_data_start(df):
     for idx in range(min(len(df), 12)):
@@ -1246,9 +1321,9 @@ def import_row_vendor_candidates(values, source_map, columns):
             candidates.append(values[col_idx])
     return [clean(v) for v in candidates if clean(v)]
 
-def import_sheet_rows():
-    columns = import_layout_columns()
-    vendor_set = {v.strip().lower() for v in import_vendor_names() if v.strip()}
+def import_sheet_rows(force_metadata=False):
+    columns = import_layout_columns(force=force_metadata)
+    vendor_set = {v.strip().lower() for v in import_vendor_names(force_default=force_metadata) if v.strip()}
     rows = []
     for source in IMPORT_SOURCE_SHEETS:
         df = read_public_sheet_csv(source['spreadsheet_id'], source['gid'])
@@ -1276,6 +1351,73 @@ def import_sheet_rows():
                 continue
             rows.append(row)
     return columns, rows
+
+def import_row_payload(row, columns):
+    return {col['field']: '' if row.get(col['field']) is None else str(row.get(col['field'])) for col in columns}
+
+def import_row_source_uid(row, columns):
+    values = [clean(row.get(col['field'])) or '' for col in columns]
+    payload = {
+        'source': clean(row.get('_source_key')) or '',
+        'vendor': clean(row.get('_vendor_name')) or '',
+        'values': values,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha1(raw.encode('utf-8')).hexdigest()
+
+def import_dashboard_row_to_dict(row, columns):
+    try:
+        data = json.loads(row.data_json or '{}')
+    except (TypeError, json.JSONDecodeError):
+        data = {}
+    out = {col['field']: data.get(col['field'], '') for col in columns}
+    out.update({
+        '_row_key': row.row_key,
+        '_source_key': row.source_key,
+        '_source_label': row.source_label,
+        '_sheet_row': row.sheet_row,
+        '_vendor_name': row.vendor_name,
+        '_dashboard_id': row.id,
+    })
+    return out
+
+def sync_import_sheet_to_dashboard():
+    columns, sheet_rows = import_sheet_rows(force_metadata=True)
+    vendor_count = len(import_vendor_names(force_default=True))
+    existing = {r.row_key: r for r in ImportDashboardRow.query.all()}
+    duplicate_counts = {}
+    now = datetime.utcnow()
+    added = 0
+    seen = 0
+    for sheet_row in sheet_rows:
+        source_uid = import_row_source_uid(sheet_row, columns)
+        duplicate_base = f"{sheet_row.get('_source_key')}:{source_uid}"
+        duplicate_counts[duplicate_base] = duplicate_counts.get(duplicate_base, 0) + 1
+        row_key = f"{duplicate_base}:{duplicate_counts[duplicate_base]}"
+        current = existing.get(row_key)
+        if current:
+            current.sheet_row = sheet_row.get('_sheet_row')
+            current.source_label = sheet_row.get('_source_label')
+            current.vendor_name = sheet_row.get('_vendor_name') or current.vendor_name
+            current.last_seen_at = now
+            seen += 1
+            continue
+        db.session.add(ImportDashboardRow(
+            row_key=row_key,
+            source_key=sheet_row.get('_source_key') or '',
+            source_label=sheet_row.get('_source_label') or '',
+            source_uid=source_uid,
+            sheet_row=sheet_row.get('_sheet_row'),
+            vendor_name=sheet_row.get('_vendor_name') or '',
+            data_json=json.dumps(import_row_payload(sheet_row, columns), ensure_ascii=False),
+            first_seen_at=now,
+            last_seen_at=now,
+            updated_at=now,
+        ))
+        added += 1
+    db.session.commit()
+    clear_runtime_caches()
+    return {'added': added, 'seen': seen, 'sheet_rows': len(sheet_rows), 'vendor_count': vendor_count, 'columns': columns}
 
 RFQ_DASHBOARD_ONLY_FIELDS = {'private_remarks_1', 'private_remarks_2'}
 
@@ -1492,6 +1634,137 @@ def fetch_rfq_rows(force=False):
     })
     return rows, fetched_at
 
+def rfq_json_load(value, fallback):
+    try:
+        return json.loads(value or '')
+    except (TypeError, json.JSONDecodeError):
+        return fallback
+
+def rfq_dashboard_payload(row):
+    payload = dict(row or {})
+    payload['row_key'] = clean(payload.get('row_key')) or rfq_row_key(payload, payload.get('sheet_row') or 0)
+    try:
+        payload['sheet_row'] = int(payload.get('sheet_row') or 0) or None
+    except (TypeError, ValueError):
+        payload['sheet_row'] = None
+    apply_rfq_computed_fields(payload)
+    return payload
+
+def rfq_dashboard_row_to_dict(row):
+    data = rfq_json_load(row.data_json, {})
+    data['row_key'] = row.row_key
+    data['sheet_row'] = row.sheet_row
+    return data
+
+def load_rfq_dashboard_rows():
+    db_rows = RFQDashboardRow.query.order_by(
+        RFQDashboardRow.sheet_row.is_(None),
+        RFQDashboardRow.sheet_row.asc(),
+        RFQDashboardRow.id.asc(),
+    ).all()
+    rows = [rfq_dashboard_row_to_dict(row) for row in db_rows]
+    fetched_at = max((row.last_seen_at for row in db_rows if row.last_seen_at), default=None)
+    return rows, fetched_at
+
+def set_rfq_runtime_rows(rows, fetched_at):
+    now = datetime.utcnow()
+    RFQ_CACHE.update({
+        'rows': [dict(row) for row in rows],
+        'fetched_at': fetched_at or now,
+        'expires_at': now + timedelta(seconds=RFQ_CACHE_TTL_SECONDS),
+    })
+
+def sync_rfq_sheet_to_dashboard():
+    sheet_rows, fetched_at = fetch_rfq_rows(force=True)
+    existing = {row.row_key: row for row in RFQDashboardRow.query.all()}
+    duplicate_counts = {}
+    now = datetime.utcnow()
+    added = 0
+    updated = 0
+    for sheet_row in sheet_rows:
+        base_key = clean(sheet_row.get('row_key'))
+        if not base_key:
+            continue
+        duplicate_counts[base_key] = duplicate_counts.get(base_key, 0) + 1
+        row_key = base_key if duplicate_counts[base_key] == 1 else f"{base_key}#{duplicate_counts[base_key]}"
+        sheet_row = dict(sheet_row)
+        sheet_row['row_key'] = row_key
+        incoming = rfq_dashboard_payload(sheet_row)
+        current = existing.get(row_key)
+        if not current:
+            db.session.add(RFQDashboardRow(
+                row_key=row_key,
+                sheet_row=incoming.get('sheet_row'),
+                data_json=json.dumps(incoming, ensure_ascii=False),
+                dirty_fields_json='[]',
+                first_seen_at=now,
+                last_seen_at=fetched_at or now,
+                updated_at=now,
+            ))
+            added += 1
+            continue
+        local = rfq_json_load(current.data_json, {})
+        dirty_fields = set(rfq_json_load(current.dirty_fields_json, []))
+        for field, value in incoming.items():
+            if field in dirty_fields and field in RFQ_EDITABLE_FIELDS:
+                continue
+            local[field] = value
+        local['row_key'] = row_key
+        local['sheet_row'] = incoming.get('sheet_row')
+        apply_rfq_computed_fields(local)
+        current.sheet_row = incoming.get('sheet_row')
+        current.data_json = json.dumps(local, ensure_ascii=False)
+        current.last_seen_at = fetched_at or now
+        current.updated_at = now
+        updated += 1
+    db.session.commit()
+    rows, loaded_at = load_rfq_dashboard_rows()
+    clear_runtime_caches()
+    set_rfq_runtime_rows(rows, loaded_at or fetched_at)
+    return {'added': added, 'updated': updated, 'sheet_rows': len(sheet_rows), 'fetched_at': loaded_at or fetched_at}
+
+def set_rfq_dashboard_cell(row_key, field, value, dirty=True, commit=True):
+    row = RFQDashboardRow.query.filter_by(row_key=row_key).first()
+    if not row:
+        return False
+    data = rfq_json_load(row.data_json, {})
+    dirty_fields = set(rfq_json_load(row.dirty_fields_json, []))
+    data[field] = value
+    data['row_key'] = row.row_key
+    data['sheet_row'] = row.sheet_row
+    apply_rfq_computed_fields(data)
+    if dirty:
+        dirty_fields.add(field)
+    else:
+        dirty_fields.discard(field)
+    row.data_json = json.dumps(data, ensure_ascii=False)
+    row.dirty_fields_json = json.dumps(sorted(dirty_fields), ensure_ascii=False)
+    row.updated_at = datetime.utcnow()
+    if commit:
+        db.session.commit()
+        RFQ_CACHE['expires_at'] = None
+        clear_runtime_caches()
+    return True
+
+def clear_rfq_dashboard_dirty_fields(updates, commit=True):
+    grouped = {}
+    for item in updates or []:
+        row_key = clean(item.get('row_key'))
+        field = clean(item.get('field'))
+        if row_key and field:
+            grouped.setdefault(row_key, set()).add(field)
+    if not grouped:
+        return
+    for row in RFQDashboardRow.query.filter(RFQDashboardRow.row_key.in_(grouped.keys())).all():
+        dirty_fields = set(rfq_json_load(row.dirty_fields_json, []))
+        dirty_fields.difference_update(grouped.get(row.row_key, set()))
+        row.dirty_fields_json = json.dumps(sorted(dirty_fields), ensure_ascii=False)
+        row.updated_at = datetime.utcnow()
+    if commit:
+        db.session.commit()
+        RFQ_CACHE['expires_at'] = None
+        clear_runtime_caches()
+
 def cleanup_rfq_sheet_backed_edits(commit=False):
     """Remove stale local RFQ edits for fields whose source of truth is Google Sheet.
 
@@ -1511,15 +1784,20 @@ def cleanup_rfq_sheet_backed_edits(commit=False):
 
 
 def rfq_rows_with_edits(force=False, prefer_stale_cache=False):
-    if prefer_stale_cache and not force and RFQ_CACHE.get('rows'):
+    now = datetime.utcnow()
+    if force:
+        sync_rfq_sheet_to_dashboard()
+        rows, fetched_at = load_rfq_dashboard_rows()
+    elif RFQDashboardRow.query.count() == 0:
+        sync_rfq_sheet_to_dashboard()
+        rows, fetched_at = load_rfq_dashboard_rows()
+    elif prefer_stale_cache and RFQ_CACHE.get('rows'):
+        rows, fetched_at = RFQ_CACHE['rows'], RFQ_CACHE['fetched_at']
+    elif RFQ_CACHE.get('expires_at') and RFQ_CACHE['expires_at'] > now and RFQ_CACHE.get('rows'):
         rows, fetched_at = RFQ_CACHE['rows'], RFQ_CACHE['fetched_at']
     else:
-        rows, fetched_at = fetch_rfq_rows(force=force)
-
-    # Clean up old local RFQ edits created before the sheet-sync fix. Only
-    # Private Remarks are dashboard-only; all other RFQ fields come from the
-    # Google Sheet so Unit Price and quotation data never get masked by stale DB values.
-    cleanup_rfq_sheet_backed_edits(commit=True)
+        rows, fetched_at = load_rfq_dashboard_rows()
+        set_rfq_runtime_rows(rows, fetched_at)
 
     edits = RFQCellEdit.query.filter(RFQCellEdit.field.in_(list(RFQ_DASHBOARD_ONLY_FIELDS))).all()
     edit_map = {}
@@ -1530,7 +1808,6 @@ def rfq_rows_with_edits(force=False, prefer_stale_cache=False):
         item = dict(row)
         for field, value in edit_map.get(item['row_key'], {}).items():
             item[field] = value
-        apply_rfq_computed_fields(item)
         merged.append(item)
     return merged, fetched_at
 
@@ -2873,6 +3150,7 @@ def get_dashboard_stats():
         runtime_cache_set(cache_key, payload, ttl_seconds=20)
         return jsonify(payload)
     except Exception as e:
+        db.session.rollback()
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
@@ -3084,10 +3362,63 @@ def get_aging_detail_all():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/dashboard/pending-total', methods=['GET'])
+def get_dashboard_pending_total():
+    """Tiny Pending Delivery count for dashboard KPI.
+
+    The paginated SO endpoint returns table rows, filter options, approval rows,
+    and PIC aggregations. Dashboard only needs this one number, so keep the
+    response and selected DB columns small.
+    """
+    try:
+        cache_key = runtime_cache_key('dashboard_pending_total')
+        cached = runtime_cache_get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        date_year, date_from, date_to = parse_so_date_args()
+        clients = selected_clients()
+        pics = selected_pics()
+        hidden_so = get_hidden_so_items()
+
+        q = db.session.query(
+            SOData.so_item,
+            SOData.so_number,
+            SOData.customer_po_number,
+            SOData.delivery_memo,
+        ).filter(open_so_filter())
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, pics)
+        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
+
+        total = 0
+        for so_item, so_number, customer_po_number, delivery_memo in q.all():
+            if so_item in hidden_so or so_number in hidden_so:
+                continue
+            if not so_is_countable(
+                so_item,
+                customer_po_number=customer_po_number,
+                delivery_memo=delivery_memo,
+            ):
+                continue
+            total += 1
+
+        payload = {'total': total}
+        runtime_cache_set(cache_key, payload, ttl_seconds=60)
+        return jsonify(payload)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/data/all-so', methods=['GET'])
 def get_all_so():
     """Paginated SO list with filters."""
     try:
+        cache_key = runtime_cache_key('all_so')
+        cached = runtime_cache_get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
         page = int(request.args.get('page', 1))
         per_page = int(request.args.get('per_page', 10))
         op_units = request.args.getlist('op_unit')
@@ -3232,13 +3563,15 @@ def get_all_so():
         # Sort with ANDRE first, then by count descending and name.
         pic_aggs_list = sort_pic_kpis(list(pic_aggregations.values()))
 
-        return jsonify({
+        payload = {
             'data': [so_dict(s) for s in paged],
             'approval_data': [so_dict(s) for s in approval_sos],
             'total': total, 'subtotal_amount': round(subtotal_amount, 2), 'page': page, 'per_page': per_page,
             'filters': {'op_units': list(op_units_opts), 'vendors': list(vendors_opts), 'manufacturers': list(manufacturers_opts), 'statuses': list(statuses_opts), 'pics': list(pics_opts)},
             'pic_aggregations': pic_aggs_list
-        })
+        }
+        runtime_cache_set(cache_key, payload, ttl_seconds=60)
+        return jsonify(payload)
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
@@ -4365,7 +4698,6 @@ def export_all_so():
 
 
 @app.route('/api/completed/summary', methods=['GET'])
-@app.route('/api/completed/summary', methods=['GET'])
 def completed_summary():
     try:
         year_filter = request.args.get('year', 'all')
@@ -4408,34 +4740,48 @@ def completed_summary():
         yoy_q = yoy_q.filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS)))
 
         cache_key = (
+            _RUNTIME_CACHE_VERSION,
             year_filter or 'all',
             date_year or '',
             date_from or '',
             date_to or '',
+            yoy_base_year or '',
             tuple(sorted(clients)),
             tuple(sorted(pics)),
         )
-        db_signature = q.with_entities(
-            func.count(SOData.id),
-            func.max(SOData.id),
-            func.max(SOData.purchasing_amount_idr_cached_at),
-        ).one()
-        yoy_signature = yoy_q.with_entities(
-            func.count(SOData.id),
-            func.max(SOData.id),
-            func.max(SOData.purchasing_amount_idr_cached_at),
-        ).one()
-        cache_entry = _COMPLETED_SUMMARY_CACHE.get(cache_key)
         now_ts = datetime.utcnow().timestamp()
-        if (
-            cache_entry
-            and cache_entry.get('signature') == (tuple(db_signature), tuple(yoy_signature))
-            and now_ts - cache_entry.get('created_at', 0) < _COMPLETED_SUMMARY_CACHE_TTL_SECONDS
-        ):
-            return jsonify(cache_entry['payload'])
+        with _COMPLETED_CACHE_LOCK:
+            cache_entry = _COMPLETED_SUMMARY_CACHE.get(cache_key)
+            if cache_entry and now_ts - cache_entry.get('created_at', 0) < _COMPLETED_SUMMARY_CACHE_TTL_SECONDS:
+                return jsonify(cache_entry['payload'])
 
-        rows = q.all()
-        yoy_rows = yoy_q.all()
+        completed_summary_fields = (
+            SOData.so_number,
+            SOData.so_item,
+            SOData.operation_unit_name,
+            SOData.vendor_name,
+            SOData.product_name,
+            SOData.specification,
+            SOData.product_id,
+            SOData.so_qty,
+            SOData.sales_amount,
+            SOData.purchasing_price,
+            SOData.purchasing_amount,
+            SOData.purchasing_currency,
+            SOData.purchasing_amount_idr,
+            SOData.so_create_date,
+        )
+        purchase_summary_fields = (
+            SOData.so_qty,
+            SOData.purchasing_price,
+            SOData.purchasing_amount,
+            SOData.purchasing_currency,
+            SOData.purchasing_amount_idr,
+            SOData.so_create_date,
+        )
+
+        rows = q.options(load_only(*completed_summary_fields)).all()
+        yoy_rows = yoy_q.options(load_only(*purchase_summary_fields)).all()
 
         missing_conversion_count = sum(
             1 for s in rows
@@ -4444,9 +4790,9 @@ def completed_summary():
             and raw_purchase_amount(s) > 0
         )
 
-        # Persist missing converted purchase amounts once. Subsequent page loads
-        # reuse so_data.purchasing_amount_idr instead of converting every row.
-        converted_count = ensure_purchase_amount_idr_cache(rows, fetch_missing=True)
+        # Read endpoints must never wait on external FX fetches. Missing
+        # conversions are filled during upload/backfill, then cached in DB.
+        converted_count = ensure_purchase_amount_idr_cache(rows, fetch_missing=False)
 
         def po_amt_of(s):
             return purchase_amount_idr(s)
@@ -4512,7 +4858,7 @@ def completed_summary():
             purchase_yoy_trend.append(row)
             purchase_yoy_by_month[month_num] = row
 
-        ensure_purchase_amount_idr_cache(yoy_rows, fetch_missing=True)
+        ensure_purchase_amount_idr_cache(yoy_rows, fetch_missing=False)
         for s in yoy_rows:
             if not s.so_create_date:
                 continue
@@ -4688,11 +5034,11 @@ def completed_summary():
                 )
             }
         }
-        _COMPLETED_SUMMARY_CACHE[cache_key] = {
-            'signature': (tuple(db_signature), tuple(yoy_signature)),
-            'created_at': now_ts,
-            'payload': payload,
-        }
+        with _COMPLETED_CACHE_LOCK:
+            _COMPLETED_SUMMARY_CACHE[cache_key] = {
+                'created_at': now_ts,
+                'payload': payload,
+            }
         return jsonify(payload)
 
     except Exception as e:
@@ -5001,6 +5347,11 @@ def find_similar_registered_items(item, registered_items=None):
 @app.route('/api/item-registration/data', methods=['GET'])
 def get_item_registration_data():
     try:
+        cache_key = runtime_cache_key('item_registration_data')
+        cached = runtime_cache_get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
         ensure_default_item_registration_loaded()
         # Safe auto-clean for old append bugs: duplicates with the same Req. No
         # are merged before the page count is calculated. Stale rows with a
@@ -5107,7 +5458,7 @@ def get_item_registration_data():
 
         response_rows = [item_registration_dict(r, include_similarity=False) for r in rows]
 
-        return jsonify({
+        payload = {
             'data': response_rows,
             'total': total,
             'page': page,
@@ -5119,7 +5470,9 @@ def get_item_registration_data():
             'mfr_name_options': all_mfr_names,
             'missing_prod_id_by_pic': missing_prod_id_by_pic,
             'last_updated': utc_isoformat(last_upload),
-        })
+        }
+        runtime_cache_set(cache_key, payload, ttl_seconds=60)
+        return jsonify(payload)
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
@@ -5991,7 +6344,7 @@ def batch_upload_rfq():
         uploads, upload_mode = request_upload_dataframes('rfq_batch')
         if not uploads:
             return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
-        rows, _ = rfq_rows_with_edits(force=True)
+        rows, _ = rfq_rows_with_edits(force=False)
         no_map = {}
         row_by_key = {}
         for row in rows:
@@ -6031,19 +6384,21 @@ def batch_upload_rfq():
                                 db.session.add(edit)
                             edit.value = str(value)
                             edit.updated_at = datetime.utcnow()
+                            set_rfq_dashboard_cell(row_key, field, str(value), dirty=False, commit=False)
                             local_updates += 1
                         else:
                             base_row = row_by_key.get(row_key)
                             if base_row:
+                                set_rfq_dashboard_cell(row_key, field, str(value), dirty=True, commit=False)
                                 sheet_updates.append({'row': base_row, 'field': field, 'value': str(value)})
                         updated += 1
 
-        # Remove legacy local edits for sheet-backed RFQ fields before syncing.
-        cleanup_rfq_sheet_backed_edits(commit=False)
         db.session.commit()
 
         try:
             sheet_sync = sync_rfq_cells_to_google_sheet(sheet_updates) if sheet_updates else {'synced': True, 'updated_ranges': 0}
+            if sheet_sync.get('synced'):
+                clear_rfq_dashboard_dirty_fields(sheet_updates)
         except Exception as sync_error:
             sheet_sync = {'synced': False, 'reason': str(sync_error)}
 
@@ -6190,15 +6545,18 @@ def update_rfq_cells_batch():
                     db.session.add(edit)
                 edit.value = clean_value
                 edit.updated_at = datetime.utcnow()
+                set_rfq_dashboard_cell(row_key, field, clean_value, dirty=False, commit=False)
             else:
+                set_rfq_dashboard_cell(row_key, field, clean_value, dirty=True, commit=False)
                 sheet_updates.append({'row': base_row, 'field': field, 'value': clean_value})
             updated += 1
 
-        cleanup_rfq_sheet_backed_edits(commit=False)
         db.session.commit()
         clear_runtime_caches()
         try:
             sheet_sync = sync_rfq_cells_to_google_sheet(sheet_updates) if sheet_updates else {'synced': True, 'local_only': True}
+            if sheet_sync.get('synced'):
+                clear_rfq_dashboard_dirty_fields(sheet_updates)
         except Exception as sync_error:
             sheet_sync = {'synced': False, 'reason': str(sync_error)}
         return jsonify({'success': True, 'updated': updated, 'skipped': skipped, 'sheet_sync': sheet_sync})
@@ -6227,14 +6585,18 @@ def update_rfq_cell(row_key):
                 db.session.add(edit)
             edit.value = clean_value
             edit.updated_at = datetime.utcnow()
+            set_rfq_dashboard_cell(row_key, field, clean_value, dirty=False, commit=False)
             db.session.commit()
             clear_runtime_caches()
             sheet_sync = {'synced': True, 'local_only': True}
         else:
             RFQCellEdit.query.filter_by(row_key=row_key, field=field).delete()
             db.session.commit()
+            set_rfq_dashboard_cell(row_key, field, clean_value, dirty=True)
             try:
                 sheet_sync = sync_rfq_cell_to_google_sheet(base_row, field, clean_value)
+                if sheet_sync.get('synced'):
+                    clear_rfq_dashboard_dirty_fields([{'row_key': row_key, 'field': field}])
             except Exception as sync_error:
                 sheet_sync = {'synced': False, 'reason': str(sync_error)}
             clear_runtime_caches()
@@ -6260,16 +6622,16 @@ def get_import_data():
         page = max(int(request.args.get('page', 1)), 1)
         per_page = min(max(int(request.args.get('per_page', 25)), 1), 500)
         search = clean(request.args.get('search')) or ''
-        cache_key = ('import_sheet_rows',)
-        cached = None if force else runtime_cache_get(cache_key)
-        if cached is None:
-            columns, rows = import_sheet_rows()
-            vendor_count = len(import_vendor_names())
-            runtime_cache_set(cache_key, {'columns': columns, 'rows': rows, 'vendor_count': vendor_count}, ttl_seconds=300)
-        else:
-            columns = cached['columns']
-            rows = cached['rows']
-            vendor_count = cached['vendor_count']
+        sync_info = None
+        if force or ImportDashboardRow.query.count() == 0:
+            sync_info = sync_import_sheet_to_dashboard()
+        columns = sync_info['columns'] if sync_info else import_layout_columns()
+        vendor_count = sync_info.get('vendor_count') if sync_info else len(import_vendor_names())
+        db_rows = ImportDashboardRow.query.order_by(
+            ImportDashboardRow.first_seen_at.desc(),
+            ImportDashboardRow.id.desc(),
+        ).all()
+        rows = [import_dashboard_row_to_dict(row, columns) for row in db_rows]
         if search:
             terms = [t.strip().lower() for t in re.split(r'[\n,]+', search) if t.strip()]
             if terms:
@@ -6285,8 +6647,10 @@ def get_import_data():
             'per_page': per_page,
             'vendor_count': vendor_count,
             'sources': [{'key': s['key'], 'label': s['label']} for s in IMPORT_SOURCE_SHEETS],
+            'sync': sync_info,
         })
     except Exception as e:
+        db.session.rollback()
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
@@ -6303,21 +6667,21 @@ def update_import_cell():
         column = next((col for col in columns if col['field'] == field), None)
         if not column:
             return jsonify({'error': 'Unknown import column'}), 400
-        source_key, _, sheet_row_raw = row_key.partition(':')
-        source = next((s for s in IMPORT_SOURCE_SHEETS if s['key'] == source_key), None)
-        if not source or not sheet_row_raw.isdigit():
-            return jsonify({'error': 'Invalid import row key'}), 400
-        df = read_public_sheet_csv(source['spreadsheet_id'], source['gid'])
-        source_map = import_source_column_map(df, columns)
-        source_col_idx = source_map.get(field)
-        if source_col_idx is None:
-            return jsonify({'error': 'This column is not available in the source sheet'}), 400
-        sheet_title = import_sheet_title_for_gid(source['spreadsheet_id'], source['gid'])
-        range_name = f"'{sheet_title}'!{get_column_letter(source_col_idx + 1)}{int(sheet_row_raw)}"
-        google_sheets_values_update(source['spreadsheet_id'], range_name, [[value]])
+        row = ImportDashboardRow.query.filter_by(row_key=row_key).first()
+        if not row:
+            return jsonify({'error': 'Import dashboard row not found'}), 404
+        try:
+            data = json.loads(row.data_json or '{}')
+        except (TypeError, json.JSONDecodeError):
+            data = {}
+        data[field] = value
+        row.data_json = json.dumps(data, ensure_ascii=False)
+        row.updated_at = datetime.utcnow()
+        db.session.commit()
         clear_runtime_caches()
-        return jsonify({'success': True, 'row_key': row_key, 'field': field, 'value': value, 'sheet_sync': {'synced': True, 'range': range_name}})
+        return jsonify({'success': True, 'row_key': row_key, 'field': field, 'value': value, 'sheet_sync': {'synced': False, 'local_only': True}})
     except Exception as e:
+        db.session.rollback()
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e), 'sheet_sync': {'synced': False, 'reason': str(e)}}), 500
 
@@ -6465,6 +6829,11 @@ def serialize_registered_product(row, pic_map=None):
 def get_all_registered_items():
     """Return all registered items from uploaded Prod ID master data."""
     try:
+        cache_key = runtime_cache_key('all_registered_items')
+        cached = runtime_cache_get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
         page = int(request.args.get('page', 1))
         per_page = int(request.args.get('per_page', 10))
         q = apply_all_registered_items_filters(base_all_registered_items_query(), request.args)
@@ -6473,7 +6842,7 @@ def get_all_registered_items():
         pic_map = {normalize_category_id(m.category_id): m.pic_name for m in db.session.query(MasterPIC).all()}
         option_q = base_all_registered_items_query()
         data = [serialize_registered_product(row, pic_map) for row in rows]
-        return jsonify({
+        payload = {
             'data': data,
             'total': total,
             'page': page,
@@ -6482,7 +6851,9 @@ def get_all_registered_items():
                 'mfr_names': sorted([r[0] for r in option_q.with_entities(ProductIDDB.manufacturer_name).distinct().all() if r[0]]),
                 'vendor_names': sorted([r[0] for r in option_q.with_entities(ProductIDDB.vendor_name).distinct().all() if r[0]]),
             }
-        })
+        }
+        runtime_cache_set(cache_key, payload, ttl_seconds=60)
+        return jsonify(payload)
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
@@ -6872,7 +7243,74 @@ def _calc_stage_leadtimes(row):
     return results
 
 
+_COMPLETED_WARMUP_STARTED = False
+_RFQ_WARMUP_STARTED = False
+
+def warm_completed_summary_cache_async():
+    """Precompute the two Delivery Completed summaries used by Dashboard."""
+    global _COMPLETED_WARMUP_STARTED
+    if _COMPLETED_WARMUP_STARTED or os.environ.get('PO_MONITOR_DISABLE_WARMUP') == '1':
+        return
+    _COMPLETED_WARMUP_STARTED = True
+
+    def _worker():
+        try:
+            current_year = datetime.utcnow().year
+            urls = [
+                '/api/completed/summary',
+                f'/api/completed/summary?date_year={current_year}&yoy_base_year={current_year}',
+            ]
+            with app.app_context():
+                client = app.test_client()
+                for url in urls:
+                    client.get(url)
+        except Exception as exc:
+            print(f'Completed summary warmup skipped: {exc}')
+
+    threading.Thread(target=_worker, daemon=True, name='completed-summary-warmup').start()
+
+def warm_rfq_dashboard_cache_async():
+    """Warm RFQ from local DB only; never hits Google Sheet."""
+    global _RFQ_WARMUP_STARTED
+    if _RFQ_WARMUP_STARTED or os.environ.get('PO_MONITOR_DISABLE_WARMUP') == '1':
+        return
+    _RFQ_WARMUP_STARTED = True
+
+    def _worker():
+        try:
+            with app.app_context():
+                if RFQDashboardRow.query.count() == 0:
+                    return
+                rows, fetched_at = load_rfq_dashboard_rows()
+                set_rfq_runtime_rows(rows, fetched_at)
+                app.test_client().get('/api/rfq/data?page=1&per_page=10')
+        except Exception as exc:
+            print(f'RFQ dashboard warmup skipped: {exc}')
+
+    threading.Thread(target=_worker, daemon=True, name='rfq-dashboard-warmup').start()
+
+FRONTEND_DIST_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'frontend', 'dist'))
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve_frontend(path):
+    if path.startswith('api/'):
+        return jsonify({'error': 'Not found'}), 404
+    if os.path.isdir(FRONTEND_DIST_DIR):
+        target = os.path.join(FRONTEND_DIST_DIR, path)
+        if path and os.path.isfile(target):
+            return send_from_directory(FRONTEND_DIST_DIR, path)
+        index_path = os.path.join(FRONTEND_DIST_DIR, 'index.html')
+        if os.path.isfile(index_path):
+            return send_from_directory(FRONTEND_DIST_DIR, 'index.html')
+    return jsonify({'status': 'ok', 'message': 'PO Monitoring API running'}), 200
+
+warm_completed_summary_cache_async()
+warm_rfq_dashboard_cache_async()
+
 if __name__ == '__main__':
     load_similarity_cache()
+    warm_completed_summary_cache_async()
+    warm_rfq_dashboard_cache_async()
     print("Backend: http://127.0.0.1:5001")
     app.run(debug=True, host='0.0.0.0', port=5001)
