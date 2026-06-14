@@ -9,6 +9,7 @@ import html
 import hashlib
 from datetime import datetime, date, timedelta
 import io
+import time
 import threading
 from sqlalchemy import func, text, event
 from sqlalchemy.engine import Engine
@@ -223,6 +224,11 @@ if _db_url:
     app.config['SQLALCHEMY_DATABASE_URI'] = _db_url
     app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
         'pool_pre_ping': True, 'pool_recycle': 300, 'pool_size': 5, 'max_overflow': 10,
+        # Cap how long a cold/sleeping Supabase project can stall the WSGI
+        # process during import. Without this, psycopg2 can hang for the OS
+        # TCP timeout (often 60s+), which is enough to make PythonAnywhere's
+        # post-reload health check time out ("took a long time to reload").
+        'connect_args': {'connect_timeout': 10},
     }
 else:
     _inst = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance')
@@ -828,11 +834,19 @@ def _ensure_performance_indexes():
     except Exception:
         db.session.rollback()
 
-with app.app_context():
-    db.create_all()
-    _ensure_extra_columns()
-    _ensure_performance_indexes()
-    print('DB schema ready.')
+try:
+    with app.app_context():
+        db.create_all()
+        _ensure_extra_columns()
+        _ensure_performance_indexes()
+        print('DB schema ready.')
+except Exception as exc:
+    # Don't let a slow/unreachable database (e.g. a sleeping Supabase
+    # project) take down the whole WSGI process at import time. The app
+    # can still serve '/' (used by PythonAnywhere's reload check) and any
+    # endpoints that don't need the DB; schema setup will be retried on the
+    # next reload once the DB is reachable again.
+    print(f'DB schema setup skipped at startup (will retry next reload): {exc}')
 
 CLOSED_STATUSES = {
     'Delivery Completed', 'SO Cancel',
@@ -7255,6 +7269,10 @@ def warm_completed_summary_cache_async():
 
     def _worker():
         try:
+            # Give the WSGI worker a few seconds to finish booting and answer
+            # PythonAnywhere's post-reload check before we start hammering
+            # the DB with this heavy analytics query.
+            time.sleep(8)
             current_year = datetime.utcnow().year
             urls = [
                 '/api/completed/summary',
@@ -7278,6 +7296,7 @@ def warm_rfq_dashboard_cache_async():
 
     def _worker():
         try:
+            time.sleep(8)
             with app.app_context():
                 if RFQDashboardRow.query.count() == 0:
                     return
