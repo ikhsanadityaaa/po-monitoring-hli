@@ -7273,6 +7273,35 @@ def _calc_stage_leadtimes(row):
 
 _COMPLETED_WARMUP_STARTED = False
 _RFQ_WARMUP_STARTED = False
+_DASHBOARD_STATS_WARMUP_STARTED = False
+
+
+def warm_dashboard_stats_cache_async():
+    """Warm /api/dashboard/stats and /api/data/aging immediately after startup.
+
+    These back the main KPI cards and aging chart. Without pre-warming, the
+    first page visit hits a cold SQLite + Python module state and takes 3-8 s.
+    The warmup runs ~3 s after boot so the cache is hot by the time the first
+    real user opens the dashboard.
+    """
+    global _DASHBOARD_STATS_WARMUP_STARTED
+    if _DASHBOARD_STATS_WARMUP_STARTED or os.environ.get('PO_MONITOR_DISABLE_WARMUP') == '1':
+        return
+    _DASHBOARD_STATS_WARMUP_STARTED = True
+
+    def _worker():
+        try:
+            time.sleep(3)
+            with app.app_context():
+                client = app.test_client()
+                client.get('/api/dashboard/stats')
+                client.get('/api/data/aging')
+                client.get('/api/dashboard/pending-total')
+        except Exception as exc:
+            print(f'Dashboard stats warmup skipped: {exc}')
+
+    threading.Thread(target=_worker, daemon=True, name='dashboard-stats-warmup').start()
+
 
 def warm_completed_summary_cache_async():
     """Precompute the two Delivery Completed summaries used by Dashboard."""
@@ -7322,6 +7351,26 @@ def warm_rfq_dashboard_cache_async():
 
     threading.Thread(target=_worker, daemon=True, name='rfq-dashboard-warmup').start()
 
+@app.route('/api/ping', methods=['GET'])
+def ping():
+    """Lightweight keepalive/warmup probe.
+
+    The frontend calls this immediately on page load so the PythonAnywhere
+    worker wakes up *before* the heavy /api/dashboard/stats request fires.
+    On a cold worker this costs ~100-200 ms; without it, the full stats
+    request absorbs the entire cold-start penalty (~2-5 s) AND has to
+    compete with the module-import overhead at the same time.
+
+    Also returns a tiny DB health flag so the caller knows whether the
+    worker is truly ready to serve data.
+    """
+    try:
+        total_so = db.session.query(func.count(SOData.id)).scalar() or 0
+        return jsonify({'ok': True, 'total_so': total_so, 'ts': datetime.utcnow().isoformat()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 200
+
+
 FRONTEND_DIST_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'frontend', 'dist'))
 
 @app.route('/', defaults={'path': ''})
@@ -7338,11 +7387,13 @@ def serve_frontend(path):
             return send_from_directory(FRONTEND_DIST_DIR, 'index.html')
     return jsonify({'status': 'ok', 'message': 'PO Monitoring API running'}), 200
 
+warm_dashboard_stats_cache_async()
 warm_completed_summary_cache_async()
 warm_rfq_dashboard_cache_async()
 
 if __name__ == '__main__':
     load_similarity_cache()
+    warm_dashboard_stats_cache_async()
     warm_completed_summary_cache_async()
     warm_rfq_dashboard_cache_async()
     print("Backend: http://127.0.0.1:5001")
