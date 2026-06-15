@@ -5381,7 +5381,7 @@ const App = () => {
         if (!shouldShow) return null;
         const pageLabel = PAGE_LABELS[activePage] || 'Data';
         return (
-          <div className="fixed inset-0 bg-black/50 z-[55] flex items-center justify-center backdrop-blur-sm">
+          <div className="fixed inset-0 bg-black/50 z-[9999] flex items-center justify-center backdrop-blur-sm">
             <div className={`${darkMode?'bg-gray-800':'bg-white'} p-8 rounded-2xl shadow-2xl flex flex-col items-center gap-5 w-80 text-center`}>
               <div className="relative w-16 h-16">
                 <div className="w-16 h-16 border-4 border-blue-200 rounded-full"/>
@@ -5398,7 +5398,7 @@ const App = () => {
       })()}
 
       {uploadProgress && (
-        <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center backdrop-blur-sm">
+        <div className="fixed inset-0 bg-black/60 z-[10000] flex items-center justify-center backdrop-blur-sm">
           <div className={`${darkMode?'bg-gray-800':'bg-white'} p-8 rounded-2xl shadow-2xl flex flex-col items-center gap-4 w-80`}>
             <div className="w-14 h-14 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"/>
             <div className="w-full text-center">
