@@ -1110,7 +1110,7 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
   const appliedRangeLabel = value?.mode === 'range' ? formatRangeLabel(value.start, value.end) : '';
 
   return (
-    <div data-tour="date-filter" className={`relative flex min-h-[64px] flex-col items-start gap-2 px-5 py-3 rounded-xl ${card} shadow ${compact ? 'mb-0' : 'mb-4'}`}>
+    <div data-tour="date-filter" className={`relative flex min-h-[64px] min-w-0 flex-1 flex-col items-start gap-2 px-5 py-3 rounded-xl ${card} shadow ${compact ? 'mb-0' : 'mb-4'}`}>
       <div className="flex items-center gap-3">
         <Calendar className="w-4 h-4 text-blue-500 flex-shrink-0"/>
         <span className={`text-sm font-semibold ${txt} flex-shrink-0`}>{label}:</span>
@@ -2744,7 +2744,7 @@ const App = () => {
     const slicerClientOptions = activePage === 'item-registration' ? (itemRegOptions.clients || []) : (dashboardFilterOptions.clients || []);
     const slicerPicOptions = activePage === 'item-registration' ? (itemRegOptions.pics || []) : (dashboardFilterOptions.pics || []);
     return (
-      <div className={showDateFilter ? "mb-5 grid grid-cols-1 gap-3 2xl:grid-cols-[minmax(760px,1.15fr)_minmax(500px,0.85fr)]" : "mb-5 flex justify-end"}>
+      <div className={showDateFilter ? "mb-5 flex flex-col gap-3 xl:flex-row xl:items-start" : "mb-5 flex justify-end"}>
         {showDateFilter && (
           <DateRangeFilter
             darkMode={darkMode}
@@ -2757,19 +2757,19 @@ const App = () => {
             onFilter={(f) => { setGlobalDateFilter(f); if (activePage === 'item-registration') setItemRegPage(1); }}
           />
         )}
-        <div className={`grid min-h-[64px] w-full grid-cols-1 gap-3 px-5 py-3 rounded-xl ${card} shadow lg:grid-cols-[minmax(180px,1fr)_minmax(170px,0.9fr)_minmax(96px,0.4fr)] lg:items-end ${showDateFilter ? '' : '2xl:max-w-[720px]'}`}>
-          <div className="min-w-0">
+        <div className={`flex min-h-[64px] w-full flex-col gap-3 px-5 py-3 rounded-xl sm:flex-row sm:flex-wrap sm:items-end ${card} shadow xl:flex-nowrap xl:w-auto xl:shrink-0 xl:min-w-[440px] xl:max-w-[560px]`}>
+          <div className="min-w-0 flex-1">
             <label className={`mb-1 block text-xs font-semibold ${txt}`}>Client Nm.</label>
             <MultiSelect label="Client Nm." options={slicerClientOptions} selected={globalClientFilter} onChange={setGlobalClientFilter} darkMode={darkMode} txt2={txt2} hideLabel />
           </div>
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <label className={`mb-1 block text-xs font-semibold ${txt}`}>PIC Name</label>
             <MultiSelect label="PIC Name" options={slicerPicOptions} selected={globalPicFilter} onChange={setGlobalPicFilter} darkMode={darkMode} txt2={txt2} hideLabel />
           </div>
           <button
             type="button"
             onClick={() => { setGlobalDateFilter({ mode: 'all' }); setGlobalClientFilter([]); setGlobalPicFilter([]); }}
-            className={`h-10 w-full min-w-0 px-3 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}
+            className={`h-10 w-full shrink-0 px-4 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap sm:w-20 ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}
           >
             Clear
           </button>
@@ -4839,10 +4839,39 @@ const App = () => {
   return (
     <div className={`min-h-screen font-sans ${darkMode?'bg-gray-900':'bg-[#edf2f1]'} ${darkMode?'':'text-[#1f2937]'}`} style={{fontFamily: "'Inter', 'Plus Jakarta Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"}}>
     <style>{`
+        /* Suppress chart/card entry animations (they slow down the UI on re-render)
+           but ALLOW spinner, pulse, and slide-in used by loading indicators.
+           We define the keyframes here so they survive Tailwind's purge in prod. */
         *, *::before, *::after {
-          animation: none !important;
           transition: none !important;
           scroll-behavior: auto !important;
+        }
+        /* Kill recharts / radix / general UI entry animations */
+        .recharts-wrapper *, [data-radix-popper-content-wrapper] * {
+          animation: none !important;
+        }
+        /* ── Loading animation keyframes (must be explicit for Tailwind purge) ── */
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to   { transform: rotate(360deg); }
+        }
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50%       { opacity: 0.4; }
+        }
+        @keyframes slide-in {
+          from { opacity: 0; transform: translateX(24px); }
+          to   { opacity: 1; transform: translateX(0); }
+        }
+        /* ── Apply animations to specific loading classes ── */
+        .animate-spin {
+          animation: spin 0.75s linear infinite !important;
+        }
+        .animate-pulse {
+          animation: pulse 1.8s ease-in-out infinite !important;
+        }
+        .animate-slide-in {
+          animation: slide-in 0.22s ease-out !important;
         }
         /* Global: all buttons, links, selects, labels with checkboxes → pointer cursor */
         button, [role="button"], select, label[for], a,
