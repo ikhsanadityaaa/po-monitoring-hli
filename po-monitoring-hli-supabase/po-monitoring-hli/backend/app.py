@@ -3489,11 +3489,36 @@ def get_all_so():
             if date_to:
                 q = q.filter(SOData.so_create_date <= date_to)
 
+        so_list_fields = (
+            SOData.id,
+            SOData.so_number,
+            SOData.so_item,
+            SOData.so_status,
+            SOData.operation_unit_name,
+            SOData.vendor_name,
+            SOData.manufacturer_name,
+            SOData.customer_po_number,
+            SOData.delivery_memo,
+            SOData.so_create_date,
+            SOData.pic_name,
+            SOData.sales_amount,
+            SOData.purchasing_amount,
+            SOData.purchasing_price,
+            SOData.so_qty,
+            SOData.purchasing_currency,
+            SOData.purchasing_amount_idr,
+            SOData.product_id,
+        )
+
         # Apply sort order (deterministic by SO Create Date, then SO Item).
+        # Load only columns needed to filter/count/paginate. Full text columns
+        # are lazy-loaded only for the current page rows in so_dict(), which is
+        # far lighter than pulling every Product/Spec/Remarks value for 100k+
+        # historical SO rows on every table load.
         if sort_order == 'oldest':
-            all_sos = q.order_by(SOData.so_create_date.asc(), SOData.so_item.asc()).all()
+            all_sos = q.options(load_only(*so_list_fields)).order_by(SOData.so_create_date.asc(), SOData.so_item.asc()).all()
         else:  # newest
-            all_sos = q.order_by(SOData.so_create_date.desc(), SOData.so_item.asc()).all()
+            all_sos = q.options(load_only(*so_list_fields)).order_by(SOData.so_create_date.desc(), SOData.so_item.asc()).all()
 
         # Keep Open SO table count aligned with dashboard total_so_count KPI:
         # exclude hidden SO rows and internal/HLI-referenced rows.
@@ -3539,9 +3564,9 @@ def get_all_so():
         if so_items: approval_q = approval_q.filter(SOData.so_item.in_(so_items))
         approval_q = apply_so_create_date_filter(approval_q, date_year, date_from, date_to, is_sqlite)
         if sort_order == 'oldest':
-            approval_sos = approval_q.order_by(SOData.so_create_date.asc(), SOData.so_item.asc()).all()
+            approval_sos = approval_q.options(load_only(*so_list_fields)).order_by(SOData.so_create_date.asc(), SOData.so_item.asc()).all()
         else:
-            approval_sos = approval_q.order_by(SOData.so_create_date.desc(), SOData.so_item.asc()).all()
+            approval_sos = approval_q.options(load_only(*so_list_fields)).order_by(SOData.so_create_date.desc(), SOData.so_item.asc()).all()
         approval_sos = [
             s for s in approval_sos
             if s.so_item not in hidden_so
@@ -3571,11 +3596,14 @@ def get_all_so():
         subtotal_amount = sum(float(s.sales_amount or 0) for s in all_sos)
         paged = all_sos[(page-1)*per_page : page*per_page]
 
-        op_units_opts = sorted({s.operation_unit_name for s in kpi_source_sos if s.operation_unit_name})
-        vendors_opts  = sorted({s.vendor_name for s in kpi_source_sos if s.vendor_name})
-        manufacturers_opts = sorted({s.manufacturer_name for s in kpi_source_sos if s.manufacturer_name})
-        statuses_opts = sorted({s.so_status for s in kpi_source_sos if s.so_status})
-        pics_opts     = sorted({canonical_pending_pic(s.pic_name, s.operation_unit_name) for s in kpi_source_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) != 'Unassigned'})
+        # Interdependent filter values: reflect the rows currently reachable
+        # after the active filters, instead of always showing the full DB list.
+        option_source_sos = all_sos
+        op_units_opts = sorted({s.operation_unit_name for s in option_source_sos if s.operation_unit_name})
+        vendors_opts  = sorted({s.vendor_name for s in option_source_sos if s.vendor_name})
+        manufacturers_opts = sorted({s.manufacturer_name for s in option_source_sos if s.manufacturer_name})
+        statuses_opts = sorted({s.so_status for s in option_source_sos if s.so_status})
+        pics_opts     = sorted({canonical_pending_pic(s.pic_name, s.operation_unit_name) for s in option_source_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) != 'Unassigned'})
 
         # Calculate PIC aggregations from ALL filtered records (not just current page)
         pic_aggregations = {}
@@ -5463,25 +5491,58 @@ def get_item_registration_data():
 
         total = q.count()
         rows = q.order_by(ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()).offset((page-1)*per_page).limit(per_page).all()
-        option_q = apply_item_registration_visible_status_filter(
-            apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to)
-        )
-        if clients:
-            option_q = option_q.filter(ItemRegistration.client_name.in_(clients))
-        option_q = apply_item_registration_pic_filter(option_q, global_pics)
-        option_rows = option_q.with_entities(
-            ItemRegistration.client_name,
-            ItemRegistration.category,
+        def item_reg_option_query(exclude_field=None):
+            oq = apply_item_registration_visible_status_filter(
+                apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to)
+            )
+            if clients:
+                oq = oq.filter(ItemRegistration.client_name.in_(clients))
+            oq = apply_item_registration_pic_filter(oq, global_pics)
+            if req_numbers:
+                oq = oq.filter(ItemRegistration.req_no.in_(req_numbers))
+            if search:
+                pattern = f'%{search}%'
+                oq = oq.filter(db.or_(
+                    ItemRegistration.req_no.ilike(pattern),
+                    ItemRegistration.prod_id.ilike(pattern),
+                    ItemRegistration.prod_name.ilike(pattern),
+                    ItemRegistration.vendor_name.ilike(pattern),
+                    ItemRegistration.mfr_name.ilike(pattern),
+                    ItemRegistration.remarks.ilike(pattern),
+                ))
+            if exclude_field != 'clients' and item_clients:
+                oq = oq.filter(ItemRegistration.client_name.in_(item_clients))
+            if exclude_field != 'categories' and categories:
+                oq = oq.filter(ItemRegistration.category.in_(categories))
+            if exclude_field != 'proc_statuses' and proc_statuses:
+                oq = oq.filter(ItemRegistration.proc_status.in_(proc_statuses))
+            if exclude_field != 'mfr_names' and mfr_names:
+                oq = oq.filter(ItemRegistration.mfr_name.in_(mfr_names))
+            if exclude_field != 'pics':
+                oq = apply_item_registration_pic_filter(oq, pics)
+            if kpi_pic:
+                if exclude_field != 'pics':
+                    oq = apply_item_registration_pic_filter(oq, [kpi_pic])
+                oq = oq.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-'))
+            return oq
+
+        def distinct_item_reg_options(exclude_field, column):
+            return sorted({
+                value for (value,) in item_reg_option_query(exclude_field).with_entities(column).distinct().all()
+                if value
+            })
+
+        all_clients = distinct_item_reg_options('clients', ItemRegistration.client_name)
+        all_categories = distinct_item_reg_options('categories', ItemRegistration.category)
+        all_proc_statuses = distinct_item_reg_options('proc_statuses', ItemRegistration.proc_status)
+        all_mfr_names = distinct_item_reg_options('mfr_names', ItemRegistration.mfr_name)
+        pic_option_rows = item_reg_option_query('pics').with_entities(
             ItemRegistration.category_id,
+            ItemRegistration.category,
             ItemRegistration.pic,
-            ItemRegistration.proc_status,
-            ItemRegistration.mfr_name,
+            ItemRegistration.client_name,
         ).all()
-        all_clients = sorted({r.client_name for r in option_rows if r.client_name})
-        all_categories = sorted({r.category for r in option_rows if r.category})
-        all_pics = sorted({resolve_item_registration_pic(r) for r in option_rows if resolve_item_registration_pic(r) != 'Unassigned'})
-        all_proc_statuses = sorted({r.proc_status for r in option_rows if r.proc_status})
-        all_mfr_names = sorted({r.mfr_name for r in option_rows if r.mfr_name})
+        all_pics = sorted({resolve_item_registration_pic(r) for r in pic_option_rows if resolve_item_registration_pic(r) != 'Unassigned'})
         last_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'ITEM_REG').scalar()
 
         response_rows = [item_registration_dict(r, include_similarity=False) for r in rows]
@@ -6237,22 +6298,37 @@ def get_rfq_data():
         if search:
             rows = filter_rfq_rows_by_multiline_search(rows, search)
 
-        option_rows = rows
-        if clients:
-            rows = [row for row in rows if clean(row.get('client_name')) in clients]
-        if rfq_numbers:
-            rows = [row for row in rows if clean(row.get('rfq_code')) in rfq_numbers]
-        if brands:
-            rows = [row for row in rows if clean(row.get('brand_manufacturer')) in brands]
-        if vendors:
-            rows = [row for row in rows if clean(row.get('vendor_name')) in vendors]
-        if checks:
-            rows = [row for row in rows if clean(row.get('check')) and clean(row.get('check')).lower() in checks]
+        search_rows = list(rows)
+
+        def rfq_filter_rows(source_rows, exclude_field=None):
+            excluded = set(exclude_field or []) if isinstance(exclude_field, (set, list, tuple)) else ({exclude_field} if exclude_field else set())
+            result = list(source_rows)
+            if 'clients' not in excluded and clients:
+                result = [row for row in result if clean(row.get('client_name')) in clients]
+            if 'rfq_numbers' not in excluded and rfq_numbers:
+                result = [row for row in result if clean(row.get('rfq_code')) in rfq_numbers]
+            if 'brands' not in excluded and brands:
+                result = [row for row in result if clean(row.get('brand_manufacturer')) in brands]
+            if 'vendors' not in excluded and vendors:
+                result = [row for row in result if clean(row.get('vendor_name')) in vendors]
+            if 'checks' not in excluded and checks:
+                result = [row for row in result if clean(row.get('check')) and clean(row.get('check')).lower() in checks]
+            if 'purchase_pics' not in excluded and purchase_pics:
+                result = [row for row in result if clean(row.get('purchase_pic')) in purchase_pics]
+            if 'pic' not in excluded and pic:
+                result = [
+                    row for row in result
+                    if clean(row.get('purchase_pic')) == pic
+                    and clean(row.get('check')) == 'open'
+                    and row.get('unit_price_missing')
+                    and not clean_product_id(row.get('product_id'))
+                ]
+            return result
 
         # KPI PIC cards should stay visible when one PIC is selected. Build the
         # KPI source after all non-PIC filters, then apply PIC filters only to
         # the table data.
-        kpi_rows = list(rows)
+        kpi_rows = rfq_filter_rows(search_rows, exclude_field={'purchase_pics', 'pic'})
         pending_by_pic = {}
         for row in kpi_rows:
             if clean(row.get('check')) != 'open':
@@ -6267,12 +6343,8 @@ def get_rfq_data():
             pending_by_pic[row_pic] = pending_by_pic.get(row_pic, 0) + 1
         pic_kpis = [{'pic': key, 'count': val} for key, val in sorted(pending_by_pic.items(), key=lambda item: (-item[1], item[0]))]
 
-        if purchase_pics:
-            rows = [row for row in rows if clean(row.get('purchase_pic')) in purchase_pics]
+        rows = rfq_filter_rows(search_rows)
         # Keep RFQ order identical to the sheet.
-
-        if pic:
-            rows = [row for row in rows if clean(row.get('purchase_pic')) == pic and clean(row.get('check')) == 'open' and row.get('unit_price_missing') and not clean_product_id(row.get('product_id'))]
 
         total = len(rows)
         start = (page - 1) * per_page
@@ -6290,12 +6362,16 @@ def get_rfq_data():
             'editable_fields': sorted(RFQ_EDITABLE_FIELDS),
             'pic_kpis': pic_kpis,
             'filters': {
-                'clients': sorted({clean(row.get('client_name')) for row in option_rows if clean(row.get('client_name'))}),
-                'rfq_numbers': sorted({clean(row.get('rfq_code')) for row in option_rows if clean(row.get('rfq_code'))}),
-                'brands': sorted({clean(row.get('brand_manufacturer')) for row in option_rows if clean(row.get('brand_manufacturer'))}),
-                'purchase_pics': sorted({clean(row.get('purchase_pic')) for row in option_rows if clean(row.get('purchase_pic')) and clean(row.get('purchase_pic')).lower() != 'unassigned'}),
-                'vendors': sorted({clean(row.get('vendor_name')) for row in option_rows if clean(row.get('vendor_name'))}),
-                'checks': [rfq_check_label(key) for key in ['complete', 'reject', 'closed', 'open']],
+                'clients': sorted({clean(row.get('client_name')) for row in rfq_filter_rows(search_rows, 'clients') if clean(row.get('client_name'))}),
+                'rfq_numbers': sorted({clean(row.get('rfq_code')) for row in rfq_filter_rows(search_rows, 'rfq_numbers') if clean(row.get('rfq_code'))}),
+                'brands': sorted({clean(row.get('brand_manufacturer')) for row in rfq_filter_rows(search_rows, 'brands') if clean(row.get('brand_manufacturer'))}),
+                'purchase_pics': sorted({clean(row.get('purchase_pic')) for row in rfq_filter_rows(search_rows, 'purchase_pics') if clean(row.get('purchase_pic')) and clean(row.get('purchase_pic')).lower() != 'unassigned'}),
+                'vendors': sorted({clean(row.get('vendor_name')) for row in rfq_filter_rows(search_rows, 'vendors') if clean(row.get('vendor_name'))}),
+                'checks': [
+                    rfq_check_label(key)
+                    for key in ['complete', 'reject', 'closed', 'open']
+                    if key in {clean(row.get('check')).lower() for row in rfq_filter_rows(search_rows, 'checks') if clean(row.get('check'))}
+                ],
             },
             'last_updated': utc_isoformat(fetched_at),
         }
@@ -6773,7 +6849,8 @@ def base_all_registered_items_query():
     ))
 
 
-def apply_all_registered_items_filters(q, args):
+def apply_all_registered_items_filters(q, args, exclude_fields=None):
+    exclude_fields = set(exclude_fields or [])
     search = (args.get('search', '') or '').strip()
     prod_ids = [clean_product_id(p) for p in args.getlist('prod_id') if clean_product_id(p)]
     date_filter = args.get('date_filter', 'all')
@@ -6804,9 +6881,9 @@ def apply_all_registered_items_filters(q, args):
         q = q.filter(ProductIDDB.product_registry_pic.ilike(f'%{pic_name}%'))
     if prod_ids:
         q = q.filter(ProductIDDB.product_id.in_(prod_ids))
-    if mfr_names:
+    if 'mfr_name' not in exclude_fields and mfr_names:
         q = q.filter(ProductIDDB.manufacturer_name.in_(mfr_names))
-    if vendor_names:
+    if 'vendor_name' not in exclude_fields and vendor_names:
         q = q.filter(ProductIDDB.vendor_name.in_(vendor_names))
 
     if search:
@@ -6868,16 +6945,17 @@ def get_all_registered_items():
         total = q.count()
         rows = q.order_by(ProductIDDB.registration_date.desc(), ProductIDDB.product_id.asc()).offset((page-1)*per_page).limit(per_page).all()
         pic_map = {normalize_category_id(m.category_id): m.pic_name for m in db.session.query(MasterPIC).all()}
-        option_q = base_all_registered_items_query()
         data = [serialize_registered_product(row, pic_map) for row in rows]
+        mfr_option_q = apply_all_registered_items_filters(base_all_registered_items_query(), request.args, exclude_fields={'mfr_name'})
+        vendor_option_q = apply_all_registered_items_filters(base_all_registered_items_query(), request.args, exclude_fields={'vendor_name'})
         payload = {
             'data': data,
             'total': total,
             'page': page,
             'per_page': per_page,
             'filters': {
-                'mfr_names': sorted([r[0] for r in option_q.with_entities(ProductIDDB.manufacturer_name).distinct().all() if r[0]]),
-                'vendor_names': sorted([r[0] for r in option_q.with_entities(ProductIDDB.vendor_name).distinct().all() if r[0]]),
+                'mfr_names': sorted([r[0] for r in mfr_option_q.with_entities(ProductIDDB.manufacturer_name).distinct().all() if r[0]]),
+                'vendor_names': sorted([r[0] for r in vendor_option_q.with_entities(ProductIDDB.vendor_name).distinct().all() if r[0]]),
             }
         }
         runtime_cache_set(cache_key, payload, ttl_seconds=60)
