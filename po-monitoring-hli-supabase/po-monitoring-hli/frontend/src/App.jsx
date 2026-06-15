@@ -1289,7 +1289,8 @@ const App = () => {
   const [vendorControlLastUpdated, setVendorControlLastUpdated] = useState(null);
   const [vendorPasswordVisible, setVendorPasswordVisible] = useState({});
 
-  const [, setLoading] = useState(false);
+  const [pageLoading, setPageLoading] = useState(false);
+  const setLoading = setPageLoading;
   const [uploadProgress, setUploadProgress] = useState(null);
   const [toasts, setToasts] = useState([]);
   const [modal, setModal] = useState(null);
@@ -1531,7 +1532,12 @@ const App = () => {
       }
       setCompletedLoaded(true);
     } catch (e) {
-      if (isCurrent()) addToast(`Error: ${e.response?.data?.error || e.message}`, 'error');
+      if (isCurrent()) {
+        // Mark as loaded even on error so KPI cards stop showing '...' indefinitely.
+        // completedData stays null — the empty-state UI will render instead.
+        setCompletedLoaded(true);
+        addToast(`Error memuat summary: ${e.response?.data?.error || e.message}`, 'error');
+      }
     } finally {
       if (isCurrent()) setCompletedLoading(false);
     }
@@ -5213,29 +5219,41 @@ const App = () => {
         </div>
       )}
 
-      {/* ── Cold-start / loading overlay ─────────────────────────────────────
-          Shows only when stats is null AND the dashboard page is active.
-          This prevents the user seeing a completely empty screen while the
-          first fetch is in flight (typical on PythonAnywhere cold starts).
-          The overlay disappears automatically once any data arrives.       */}
-      {activePage === 'dashboard' && stats === null && (
-        <div className="fixed inset-0 bg-black/50 z-[55] flex items-center justify-center backdrop-blur-sm">
-          <div className={`${darkMode?'bg-gray-800':'bg-white'} p-8 rounded-2xl shadow-2xl flex flex-col items-center gap-5 w-80 text-center`}>
-            <div className="relative w-16 h-16">
-              <div className="w-16 h-16 border-4 border-blue-200 rounded-full"/>
-              <div className="absolute inset-0 w-16 h-16 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"/>
-            </div>
-            <div>
-              <p className={`font-bold text-lg mb-1 ${darkMode?'text-white':'text-gray-900'}`}>Memuat Data Dashboard</p>
-              <p className={`text-sm ${darkMode?'text-gray-400':'text-gray-500'}`}>Sedang mengambil data dari server…</p>
-              <p className={`text-xs mt-2 ${darkMode?'text-gray-500':'text-gray-400'}`}>Mohon tunggu sebentar</p>
-            </div>
-            <div className={`w-full rounded-full h-1.5 ${darkMode?'bg-gray-700':'bg-gray-100'} overflow-hidden`}>
-              <div className="h-full bg-gradient-to-r from-blue-600 to-blue-400 rounded-full animate-pulse" style={{width:'60%'}}/>
+      {/* ── Per-page loading overlay ─────────────────────────────────────────
+          Dashboard: shows on first cold load when stats is null.
+          Other pages: shows whenever pageLoading is true (data fetch in flight).
+          The overlay disappears automatically once data arrives.            */}
+      {(() => {
+        const PAGE_LABELS = {
+          dashboard: 'Dashboard',
+          'all-so': 'Pending Delivery',
+          'item-registration': 'Item Registration',
+          rfq: 'RFQ',
+          import: 'Import',
+          'vendor-control': 'Vendor Control',
+          'all-registered-items': 'Registered Items',
+        };
+        const isDashboardFirstLoad = activePage === 'dashboard' && stats === null;
+        const isOtherPageLoading = activePage !== 'dashboard' && pageLoading;
+        const shouldShow = isDashboardFirstLoad || isOtherPageLoading;
+        if (!shouldShow) return null;
+        const pageLabel = PAGE_LABELS[activePage] || 'Data';
+        return (
+          <div className="fixed inset-0 bg-black/50 z-[55] flex items-center justify-center backdrop-blur-sm">
+            <div className={`${darkMode?'bg-gray-800':'bg-white'} p-8 rounded-2xl shadow-2xl flex flex-col items-center gap-5 w-80 text-center`}>
+              <div className="relative w-16 h-16">
+                <div className="w-16 h-16 border-4 border-blue-200 rounded-full"/>
+                <div className="absolute inset-0 w-16 h-16 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"/>
+              </div>
+              <div>
+                <p className={`font-bold text-lg mb-1 ${darkMode?'text-white':'text-gray-900'}`}>Memuat {pageLabel}</p>
+                <p className={`text-sm ${darkMode?'text-gray-400':'text-gray-500'}`}>Sedang mengambil data dari server…</p>
+                <p className={`text-xs mt-2 ${darkMode?'text-gray-500':'text-gray-400'}`}>Mohon tunggu sebentar</p>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {uploadProgress && (
         <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center backdrop-blur-sm">
