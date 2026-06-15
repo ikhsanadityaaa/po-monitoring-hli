@@ -5219,10 +5219,13 @@ const App = () => {
         </div>
       )}
 
-      {/* ── Per-page loading overlay ─────────────────────────────────────────
-          Dashboard: shows on first cold load when stats is null.
-          Other pages: shows whenever pageLoading is true (data fetch in flight).
-          The overlay disappears automatically once data arrives.            */}
+      {/* ── Full-page loading overlay ────────────────────────────────────────
+          Dashboard: stays until BOTH phases complete:
+            Phase 1 (/api/dashboard/stats)    → clears stats === null
+            Phase 2 (/api/completed/summary)  → clears completedLoading && !completedLoaded
+          Other pages: only on first visit when the page data array is still
+          empty AND a fetch is in-flight — prevents overlay flashing on every
+          filter / pagination change after initial load.                     */}
       {(() => {
         const PAGE_LABELS = {
           dashboard: 'Dashboard',
@@ -5233,9 +5236,27 @@ const App = () => {
           'vendor-control': 'Vendor Control',
           'all-registered-items': 'Registered Items',
         };
-        const isDashboardFirstLoad = activePage === 'dashboard' && stats === null;
-        const isOtherPageLoading = activePage !== 'dashboard' && pageLoading;
-        const shouldShow = isDashboardFirstLoad || isOtherPageLoading;
+
+        // Dashboard: show overlay until both phase-1 (stats) AND phase-2
+        // (completedData/summary) have finished their first load.
+        const isDashboardLoading =
+          activePage === 'dashboard' &&
+          (stats === null || (completedLoading && !completedLoaded));
+
+        // Other pages: only show when the page has never loaded data yet
+        // (data array is still empty) AND a fetch is actively in-flight.
+        // This prevents the overlay from re-appearing on pagination / filter.
+        const isOtherPageFirstLoad = activePage !== 'dashboard' && pageLoading && (() => {
+          if (activePage === 'all-so')               return allSOData.length === 0;
+          if (activePage === 'item-registration')    return itemRegData.length === 0;
+          if (activePage === 'rfq')                  return rfqData.length === 0;
+          if (activePage === 'import')               return importData.length === 0;
+          if (activePage === 'vendor-control')       return vendorControlData.length === 0;
+          if (activePage === 'all-registered-items') return registeredItemsData.length === 0;
+          return false;
+        })();
+
+        const shouldShow = isDashboardLoading || isOtherPageFirstLoad;
         if (!shouldShow) return null;
         const pageLabel = PAGE_LABELS[activePage] || 'Data';
         return (
