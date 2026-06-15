@@ -23,61 +23,87 @@ const api = axios.create({ baseURL: BACKEND, timeout: 600000 });
 const DASHBOARD_SUMMARY_CACHE_PREFIX = 'po-monitoring:dashboard-summary:';
 const DASHBOARD_STATS_CACHE_KEY = 'po-monitoring:dashboard-stats';
 const DASHBOARD_AGING_CACHE_KEY = 'po-monitoring:dashboard-aging';
-// Cache TTL: 10 minutes — long enough to survive page reload, short enough to
-// not show stale data if someone uploads new SO data and refreshes.
+const DASHBOARD_PENDING_TOTAL_CACHE_KEY = 'po-monitoring:dashboard-pending-total';
+const DASHBOARD_CACHE_KEY_ALL = '__all__';
+// Cache TTL: keeps Dashboard instant on reload, while uploads still clear it explicitly.
+// localStorage is used instead of sessionStorage so refresh / browser reopen does not
+// force PythonAnywhere to recalculate the heavy KPI + Delivery Completed summary.
 const DASHBOARD_CACHE_TTL_MS = 30 * 60 * 1000;
 
-const readDashboardSummaryCache = (url) => {
+const storageGet = (key) => {
+  if (typeof window === 'undefined') return null;
   try {
-    const raw = sessionStorage.getItem(`${DASHBOARD_SUMMARY_CACHE_PREFIX}${url}`);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    return parsed?.data || null;
+    return window.localStorage.getItem(key) || window.sessionStorage.getItem(key);
   } catch {
     return null;
   }
 };
 
-const writeDashboardSummaryCache = (url, data) => {
+const storageSet = (key, value) => {
+  if (typeof window === 'undefined') return;
   try {
-    sessionStorage.setItem(`${DASHBOARD_SUMMARY_CACHE_PREFIX}${url}`, JSON.stringify({ at: Date.now(), data }));
+    window.localStorage.setItem(key, value);
   } catch {
-    // Storage can be unavailable in private/locked-down contexts; network data still renders.
+    try { window.sessionStorage.setItem(key, value); } catch {}
   }
 };
 
-const clearDashboardSummaryCache = () => {
-  try {
-    Object.keys(sessionStorage)
-      .filter((key) => key.startsWith(DASHBOARD_SUMMARY_CACHE_PREFIX))
-      .forEach((key) => sessionStorage.removeItem(key));
-  } catch {}
+const storageRemoveWhere = (predicate) => {
+  if (typeof window === 'undefined') return;
+  for (const store of [window.localStorage, window.sessionStorage]) {
+    try {
+      Object.keys(store)
+        .filter(predicate)
+        .forEach((key) => store.removeItem(key));
+    } catch {}
+  }
 };
 
-// ─── Stats & aging session cache (survives page reload, not tab close) ────────
-const readStatsCache = (key) => {
+const normalizeDashboardCacheQuery = (qs = '') => {
+  const raw = String(qs || '').replace(/^\?/, '');
+  return raw || DASHBOARD_CACHE_KEY_ALL;
+};
+
+const dashboardStatsCacheKey = (qs = '') => `${DASHBOARD_STATS_CACHE_KEY}:${normalizeDashboardCacheQuery(qs)}`;
+const dashboardAgingCacheKey = (qs = '') => `${DASHBOARD_AGING_CACHE_KEY}:${normalizeDashboardCacheQuery(qs)}`;
+const dashboardPendingCacheKey = (qs = '') => `${DASHBOARD_PENDING_TOTAL_CACHE_KEY}:${normalizeDashboardCacheQuery(qs)}`;
+
+const readCachePayload = (key) => {
   try {
-    const raw = sessionStorage.getItem(key);
+    const raw = storageGet(key);
     if (!raw) return null;
     const { at, data } = JSON.parse(raw);
-    if (Date.now() - at > DASHBOARD_CACHE_TTL_MS) return null;
-    return data;
+    if (!at || Date.now() - at > DASHBOARD_CACHE_TTL_MS) return null;
+    return data ?? null;
   } catch {
     return null;
   }
 };
 
-const writeStatsCache = (key, data) => {
-  try {
-    sessionStorage.setItem(key, JSON.stringify({ at: Date.now(), data }));
-  } catch {}
+const writeCachePayload = (key, data) => {
+  try { storageSet(key, JSON.stringify({ at: Date.now(), data })); } catch {}
 };
 
+const readDashboardSummaryCache = (url) => readCachePayload(`${DASHBOARD_SUMMARY_CACHE_PREFIX}${url}`);
+const writeDashboardSummaryCache = (url, data) => writeCachePayload(`${DASHBOARD_SUMMARY_CACHE_PREFIX}${url}`, data);
+
+const clearDashboardSummaryCache = () => {
+  storageRemoveWhere((key) => key.startsWith(DASHBOARD_SUMMARY_CACHE_PREFIX));
+};
+
+// ─── Stats & aging persistent cache ───────────────────────────────────────
+const readStatsCache = (key) => readCachePayload(key);
+const writeStatsCache = (key, data) => writeCachePayload(key, data);
+
 const clearStatsCache = () => {
-  try {
-    sessionStorage.removeItem(DASHBOARD_STATS_CACHE_KEY);
-    sessionStorage.removeItem(DASHBOARD_AGING_CACHE_KEY);
-  } catch {}
+  storageRemoveWhere((key) => (
+    key === DASHBOARD_STATS_CACHE_KEY ||
+    key === DASHBOARD_AGING_CACHE_KEY ||
+    key === DASHBOARD_PENDING_TOTAL_CACHE_KEY ||
+    key.startsWith(`${DASHBOARD_STATS_CACHE_KEY}:`) ||
+    key.startsWith(`${DASHBOARD_AGING_CACHE_KEY}:`) ||
+    key.startsWith(`${DASHBOARD_PENDING_TOTAL_CACHE_KEY}:`)
+  ));
 };
 
 const PIE_COLORS = ['#2563EB','#14B8A6','#22C55E','#EF4444','#06B6D4',
@@ -1229,9 +1255,14 @@ const App = () => {
   const dashboardRequestSeq = useRef(0);
   const [frozenColumns, setFrozenColumns] = useState({});
 
-  const [stats, setStats] = useState(null);
-  const [summaryPendingTotal, setSummaryPendingTotal] = useState(null);
-  const [agingData, setAgingData] = useState([]);
+  const [stats, setStats] = useState(() => readStatsCache(dashboardStatsCacheKey()));
+  const [summaryPendingTotal, setSummaryPendingTotal] = useState(() => {
+    const cachedStats = readStatsCache(dashboardStatsCacheKey());
+    const cachedPending = readStatsCache(dashboardPendingCacheKey());
+    const n = Number(cachedPending?.total ?? cachedStats?.total_so_count);
+    return Number.isFinite(n) ? n : null;
+  });
+  const [agingData, setAgingData] = useState(() => readStatsCache(dashboardAgingCacheKey()) || []);
   const [allSOData, setAllSOData] = useState([]);
   const [approvalSOData, setApprovalSOData] = useState([]);
   const [picAggregations, setPicAggregations] = useState([]); // PIC aggregations from backend (all filtered data)
@@ -1437,7 +1468,10 @@ const App = () => {
   const [globalDateFilter, setGlobalDateFilter] = useState({ mode: 'all' });
   const [globalClientFilter, setGlobalClientFilter] = useState([]);
   const [globalPicFilter, setGlobalPicFilter] = useState([]);
-  const [dashboardFilterOptions, setDashboardFilterOptions] = useState({ clients: [], pics: [] });
+  const [dashboardFilterOptions, setDashboardFilterOptions] = useState(() => {
+    const cachedStats = readStatsCache(dashboardStatsCacheKey());
+    return cachedStats?.filters || { clients: [], pics: [] };
+  });
   // Aliases kept so existing references continue to compile.
   const dashDateFilter      = globalDateFilter;
   const setDashDateFilter   = setGlobalDateFilter;
@@ -1507,53 +1541,76 @@ const App = () => {
     const cachedMargin = completedUrl === marginUrl ? cachedCompleted : readDashboardSummaryCache(marginUrl);
     const hasSummaryCache = Boolean(cachedCompleted && cachedMargin);
 
-    // ── Cold-start optimisation ────────────────────────────────────────────
-    // 1. Show cached stats & aging immediately so the dashboard is not blank.
-    // 2. Fire a lightweight /api/ping first to wake the PythonAnywhere worker
-    //    before the heavy stats request arrives (reduces perceived latency by
-    //    absorbing the cold-start penalty in parallel).
-    const cachedStats = readStatsCache(DASHBOARD_STATS_CACHE_KEY);
-    const cachedAging = readStatsCache(DASHBOARD_AGING_CACHE_KEY);
-    if (cachedStats && isCurrent()) {
+    // ── Persistent Dashboard cache ─────────────────────────────────────────
+    // If the same filter has been opened before, render directly from localStorage
+    // and do not refetch until the TTL expires. This is the key difference from
+    // the previous version, which showed cache briefly but still recalculated on
+    // every reload. Upload/update actions still clear these keys explicitly.
+    const statsCacheKey = dashboardStatsCacheKey(qs);
+    const agingCacheKey = dashboardAgingCacheKey(qs);
+    const pendingCacheKey = dashboardPendingCacheKey(qs);
+    const cachedStats = readStatsCache(statsCacheKey);
+    const cachedAging = readStatsCache(agingCacheKey);
+    const cachedPending = readStatsCache(pendingCacheKey);
+    const pendingNumber = Number(cachedPending?.total ?? cachedStats?.total_so_count);
+    const hasLightCache = Boolean(cachedStats && Array.isArray(cachedAging) && Number.isFinite(pendingNumber));
+
+    if (hasLightCache && isCurrent()) {
       setStats(cachedStats);
-      setSummaryPendingTotal(Number(cachedStats?.total_so_count) || 0);
+      setSummaryPendingTotal(pendingNumber);
       setDashboardFilterOptions(cachedStats?.filters || { clients: [], pics: [] });
-    }
-    if (cachedAging && isCurrent()) {
       setAgingData(cachedAging);
     }
 
-    setLoading(!(cachedStats && cachedAging));
+    setLoading(!hasLightCache);
     setCompletedLoading(!hasSummaryCache);
     setCompletedLoaded(hasSummaryCache);
     setCompletedData(hasSummaryCache ? cachedCompleted : null);
     setDashboardMarginData(hasSummaryCache ? cachedMargin : null);
 
-    // Pre-ping to wake the worker (fire-and-forget, failure is harmless)
+    // When everything is already cached, skip the backend entirely.
+    if (hasLightCache && hasSummaryCache) {
+      setLoading(false);
+      setCompletedLoading(false);
+      return;
+    }
+
+    // Pre-ping only when the backend is actually needed.
     api.get('/api/ping').catch(() => {});
 
-    try {
-      const [sRes, aRes, pendingRes] = await Promise.all([
-        api.get(`/api/dashboard/stats${qs}`),
-        api.get(`/api/data/aging${qs}`),
-        api.get(`/api/dashboard/pending-total${qs}`)
-      ]);
-      if (!isCurrent()) return;
-      setStats(sRes.data);
-      setSummaryPendingTotal(Number(pendingRes.data?.total) || 0);
-      setDashboardFilterOptions(sRes.data?.filters || { clients: [], pics: [] });
-      setAgingData(Array.isArray(aRes.data) ? aRes.data : []);
-      // Persist to session cache so next reload is instant
-      writeStatsCache(DASHBOARD_STATS_CACHE_KEY, sRes.data);
-      writeStatsCache(DASHBOARD_AGING_CACHE_KEY, Array.isArray(aRes.data) ? aRes.data : []);
-    } catch (e) {
-      if (isCurrent()) {
-        addToast(`Error: ${e.response?.data?.error || e.message}`, 'error');
-        setCompletedLoading(false);
+    if (!hasLightCache) {
+      try {
+        const [sRes, aRes, pendingRes] = await Promise.all([
+          api.get(`/api/dashboard/stats${qs}`),
+          api.get(`/api/data/aging${qs}`),
+          api.get(`/api/dashboard/pending-total${qs}`)
+        ]);
+        if (!isCurrent()) return;
+        const nextAging = Array.isArray(aRes.data) ? aRes.data : [];
+        const nextPending = { total: Number(pendingRes.data?.total) || 0 };
+        setStats(sRes.data);
+        setSummaryPendingTotal(nextPending.total);
+        setDashboardFilterOptions(sRes.data?.filters || { clients: [], pics: [] });
+        setAgingData(nextAging);
+        writeStatsCache(statsCacheKey, sRes.data);
+        writeStatsCache(agingCacheKey, nextAging);
+        writeStatsCache(pendingCacheKey, nextPending);
+      } catch (e) {
+        if (isCurrent()) {
+          addToast(`Error: ${e.response?.data?.error || e.message}`, 'error');
+          setCompletedLoading(false);
+        }
+        return;
+      } finally {
+        if (isCurrent()) setLoading(false);
       }
+    } else {
+      setLoading(false);
+    }
+
+    if (hasSummaryCache) {
+      setCompletedLoading(false);
       return;
-    } finally {
-      if (isCurrent()) setLoading(false);
     }
 
     // Do not immediately occupy the backend with the heavier completed-summary query.
@@ -5315,10 +5372,12 @@ const App = () => {
           return false;
         })();
 
-        // Full-page overlay is reserved for Dashboard first paint only.
-        // Data-table pages keep rendering their header/filter/table while fetching,
-        // so the screen is never blocked by an empty-result overlay.
-        const shouldShow = isDashboardLoading;
+        // Show the same loading popup on every page while its data request is running.
+        // Dashboard still waits only for lightweight KPI stats, while table pages use
+        // pageLoading from their own fetch function, so users get clear feedback when
+        // changing page, pagination, filter, or search.
+        const isOtherPageLoading = activePage !== 'dashboard' && pageLoading;
+        const shouldShow = isDashboardLoading || isOtherPageLoading;
         if (!shouldShow) return null;
         const pageLabel = PAGE_LABELS[activePage] || 'Data';
         return (
