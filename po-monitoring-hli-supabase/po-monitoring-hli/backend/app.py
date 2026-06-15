@@ -12,7 +12,7 @@ from datetime import datetime, date, timedelta
 import io
 import time
 import threading
-from sqlalchemy import func, text, event
+from sqlalchemy import func, text, event, case, desc
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import load_only
 from openpyxl import Workbook
@@ -44,7 +44,7 @@ _MASTER_PIC_LOCK = threading.Lock()
 # Keyed by request filters + cheap DB signature, so repeated page opens return
 # immediately while uploads/changed rows naturally invalidate the cache.
 _COMPLETED_SUMMARY_CACHE = {}
-_COMPLETED_SUMMARY_CACHE_TTL_SECONDS = 300
+_COMPLETED_SUMMARY_CACHE_TTL_SECONDS = 900
 _RUNTIME_CACHE_VERSION = 0
 
 # Similarity check cache for Item Registration
@@ -2886,10 +2886,29 @@ def get_dashboard_stats():
         so_without_po_count = 0
 
         # Single pass over open SO rows — compute total_so_count AND so_without_po_count
-        # together instead of two separate full-table scans.
+        # together instead of two separate full-table scans. Load only the fields
+        # used by KPI/chart aggregation; pulling Product/Spec/Remarks for every
+        # open SO row was one of the largest Dashboard slowdowns.
+        dashboard_stats_fields = (
+            SOData.id,
+            SOData.so_number,
+            SOData.so_item,
+            SOData.so_status,
+            SOData.operation_unit_name,
+            SOData.vendor_name,
+            SOData.customer_po_number,
+            SOData.delivery_memo,
+            SOData.so_create_date,
+            SOData.sales_amount,
+            SOData.purchasing_amount,
+            SOData.purchasing_price,
+            SOData.purchasing_currency,
+            SOData.purchasing_amount_idr,
+            SOData.pic_name,
+        )
         open_so_rows = so_q(
             open_so_filter()
-        ).all()
+        ).options(load_only(*dashboard_stats_fields)).all()
 
         # Prefetch exchange rates for all rows in one shot BEFORE the loop.
         # Without this, purchase_amount_idr() falls back to per-row HTTP calls
@@ -3039,7 +3058,14 @@ def get_dashboard_stats():
             date_year, date_from, date_to,
         )
         option_rows = [
-            s for s in options_q.all()
+            s for s in options_q.options(load_only(
+                SOData.so_number,
+                SOData.so_item,
+                SOData.operation_unit_name,
+                SOData.pic_name,
+                SOData.customer_po_number,
+                SOData.delivery_memo,
+            )).all()
             if s.so_item not in hidden_so
             and s.so_number not in hidden_so
             and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)
@@ -3175,7 +3201,7 @@ def get_dashboard_stats():
                 'max': so_date_range[1].isoformat() if so_date_range and so_date_range[1] else None,
             },
         }
-        runtime_cache_set(cache_key, payload, ttl_seconds=20)
+        runtime_cache_set(cache_key, payload, ttl_seconds=180)
         return jsonify(payload)
     except Exception as e:
         db.session.rollback()
@@ -3299,7 +3325,12 @@ def get_aging_data():
         q = apply_so_client_filter(q, clients)
         q = apply_so_pic_filter(q, pics)
         q = apply_so_create_date_filter(q, date_year, date_from, date_to)
-        for s in q.all():
+        aging_fields = (
+            SOData.so_number, SOData.so_item, SOData.vendor_name,
+            SOData.customer_po_number, SOData.delivery_memo,
+            SOData.so_create_date, SOData.sales_amount,
+        )
+        for s in q.options(load_only(*aging_fields)).all():
             # Apply same exclusions as total_so_count
             if s.so_item in hidden_so or s.so_number in hidden_so:
                 continue
@@ -3327,7 +3358,7 @@ def get_aging_data():
             vendors[v]['sales_amount'] += float(s.sales_amount or 0)
 
         payload = sorted(vendors.values(), key=lambda x: x['total_open'], reverse=True)
-        runtime_cache_set(cache_key, payload, ttl_seconds=20)
+        runtime_cache_set(cache_key, payload, ttl_seconds=180)
         return jsonify(payload)
     except Exception as e:
         import traceback; traceback.print_exc()
@@ -4761,6 +4792,8 @@ def completed_summary():
         date_from   = request.args.get('date_from', '')
         date_to     = request.args.get('date_to', '')
         yoy_base_year = request.args.get('yoy_base_year', '')
+        mode = (request.args.get('mode') or '').strip().lower()
+        light_mode = mode in ('dashboard', 'light', 'kpi')
         is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
         clients = selected_clients()
         pics = selected_pics()
@@ -4802,6 +4835,7 @@ def completed_summary():
             date_from or '',
             date_to or '',
             yoy_base_year or '',
+            mode or '',
             tuple(sorted(clients)),
             tuple(sorted(pics)),
         )
@@ -4811,14 +4845,214 @@ def completed_summary():
             if cache_entry and now_ts - cache_entry.get('created_at', 0) < _COMPLETED_SUMMARY_CACHE_TTL_SECONDS:
                 return jsonify(cache_entry['payload'])
 
+        if light_mode:
+            # SQL-aggregated Dashboard summary. This avoids materialising every
+            # Delivery Completed row into Python just to draw KPI cards and charts.
+            currency_expr = func.upper(func.trim(func.coalesce(SOData.purchasing_currency, '')))
+            raw_purchase_expr = case(
+                (func.coalesce(SOData.purchasing_amount, 0) != 0, func.coalesce(SOData.purchasing_amount, 0)),
+                else_=func.coalesce(SOData.purchasing_price, 0) * func.coalesce(SOData.so_qty, 0)
+            )
+            purchase_expr = case(
+                (SOData.purchasing_amount_idr.isnot(None), SOData.purchasing_amount_idr),
+                (currency_expr.in_(['', 'IDR']), raw_purchase_expr),
+                else_=0.0
+            )
+            sales_expr = func.coalesce(SOData.sales_amount, 0.0)
+            has_purchase_expr = db.or_(
+                db.and_(SOData.purchasing_amount.isnot(None), SOData.purchasing_amount != 0),
+                db.and_(SOData.purchasing_price.isnot(None), SOData.purchasing_price != 0),
+            )
+            margin_expr = case(
+                (has_purchase_expr, sales_expr - purchase_expr),
+                else_=None
+            )
+            sum_purchase_expr = func.coalesce(func.sum(purchase_expr), 0.0)
+            sum_sales_expr = func.coalesce(func.sum(sales_expr), 0.0)
+            sum_margin_expr = func.coalesce(func.sum(func.coalesce(margin_expr, 0.0)), 0.0)
+            count_expr = func.count(SOData.id)
+
+            kpi_row = q.with_entities(
+                count_expr,
+                sum_sales_expr,
+                sum_purchase_expr,
+                func.coalesce(func.sum(case((margin_expr > 0, 1), else_=0)), 0),
+                func.coalesce(func.sum(case((margin_expr < 0, 1), else_=0)), 0),
+                func.coalesce(func.sum(case((margin_expr == 0, 1), else_=0)), 0),
+            ).first()
+            total_count = int(kpi_row[0] or 0) if kpi_row else 0
+            total_sales = float(kpi_row[1] or 0) if kpi_row else 0.0
+            total_purchase = float(kpi_row[2] or 0) if kpi_row else 0.0
+            pos = int(kpi_row[3] or 0) if kpi_row else 0
+            neg = int(kpi_row[4] or 0) if kpi_row else 0
+            zero = int(kpi_row[5] or 0) if kpi_row else 0
+
+            month_expr = func.strftime('%Y-%m', SOData.so_create_date) if is_sqlite else func.to_char(func.date_trunc('month', SOData.so_create_date), 'YYYY-MM')
+            monthly_trend = []
+            month_rows = (
+                q.filter(SOData.so_create_date.isnot(None))
+                .with_entities(
+                    month_expr.label('month'),
+                    count_expr.label('count'),
+                    sum_sales_expr.label('sales_amount'),
+                    sum_purchase_expr.label('purchase_amount'),
+                )
+                .group_by(month_expr)
+                .order_by(month_expr)
+                .all()
+            )
+            for month, cnt, sales_amt, purchase_amt in month_rows:
+                monthly_trend.append({
+                    'month': month,
+                    'count': int(cnt or 0),
+                    'sales_amount': float(sales_amt or 0),
+                    'purchase_amount': float(purchase_amt or 0),
+                })
+
+            current_year = datetime.utcnow().year
+            def _int_year(value):
+                try:
+                    return int(str(value)[:4])
+                except (TypeError, ValueError):
+                    return None
+
+            base_year = (
+                _int_year(yoy_base_year)
+                or _int_year(effective_year)
+                or _int_year(date_from)
+                or current_year
+            )
+            latest_three_years = sorted({current_year, current_year - 1, current_year - 2})
+            yoy_years = [year for year in latest_three_years if year != base_year]
+            if len(yoy_years) > 2:
+                yoy_years = yoy_years[-2:]
+            yoy_fields = {year: f'purchase_{year}' for year in yoy_years}
+            purchase_yoy_trend = []
+            purchase_yoy_by_month = {}
+            for month_num in range(1, 13):
+                row = {
+                    'month': month_num,
+                    'month_label': datetime(current_year, month_num, 1).strftime('%B'),
+                }
+                for field in yoy_fields.values():
+                    row[field] = 0.0
+                purchase_yoy_trend.append(row)
+                purchase_yoy_by_month[month_num] = row
+
+            if yoy_years:
+                if is_sqlite:
+                    yoy_year_expr = func.strftime('%Y', SOData.so_create_date)
+                    yoy_month_expr = func.strftime('%m', SOData.so_create_date)
+                    yoy_filter = yoy_year_expr.in_([str(y) for y in yoy_years])
+                else:
+                    yoy_year_expr = func.extract('year', SOData.so_create_date)
+                    yoy_month_expr = func.extract('month', SOData.so_create_date)
+                    yoy_filter = yoy_year_expr.in_(yoy_years)
+                yoy_rows = (
+                    yoy_q.filter(SOData.so_create_date.isnot(None), yoy_filter)
+                    .with_entities(
+                        yoy_year_expr.label('yr'),
+                        yoy_month_expr.label('mo'),
+                        sum_purchase_expr.label('purchase_amount'),
+                    )
+                    .group_by(yoy_year_expr, yoy_month_expr)
+                    .all()
+                )
+                for yr, mo, purchase_amt in yoy_rows:
+                    try:
+                        year_int = int(yr)
+                        month_int = int(mo)
+                    except (TypeError, ValueError):
+                        continue
+                    field = yoy_fields.get(year_int)
+                    if field and month_int in purchase_yoy_by_month:
+                        purchase_yoy_by_month[month_int][field] = round(float(purchase_amt or 0), 2)
+
+            def group_top(base_q, label_expr, label_key, value_key='purchase_amount', limit=5, extra_filter=None):
+                gq = base_q
+                if extra_filter is not None:
+                    gq = gq.filter(extra_filter)
+                rows = (
+                    gq.with_entities(
+                        label_expr.label(label_key),
+                        count_expr.label('count'),
+                        sum_sales_expr.label('sales_amount'),
+                        sum_purchase_expr.label('purchase_amount'),
+                        sum_margin_expr.label('margin'),
+                    )
+                    .group_by(label_expr)
+                    .order_by(desc(value_key if isinstance(value_key, str) else value_key))
+                    .limit(limit)
+                    .all()
+                )
+                result = []
+                for label, cnt, sales_amt, purchase_amt, margin_amt in rows:
+                    result.append({
+                        label_key: label or 'Unknown',
+                        'count': int(cnt or 0),
+                        'sales_amount': float(sales_amt or 0),
+                        'purchase_amount': float(purchase_amt or 0),
+                        'margin': float(margin_amt or 0),
+                    })
+                return result
+
+            vendor_label = func.coalesce(func.nullif(func.trim(SOData.vendor_name), ''), 'Unknown')
+            client_label = func.coalesce(func.nullif(func.trim(SOData.operation_unit_name), ''), 'Unknown')
+            local_filter = currency_expr.in_(['', 'IDR'])
+            import_filter = db.not_(currency_expr.in_(['', 'IDR']))
+            top_vendors = group_top(q, vendor_label, 'vendor', value_key=sum_purchase_expr, limit=5)
+            top_vendors_local = group_top(q, vendor_label, 'vendor', value_key=sum_purchase_expr, limit=5, extra_filter=local_filter)
+            top_vendors_import = group_top(q, vendor_label, 'vendor', value_key=sum_purchase_expr, limit=5, extra_filter=import_filter)
+            top_clients = group_top(q, client_label, 'client', value_key=sum_sales_expr, limit=5)
+
+            # Count rows whose USD/EUR conversion cache is still missing without
+            # trying to fetch rates during dashboard page-load.
+            missing_conversion_count = q.filter(
+                SOData.purchasing_amount_idr.is_(None),
+                db.not_(currency_expr.in_(['', 'IDR'])),
+                raw_purchase_expr > 0,
+            ).count()
+
+            payload = {
+                'total_count': total_count,
+                'total_sales': total_sales,
+                'total_purchase': total_purchase,
+                'total_margin': (total_sales - total_purchase) if (total_sales > 0 and total_purchase > 0) else None,
+                'monthly_trend': monthly_trend,
+                'purchase_yoy_years': yoy_years,
+                'purchase_yoy_trend': purchase_yoy_trend,
+                'top_vendors': top_vendors,
+                'top_vendors_local': top_vendors_local,
+                'top_vendors_import': top_vendors_import,
+                'top_clients': top_clients,
+                'top_items': [],
+                'worst_margin_vendors': [],
+                'worst_margin_transactions': [],
+                'margin_distribution': {
+                    'positive': pos,
+                    'negative': neg,
+                    'zero': zero,
+                },
+                'conversion_status': {
+                    'checked': True,
+                    'had_missing_cache': missing_conversion_count > 0,
+                    'converted_count': 0,
+                    'pending_count': int(missing_conversion_count or 0),
+                    'message': 'Dashboard memakai cache currency yang sudah tersimpan. Backfill rate dijalankan terpisah.',
+                }
+            }
+            with _COMPLETED_CACHE_LOCK:
+                _COMPLETED_SUMMARY_CACHE[cache_key] = {
+                    'created_at': now_ts,
+                    'payload': payload,
+                }
+            return jsonify(payload)
+
         completed_summary_fields = (
             SOData.so_number,
             SOData.so_item,
             SOData.operation_unit_name,
             SOData.vendor_name,
-            SOData.product_name,
-            SOData.specification,
-            SOData.product_id,
             SOData.so_qty,
             SOData.sales_amount,
             SOData.purchasing_price,
@@ -4827,6 +5061,12 @@ def completed_summary():
             SOData.purchasing_amount_idr,
             SOData.so_create_date,
         )
+        if not light_mode:
+            completed_summary_fields = completed_summary_fields + (
+                SOData.product_name,
+                SOData.specification,
+                SOData.product_id,
+            )
         purchase_summary_fields = (
             SOData.so_qty,
             SOData.purchasing_price,
@@ -4989,74 +5229,79 @@ def completed_summary():
                 else:
                     zero += 1
 
-        # Top 20 items by sales amount (grouped by product / item label).
-        # Also surface Specification + Product ID so the frontend table can
-        # display them.  Group key prefers Product ID when present so the
-        # same product across multiple SOs aggregates correctly even when
-        # `product_name` differs slightly.
-        item_map = {}
-        for s, po_amt, sales, m in enriched:
-            pid = (s.product_id or '').strip()
-            label = s.product_name or s.so_item or 'Unknown'
-            key = pid or label
-            if key not in item_map:
-                item_map[key] = {
-                    'item': label,
-                    'specification': s.specification or '',
-                    'product_id': pid,
-                    'count': 0, 'sales_amount': 0.0,
-                    'purchase_amount': 0.0, 'margin': 0.0,
-                }
-            agg = item_map[key]
-            agg['count'] += 1
-            agg['sales_amount'] += sales
-            agg['purchase_amount'] += po_amt
-            if m is not None:
-                agg['margin'] += m
-            # Backfill spec from later rows if the first one was empty.
-            if not agg['specification'] and s.specification:
-                agg['specification'] = s.specification
-
-        top_items = sorted(item_map.values(), key=lambda x: x['sales_amount'], reverse=True)[:20]
-
-        # Worst-margin vendors: vendors with one or more negative-margin txns,
-        # ranked by total negative margin (most negative first).
-        neg_vendor_map = {}
-        for s, po_amt, sales, m in enriched:
-            if m is None or m >= 0:
-                continue
-            v = s.vendor_name or 'Unknown'
-            if v not in neg_vendor_map:
-                neg_vendor_map[v] = {
-                    'vendor': v, 'margin': 0.0, 'count': 0,
-                    'total_sales': 0.0, 'total_purchase': 0.0,
-                }
-            neg_vendor_map[v]['margin'] += m
-            neg_vendor_map[v]['count'] += 1
-            neg_vendor_map[v]['total_sales'] += sales
-            neg_vendor_map[v]['total_purchase'] += po_amt
-
-        worst_margin_vendors = sorted(neg_vendor_map.values(), key=lambda x: x['margin'])[:50]
-
-        # Top 30 worst-margin transactions (UI scrolls within fixed-height box)
-        neg_txns = [(s, po_amt, sales, m) for s, po_amt, sales, m in enriched if m is not None and m < 0]
-        neg_txns.sort(key=lambda x: x[3])  # most negative first
+        # Dashboard mode does not need detail-heavy item/transaction lists.
+        # Skipping these avoids loading Product Name / Spec for every completed row.
+        top_items = []
+        worst_margin_vendors = []
         worst_margin_transactions = []
-        for s, po_amt, sales, m in neg_txns[:30]:
-            pct = round(m / sales * 100, 1) if sales else None
-            worst_margin_transactions.append({
-                'so_item': s.so_item,
-                'so_number': s.so_number,
-                'item_code': (s.item_code if hasattr(s, 'item_code') and s.item_code else (s.so_item or '-')),
-                'product': s.product_name or '-',
-                'vendor': s.vendor_name or '-',
-                'sales_amount': sales,
-                'purchase_amount': po_amt,
-                'margin': m,
-                'margin_pct': pct,
-                'count': 1,
-                'date': s.so_create_date.isoformat() if s.so_create_date else None,
-            })
+        if not light_mode:
+            # Top 20 items by sales amount (grouped by product / item label).
+            # Also surface Specification + Product ID so the frontend table can
+            # display them.  Group key prefers Product ID when present so the
+            # same product across multiple SOs aggregates correctly even when
+            # `product_name` differs slightly.
+            item_map = {}
+            for s, po_amt, sales, m in enriched:
+                pid = (s.product_id or '').strip()
+                label = s.product_name or s.so_item or 'Unknown'
+                key = pid or label
+                if key not in item_map:
+                    item_map[key] = {
+                        'item': label,
+                        'specification': s.specification or '',
+                        'product_id': pid,
+                        'count': 0, 'sales_amount': 0.0,
+                        'purchase_amount': 0.0, 'margin': 0.0,
+                    }
+                agg = item_map[key]
+                agg['count'] += 1
+                agg['sales_amount'] += sales
+                agg['purchase_amount'] += po_amt
+                if m is not None:
+                    agg['margin'] += m
+                # Backfill spec from later rows if the first one was empty.
+                if not agg['specification'] and s.specification:
+                    agg['specification'] = s.specification
+
+            top_items = sorted(item_map.values(), key=lambda x: x['sales_amount'], reverse=True)[:20]
+
+            # Worst-margin vendors: vendors with one or more negative-margin txns,
+            # ranked by total negative margin (most negative first).
+            neg_vendor_map = {}
+            for s, po_amt, sales, m in enriched:
+                if m is None or m >= 0:
+                    continue
+                v = s.vendor_name or 'Unknown'
+                if v not in neg_vendor_map:
+                    neg_vendor_map[v] = {
+                        'vendor': v, 'margin': 0.0, 'count': 0,
+                        'total_sales': 0.0, 'total_purchase': 0.0,
+                    }
+                neg_vendor_map[v]['margin'] += m
+                neg_vendor_map[v]['count'] += 1
+                neg_vendor_map[v]['total_sales'] += sales
+                neg_vendor_map[v]['total_purchase'] += po_amt
+
+            worst_margin_vendors = sorted(neg_vendor_map.values(), key=lambda x: x['margin'])[:50]
+
+            # Top 30 worst-margin transactions (UI scrolls within fixed-height box)
+            neg_txns = [(s, po_amt, sales, m) for s, po_amt, sales, m in enriched if m is not None and m < 0]
+            neg_txns.sort(key=lambda x: x[3])  # most negative first
+            for s, po_amt, sales, m in neg_txns[:30]:
+                pct = round(m / sales * 100, 1) if sales else None
+                worst_margin_transactions.append({
+                    'so_item': s.so_item,
+                    'so_number': s.so_number,
+                    'item_code': (s.item_code if hasattr(s, 'item_code') and s.item_code else (s.so_item or '-')),
+                    'product': s.product_name or '-',
+                    'vendor': s.vendor_name or '-',
+                    'sales_amount': sales,
+                    'purchase_amount': po_amt,
+                    'margin': m,
+                    'margin_pct': pct,
+                    'count': 1,
+                    'date': s.so_create_date.isoformat() if s.so_create_date else None,
+                })
 
         payload = {
             'total_count': len(rows),
