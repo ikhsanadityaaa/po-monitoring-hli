@@ -1,17 +1,3 @@
-"""
-Optimized Flask Backend for PythonAnywhere + SQLite
-=====================================================
-Key optimizations applied:
-1. Read paths NEVER call external APIs (Frankfurter, Google Sheets)
-2. Exchange rates cached permanently in DB, warmed at startup
-3. RFQ smart sync via lightweight fingerprint detection
-4. Server-side pagination on all list endpoints
-5. SQLite composite indexes for all query patterns
-6. In-memory caches warmed at startup
-7. Batch operations instead of N+1 queries
-8. Cursor-based pagination where possible
-"""
-
 from flask import Flask, request, jsonify, send_file, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
@@ -33,66 +19,20 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 1. APP INITIALIZATION
-# ═══════════════════════════════════════════════════════════════════════════
-
 app = Flask(__name__)
 
-CORS(app, resources={r"/api/*": {
-    "origins": "*",
-    "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    "allow_headers": ["Content-Type", "Authorization", "Accept"]
-}})
-
-# ─── Database Configuration ──────────────────────────────────────────────
-_db_url = os.environ.get('DATABASE_URL', '')
-if _db_url:
-    if _db_url.startswith('postgres://'):
-        _db_url = _db_url.replace('postgres://', 'postgresql://', 1)
-    app.config['SQLALCHEMY_DATABASE_URI'] = _db_url
-    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-        'pool_pre_ping': True, 'pool_recycle': 300,
-        'pool_size': 5, 'max_overflow': 10,
-        'connect_args': {'connect_timeout': 10},
-    }
-else:
-    _inst = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance')
-    os.makedirs(_inst, exist_ok=True)
-    app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{_inst}/po_database.db'
-    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-        'pool_pre_ping': True,
-        'connect_args': {'timeout': 30},
-    }
-
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
-db = SQLAlchemy(app)
-
-
-# ─── SQLite Performance Pragmas ──────────────────────────────────────────
-@event.listens_for(Engine, 'connect')
-def _set_sqlite_pragmas(dbapi_connection, connection_record):
-    if 'sqlite' in app.config.get('SQLALCHEMY_DATABASE_URI', ''):
-        cursor = dbapi_connection.cursor()
-        cursor.execute('PRAGMA journal_mode=WAL')
-        cursor.execute('PRAGMA synchronous=NORMAL')
-        cursor.execute('PRAGMA busy_timeout=30000')
-        cursor.execute('PRAGMA temp_store=MEMORY')
-        cursor.execute('PRAGMA cache_size=-65536')
-        cursor.execute('PRAGMA wal_autocheckpoint=1000')
-        cursor.close()
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 2. THREAD LOCKS & CACHE INFRASTRUCTURE
-# ═══════════════════════════════════════════════════════════════════════════
-
+# ─── Indonesian Public Holidays (auto-generated, year-flexible) ───────────
+# We use the `holidays` package to generate Indonesian national holidays for
+# any year automatically — no need to hand-maintain a list when the year
+# rolls over.  Government-announced "cuti bersama" / replacement days that
+# the package doesn't know about live in `holiday_extras.json` next to this
+# file; that file is a plain JSON array of "YYYY-MM-DD" strings the user can
+# edit when SKB tahunan is published.
 _HOLIDAY_CACHE = None
 _HOLIDAY_CACHE_KEY = None
-_HOLIDAY_ARRAY_CACHE = None
-_HOLIDAY_ARRAY_CACHE_KEY = None
 
+# Thread locks for in-memory caches. PythonAnywhere/Gunicorn can serve several
+# requests in parallel, so cache mutation needs a small guard.
 _HOLIDAY_LOCK = threading.Lock()
 _READ_CACHE_LOCK = threading.Lock()
 _COMPLETED_CACHE_LOCK = threading.Lock()
@@ -100,32 +40,54 @@ _RATE_CACHE_LOCK = threading.Lock()
 _SIMILARITY_LOCK = threading.Lock()
 _MASTER_PIC_LOCK = threading.Lock()
 
-# Exchange rate: {date: float} — permanent, warmed at startup
-_RATE_CACHE = {}
-# FX rate for non-USD: {(currency, date): float}
-_FX_RATE_CACHE = {}
-
-# General read-response cache
-_READ_RESPONSE_CACHE = {}
-
-# Delivery completed summary cache
+# Short-lived in-memory response cache for heavy Delivery Completed analytics.
+# Keyed by request filters + cheap DB signature, so repeated page opens return
+# immediately while uploads/changed rows naturally invalidate the cache.
 _COMPLETED_SUMMARY_CACHE = {}
 _COMPLETED_SUMMARY_CACHE_TTL_SECONDS = 300
+_RUNTIME_CACHE_VERSION = 0
 
-# Similarity cache
+# Similarity check cache for Item Registration
+# Stores similarity results keyed by (req_no, line_no) to avoid recalculating
 _SIMILARITY_CACHE = {}
-_SIMILARITY_CACHE_FILE = os.path.join(
-    os.path.dirname(__file__), 'instance', 'similarity_cache.json')
-
-# Master PIC cache: {category_name: pic_name}
+_SIMILARITY_CACHE_FILE = os.path.join(os.path.dirname(__file__), 'instance', 'similarity_cache.json')
 _MASTER_PIC_CACHE = {'signature': None, 'by_id': {}, 'by_name': {}}
 
-# ProductIDDB category cache
+# ProductIDDB category_name cache. Detail Pending Delivery renders many rows;
+# doing one ProductIDDB query per row is a visible slowdown under multiple users.
 _PID_CATEGORY_CACHE = {}
 _PID_CATEGORY_CACHE_LOADED = False
 
-_RUNTIME_CACHE_VERSION = 0
+def _pid_category_cache_load():
+    global _PID_CATEGORY_CACHE, _PID_CATEGORY_CACHE_LOADED
+    mapping = {}
+    try:
+        for pid, cat in db.session.query(ProductIDDB.product_id, ProductIDDB.category_name).all():
+            if not pid:
+                continue
+            raw = (cat or '').strip()
+            mapping[str(pid).strip()] = raw.split('>')[0].strip() if '>' in raw else raw
+    except Exception:
+        mapping = {}
+    with _MASTER_PIC_LOCK:
+        _PID_CATEGORY_CACHE = mapping
+        _PID_CATEGORY_CACHE_LOADED = True
 
+def _pid_category_lookup(product_id):
+    global _PID_CATEGORY_CACHE_LOADED
+    with _MASTER_PIC_LOCK:
+        loaded = _PID_CATEGORY_CACHE_LOADED
+    if not loaded:
+        _pid_category_cache_load()
+    pid = str(product_id or '').strip()
+    with _MASTER_PIC_LOCK:
+        return _PID_CATEGORY_CACHE.get(pid, '')
+
+def _pid_category_cache_invalidate():
+    global _PID_CATEGORY_CACHE_LOADED
+    with _MASTER_PIC_LOCK:
+        _PID_CATEGORY_CACHE_LOADED = False
+_READ_RESPONSE_CACHE = {}
 
 def runtime_cache_get(key):
     with _READ_CACHE_LOCK:
@@ -138,16 +100,12 @@ def runtime_cache_get(key):
             return None
         return payload
 
-
-def runtime_cache_set(key, payload, ttl_seconds=120):
+def runtime_cache_set(key, payload, ttl_seconds=20):
     with _READ_CACHE_LOCK:
-        _READ_RESPONSE_CACHE[key] = (
-            datetime.utcnow() + timedelta(seconds=ttl_seconds), payload)
-
+        _READ_RESPONSE_CACHE[key] = (datetime.utcnow() + timedelta(seconds=ttl_seconds), payload)
 
 def runtime_cache_key(namespace):
     return (namespace, request.query_string.decode('utf-8', errors='ignore'))
-
 
 def clear_runtime_caches():
     global _RUNTIME_CACHE_VERSION
@@ -165,12 +123,13 @@ def clear_runtime_caches():
     except NameError:
         pass
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 3. HOLIDAY HELPERS (unchanged logic, optimized caching)
-# ═══════════════════════════════════════════════════════════════════════════
-
 def _holiday_set():
+    """Return cached set of Indonesian non-working public holidays.
+
+    The cache covers the operational reporting window: two years behind,
+    the current year, and one year ahead. Holiday dates come from the
+    `holidays` package; `holiday_extras.json` only adds cuti bersama or
+    government corrections that are not generated by the package."""
     global _HOLIDAY_CACHE, _HOLIDAY_CACHE_KEY
     today_year = date.today().year
     cache_key = today_year
@@ -182,27 +141,36 @@ def _holiday_set():
         import holidays as _holidays_pkg
         s = set(_holidays_pkg.country_holidays('ID', years=years).keys())
     except Exception:
+        # If the package fails to import (e.g. dependency not installed),
+        # fall back to weekends-only — the extras JSON still applies below.
         s = set()
 
     extras_path = os.path.join(os.path.dirname(__file__), 'holiday_extras.json')
     try:
         with open(extras_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
+        # Accept either {"dates": [...]} or a bare list for forward-compat.
         items = data.get('dates', []) if isinstance(data, dict) else data
         for ds in items or []:
             try:
                 s.add(date.fromisoformat(str(ds).strip()))
             except (ValueError, TypeError):
                 pass
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
+    except FileNotFoundError:
+        pass
+    except (OSError, json.JSONDecodeError):
         pass
 
     _HOLIDAY_CACHE = s
     _HOLIDAY_CACHE_KEY = cache_key
     return s
 
+_HOLIDAY_ARRAY_CACHE = None
+_HOLIDAY_ARRAY_CACHE_KEY = None
 
 def _holiday_array():
+    """numpy datetime64[D] array mirroring _holiday_set(), used by
+    count_workdays() for a vectorised/C-speed business-day count."""
     global _HOLIDAY_ARRAY_CACHE, _HOLIDAY_ARRAY_CACHE_KEY
     holiday_set = _holiday_set()
     cache_key = (_HOLIDAY_CACHE_KEY, len(holiday_set))
@@ -214,12 +182,20 @@ def _holiday_array():
     _HOLIDAY_ARRAY_CACHE_KEY = cache_key
     return arr
 
-
 def is_workday(d):
+    """Return True if date is a working day (Mon–Fri, not a public holiday)."""
     return d.weekday() < 5 and d not in _holiday_set()
 
-
 def count_workdays(start, end):
+    """Count working days between start and end (exclusive of end).
+    Returns negative if end < start (overdue).
+
+    Implemented with numpy.busday_count (C-speed) instead of a day-by-day
+    Python loop. Dashboard endpoints call this once per SO/PO row to compute
+    aging/leadtime, and rows often span hundreds of calendar days — a pure
+    Python loop there scales as O(rows x days), which is the main reason
+    dashboard data takes a long time to load on large datasets.
+    """
     if start is None or end is None:
         return None
     if start == end:
@@ -229,16 +205,16 @@ def count_workdays(start, end):
         return int(np.busday_count(start, end, holidays=holidays))
     return -int(np.busday_count(end, start, holidays=holidays))
 
-
 def workdays_since(past_date, today=None):
+    """Count working days from past_date to today (aging)."""
     if past_date is None:
         return None
     if today is None:
         today = date.today()
     return count_workdays(past_date, today)
 
-
 def workdays_until(future_date, today=None):
+    """Count working days from today to future_date (days remaining)."""
     if future_date is None:
         return None
     if today is None:
@@ -246,9 +222,49 @@ def workdays_until(future_date, today=None):
     return count_workdays(today, future_date)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 4. DATABASE MODELS
-# ═══════════════════════════════════════════════════════════════════════════
+CORS(app, resources={r"/api/*": {
+    "origins": "*",
+    "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    "allow_headers": ["Content-Type", "Authorization", "Accept"]
+}})
+
+_db_url = os.environ.get('DATABASE_URL', '')
+if _db_url:
+    if _db_url.startswith('postgres://'):
+        _db_url = _db_url.replace('postgres://', 'postgresql://', 1)
+    app.config['SQLALCHEMY_DATABASE_URI'] = _db_url
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+        'pool_pre_ping': True, 'pool_recycle': 300, 'pool_size': 5, 'max_overflow': 10,
+        # Cap how long a cold/sleeping Supabase project can stall the WSGI
+        # process during import. Without this, psycopg2 can hang for the OS
+        # TCP timeout (often 60s+), which is enough to make PythonAnywhere's
+        # post-reload health check time out ("took a long time to reload").
+        'connect_args': {'connect_timeout': 10},
+    }
+else:
+    _inst = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance')
+    os.makedirs(_inst, exist_ok=True)
+    app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{_inst}/po_database.db'
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+        'pool_pre_ping': True,
+        'connect_args': {'timeout': 30},
+    }
+
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
+db = SQLAlchemy(app)
+
+@event.listens_for(Engine, 'connect')
+def _set_sqlite_pragmas(dbapi_connection, connection_record):
+    if 'sqlite' in app.config.get('SQLALCHEMY_DATABASE_URI', ''):
+        cursor = dbapi_connection.cursor()
+        cursor.execute('PRAGMA journal_mode=WAL')
+        cursor.execute('PRAGMA synchronous=NORMAL')
+        cursor.execute('PRAGMA busy_timeout=30000')
+        cursor.execute('PRAGMA temp_store=MEMORY')
+        cursor.execute('PRAGMA cache_size=-65536')
+        cursor.execute('PRAGMA wal_autocheckpoint=1000')
+        cursor.close()
 
 class SOData(db.Model):
     __tablename__ = 'so_data'
@@ -283,7 +299,6 @@ class SOData(db.Model):
     pic_name = db.Column(db.String(100))
     uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-
 class UploadLog(db.Model):
     __tablename__ = 'upload_log'
     id = db.Column(db.Integer, primary_key=True)
@@ -292,85 +307,88 @@ class UploadLog(db.Model):
     records_count = db.Column(db.Integer)
     uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-
 class ExchangeRate(db.Model):
+    """USD->IDR exchange rate per date. Auto-fetched via Frankfurter API on first need,
+    or set manually via /api/exchange-rate endpoint."""
     __tablename__ = 'exchange_rate'
-    id = db.Column(db.Integer, primary_key=True)
-    rate_date = db.Column(db.Date, nullable=False, unique=True, index=True)
+    id         = db.Column(db.Integer, primary_key=True)
+    rate_date  = db.Column(db.Date, nullable=False, unique=True, index=True)
     usd_to_idr = db.Column(db.Float, nullable=False)
-    source = db.Column(db.String(50), default='manual')
+    source     = db.Column(db.String(50), default='manual')  # 'frankfurter'|'manual'|'fallback'
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
 class ProductIDDB(db.Model):
+    """Database of Product ID → Category ID, downloaded from SAP."""
     __tablename__ = 'product_id_db'
-    id = db.Column(db.Integer, primary_key=True)
-    product_id = db.Column(db.String(100), unique=True, nullable=False, index=True)
-    category_id = db.Column(db.String(100))
-    category_name = db.Column(db.String(255))
-    product_name = db.Column(db.Text)
-    product_status = db.Column(db.String(100))
-    specification = db.Column(db.Text)
+    id               = db.Column(db.Integer, primary_key=True)
+    product_id       = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    category_id      = db.Column(db.String(100))
+    category_name    = db.Column(db.String(255))
+    product_name     = db.Column(db.Text)
+    product_status   = db.Column(db.String(100))
+    specification    = db.Column(db.Text)
     manufacturer_name = db.Column(db.String(255))
-    vendor_name = db.Column(db.String(300))
-    order_unit = db.Column(db.String(50))
+    vendor_name      = db.Column(db.String(300))
+    order_unit       = db.Column(db.String(50))
     hub_handling_check = db.Column(db.String(100))
-    tax_type = db.Column(db.String(100))
+    tax_type         = db.Column(db.String(100))
     registration_date = db.Column(db.Date, index=True)
     product_registry_pic = db.Column(db.String(200))
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at       = db.Column(db.DateTime, default=datetime.utcnow)
 
 
 class MasterPIC(db.Model):
+    """Master mapping: Category Name → PIC name. Updated manually via UI.
+
+    `category_id` is kept for backward compatibility with existing DB schema,
+    but new Master PIC uploads use Category Name as the business unique key.
+    """
     __tablename__ = 'master_pic'
-    id = db.Column(db.Integer, primary_key=True)
-    category_id = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    id            = db.Column(db.Integer, primary_key=True)
+    category_id   = db.Column(db.String(100), unique=True, nullable=False, index=True)
     category_name = db.Column(db.String(255))
-    pic_name = db.Column(db.String(100))
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+    pic_name      = db.Column(db.String(100))
+    updated_at    = db.Column(db.DateTime, default=datetime.utcnow)
 
 
 class ItemRegistration(db.Model):
     __tablename__ = 'item_registration'
-    id = db.Column(db.Integer, primary_key=True)
-    proc_status = db.Column(db.String(100))
-    req_date = db.Column(db.Date, index=True)
-    existing_owner = db.Column(db.String(100))
-    client_name = db.Column(db.String(300), index=True)
-    category = db.Column(db.String(255))
-    category_id = db.Column(db.String(100))
-    pic = db.Column(db.String(200))
-    pic_name = db.Column(db.String(200))
-    req_no = db.Column(db.String(100), index=True)
-    prod_id = db.Column(db.String(100), index=True)
-    product_status = db.Column(db.String(100))
-    batch_grp_no = db.Column(db.String(100))
-    prod_name = db.Column(db.Text)
-    spec = db.Column(db.Text)
-    mfr_name = db.Column(db.String(300))
-    odr_unit = db.Column(db.String(50))
-    vendor_name = db.Column(db.String(300))
-    prod_price = db.Column(db.Float)
-    curr = db.Column(db.String(20))
-    hub_handling_check = db.Column(db.String(100))
-    tax_type = db.Column(db.String(50))
-    registration_date = db.Column(db.Date, index=True)
+    id              = db.Column(db.Integer, primary_key=True)
+    proc_status     = db.Column(db.String(100))
+    req_date        = db.Column(db.Date, index=True)
+    existing_owner  = db.Column(db.String(100))
+    client_name     = db.Column(db.String(300), index=True)
+    category        = db.Column(db.String(255))
+    category_id     = db.Column(db.String(100))
+    pic             = db.Column(db.String(200))
+    pic_name        = db.Column(db.String(200))
+    req_no          = db.Column(db.String(100), index=True)
+    prod_id         = db.Column(db.String(100), index=True)
+    product_status  = db.Column(db.String(100))
+    batch_grp_no    = db.Column(db.String(100))
+    prod_name       = db.Column(db.Text)
+    spec            = db.Column(db.Text)
+    mfr_name        = db.Column(db.String(300))
+    odr_unit        = db.Column(db.String(50))
+    vendor_name     = db.Column(db.String(300))
+    prod_price      = db.Column(db.Float)
+    curr            = db.Column(db.String(20))
+    hub_handling_check  = db.Column(db.String(100))
+    tax_type            = db.Column(db.String(50))
+    registration_date   = db.Column(db.Date, index=True)
     product_registry_pic = db.Column(db.String(200))
-    remarks = db.Column(db.Text)
-    uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
-
+    remarks         = db.Column(db.Text)
+    uploaded_at     = db.Column(db.DateTime, default=datetime.utcnow)
 
 class RFQCellEdit(db.Model):
     __tablename__ = 'rfq_cell_edit'
-    id = db.Column(db.Integer, primary_key=True)
-    row_key = db.Column(db.String(200), nullable=False, index=True)
-    field = db.Column(db.String(100), nullable=False)
-    value = db.Column(db.Text)
+    id         = db.Column(db.Integer, primary_key=True)
+    row_key    = db.Column(db.String(200), nullable=False, index=True)
+    field      = db.Column(db.String(100), nullable=False)
+    value      = db.Column(db.Text)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow)
-    __table_args__ = (
-        db.UniqueConstraint('row_key', 'field', name='uq_rfq_cell_edit_row_field'),
-    )
-
+    __table_args__ = (db.UniqueConstraint('row_key', 'field', name='uq_rfq_cell_edit_row_field'),)
 
 class RFQDashboardRow(db.Model):
     __tablename__ = 'rfq_dashboard_row'
@@ -383,13 +401,11 @@ class RFQDashboardRow(db.Model):
     last_seen_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-
 class ImportVendor(db.Model):
     __tablename__ = 'import_vendor'
     id = db.Column(db.Integer, primary_key=True)
     vendor_name = db.Column(db.String(300), unique=True, nullable=False, index=True)
     uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
-
 
 class ImportDashboardRow(db.Model):
     __tablename__ = 'import_dashboard_row'
@@ -405,7 +421,6 @@ class ImportDashboardRow(db.Model):
     last_seen_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-
 class ImportDashboardMeta(db.Model):
     __tablename__ = 'import_dashboard_meta'
     id = db.Column(db.Integer, primary_key=True)
@@ -414,117 +429,33 @@ class ImportDashboardMeta(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 5. PRODUCTIDDB CATEGORY CACHE (warm at startup)
-# ═══════════════════════════════════════════════════════════════════════════
-
-def _pid_category_cache_load():
-    global _PID_CATEGORY_CACHE, _PID_CATEGORY_CACHE_LOADED
-    mapping = {}
-    try:
-        for pid, cat in db.session.query(
-                ProductIDDB.product_id, ProductIDDB.category_name).all():
-            if not pid:
-                continue
-            raw = (cat or '').strip()
-            mapping[str(pid).strip()] = (
-                raw.split('>')[0].strip() if '>' in raw else raw)
-    except Exception:
-        mapping = {}
-    with _MASTER_PIC_LOCK:
-        _PID_CATEGORY_CACHE = mapping
-        _PID_CATEGORY_CACHE_LOADED = True
-
-
-def _pid_category_lookup(product_id):
-    global _PID_CATEGORY_CACHE_LOADED
-    with _MASTER_PIC_LOCK:
-        loaded = _PID_CATEGORY_CACHE_LOADED
-    if not loaded:
-        _pid_category_cache_load()
-    pid = str(product_id or '').strip()
-    with _MASTER_PIC_LOCK:
-        return _PID_CATEGORY_CACHE.get(pid, '')
-
-
-def _pid_category_cache_invalidate():
-    global _PID_CATEGORY_CACHE_LOADED
-    with _MASTER_PIC_LOCK:
-        _PID_CATEGORY_CACHE_LOADED = False
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 6. EXCHANGE RATE HELPERS — PERMANENT CACHE, READ-ONLY PATHS
-# ═══════════════════════════════════════════════════════════════════════════
+# ─── Exchange rate helpers ─────────────────────────────────────────────────
+_RATE_CACHE = {}   # {date: float} in-process cache for USD -> IDR
+_FX_RATE_CACHE = {}  # {(currency, date): float} in-process cache for non-USD FX
 
 def _fetch_rate_from_api(d, currency='USD'):
-    """Fetch one historical currency→IDR rate from Frankfurter v2.
-    ONLY called during upload/backfill — NEVER on read path."""
+    """Fetch one historical currency->IDR rate from Frankfurter v2."""
     try:
-        import urllib.request
+        import urllib.request, json as _json
         cur = (currency or 'USD').strip().upper()
-        url = (f"https://api.frankfurter.dev/v2/rate/{cur}/IDR"
-               f"?date={d.isoformat()}")
+        url = f"https://api.frankfurter.dev/v2/rate/{cur}/IDR?date={d.isoformat()}"
         with urllib.request.urlopen(url, timeout=6) as resp:
-            data = json.loads(resp.read())
+            data = _json.loads(resp.read())
         return float(data['rate'])
     except Exception:
         return None
-
 
 def _get_fallback_rate():
     last = ExchangeRate.query.order_by(ExchangeRate.rate_date.desc()).first()
     return last.usd_to_idr if last else 16000.0
 
-
-def _warm_exchange_rate_cache():
-    """Load ALL exchange rates from DB into memory at startup.
-    Historical rates are immutable — this is a permanent cache."""
-    global _RATE_CACHE
-    try:
-        rates = ExchangeRate.query.all()
-        for r in rates:
-            _RATE_CACHE[r.rate_date] = r.usd_to_idr
-        print(f'Exchange rate cache warmed: {len(_RATE_CACHE)} dates')
-    except Exception as e:
-        print(f'Exchange rate warm skipped: {e}')
-
-
-def get_usd_to_idr_readonly(d):
-    """Dashboard-safe: NEVER hits external API.
-
-    Flow: memory cache → DB exact → DB nearest → fallback.
-    Historical rates never change once stored."""
-    if d is None:
-        return _get_fallback_rate()
-
-    # 1. In-memory cache (instant, zero I/O)
-    if d in _RATE_CACHE:
-        return _RATE_CACHE[d]
-
-    # 2. DB exact match (SQLite index lookup)
-    rec = ExchangeRate.query.filter_by(rate_date=d).first()
-    if rec:
-        _RATE_CACHE[d] = rec.usd_to_idr
-        return rec.usd_to_idr
-
-    # 3. Nearest known rate from DB (NO network call)
-    nearest = ExchangeRate.query.order_by(
-        func.abs(
-            func.julianday(ExchangeRate.rate_date) - func.julianday(str(d))
-        )
-    ).first()
-    if nearest:
-        _RATE_CACHE[d] = nearest.usd_to_idr
-        return nearest.usd_to_idr
-
-    # 4. Hardcoded fallback
-    return _get_fallback_rate()
-
-
 def get_usd_to_idr(d, cache_only=False):
-    """Write-path version. Can fetch from API when cache_only=False.
-    Used ONLY during upload/backfill operations."""
+    """Return USD->IDR rate for date d.
+    Order: in-memory cache -> DB exact -> (if not cache_only) API fetch -> DB nearest -> hardcoded fallback.
+
+    Pass cache_only=True when calling inside a loop that has already called
+    prefetch_exchange_rates() — this skips the expensive HTTP request path
+    entirely, relying on the already-warmed in-memory cache and DB."""
     if d is None:
         return _get_fallback_rate()
     if d in _RATE_CACHE:
@@ -537,17 +468,15 @@ def get_usd_to_idr(d, cache_only=False):
         rate = _fetch_rate_from_api(d)
         if rate:
             try:
-                db.session.add(ExchangeRate(
-                    rate_date=d, usd_to_idr=rate, source='frankfurter'))
+                db.session.add(ExchangeRate(rate_date=d, usd_to_idr=rate, source='frankfurter'))
                 db.session.commit()
             except Exception:
                 db.session.rollback()
             _RATE_CACHE[d] = rate
             return rate
+    # Nearest known rate (no HTTP call)
     nearest = ExchangeRate.query.order_by(
-        func.abs(
-            func.julianday(ExchangeRate.rate_date) - func.julianday(str(d))
-        )
+        func.abs(func.julianday(ExchangeRate.rate_date) - func.julianday(str(d)))
     ).first()
     if nearest:
         _RATE_CACHE[d] = nearest.usd_to_idr
@@ -555,13 +484,11 @@ def get_usd_to_idr(d, cache_only=False):
     return _get_fallback_rate()
 
 
-def get_currency_to_idr(currency, d, cache_only=False, readonly=False):
+def get_currency_to_idr(currency, d, cache_only=False):
     cur = (currency or 'IDR').strip().upper()
     if cur in ('IDR', ''):
         return 1.0
     if cur == 'USD':
-        if readonly:
-            return get_usd_to_idr_readonly(d)
         return get_usd_to_idr(d, cache_only=cache_only)
 
     if d is None:
@@ -569,43 +496,50 @@ def get_currency_to_idr(currency, d, cache_only=False, readonly=False):
     key = (cur, d)
     if key in _FX_RATE_CACHE:
         return _FX_RATE_CACHE[key]
-    if readonly:
-        # Try nearest in cache
-        same = [(rd, r) for (c, rd), r in _FX_RATE_CACHE.items() if c == cur]
-        if same:
-            nearest = min(same, key=lambda r: abs((r[0] - d).days))
-            _FX_RATE_CACHE[key] = nearest[1]
-            return nearest[1]
-        return _get_fallback_rate()
     if not cache_only and d <= date.today():
         rate = _fetch_rate_from_api(d, cur)
         if rate:
             _FX_RATE_CACHE[key] = rate
             return rate
-    same = [(rd, r) for (c, rd), r in _FX_RATE_CACHE.items() if c == cur]
-    if same:
-        nearest = min(same, key=lambda r: abs((r[0] - d).days))
-        _FX_RATE_CACHE[key] = nearest[1]
-        return nearest[1]
-    fallback = _fetch_rate_from_api(date.today(), cur) if not cache_only else None
-    if fallback:
-        _FX_RATE_CACHE[key] = fallback
-        return fallback
+
+    same_currency_rates = [(rate_date, rate) for (fx_cur, rate_date), rate in _FX_RATE_CACHE.items() if fx_cur == cur]
+    if same_currency_rates:
+        _nearest_date, nearest_rate = min(same_currency_rates, key=lambda r: abs((r[0] - d).days))
+        _FX_RATE_CACHE[key] = nearest_rate
+        return nearest_rate
+
+    fallback_rate = _fetch_rate_from_api(date.today(), cur) if not cache_only else None
+    if fallback_rate:
+        _FX_RATE_CACHE[key] = fallback_rate
+        return fallback_rate
     return _get_fallback_rate()
 
 
 def prefetch_exchange_rates(dates, fetch_missing=True, currency='USD'):
-    """Warm in-memory cache for a collection of dates.
+    """Warm the in-memory _RATE_CACHE for a collection of dates, minimising
+    round-trips to the Frankfurter API.
 
-    IMPORTANT: Dashboard calls with fetch_missing=False.
-    Upload/backfill calls with fetch_missing=True."""
+    Algorithm:
+    1. Skip dates already in _RATE_CACHE (already warm).
+    2. Bulk-load all ExchangeRate rows from the DB in a single query and
+       populate the cache — avoids N individual DB lookups.
+    3. If fetch_missing=True, for any remaining dates (still not in cache) that
+       are ≤ today, fetch from the Frankfurter API **sequentially** and persist
+       to DB. For latency-sensitive dashboard endpoints, pass
+       fetch_missing=False so page load never waits on external API calls.
+    4. After optional API fetches, one final pass stores any date still missing
+       in the in-process cache using the nearest DB rate / fallback (no HTTP).
+
+    Call this once at the top of any endpoint that iterates over many rows and
+    calls convert_to_idr(), then pass cache_only=True to get_usd_to_idr()
+    inside the loop.
+    """
     cur = (currency or 'USD').strip().upper()
     if not dates or cur in ('IDR', ''):
         return
 
     if cur != 'USD':
-        needed = {d for d in dates
-                  if d is not None and (cur, d) not in _FX_RATE_CACHE}
+        needed = {d for d in dates if d is not None and (cur, d) not in _FX_RATE_CACHE}
         if fetch_missing:
             today = date.today()
             for d in sorted(x for x in needed if x <= today):
@@ -614,40 +548,45 @@ def prefetch_exchange_rates(dates, fetch_missing=True, currency='USD'):
                     _FX_RATE_CACHE[(cur, d)] = rate
                     needed.discard(d)
         if needed:
-            same = [(rd, r) for (c, rd), r in _FX_RATE_CACHE.items() if c == cur]
-            fallback = get_currency_to_idr(
-                cur, date.today(), cache_only=not fetch_missing)
+            same_currency_rates = [(rate_date, rate) for (fx_cur, rate_date), rate in _FX_RATE_CACHE.items() if fx_cur == cur]
+            fallback = get_currency_to_idr(cur, date.today(), cache_only=not fetch_missing)
             for d in needed:
-                if same:
-                    nearest = min(same, key=lambda r: abs((r[0] - d).days))
-                    _FX_RATE_CACHE[(cur, d)] = nearest[1]
+                if same_currency_rates:
+                    _nearest_date, nearest_rate = min(same_currency_rates, key=lambda r: abs((r[0] - d).days))
+                    _FX_RATE_CACHE[(cur, d)] = nearest_rate
                 else:
                     _FX_RATE_CACHE[(cur, d)] = fallback
         return
 
+    # 1. Filter to dates not already cached
     needed = {d for d in dates if d is not None and d not in _RATE_CACHE}
     if not needed:
         return
 
-    # Bulk DB load
-    db_rows = ExchangeRate.query.filter(
-        ExchangeRate.rate_date.in_(list(needed))).all()
+    # 2. Bulk DB load — single query for all needed dates
+    db_rows = ExchangeRate.query.filter(ExchangeRate.rate_date.in_(list(needed))).all()
     for row in db_rows:
         _RATE_CACHE[row.rate_date] = row.usd_to_idr
     needed -= {row.rate_date for row in db_rows}
+
     if not needed:
         return
 
+    # 3. Optionally fetch remaining from API (only past/today dates).
+    # Dashboard/page-load code should call this with fetch_missing=False; missing
+    # historical rates can be filled once via /api/exchange-rate/fetch and then
+    # reused from the DB forever.
     if fetch_missing:
         today = date.today()
+        to_api = sorted(d for d in needed if d <= today)
         fetched_rows = []
-        for d in sorted(d for d in needed if d <= today):
+        for d in to_api:
             rate = _fetch_rate_from_api(d)
             if rate:
                 _RATE_CACHE[d] = rate
-                fetched_rows.append(ExchangeRate(
-                    rate_date=d, usd_to_idr=rate, source='frankfurter'))
+                fetched_rows.append(ExchangeRate(rate_date=d, usd_to_idr=rate, source='frankfurter'))
                 needed.discard(d)
+
         if fetched_rows:
             try:
                 db.session.bulk_save_objects(fetched_rows)
@@ -655,57 +594,45 @@ def prefetch_exchange_rates(dates, fetch_missing=True, currency='USD'):
             except Exception:
                 db.session.rollback()
 
+    # 4. Proxy remaining with nearest known rate (no extra HTTP calls)
     if needed:
         fallback = _get_fallback_rate()
-        all_rates = ExchangeRate.query.order_by(
-            ExchangeRate.rate_date).all()
+        # Load all rates once for proximity search
+        all_rates = ExchangeRate.query.order_by(ExchangeRate.rate_date).all()
         for d in needed:
             if all_rates:
-                nearest = min(all_rates,
-                              key=lambda r: abs((r.rate_date - d).days))
+                nearest = min(all_rates, key=lambda r: abs((r.rate_date - d).days))
                 _RATE_CACHE[d] = nearest.usd_to_idr
             else:
                 _RATE_CACHE[d] = fallback
 
 
-def backfill_exchange_rates_for_rows(rows):
-    """Called ONLY during upload. Fetches missing rates and stores in DB.
-    After this, all dates have rates cached permanently."""
-    dates = set()
-    for s in rows:
-        cur = (getattr(s, 'purchasing_currency', '') or '').strip().upper()
-        d = getattr(s, 'so_create_date', None)
-        if cur in ('USD', 'EUR') and d and d <= date.today():
-            dates.add(d)
-    if not dates:
-        return 0
-    prefetch_exchange_rates(dates, fetch_missing=True)
-    return len(dates)
+def convert_to_idr(amount, currency, rate_date=None, cache_only=False):
+    """Convert amount to IDR. USD and EUR use FX rates; other currencies are returned as-is.
 
-
-def compute_and_cache_purchase_amount_idr(s):
-    """Compute purchasing_amount_idr and persist to DB column.
-    Called ONLY during upload/backfill — NOT on read path."""
-    cached = getattr(s, 'purchasing_amount_idr', None)
-    if cached is not None:
-        return float(cached)
-
-    raw = raw_purchase_amount(s)
-    cur = (s.purchasing_currency or 'IDR').strip().upper()
-
+    When called inside a loop preceded by prefetch_exchange_rates(), pass
+    cache_only=True to skip the per-row HTTP fallback path entirely."""
+    if not amount:
+        return 0.0
+    cur = (currency or 'IDR').strip().upper()
     if cur in ('IDR', ''):
-        s.purchasing_amount_idr = raw
-    elif cur in ('USD', 'EUR'):
-        rate = get_usd_to_idr_readonly(s.so_create_date)
-        s.purchasing_amount_idr = raw * rate
-    else:
-        s.purchasing_amount_idr = raw
+        return float(amount)
+    if cur in ('USD', 'EUR'):
+        return float(amount) * get_currency_to_idr(cur, rate_date, cache_only=cache_only)
+    return float(amount)
 
-    s.purchasing_amount_idr_cached_at = datetime.utcnow()
-    return s.purchasing_amount_idr
+
+def prefetch_convertible_exchange_rates(rows, fetch_missing=False):
+    for currency in ('USD', 'EUR'):
+        dates = {
+            s.so_create_date for s in rows
+            if s.so_create_date and (s.purchasing_currency or '').strip().upper() == currency
+        }
+        prefetch_exchange_rates(dates, fetch_missing=fetch_missing, currency=currency)
 
 
 def raw_purchase_amount(s):
+    """Return the original purchasing amount before currency conversion."""
     raw = float(s.purchasing_amount or 0)
     if raw == 0 and s.purchasing_price:
         raw = float(s.purchasing_price) * float(s.so_qty or 0)
@@ -713,116 +640,189 @@ def raw_purchase_amount(s):
 
 
 def purchase_amount_idr(s, allow_persist=False):
-    """Dashboard-safe read. NEVER hits external API.
+    """Return the stored IDR purchase amount without network access on reads.
 
-    If purchasing_amount_idr is NULL (not yet backfilled):
-    - IDR rows: return raw amount directly
-    - Non-IDR rows: return 0 (admin must run backfill)
+    USD/EUR conversion is performed only by an explicit write/backfill flow
+    (allow_persist=True). Normal dashboard reads reuse purchasing_amount_idr.
     """
     cached = getattr(s, 'purchasing_amount_idr', None)
+    cur = (s.purchasing_currency or 'IDR').strip().upper()
+
+    # Important: cached EUR values are valid too. The previous EUR exception
+    # caused every page load to reconvert every EUR row.
     if cached is not None:
         return float(cached)
 
     raw = raw_purchase_amount(s)
-    cur = (s.purchasing_currency or 'IDR').strip().upper()
-
     if cur in ('IDR', ''):
         return raw
 
+    # Never call an external FX API from a dashboard/read request. Missing
+    # non-IDR rows must be filled by upload or /api/exchange-rate/fetch.
     if not allow_persist:
         return 0.0
 
-    # Only called during upload/backfill
-    return compute_and_cache_purchase_amount_idr(s)
+    converted = convert_to_idr(
+        raw,
+        s.purchasing_currency,
+        s.so_create_date,
+        cache_only=True,
+    )
+    s.purchasing_amount_idr = converted
+    s.purchasing_amount_idr_cached_at = datetime.utcnow()
+    return converted
 
 
-def convert_to_idr(amount, currency, rate_date=None,
-                    cache_only=False, readonly=False):
-    if not amount:
-        return 0.0
-    cur = (currency or 'IDR').strip().upper()
-    if cur in ('IDR', ''):
-        return float(amount)
-    if cur in ('USD', 'EUR'):
-        return float(amount) * get_currency_to_idr(
-            cur, rate_date, cache_only=cache_only, readonly=readonly)
-    return float(amount)
+def ensure_purchase_amount_idr_cache(rows, fetch_missing=False):
+    """Persist missing USD/EUR conversions.
 
+    Set fetch_missing=True only in write/backfill flows. Dashboard endpoints
+    leave it False, so page loads never wait for Frankfurter.
+    """
+    if not fetch_missing:
+        return 0
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 7. DATABASE MIGRATION & INDEXES
-# ═══════════════════════════════════════════════════════════════════════════
+    missing = [
+        s for s in rows
+        if getattr(s, 'purchasing_amount_idr', None) is None
+        and (s.purchasing_currency or '').strip().upper() in ('USD', 'EUR')
+        and raw_purchase_amount(s) > 0
+    ]
+    if not missing:
+        return 0
 
-def _existing_columns(table_name):
-    is_sqlite = 'sqlite' in app.config.get('SQLALCHEMY_DATABASE_URI', '')
+    prefetch_convertible_exchange_rates(missing, fetch_missing=True)
+
+    for s in missing:
+        purchase_amount_idr(s, allow_persist=True)
+
     try:
-        if is_sqlite:
-            result = db.session.execute(text(f"PRAGMA table_info({table_name})"))
-            return {row[1].lower() for row in result}
-        result = db.session.execute(text(
-            "SELECT column_name FROM information_schema.columns "
-            f"WHERE table_name = '{table_name}'"
-        ))
-        return {row[0].lower() for row in result}
+        db.session.commit()
     except Exception:
-        return set()
+        db.session.rollback()
+        raise
+    return len(missing)
 
 
 def _ensure_extra_columns():
+    """Online migration: add optional columns that older local DBs may miss."""
+    is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
+
+    def existing_columns(table_name):
+        try:
+            if is_sqlite:
+                result = db.session.execute(text(f"PRAGMA table_info({table_name})"))
+                return {row[1].lower() for row in result}
+            result = db.session.execute(text(
+                "SELECT column_name FROM information_schema.columns "
+                f"WHERE table_name = '{table_name}'"
+            ))
+            return {row[0].lower() for row in result}
+        except Exception:
+            return set()
+
     migration_plan = {
         'so_data': [
-            ('specification', 'TEXT'),
-            ('product_id', 'VARCHAR(100)'),
-            ('vendor_id', 'VARCHAR(100)'),
-            ('manufacturer_name', 'VARCHAR(300)'),
-            ('purchasing_currency', 'VARCHAR(10)'),
-            ('purchasing_amount_idr', 'DOUBLE PRECISION'),
-            ('purchasing_amount_idr_cached_at', 'TIMESTAMP'),
-            ('pic_name', 'VARCHAR(100)'),
-        ],
-        'item_registration': [
-            ('req_date', 'DATE'),
-            ('existing_owner', 'VARCHAR(100)'),
-            ('category_id', 'VARCHAR(100)'),
-            ('pic_name', 'VARCHAR(200)'),
-            ('product_status', 'VARCHAR(100)'),
-            ('hub_handling_check', 'VARCHAR(100)'),
-            ('tax_type', 'VARCHAR(50)'),
-            ('registration_date', 'DATE'),
+            ('specification',                      'TEXT'),
+            ('product_id',                         'VARCHAR(100)'),
+            ('vendor_id',                          'VARCHAR(100)'),
+            ('manufacturer_name',                  'VARCHAR(300)'),
+            ('purchasing_currency',                'VARCHAR(10)'),
+            ('purchasing_amount_idr',              'DOUBLE PRECISION'),
+            ('purchasing_amount_idr_cached_at',    'TIMESTAMP'),
+            ('pic_name',                           'VARCHAR(100)'),
+        ],        'item_registration': [
+            ('req_date',             'DATE'),
+            ('existing_owner',       'VARCHAR(100)'),
+            ('category_id',          'VARCHAR(100)'),
+            ('pic_name',             'VARCHAR(200)'),
+            ('product_status',       'VARCHAR(100)'),
+            ('hub_handling_check',   'VARCHAR(100)'),
+            ('tax_type',             'VARCHAR(50)'),
+            ('registration_date',    'DATE'),
             ('product_registry_pic', 'VARCHAR(200)'),
-            ('remarks', 'TEXT'),
+            ('remarks',              'TEXT'),
         ],
         'product_id_db': [
-            ('specification', 'TEXT'),
-            ('manufacturer_name', 'VARCHAR(255)'),
-            ('vendor_name', 'VARCHAR(300)'),
-            ('order_unit', 'VARCHAR(50)'),
-            ('product_status', 'VARCHAR(100)'),
-            ('hub_handling_check', 'VARCHAR(100)'),
-            ('tax_type', 'VARCHAR(100)'),
-            ('registration_date', 'DATE'),
+            ('specification',        'TEXT'),
+            ('manufacturer_name',    'VARCHAR(255)'),
+            ('vendor_name',          'VARCHAR(300)'),
+            ('order_unit',           'VARCHAR(50)'),
+            ('product_status',       'VARCHAR(100)'),
+            ('hub_handling_check',   'VARCHAR(100)'),
+            ('tax_type',             'VARCHAR(100)'),
+            ('registration_date',    'DATE'),
             ('product_registry_pic', 'VARCHAR(200)'),
         ],
     }
+
     for table_name, columns in migration_plan.items():
-        cols = _existing_columns(table_name)
+        cols = existing_columns(table_name)
         for col_name, col_type in columns:
             if col_name.lower() not in cols:
                 try:
-                    db.session.execute(text(
-                        f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}"))
+                    db.session.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}"))
                     db.session.commit()
-                    print(f'Migration: added {table_name}.{col_name}')
+                    print(f'DB migration: added column {table_name}.{col_name}')
                 except Exception as exc:
                     db.session.rollback()
-                    print(f'Migration warning ({table_name}.{col_name}): {exc}')
+                    print(f'DB migration warning ({table_name}.{col_name}): {exc}')
+
+
+def _ensure_so_extra_columns():
+    """Online migration: add `specification` and `product_id` columns to
+    so_data if they don't exist yet.
+
+    Strategy (works on all SQLite versions and PostgreSQL):
+    1. Query the actual column list from the DB (PRAGMA for SQLite,
+       information_schema for Postgres).
+    2. Only issue ALTER TABLE when the column is genuinely absent.
+    This avoids the `IF NOT EXISTS` clause that many SQLite builds reject.
+    """
+    is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
+    needed = [
+        ('specification',                      'TEXT'),
+        ('product_id',                         'VARCHAR(100)'),
+        ('purchasing_currency',                'VARCHAR(10)'),
+        ('purchasing_amount_idr',              'DOUBLE PRECISION'),
+        ('purchasing_amount_idr_cached_at',    'TIMESTAMP'),
+    ]
+    try:
+        if is_sqlite:
+            result = db.session.execute(text("PRAGMA table_info(so_data)"))
+            existing_cols = {row[1].lower() for row in result}
+        else:
+            result = db.session.execute(text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'so_data'"
+            ))
+            existing_cols = {row[0].lower() for row in result}
+    except Exception:
+        existing_cols = set()
+
+    for col_name, col_type in needed:
+        if col_name.lower() not in existing_cols:
+            try:
+                db.session.execute(
+                    text(f"ALTER TABLE so_data ADD COLUMN {col_name} {col_type}")
+                )
+                db.session.commit()
+                print(f'DB migration: added column so_data.{col_name}')
+            except Exception as exc:
+                db.session.rollback()
+                print(f'DB migration warning (so_data.{col_name}): {exc}')
 
 
 def _ensure_performance_indexes():
-    """Create indexes for ALL databases (SQLite and PostgreSQL).
-    Composite indexes match actual query patterns from dashboard endpoints."""
+    """Create lightweight indexes used by dashboard filters and pagination.
+
+    CREATE INDEX IF NOT EXISTS is supported on both SQLite and Postgres
+    (9.5+), so these run regardless of backend. On Postgres/Supabase,
+    skipping this previously meant every dashboard query that filters or
+    sorts by so_status / so_create_date / operation_unit_name / pic_name /
+    vendor_name / etc. did a full table scan -- a major source of slow
+    dashboard loads as so_data grows."""
     statements = [
-        # SO dashboard: filter by status+date, sort by date
         "CREATE INDEX IF NOT EXISTS idx_so_status_date ON so_data (so_status, so_create_date)",
         "CREATE INDEX IF NOT EXISTS idx_so_op_unit ON so_data (operation_unit_name)",
         "CREATE INDEX IF NOT EXISTS idx_so_pic_name ON so_data (pic_name)",
@@ -831,43 +831,12 @@ def _ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS idx_so_number ON so_data (so_number)",
         "CREATE INDEX IF NOT EXISTS idx_so_product_id ON so_data (product_id)",
         "CREATE INDEX IF NOT EXISTS idx_so_customer_po ON so_data (customer_po_number)",
-        "CREATE INDEX IF NOT EXISTS idx_so_create_date ON so_data (so_create_date)",
-
-        # Exchange rate: date lookup (critical for read-only path)
-        "CREATE INDEX IF NOT EXISTS idx_exchange_rate_date ON exchange_rate (rate_date)",
-
-        # Upload log
         "CREATE INDEX IF NOT EXISTS idx_upload_log_type_date ON upload_log (file_type, uploaded_at)",
-
-        # RFQ dashboard
-        "CREATE INDEX IF NOT EXISTS idx_rfq_dash_row_key ON rfq_dashboard_row (row_key)",
-        "CREATE INDEX IF NOT EXISTS idx_rfq_dash_sheet_row ON rfq_dashboard_row (sheet_row)",
-        "CREATE INDEX IF NOT EXISTS idx_rfq_dash_last_seen ON rfq_dashboard_row (last_seen_at)",
-        "CREATE INDEX IF NOT EXISTS idx_rfq_cell_edit_row ON rfq_cell_edit (row_key, field)",
-
-        # Import dashboard
-        "CREATE INDEX IF NOT EXISTS idx_import_dash_row_key ON import_dashboard_row (row_key)",
-        "CREATE INDEX IF NOT EXISTS idx_import_dash_source ON import_dashboard_row (source_key)",
-        "CREATE INDEX IF NOT EXISTS idx_import_dash_vendor ON import_dashboard_row (vendor_name)",
-
-        # ProductIDDB — similarity lookups
-        "CREATE INDEX IF NOT EXISTS idx_pid_product_id ON product_id_db (product_id)",
-        "CREATE INDEX IF NOT EXISTS idx_pid_status ON product_id_db (product_status)",
-        "CREATE INDEX IF NOT EXISTS idx_pid_name_lower ON product_id_db (product_name COLLATE NOCASE)",
-        "CREATE INDEX IF NOT EXISTS idx_pid_spec_lower ON product_id_db (specification COLLATE NOCASE)",
-
-        # Master PIC
-        "CREATE INDEX IF NOT EXISTS idx_master_pic_cat_id ON master_pic (category_id)",
-        "CREATE INDEX IF NOT EXISTS idx_master_pic_cat_name ON master_pic (category_name)",
-
-        # Item Registration
         "CREATE INDEX IF NOT EXISTS idx_item_reg_proc_client ON item_registration (proc_status, client_name)",
         "CREATE INDEX IF NOT EXISTS idx_item_reg_pic ON item_registration (pic)",
         "CREATE INDEX IF NOT EXISTS idx_item_reg_req_no ON item_registration (req_no)",
         "CREATE INDEX IF NOT EXISTS idx_item_reg_mfr ON item_registration (mfr_name)",
         "CREATE INDEX IF NOT EXISTS idx_item_reg_owner ON item_registration (existing_owner)",
-
-        # Product status+unit combo
         "CREATE INDEX IF NOT EXISTS idx_product_status_unit ON product_id_db (product_status, order_unit)",
     ]
     for stmt in statements:
@@ -875,157 +844,64 @@ def _ensure_performance_indexes():
             db.session.execute(text(stmt))
         except Exception as exc:
             db.session.rollback()
-            print(f'Index warning: {exc}')
+            print(f'DB index warning: {exc}')
     try:
         db.session.commit()
     except Exception:
         db.session.rollback()
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 8. UTILITY FUNCTIONS
-# ═══════════════════════════════════════════════════════════════════════════
+try:
+    with app.app_context():
+        db.create_all()
+        _ensure_extra_columns()
+        _ensure_performance_indexes()
+        print('DB schema ready.')
+except Exception as exc:
+    # Don't let a slow/unreachable database (e.g. a sleeping Supabase
+    # project) take down the whole WSGI process at import time. The app
+    # can still serve '/' (used by PythonAnywhere's reload check) and any
+    # endpoints that don't need the DB; schema setup will be retried on the
+    # next reload once the DB is reachable again.
+    print(f'DB schema setup skipped at startup (will retry next reload): {exc}')
 
 CLOSED_STATUSES = {
     'Delivery Completed', 'SO Cancel',
-    'Approval Apply', 'Approval Complete', 'Approval Complete Step',
-    'Approval Reject', 'Approval Hold',
+    'Approval Apply', 'Approval Complete', 'Approval Complete Step', 'Approval Reject', 'Approval Hold',
     'Return Complete(Vendor)', 'Return Complete(HUB)', 'Customer PO Reject'
 }
 
+# Statuses that are safe to discard entirely from the DB — they are closed,
+# never queried by any analytics endpoint, and only inflate storage.
+# 'Delivery Completed' is intentionally NOT here because it is used by
+# Delivery Analytics and YoY margin reporting.
 DISCARDABLE_STATUSES = {
     'SO Cancel',
-    'Approval Apply', 'Approval Complete Step', 'Approval Reject',
-    'Approval Hold',
+    'Approval Apply', 'Approval Complete Step', 'Approval Reject', 'Approval Hold',
     'Return Complete(Vendor)', 'Return Complete(HUB)',
     'Customer PO Reject', 'Ship. Order Reject', 'PO Received Reject',
 }
 
 EXCLUDED_OP_UNITS = {'HLI GREEN POWER (CONSUMABLE)'}
 
+# ─── PO HLI extraction patterns ──────────────────────────────────────────
+# Full PO HLI: 7+ digit number, optionally followed by `-<item line>`.  We
+# only treat `-` as the item separator (the original convention) so that
+# two adjacent PO numbers separated by space / `/` / `_` / `.` parse as
+# *two* separate POs instead of being merged.  The trailing `(?!\d)`
+# lookahead protects against truncating into a longer adjacent number
+# (e.g. "4502342011-10245" still yields PO=4502342011 with no item, not a
+# bogus item="1024").  Examples we capture from free-text fields:
+#   "4502342011-10"          → 4502342011 + item 10
+#   "4502342011"             → 4502342011 (bare)
+#   "Po No 4502202743_..."   → 4502202743
+#   "4502342011 4502342012"  → both numbers separately
 PO_HLI_RE = re.compile(r'(\d{7,})(?:-(\d{1,4}))?(?!\d)')
+# Short reference like "PO 626", "P.O #626", "PO-626", "po:626" — used to
+# match against the *suffix* of full PO HLI keys in the PO table.
 PO_SHORT_REF_RE = re.compile(
-    r'\bP\s*\.?\s*O\s*\.?\s*[#:.\-]?\s*(\d{2,6})\b', re.IGNORECASE)
-
-
-def clean(val):
-    if val is None:
-        return None
-    try:
-        if pd.isna(val):
-            return None
-    except (TypeError, ValueError):
-        pass
-    s = str(val).strip()
-    return None if s.lower() in ('nan', 'none', '') else s
-
-
-def clean_product_id(val):
-    s = clean(val)
-    if not s:
-        return ''
-    try:
-        f = float(s)
-        if f.is_integer():
-            return str(int(f))
-    except (TypeError, ValueError):
-        pass
-    return re.sub(r'\.0+$', '', s)
-
-
-def clean_request_number(val):
-    s = clean(val)
-    if not s:
-        return ''
-    s = str(s).strip()
-    try:
-        from decimal import Decimal, InvalidOperation
-        number = Decimal(s)
-        if number == number.to_integral_value():
-            return format(number.quantize(Decimal('1')), 'f')
-    except (InvalidOperation, ValueError, TypeError):
-        pass
-    return re.sub(r'\.0+$', '', s)
-
-
-def parse_date(val):
-    if val is None:
-        return None
-    try:
-        if pd.isna(val):
-            return None
-    except (TypeError, ValueError):
-        pass
-    raw = str(val).strip()
-    if re.match(r'^\d{8}(\.0)?$', raw):
-        try:
-            return datetime.strptime(raw[:8], '%Y%m%d').date()
-        except ValueError:
-            pass
-    try:
-        return pd.to_datetime(val).date()
-    except Exception:
-        return None
-
-
-def safe_float(val, default=0.0):
-    try:
-        if pd.isna(val):
-            return default
-    except (TypeError, ValueError):
-        pass
-    try:
-        return float(val)
-    except Exception:
-        return default
-
-
-def find_column(df, names):
-    low = {c.lower().strip(): c for c in df.columns}
-    for n in names:
-        if n.lower().strip() in low:
-            return low[n.lower().strip()]
-    return None
-
-
-def utc_isoformat(dt):
-    if dt is None:
-        return None
-    s = dt.isoformat()
-    tail = s[10:]
-    if s.endswith('Z') or '+' in tail or '-' in tail:
-        return s
-    return s + 'Z'
-
-
-def is_return_so_item(so_item):
-    if not so_item:
-        return False
-    return str(so_item).strip().startswith('9')
-
-
-def is_return_so_status(so_status):
-    return 'return' in str(so_status or '').strip().lower()
-
-
-def has_internal_po_ref(customer_po_number, delivery_memo):
-    for field in [customer_po_number, delivery_memo]:
-        if not field:
-            continue
-        text_val = str(field).strip()
-        for token in re.split(r'[\s,;]+', text_val):
-            token = token.strip()
-            if token and token[0] == '2' and re.match(r'^2\d{6,}', token):
-                return True
-    return False
-
-
-def so_is_countable(so_item, so_number=None, customer_po_number=None,
-                    delivery_memo=None):
-    if has_internal_po_ref(customer_po_number, delivery_memo):
-        return False
-    return True
-
+    r'\bP\s*\.?\s*O\s*\.?\s*[#:.\-]?\s*(\d{2,6})\b',
+    re.IGNORECASE,
+)
 
 def _normalize_item_no(item_no):
     if item_no is None:
@@ -1044,15 +920,20 @@ def _normalize_item_no(item_no):
         pass
     return variants
 
-
 def extract_po_hli(val):
+    """Return all candidate PO HLI keys (full PO and PO-item) found in `val`."""
     if not val:
         return []
-    text_val = str(val).strip()
+    text = str(val).strip()
     result = set()
-    for m in PO_HLI_RE.finditer(text_val):
-        po_num = m.group(1)
+    for m in PO_HLI_RE.finditer(text):
+        po_num  = m.group(1)
         item_no = m.group(2)
+        # Skip leading-2 numbers — those are non-HLI internal PO refs the user
+        # explicitly wants ignored (e.g. "2123456789").  Real HLI POs start
+        # with 4/5/6 etc.  This also avoids accidentally matching dates that
+        # happen to be 8+ digits (e.g. "20240105") when written without
+        # separators.
         if po_num.startswith('2'):
             continue
         result.add(po_num)
@@ -1063,21 +944,22 @@ def extract_po_hli(val):
 
 
 def extract_po_short_refs(val):
+    """Return short numeric references like '626' parsed from 'PO 626'.
+
+    Used as a fallback to suffix-match against full PO HLI numbers in the PO
+    table when the customer wrote the PO in shorthand form."""
     if not val:
         return []
-    text_val = str(val).strip()
+    text = str(val).strip()
     refs = set()
-    for m in PO_SHORT_REF_RE.finditer(text_val):
+    for m in PO_SHORT_REF_RE.finditer(text):
         n = m.group(1)
+        # Avoid double-counting full POs that already came out of extract_po_hli.
         if len(n) >= 7:
             continue
         refs.add(n)
     return list(refs)
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 9. SO DATA HELPERS
-# ═══════════════════════════════════════════════════════════════════════════
 
 def open_so_filter():
     return db.or_(
@@ -1087,10 +969,13 @@ def open_so_filter():
 
 
 def parse_so_date_args(args=None):
+    """Read date_year / date_from / date_to (with optional legacy `year`)
+    from a request args object and normalize them.
+    Returns (date_year_str, date_from_str, date_to_str)."""
     args = args if args is not None else request.args
     date_year = args.get('date_year', '')
     date_from = args.get('date_from', '')
-    date_to = args.get('date_to', '')
+    date_to   = args.get('date_to', '')
     if not date_year:
         legacy = args.get('year', '')
         if legacy and legacy != 'all':
@@ -1098,18 +983,16 @@ def parse_so_date_args(args=None):
     return date_year, date_from, date_to
 
 
-def apply_so_create_date_filter(query, date_year='', date_from='',
-                                date_to='', is_sqlite=None):
+def apply_so_create_date_filter(query, date_year='', date_from='', date_to='', is_sqlite=None):
+    """Apply SO Create Date filter to any query that references SOData."""
     if is_sqlite is None:
         is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
     if date_year:
         try:
             yr = int(date_year)
             if is_sqlite:
-                return query.filter(
-                    func.strftime('%Y', SOData.so_create_date) == str(yr))
-            return query.filter(
-                func.extract('year', SOData.so_create_date) == yr)
+                return query.filter(func.strftime('%Y', SOData.so_create_date) == str(yr))
+            return query.filter(func.extract('year', SOData.so_create_date) == yr)
         except (ValueError, TypeError):
             return query
     if date_from:
@@ -1119,18 +1002,22 @@ def apply_so_create_date_filter(query, date_year='', date_from='',
     return query
 
 
-def apply_item_registration_date_filter(query, date_year='',
-                                        date_from='', date_to=''):
+def apply_item_registration_date_filter(query, date_year='', date_from='', date_to=''):
+    """Apply the global date slicer to Item Registration.
+
+    Item Registration does not have SO Create Date, so the shared dashboard
+    slicer is applied to Req. Date (request date) for this page. Rows without
+    Req. Date are included only when the date slicer is set to All.
+    """
     if date_year:
         try:
             yr = int(date_year)
             if 'sqlite' in app.config.get('SQLALCHEMY_DATABASE_URI', ''):
-                return query.filter(
-                    func.strftime('%Y', ItemRegistration.req_date) == str(yr))
-            return query.filter(
-                func.extract('year', ItemRegistration.req_date) == yr)
+                return query.filter(func.strftime('%Y', ItemRegistration.req_date) == str(yr))
+            return query.filter(func.extract('year', ItemRegistration.req_date) == yr)
         except (ValueError, TypeError):
             return query
+
     df = parse_date(date_from) if date_from else None
     dt = parse_date(date_to) if date_to else None
     if df:
@@ -1140,408 +1027,124 @@ def apply_item_registration_date_filter(query, date_year='',
     return query
 
 
-def selected_clients(args=None):
-    args = args if args is not None else request.args
-    return [c.strip() for c in args.getlist('client')
-            if c and c.strip()]
+def utc_isoformat(dt):
+    """Serialize a (naive UTC) datetime as an ISO-8601 string with a trailing
+    'Z' so JS Date() parses it as UTC and the browser converts to local time.
+    Datetimes that already carry a timezone designator (Z, +HH:MM, or -HH:MM
+    after the time portion) are returned unchanged."""
+    if dt is None:
+        return None
+    s = dt.isoformat()
+    tail = s[10:]  # everything after the date portion (skip the leading YYYY-MM-DD)
+    if s.endswith('Z') or '+' in tail or '-' in tail:
+        return s
+    return s + 'Z'
+
+def is_return_so_item(so_item):
+    if not so_item:
+        return False
+    return str(so_item).strip().startswith('9')
+
+def is_return_so_status(so_status):
+    return 'return' in str(so_status or '').strip().lower()
+
+def has_internal_po_ref(customer_po_number, delivery_memo):
+    for field in [customer_po_number, delivery_memo]:
+        if not field:
+            continue
+        text = str(field).strip()
+        for token in re.split(r'[\s,;]+', text):
+            token = token.strip()
+            if token and token[0] == '2' and re.match(r'^2\d{6,}', token):
+                return True
+    return False
+
+def so_is_countable(so_item, so_number=None, customer_po_number=None, delivery_memo=None):
+    if has_internal_po_ref(customer_po_number, delivery_memo):
+        return False
+    return True
+
+def clean(val):
+    if val is None: return None
+    try:
+        if pd.isna(val): return None
+    except (TypeError, ValueError): pass
+    s = str(val).strip()
+    return None if s.lower() in ('nan', 'none', '') else s
+
+def clean_product_id(val):
+    s = clean(val)
+    if not s:
+        return ''
+    try:
+        f = float(s)
+        if f.is_integer():
+            return str(int(f))
+    except (TypeError, ValueError):
+        pass
+    return re.sub(r'\.0+$', '', s)
 
 
-def selected_pics(args=None):
-    args = args if args is not None else request.args
-    return [p.strip() for p in args.getlist('pic')
-            if p and p.strip()]
-
-
-def matches_selected_client(value, clients):
-    if not clients:
-        return True
-    v = (value or '').strip().lower()
-    return any(v == c.lower() for c in clients)
-
-
-def apply_so_client_filter(query, clients):
-    if clients:
-        return query.filter(SOData.operation_unit_name.in_(clients))
-    return query
-
-
-def apply_so_pic_filter(query, pics):
-    if not pics:
-        return query
-    if '__NONE_PLACEHOLDER__' in pics:
-        return query.filter(SOData.id.is_(None))
-    non_yupi_op_unit = db.or_(
-        SOData.operation_unit_name.is_(None),
-        db.not_(SOData.operation_unit_name.ilike('%YUPI%')))
-    if 'ANDRE' in pics:
-        others = [p for p in pics if p != 'ANDRE']
-        andre_filter = db.or_(
-            SOData.pic_name == 'ANDRE',
-            SOData.operation_unit_name.ilike('%YUPI%'))
-        if others:
-            others_filter = db.and_(
-                SOData.pic_name.in_(others), non_yupi_op_unit)
-            return query.filter(db.or_(others_filter, andre_filter))
-        return query.filter(andre_filter)
-    if '(Kosong)' in pics:
-        others = [p for p in pics if p != '(Kosong)']
-        empty_pic = db.and_(
-            db.or_(SOData.pic_name.is_(None), SOData.pic_name == ''),
-            non_yupi_op_unit)
-        if others:
-            others_filter = db.and_(
-                SOData.pic_name.in_(others), non_yupi_op_unit)
-            return query.filter(db.or_(others_filter, empty_pic))
-        return query.filter(empty_pic)
-    return query.filter(SOData.pic_name.in_(pics), non_yupi_op_unit)
-
-
-def canonical_pending_pic(pic, client_or_op_unit=None):
-    if client_or_op_unit and 'YUPI' in str(client_or_op_unit).upper():
-        return 'ANDRE'
-    return pic or 'Unassigned'
-
-
-def canonical_rfq_pic(row):
-    return canonical_pending_pic(
-        clean(row.get('purchase_pic')), row.get('client_name'))
-
-
-def sort_pic_kpis(rows):
-    return sorted(rows, key=lambda x: (
-        0 if x.get('pic') == 'ANDRE' else 1,
-        -x.get('count', 0),
-        x.get('pic') or ''))
-
-
-def apply_item_registration_pic_filter(query, pics):
-    if not pics:
-        return query
-    non_yupi_client = db.or_(
-        ItemRegistration.client_name.is_(None),
-        db.not_(ItemRegistration.client_name.ilike('%YUPI%')))
-    if 'ANDRE' in pics:
-        others = [p for p in pics if p != 'ANDRE']
-        andre_filter = db.or_(
-            ItemRegistration.pic_name == 'ANDRE',
-            ItemRegistration.client_name.ilike('%YUPI%'))
-        if others:
-            others_filter = db.and_(
-                ItemRegistration.pic_name.in_(others), non_yupi_client)
-            return query.filter(db.or_(others_filter, andre_filter))
-        return query.filter(andre_filter)
-    if '(Kosong)' in pics:
-        others = [p for p in pics if p != '(Kosong)']
-        empty_pic = db.and_(
-            db.or_(ItemRegistration.pic_name.is_(None),
-                   ItemRegistration.pic_name == ''),
-            non_yupi_client)
-        if others:
-            others_filter = db.and_(
-                ItemRegistration.pic_name.in_(others), non_yupi_client)
-            return query.filter(db.or_(others_filter, empty_pic))
-        return query.filter(empty_pic)
-    return query.filter(
-        ItemRegistration.pic_name.in_(pics), non_yupi_client)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 10. UPLOAD HELPERS
-# ═══════════════════════════════════════════════════════════════════════════
-
-def uploaded_files():
-    files = []
-    for key in ('file', 'files'):
-        files.extend(request.files.getlist(key))
-    return [f for f in files if f and f.filename]
-
-
-def read_upload_excel(file):
-    raw = file.read()
-    file.seek(0)
-    filename = (file.filename or '').lower()
-    is_xls_format = raw[:4] == b'\xd0\xcf\x11\xe0'
-    engine = 'xlrd' if is_xls_format or filename.endswith('.xls') else 'openpyxl'
-    return pd.read_excel(file, sheet_name=0, engine=engine)
-
-
-def _json_rows_to_dataframe(rows, columns=None):
-    if rows is None:
-        rows = []
-    if not isinstance(rows, list):
-        raise ValueError('JSON rows/data must be a list')
-    if columns:
-        return pd.DataFrame(rows, columns=[str(c).strip() for c in columns])
-    if not rows:
-        return pd.DataFrame()
-    if all(isinstance(r, dict) for r in rows):
-        return pd.DataFrame(rows)
-    return pd.DataFrame(rows)
-
-
-def _json_payload_to_uploads(payload, default_filename='json_upload'):
-    if payload is None:
-        raise ValueError('Invalid or empty JSON body')
-
-    def one(obj, index=1):
-        if isinstance(obj, dict):
-            filename = (clean(obj.get('filename')) or
-                        clean(obj.get('name')) or
-                        f'{default_filename}_{index}.json')
-            columns = obj.get('columns')
-            rows = (obj.get('rows') if 'rows' in obj else
-                    obj.get('data') if 'data' in obj else
-                    obj.get('records') if 'records' in obj else
-                    obj.get('items') if 'items' in obj else None)
-            if rows is None:
-                row = {k: v for k, v in obj.items()
-                       if k not in ('filename', 'name', 'columns')}
-                rows = [row] if row else []
-            df = _json_rows_to_dataframe(rows, columns=columns)
-            df.columns = [str(c).strip() for c in df.columns]
-            return {'filename': filename, 'df': df}
-        if isinstance(obj, list):
-            df = _json_rows_to_dataframe(obj)
-            df.columns = [str(c).strip() for c in df.columns]
-            return {'filename': f'{default_filename}_{index}.json', 'df': df}
-        raise ValueError('Each JSON upload must be an object or list')
-
-    uploads = []
-    if isinstance(payload, dict) and isinstance(payload.get('files'), list):
-        for idx, item in enumerate(payload.get('files') or [], start=1):
-            uploads.append(one(item, idx))
-    else:
-        uploads.append(one(payload, 1))
-    return [u for u in uploads if u['df'] is not None]
-
-
-def request_upload_dataframes(default_filename='upload'):
-    content_type = (request.content_type or '').lower()
-    if request.is_json or 'application/json' in content_type:
-        payload = request.get_json(silent=True)
-        uploads = _json_payload_to_uploads(
-            payload, default_filename=default_filename)
-        return uploads, 'json'
-    files = uploaded_files()
-    uploads = []
-    for file in files:
-        df = read_upload_excel(file)
-        df.columns = [str(c).strip() for c in df.columns]
-        uploads.append({'filename': file.filename, 'df': df})
-    return uploads, 'excel'
-
-
-def _product_id_columns(df):
-    return {
-        'product_id': find_column(df, ['Product ID', 'Prod. ID', 'Prod ID']),
-        'category_id': find_column(df, ['Category ID', 'Category Id',
-                                         'CategoryID', 'Cat. ID', 'Cat. ID.']),
-        'category_name': find_column(df, ['Category Name', 'Category Nm.',
-                                           'Cat. Nm.', 'Cat. Nm']),
-        'product_name': find_column(df, ['Product Name', 'Prod. Nm.',
-                                          'Prod. Nm', 'Product Name(EN)']),
-        'product_status': find_column(df, ['Product Status', 'Prod. Status',
-                                            'Prod Status']),
-        'specification': find_column(df, ['Specification', 'Spec.', 'Spec']),
-        'manufacturer_name': find_column(df, ['Manufacturer Name', 'Mfr. Nm.',
-                                               'Mfr. Nm', 'Maker Nm.']),
-        'vendor_name': find_column(df, ['Vendor Name', 'Vendor Nm.',
-                                         'Vendor Nm', 'Supplier Name',
-                                         'Supplier']),
-        'order_unit': find_column(df, ['Order Unit', 'Odr. Unit',
-                                        'Odr. Unit.']),
-        'hub_handling_check': find_column(df, ['HUB Handling Check',
-                                                'HUB Handling Chk.',
-                                                'HUB Handling Chk']),
-        'tax_type': find_column(df, ['Purchasing Price Tax Type', 'Tax Type',
-                                      'Tax Type.', 'Tax']),
-        'registration_date': find_column(df, [
-            'Registration Date', 'Prod. Reg. Date',
-            'Product Registration Date', 'Product Reg. Date', 'Reg. Date']),
-        'product_registry_pic': find_column(df, [
-            'Product Registy PIC(Name)', 'Product Registry PIC(Name)',
-            'Product Registy PIC', 'Product Registry PIC',
-            'Product Registered by(Name)', 'Prod. Reg. PIC Nm.',
-            'Prod. Reg. PIC Nm', 'Prod. Reg. PIC',
-            'Product Registry PIC Name']),
-    }
-
-
-def _master_pic_columns(df):
-    return {
-        'category_id': find_column(df, ['Category ID', 'Category Id',
-                                         'CategoryID', 'Cat. ID', 'Cat. ID.']),
-        'category_name': find_column(df, ['Category Name', 'Category Nm.',
-                                           'Cat. Nm.', 'Cat. Nm']),
-        'pic': find_column(df, ['PIC', 'PIC Name', 'Pur. PIC',
-                                 'Purchase PIC', 'Current PIC', 'Nama PIC']),
-        'pic_update': find_column(df, ['Update New PIC', 'New PIC',
-                                        'Update PIC', 'PIC Baru',
-                                        'New PIC Name']),
-    }
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 11. GOOGLE SHEETS INTEGRATION
-# ═══════════════════════════════════════════════════════════════════════════
+def clean_request_number(val):
+    """Keep RFQ request numbers searchable even when Sheets exports them as numbers."""
+    s = clean(val)
+    if not s:
+        return ''
+    s = str(s).strip()
+    # Google Sheets/CSV may expose numeric IDs as 12345.0 or scientific notation.
+    try:
+        from decimal import Decimal, InvalidOperation
+        number = Decimal(s)
+        if number == number.to_integral_value():
+            return format(number.quantize(Decimal('1')), 'f')
+    except (InvalidOperation, ValueError, TypeError):
+        pass
+    return re.sub(r'\.0+$', '', s)
 
 RFQ_SHEET_ID = '1JrdsYWhv1mzeXB-jbukDxDYxBgaeISzpiVKEKdgfQvw'
 RFQ_SHEET_NAME = 'Sales Submit-RFQ'
 RFQ_CACHE = {'expires_at': None, 'rows': [], 'fetched_at': None}
 RFQ_CACHE_TTL_SECONDS = 3600
-
 VENDOR_CONTROL_SHEET_ID = '1N0Jr_h5InHH1X2TyLxRf2SMXgDzAXIJnhswzMv5Wf4E'
 VENDOR_CONTROL_SHEET_GID = 723367207
-VENDOR_CONTROL_CACHE = {
-    'expires_at': None, 'rows': [], 'fetched_at': None,
-    'sheet_name': None, 'columns': {}
-}
+VENDOR_CONTROL_CACHE = {'expires_at': None, 'rows': [], 'fetched_at': None, 'sheet_name': None, 'columns': {}}
 VENDOR_CONTROL_CACHE_TTL_SECONDS = 300
-
-
-def rfq_sheet_sync_credentials():
-    raw_json = (os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON') or
-                os.environ.get('GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON'))
-    raw_file = (os.environ.get('GOOGLE_SERVICE_ACCOUNT_FILE') or
-                os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'))
-    if raw_json:
-        try:
-            return json.loads(raw_json)
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f'Invalid GOOGLE_SERVICE_ACCOUNT_JSON: {e}')
-    if raw_file and os.path.exists(raw_file):
-        with open(raw_file, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return None
-
-
-GOOGLE_SHEETS_SCOPE = ['https://www.googleapis.com/auth/spreadsheets']
-
-
-def google_sheets_access_token():
-    credentials_info = rfq_sheet_sync_credentials()
-    if not credentials_info:
-        raise RuntimeError('Google service account not configured')
-    from google.oauth2.service_account import Credentials
-    from google.auth.transport.requests import Request
-    creds = Credentials.from_service_account_info(
-        credentials_info, scopes=GOOGLE_SHEETS_SCOPE)
-    creds.refresh(Request())
-    return creds.token
-
-
-def google_sheets_request(method, spreadsheet_id, path,
-                          params=None, body=None):
-    import requests as _requests
-    from urllib.parse import quote
-    token = google_sheets_access_token()
-    encoded_path = '/'.join(quote(str(part), safe='') for part in path)
-    url = (f'https://sheets.googleapis.com/v4/spreadsheets/'
-           f'{spreadsheet_id}/{encoded_path}')
-    headers = {'Authorization': f'Bearer {token}'}
-    if body is not None:
-        headers['Content-Type'] = 'application/json'
-    proxies = {}
-    if os.environ.get('HTTPS_PROXY'):
-        proxies['https'] = os.environ.get('HTTPS_PROXY')
-    if os.environ.get('HTTP_PROXY'):
-        proxies['http'] = os.environ.get('HTTP_PROXY')
-    kwargs = {'headers': headers, 'params': params or {}, 'timeout': 60}
-    if body is not None:
-        kwargs['json'] = body
-    if proxies:
-        kwargs['proxies'] = proxies
-    response = _requests.request(method, url, **kwargs)
-    if not response.ok:
-        raise RuntimeError(
-            f'Google Sheets API {method} {path} failed: '
-            f'{response.status_code} {response.text[:500]}')
-    return response.json() if response.text else {}
-
-
-def google_sheets_metadata(spreadsheet_id):
-    import requests as _requests
-    token = google_sheets_access_token()
-    url = f'https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}'
-    headers = {'Authorization': f'Bearer {token}'}
-    proxies = {}
-    if os.environ.get('HTTPS_PROXY'):
-        proxies['https'] = os.environ.get('HTTPS_PROXY')
-    if os.environ.get('HTTP_PROXY'):
-        proxies['http'] = os.environ.get('HTTP_PROXY')
-    kwargs = {'headers': headers, 'timeout': 60}
-    if proxies:
-        kwargs['proxies'] = proxies
-    response = _requests.get(url, **kwargs)
-    if not response.ok:
-        raise RuntimeError(
-            f'Google Sheets metadata failed: '
-            f'{response.status_code} {response.text[:500]}')
-    return response.json()
-
-
-def google_sheets_values_get(spreadsheet_id, range_name,
-                             value_render_option='UNFORMATTED_VALUE'):
-    return google_sheets_request(
-        'GET', spreadsheet_id, ['values', range_name],
-        params={'valueRenderOption': value_render_option})
-
-
-def google_sheets_values_update(spreadsheet_id, range_name, values):
-    return google_sheets_request(
-        'PUT', spreadsheet_id, ['values', range_name],
-        params={'valueInputOption': 'USER_ENTERED'},
-        body={'values': values})
-
-
-def google_sheets_values_batch_update(spreadsheet_id, ranges):
-    return google_sheets_request(
-        'POST', spreadsheet_id, ['values:batchUpdate'],
-        body={'valueInputOption': 'USER_ENTERED', 'data': ranges})
-
-
-def google_csv_url(spreadsheet_id, gid='0'):
-    return (f'https://docs.google.com/spreadsheets/d/{spreadsheet_id}'
-            f'/gviz/tq?tqx=out:csv&gid={gid}')
-
-
-def read_public_sheet_csv(spreadsheet_id, gid='0', nrows=None):
-    return pd.read_csv(
-        google_csv_url(spreadsheet_id, gid), header=None, dtype=str,
-        keep_default_na=False, nrows=nrows)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 12. RFQ HELPERS — SMART SYNC WITH FINGERPRINT
-# ═══════════════════════════════════════════════════════════════════════════
-
 RFQ_TEMPLATE_COLUMNS = [
-    ('check', 'Check'), ('sheet_status', 'Status'),
-    ('days_left', 'Days Left'), ('no', 'No'),
-    ('client_name', 'Nama Client'), ('rfq_date', 'RFQ Date'),
-    ('closing_date', 'Closing Date'), ('sales_pic', 'Sales PIC'),
+    ('check', 'Check'),
+    ('sheet_status', 'Status'),
+    ('days_left', 'Days Left'),
+    ('no', 'No'),
+    ('client_name', 'Nama Client'),
+    ('rfq_date', 'RFQ Date'),
+    ('closing_date', 'Closing Date'),
+    ('sales_pic', 'Sales PIC'),
     ('category_name', 'Category Name'),
     ('purchase_pic', 'Purchase PIC'),
-    ('rfq_code', 'No. RFQ / KODE'), ('item_name', 'Item Name'),
+    ('rfq_code', 'No. RFQ / KODE'),
+    ('item_name', 'Item Name'),
     ('detail_spec', 'Detail Spec'),
     ('brand_manufacturer', 'Brand/Manufaktur'),
-    ('qty', 'Qty'), ('unit', 'Unit'), ('remark', 'Remark'),
+    ('qty', 'Qty'),
+    ('unit', 'Unit'),
+    ('remark', 'Remark'),
     ('product_id', 'Product ID'),
     ('request_number', 'Request Number'),
     ('same_replacement', 'Same/Replacement'),
     ('vendor_name', 'Vendor Name'),
     ('unit_price_idr', 'Unit Price (IDR)'),
     ('amt_idr', 'Amt (IDR)'),
-    ('quoted_item_name', 'Item Name'), ('quoted_spec', 'Spec'),
-    ('quoted_brand', 'Brand'), ('quoted_unit', 'Unit'),
-    ('moq', 'MOQ'), ('lead_time_days', 'Lead Time (Days)'),
+    ('quoted_item_name', 'Item Name'),
+    ('quoted_spec', 'Spec'),
+    ('quoted_brand', 'Brand'),
+    ('quoted_unit', 'Unit'),
+    ('moq', 'MOQ'),
+    ('lead_time_days', 'Lead Time (Days)'),
     ('valid_period', 'Valid period'),
     ('photo_url', 'Photo URL (optional)'),
     ('remarks', 'Remarks'),
     ('private_remarks_1', 'Private Remarks 1'),
     ('private_remarks_2', 'Private Remarks 2'),
 ]
-
 RFQ_SIMILARITY_COLUMNS = [
     ('similar_prod_ids', 'Similar Product ID'),
     ('similar_prod_name', 'Similar Product Name'),
@@ -1550,49 +1153,306 @@ RFQ_SIMILARITY_COLUMNS = [
     ('similar_odr_unit', 'Similar Unit'),
     ('similar_score', '%Similarity'),
 ]
-
 RFQ_EDITABLE_FIELDS = {
-    'sheet_status', 'no', 'client_name', 'rfq_date', 'closing_date',
-    'sales_pic', 'category_name', 'purchase_pic', 'item_name',
-    'detail_spec', 'brand_manufacturer', 'qty', 'unit', 'remark',
-    'product_id', 'request_number', 'same_replacement', 'vendor_name',
-    'unit_price_idr', 'quoted_item_name', 'quoted_spec', 'quoted_brand',
-    'quoted_unit', 'moq', 'lead_time_days', 'valid_period',
+    'sheet_status', 'no', 'client_name', 'rfq_date', 'closing_date', 'sales_pic',
+    'category_name', 'purchase_pic', 'item_name', 'detail_spec', 'brand_manufacturer',
+    'qty', 'unit', 'remark', 'product_id', 'request_number',
+    'same_replacement', 'vendor_name', 'unit_price_idr', 'quoted_item_name',
+    'quoted_spec', 'quoted_brand', 'quoted_unit', 'moq', 'lead_time_days', 'valid_period',
     'photo_url', 'remarks', 'private_remarks_1', 'private_remarks_2'
 }
-
 RFQ_DIRECT_UPDATE_FIELDS = {'product_id'}
-
 RFQ_BATCH_FIELDS = [
-    'same_replacement', 'vendor_name', 'unit_price_idr',
-    'quoted_item_name', 'quoted_spec', 'quoted_brand', 'quoted_unit',
-    'moq', 'lead_time_days', 'valid_period', 'photo_url', 'remarks',
-    'private_remarks_1', 'private_remarks_2'
+    'same_replacement', 'vendor_name', 'unit_price_idr', 'quoted_item_name',
+    'quoted_spec', 'quoted_brand', 'quoted_unit', 'moq', 'lead_time_days', 'valid_period',
+    'photo_url', 'remarks', 'private_remarks_1', 'private_remarks_2'
 ]
-
 RFQ_SHEET_COLUMN_BY_FIELD = {
-    'sheet_status': 'A', 'no': 'B', 'client_name': 'C',
-    'rfq_date': 'E', 'closing_date': 'F', 'sales_pic': 'G',
-    'request_number': 'R', 'item_name': 'I', 'detail_spec': 'J',
-    'brand_manufacturer': 'K', 'qty': 'L', 'unit': 'M', 'remark': 'N',
-    'category_name': 'P', 'product_id': 'Q', 'purchase_pic': 'S',
-    'same_replacement': 'V', 'vendor_name': 'W',
-    'unit_price_idr': 'X', 'quoted_item_name': 'Z',
-    'quoted_spec': 'AA', 'quoted_brand': 'AB', 'quoted_unit': 'AC',
-    'moq': 'AD', 'lead_time_days': 'AE', 'valid_period': 'AF',
-    'photo_url': 'AG', 'remarks': 'AH',
+    'sheet_status': 'A',
+    'no': 'B',
+    'client_name': 'C',
+    'rfq_date': 'E',
+    'closing_date': 'F',
+    'sales_pic': 'G',
+    'request_number': 'R',
+    'item_name': 'I',
+    'detail_spec': 'J',
+    'brand_manufacturer': 'K',
+    'qty': 'L',
+    'unit': 'M',
+    'remark': 'N',
+    'category_name': 'P',
+    'product_id': 'Q',
+    'purchase_pic': 'S',
+    'same_replacement': 'V',
+    'vendor_name': 'W',
+    'unit_price_idr': 'X',
+    'quoted_item_name': 'Z',
+    'quoted_spec': 'AA',
+    'quoted_brand': 'AB',
+    'quoted_unit': 'AC',
+    'moq': 'AD',
+    'lead_time_days': 'AE',
+    'valid_period': 'AF',
+    'photo_url': 'AG',
+    'remarks': 'AH',
 }
 
+IMPORT_LAYOUT_SHEET_ID = '1i0N4VdF_vMHjr_0gjrUdS7nCKUpxPYvDWW-HOWSanEM'
+IMPORT_LAYOUT_GID = '73188127'
+IMPORT_SOURCE_SHEETS = [
+    {'key': 'source_1', 'spreadsheet_id': '1OSISIb3-D_-oxj2LXH4Q3jcG2IZWnjFGWAmTmdcPBJg', 'gid': '0', 'label': 'Source 1'},
+    {'key': 'source_2', 'spreadsheet_id': '17P7_JsUGF5mqlz-j2fdvFZ9-gX8l-WGPqZABjng5Hnc', 'gid': '0', 'label': 'Source 2'},
+]
+IMPORT_LAYOUT_VENDOR_COLUMNS = (5, 28)
+IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS = (16,)
+
+def import_meta_get(key):
+    row = ImportDashboardMeta.query.filter_by(meta_key=key).first()
+    if not row:
+        return None
+    try:
+        return json.loads(row.value_json or 'null')
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+def import_meta_set(key, value):
+    row = ImportDashboardMeta.query.filter_by(meta_key=key).first()
+    if not row:
+        row = ImportDashboardMeta(meta_key=key)
+        db.session.add(row)
+    row.value_json = json.dumps(value, ensure_ascii=False)
+    row.updated_at = datetime.utcnow()
+    db.session.commit()
+
+def google_csv_url(spreadsheet_id, gid='0'):
+    return f'https://docs.google.com/spreadsheets/d/{spreadsheet_id}/gviz/tq?tqx=out:csv&gid={gid}'
+
+def read_public_sheet_csv(spreadsheet_id, gid='0', nrows=None):
+    return pd.read_csv(google_csv_url(spreadsheet_id, gid), header=None, dtype=str, keep_default_na=False, nrows=nrows)
+
+def import_clean_header(value, fallback):
+    label = (clean(value) or '').replace('\r', '').replace('\n', ' / ')
+    return label or fallback
+
+def import_header_key(value):
+    return re.sub(r'[^a-z0-9]+', '', (clean(value) or '').lower())
+
+def import_layout_columns(force=False):
+    cache_key = ('import_layout_columns',)
+    cached = None if force else runtime_cache_get(cache_key)
+    if cached is not None:
+        return cached
+    cached = None if force else import_meta_get('layout_columns')
+    if cached is not None:
+        runtime_cache_set(cache_key, cached, ttl_seconds=900)
+        return cached
+    df = read_public_sheet_csv(IMPORT_LAYOUT_SHEET_ID, IMPORT_LAYOUT_GID, nrows=3)
+    header_row = df.iloc[1] if len(df) > 1 else (df.iloc[0] if len(df) else [])
+    columns = []
+    seen = {}
+    for idx, raw in enumerate(list(header_row)):
+        label = import_clean_header(raw, '')
+        if not label:
+            continue
+        base = re.sub(r'[^a-z0-9]+', '_', label.lower()).strip('_') or f'col_{idx}'
+        count = seen.get(base, 0) + 1
+        seen[base] = count
+        field = base if count == 1 else f'{base}_{count}'
+        columns.append({'field': field, 'label': label, 'col_idx': idx})
+    import_meta_set('layout_columns', columns)
+    runtime_cache_set(cache_key, columns, ttl_seconds=900)
+    return columns
+
+def import_default_vendors_from_layout(force=False):
+    cache_key = ('import_default_vendors_from_layout',)
+    cached = None if force else runtime_cache_get(cache_key)
+    if cached is not None:
+        return cached
+    cached = None if force else import_meta_get('default_vendors')
+    if cached is not None:
+        runtime_cache_set(cache_key, cached, ttl_seconds=900)
+        return cached
+    try:
+        df = read_public_sheet_csv(IMPORT_LAYOUT_SHEET_ID, IMPORT_LAYOUT_GID)
+    except Exception:
+        return []
+    vendors = set()
+    for row_idx in range(2, len(df)):
+        for col_idx in IMPORT_LAYOUT_VENDOR_COLUMNS:
+            if col_idx >= df.shape[1]:
+                continue
+            name = clean(df.iloc[row_idx, col_idx])
+            if not name or name.lower() in ('vendor', 'vendor name'):
+                continue
+            vendors.add(name)
+    vendors = sorted(vendors, key=lambda s: s.lower())
+    import_meta_set('default_vendors', vendors)
+    runtime_cache_set(cache_key, vendors, ttl_seconds=900)
+    return vendors
+
+def import_vendor_names(force_default=False):
+    rows = ImportVendor.query.order_by(ImportVendor.vendor_name.asc()).all()
+    uploaded = [r.vendor_name for r in rows if clean(r.vendor_name)]
+    return uploaded or import_default_vendors_from_layout(force=force_default)
+
+def import_detect_data_start(df):
+    for idx in range(min(len(df), 12)):
+        item = clean(df.iloc[idx, 7]) if df.shape[1] > 7 else ''
+        vendor = clean(df.iloc[idx, 16]) if df.shape[1] > 16 else ''
+        qty = clean(df.iloc[idx, 12]) if df.shape[1] > 12 else ''
+        if item and item.lower() != 'item name' and (vendor or qty):
+            return idx
+    return 3
+
+def import_detect_header_row(df):
+    for idx in range(min(len(df), 12)):
+        labels = [import_header_key(v) for v in df.iloc[idx].tolist()]
+        if 'itemname' in labels and ('vendorname' in labels or 'posementara' in labels):
+            return idx
+    return max(import_detect_data_start(df) - 1, 0)
+
+def import_source_column_map(df, columns):
+    header_idx = import_detect_header_row(df)
+    header_values = list(df.iloc[header_idx]) if len(df) else []
+    by_key = {}
+    for idx, raw in enumerate(header_values):
+        key = import_header_key(raw)
+        if key and key not in by_key:
+            by_key[key] = idx
+
+    aliases = {
+        'site': ['siteidnkrg'],
+        'vendor': ['vendorname'],
+        'so': ['noso'],
+        'purchaseprice': ['purchaseprice', 'price', 'unitprice'],
+        'deliverystatus': ['deliverystatus', 'createsopodeliverycompletefelix'],
+        'importcheck': ['importcheck', 'importautoinput'],
+        'happycall': ['happycall', 'poconfirmhappycall'],
+    }
+
+    source_map = {}
+    for col in columns:
+        keys = [import_header_key(col.get('label')), import_header_key(col.get('field'))]
+        keys.extend(aliases.get(keys[0], []))
+        source_idx = next((by_key[key] for key in keys if key in by_key), None)
+        if source_idx is not None:
+            source_map[col['field']] = source_idx
+    return source_map
+
+def import_row_vendor_candidates(values, source_map, columns):
+    candidates = []
+    for field in ('vendor_name', 'vendor'):
+        col_idx = source_map.get(field)
+        if col_idx is not None and col_idx < len(values):
+            candidates.append(values[col_idx])
+    for col_idx in IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS:
+        if col_idx < len(values):
+            candidates.append(values[col_idx])
+    return [clean(v) for v in candidates if clean(v)]
+
+def import_sheet_rows(force_metadata=False):
+    columns = import_layout_columns(force=force_metadata)
+    vendor_set = {v.strip().lower() for v in import_vendor_names(force_default=force_metadata) if v.strip()}
+    rows = []
+    for source in IMPORT_SOURCE_SHEETS:
+        df = read_public_sheet_csv(source['spreadsheet_id'], source['gid'])
+        source_map = import_source_column_map(df, columns)
+        start_idx = import_detect_data_start(df)
+        for idx in range(start_idx, len(df)):
+            values = [clean(v) or '' for v in df.iloc[idx].tolist()]
+            vendor_candidates = import_row_vendor_candidates(values, source_map, columns)
+            row_vendor = next((v for v in vendor_candidates if v), '')
+            if vendor_set and not any(v.strip().lower() in vendor_set for v in vendor_candidates if v):
+                continue
+            row = {
+                '_row_key': f"{source['key']}:{idx + 1}",
+                '_source_key': source['key'],
+                '_source_label': source['label'],
+                '_spreadsheet_id': source['spreadsheet_id'],
+                '_gid': source['gid'],
+                '_sheet_row': idx + 1,
+                '_vendor_name': row_vendor,
+            }
+            for col in columns:
+                col_idx = source_map.get(col['field'])
+                row[col['field']] = values[col_idx] if col_idx is not None and col_idx < len(values) else ''
+            if not any(row.get(col['field']) for col in columns):
+                continue
+            rows.append(row)
+    return columns, rows
+
+def import_row_payload(row, columns):
+    return {col['field']: '' if row.get(col['field']) is None else str(row.get(col['field'])) for col in columns}
+
+def import_row_source_uid(row, columns):
+    values = [clean(row.get(col['field'])) or '' for col in columns]
+    payload = {
+        'source': clean(row.get('_source_key')) or '',
+        'vendor': clean(row.get('_vendor_name')) or '',
+        'values': values,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha1(raw.encode('utf-8')).hexdigest()
+
+def import_dashboard_row_to_dict(row, columns):
+    try:
+        data = json.loads(row.data_json or '{}')
+    except (TypeError, json.JSONDecodeError):
+        data = {}
+    out = {col['field']: data.get(col['field'], '') for col in columns}
+    out.update({
+        '_row_key': row.row_key,
+        '_source_key': row.source_key,
+        '_source_label': row.source_label,
+        '_sheet_row': row.sheet_row,
+        '_vendor_name': row.vendor_name,
+        '_dashboard_id': row.id,
+    })
+    return out
+
+def sync_import_sheet_to_dashboard():
+    columns, sheet_rows = import_sheet_rows(force_metadata=True)
+    vendor_count = len(import_vendor_names(force_default=True))
+    existing = {r.row_key: r for r in ImportDashboardRow.query.all()}
+    duplicate_counts = {}
+    now = datetime.utcnow()
+    added = 0
+    seen = 0
+    for sheet_row in sheet_rows:
+        source_uid = import_row_source_uid(sheet_row, columns)
+        duplicate_base = f"{sheet_row.get('_source_key')}:{source_uid}"
+        duplicate_counts[duplicate_base] = duplicate_counts.get(duplicate_base, 0) + 1
+        row_key = f"{duplicate_base}:{duplicate_counts[duplicate_base]}"
+        current = existing.get(row_key)
+        if current:
+            current.sheet_row = sheet_row.get('_sheet_row')
+            current.source_label = sheet_row.get('_source_label')
+            current.vendor_name = sheet_row.get('_vendor_name') or current.vendor_name
+            current.last_seen_at = now
+            seen += 1
+            continue
+        db.session.add(ImportDashboardRow(
+            row_key=row_key,
+            source_key=sheet_row.get('_source_key') or '',
+            source_label=sheet_row.get('_source_label') or '',
+            source_uid=source_uid,
+            sheet_row=sheet_row.get('_sheet_row'),
+            vendor_name=sheet_row.get('_vendor_name') or '',
+            data_json=json.dumps(import_row_payload(sheet_row, columns), ensure_ascii=False),
+            first_seen_at=now,
+            last_seen_at=now,
+            updated_at=now,
+        ))
+        added += 1
+    db.session.commit()
+    clear_runtime_caches()
+    return {'added': added, 'seen': seen, 'sheet_rows': len(sheet_rows), 'vendor_count': vendor_count, 'columns': columns}
+
 RFQ_DASHBOARD_ONLY_FIELDS = {'private_remarks_1', 'private_remarks_2'}
-RFQ_SEARCH_FIELDS = ('rfq_code', 'request_number', 'item_name', 'detail_spec')
-
-_RFQ_SHEET_FINGERPRINT = None
-_RFQ_FINGERPRINT_TTL = 300  # 5 minutes
-
 
 def rfq_label(field):
     return dict(RFQ_TEMPLATE_COLUMNS).get(field, field)
-
 
 def parse_rfq_number(value):
     raw = clean(value)
@@ -1606,14 +1466,12 @@ def parse_rfq_number(value):
     except ValueError:
         return None
 
-
 def fmt_rfq_amount(value):
     if value is None:
         return None
     if abs(value - round(value)) < 0.000001:
         return f'{int(round(value)):,}'
     return f'{value:,.2f}'
-
 
 def rfq_days_left(closing_date):
     raw = clean(closing_date)
@@ -1634,7 +1492,6 @@ def rfq_days_left(closing_date):
         return None
     return workdays_until(d)
 
-
 def parse_rfq_closing_date_value(value):
     raw = clean(value)
     if not raw:
@@ -1646,13 +1503,11 @@ def parse_rfq_closing_date_value(value):
             pass
     return parse_date(raw)
 
-
 def parse_rfq_date_value(value):
     raw = clean(value)
     if not raw:
         return None
-    if not re.search(r'\d{4}', str(raw)) and not re.match(
-            r'^\d{8}(\.0)?$', str(raw).strip()):
+    if not re.search(r'\d{4}', str(raw)) and not re.match(r'^\d{8}(\.0)?$', str(raw).strip()):
         return None
     for fmt in ('%d/%m/%Y', '%Y/%m/%d', '%Y-%m-%d'):
         try:
@@ -1661,10 +1516,8 @@ def parse_rfq_date_value(value):
             pass
     return parse_date(raw)
 
-
 def sort_rfq_rows(rows, sort_order='newest'):
     newest = sort_order != 'oldest'
-
     def key(row):
         d = parse_rfq_date_value(row.get('rfq_date'))
         ordinal = d.toordinal() if d else 0
@@ -1673,8 +1526,11 @@ def sort_rfq_rows(rows, sort_order='newest'):
     rows.sort(key=key)
     return rows
 
+RFQ_SEARCH_FIELDS = ('rfq_code', 'request_number', 'item_name', 'detail_spec')
+
 
 def rfq_multiline_search_terms(value):
+    """Return unique, normalized RFQ search terms entered one per line."""
     terms = []
     seen = set()
     for raw in re.split(r'[\r\n]+', str(value or '')):
@@ -1686,13 +1542,15 @@ def rfq_multiline_search_terms(value):
 
 
 def filter_rfq_rows_by_multiline_search(rows, value):
+    """Match any entered line against Request Number, Item Name, or Detail Spec."""
     terms = rfq_multiline_search_terms(value)
     if not terms:
         return rows
+
     filtered = []
     for row in rows:
-        searchable = [str(row.get(f) or '').lower() for f in RFQ_SEARCH_FIELDS]
-        if any(term in fv for term in terms for fv in searchable):
+        searchable_values = [str(row.get(field) or '').lower() for field in RFQ_SEARCH_FIELDS]
+        if any(term in field_value for term in terms for field_value in searchable_values):
             filtered.append(row)
     return filtered
 
@@ -1707,29 +1565,19 @@ def rfq_check_value(item):
         return 'closed'
     return 'open'
 
-
 def rfq_check_label(value):
-    return {
-        'complete': 'Complete', 'reject': 'Reject',
-        'closed': 'Closed', 'open': 'Open'
-    }.get(value or '', 'Open')
-
+    return {'complete': 'Complete', 'reject': 'Reject', 'closed': 'Closed', 'open': 'Open'}.get(value or '', 'Open')
 
 def apply_rfq_computed_fields(item):
-    item['category_name'] = (
-        (clean(item.get('category_name')) or '').split('>')[0].strip()
-        or None)
+    item['category_name'] = (clean(item.get('category_name')) or '').split('>')[0].strip() or None
     qty = parse_rfq_number(item.get('qty'))
     unit_price = parse_rfq_number(item.get('unit_price_idr'))
-    item['amt_idr'] = (fmt_rfq_amount(qty * unit_price)
-                       if qty is not None and unit_price is not None
-                       else None)
+    item['amt_idr'] = fmt_rfq_amount(qty * unit_price) if qty is not None and unit_price is not None else None
     item['days_left'] = rfq_days_left(item.get('closing_date'))
     item['unit_price_missing'] = unit_price is None
     item['status'] = bool(clean_product_id(item.get('product_id')))
     item['check'] = rfq_check_value(item)
     return item
-
 
 def rfq_cell(row, idx):
     try:
@@ -1737,31 +1585,30 @@ def rfq_cell(row, idx):
     except Exception:
         return None
 
-
 def rfq_row_key(data, sheet_row):
     code = clean(data.get('source_code'))
     if code:
         return code
-    parts = [data.get('no'), data.get('client_name'),
-             data.get('rfq_date'), data.get('item_name')]
+    parts = [data.get('no'), data.get('client_name'), data.get('rfq_date'), data.get('item_name')]
     key = '|'.join(str(clean(x) or '') for x in parts).strip('|')
     return key or f'row-{sheet_row}'
 
-
 def fetch_rfq_rows(force=False):
     now = datetime.utcnow()
-    if (not force and RFQ_CACHE['expires_at'] and
-            RFQ_CACHE['expires_at'] > now):
+    if not force and RFQ_CACHE['expires_at'] and RFQ_CACHE['expires_at'] > now:
         return RFQ_CACHE['rows'], RFQ_CACHE['fetched_at']
 
     from urllib.parse import quote
-    url = (f'https://docs.google.com/spreadsheets/d/{RFQ_SHEET_ID}'
-           f'/gviz/tq?tqx=out:csv&sheet={quote(RFQ_SHEET_NAME)}')
+    url = f'https://docs.google.com/spreadsheets/d/{RFQ_SHEET_ID}/gviz/tq?tqx=out:csv&sheet={quote(RFQ_SHEET_NAME)}'
     df = pd.read_csv(url, header=None, dtype=str, keep_default_na=False)
     rows = []
+    # Google CSV rows 1-3 are title/header rows; data starts at sheet row 4.
     for idx in range(3, len(df)):
         src = df.iloc[idx]
         product_id = clean_product_id(rfq_cell(src, 16))
+        # Current sheet layout stores Request Number in column R (zero-based index 17).
+        # It used to be read from column H, which caused dashboard searches to miss
+        # valid request numbers such as 100010794064.
         request_number = clean_request_number(rfq_cell(src, 17))
         data = {
             'sheet_row': idx + 1,
@@ -1796,13 +1643,14 @@ def fetch_rfq_rows(force=False):
             'valid_period': rfq_cell(src, 31),
             'photo_url': rfq_cell(src, 32),
             'remarks': rfq_cell(src, 33),
+            # Private remarks are dashboard-only notes. Do not read them from
+            # Google Sheet columns, even if old sheet exports still contain AI/AJ.
             'private_remarks_1': '',
             'private_remarks_2': '',
             'source_code': rfq_cell(src, 38),
         }
         data['purchase_pic'] = canonical_rfq_pic(data)
-        if not any(data.get(f) for f, _ in RFQ_TEMPLATE_COLUMNS
-                   if f != 'check'):
+        if not any(data.get(field) for field, _ in RFQ_TEMPLATE_COLUMNS if field != 'check'):
             continue
         data['row_key'] = rfq_row_key(data, idx + 1)
         apply_rfq_computed_fields(data)
@@ -1810,11 +1658,11 @@ def fetch_rfq_rows(force=False):
 
     fetched_at = datetime.utcnow()
     RFQ_CACHE.update({
-        'rows': rows, 'fetched_at': fetched_at,
+        'rows': rows,
+        'fetched_at': fetched_at,
         'expires_at': fetched_at + timedelta(seconds=RFQ_CACHE_TTL_SECONDS),
     })
     return rows, fetched_at
-
 
 def rfq_json_load(value, fallback):
     try:
@@ -1822,12 +1670,9 @@ def rfq_json_load(value, fallback):
     except (TypeError, json.JSONDecodeError):
         return fallback
 
-
 def rfq_dashboard_payload(row):
     payload = dict(row or {})
-    payload['row_key'] = (clean(payload.get('row_key')) or
-                          rfq_row_key(payload,
-                                      payload.get('sheet_row') or 0))
+    payload['row_key'] = clean(payload.get('row_key')) or rfq_row_key(payload, payload.get('sheet_row') or 0)
     try:
         payload['sheet_row'] = int(payload.get('sheet_row') or 0) or None
     except (TypeError, ValueError):
@@ -1835,13 +1680,11 @@ def rfq_dashboard_payload(row):
     apply_rfq_computed_fields(payload)
     return payload
 
-
 def rfq_dashboard_row_to_dict(row):
     data = rfq_json_load(row.data_json, {})
     data['row_key'] = row.row_key
     data['sheet_row'] = row.sheet_row
     return data
-
 
 def load_rfq_dashboard_rows():
     db_rows = RFQDashboardRow.query.order_by(
@@ -1850,11 +1693,8 @@ def load_rfq_dashboard_rows():
         RFQDashboardRow.id.asc(),
     ).all()
     rows = [rfq_dashboard_row_to_dict(row) for row in db_rows]
-    fetched_at = max(
-        (r.last_seen_at for r in db_rows if r.last_seen_at),
-        default=None)
+    fetched_at = max((row.last_seen_at for row in db_rows if row.last_seen_at), default=None)
     return rows, fetched_at
-
 
 def set_rfq_runtime_rows(rows, fetched_at):
     now = datetime.utcnow()
@@ -1864,131 +1704,24 @@ def set_rfq_runtime_rows(rows, fetched_at):
         'expires_at': now + timedelta(seconds=RFQ_CACHE_TTL_SECONDS),
     })
 
-
-# ─── RFQ Smart Sync via Fingerprint ─────────────────────────────────────
-
-def _rfq_sheet_fingerprint():
-    """Lightweight change detection: Google Sheets metadata only (~200ms).
-    No data download. Rate-limited to once per 5 minutes."""
-    global _RFQ_SHEET_FINGERPRINT
-    now = datetime.utcnow()
-
-    if (_RFQ_SHEET_FINGERPRINT and
-            _RFQ_SHEET_FINGERPRINT.get('checked_at') and
-            (now - _RFQ_SHEET_FINGERPRINT['checked_at']).total_seconds()
-            < _RFQ_FINGERPRINT_TTL):
-        return _RFQ_SHEET_FINGERPRINT
-
-    try:
-        meta = google_sheets_metadata(RFQ_SHEET_ID)
-        for sheet in meta.get('sheets', []):
-            props = sheet.get('properties', {})
-            if props.get('title') == RFQ_SHEET_NAME:
-                _RFQ_SHEET_FINGERPRINT = {
-                    'row_count': props.get(
-                        'gridProperties', {}).get('rowCount', 0),
-                    'column_count': props.get(
-                        'gridProperties', {}).get('columnCount', 0),
-                    'modified': meta.get('modifiedTime', ''),
-                    'checked_at': now,
-                }
-                return _RFQ_SHEET_FINGERPRINT
-    except Exception as e:
-        print(f'RFQ fingerprint check failed: {e}')
-
-    _RFQ_SHEET_FINGERPRINT = {
-        'row_count': 0, 'modified': '', 'checked_at': now}
-    return _RFQ_SHEET_FINGERPRINT
-
-
-def _rfq_stored_fingerprint():
-    row = ImportDashboardMeta.query.filter_by(
-        meta_key='rfq_fingerprint').first()
-    if not row:
-        return None
-    try:
-        return json.loads(row.value_json)
-    except (TypeError, json.JSONDecodeError):
-        return None
-
-
-def _rfq_save_fingerprint(fingerprint):
-    meta_row = ImportDashboardMeta.query.filter_by(
-        meta_key='rfq_fingerprint').first()
-    if not meta_row:
-        meta_row = ImportDashboardMeta(meta_key='rfq_fingerprint')
-        db.session.add(meta_row)
-    meta_row.value_json = json.dumps({
-        'row_count': fingerprint.get('row_count', 0),
-        'modified': fingerprint.get('modified', ''),
-        'synced_at': utc_isoformat(datetime.utcnow()),
-    }, ensure_ascii=False)
-    meta_row.updated_at = datetime.utcnow()
-    db.session.commit()
-
-
-def rfq_sheet_has_changes():
-    current = _rfq_sheet_fingerprint()
-    stored = _rfq_stored_fingerprint()
-    if not stored:
-        return True
-    if current.get('row_count', 0) > stored.get('row_count', 0):
-        return True
-    if current.get('modified') != stored.get('modified'):
-        return True
-    return False
-
-
-def sync_rfq_incremental():
-    """Sync only new/changed rows from RFQ Google Sheet.
-
-    Because row/column structure is stable (only data added):
-    - New rows at bottom → add to DB
-    - Changed data in existing rows → update non-dirty fields
-    - Deleted rows → leave in DB (don't remove)
-    """
+def sync_rfq_sheet_to_dashboard():
     sheet_rows, fetched_at = fetch_rfq_rows(force=True)
     existing = {row.row_key: row for row in RFQDashboardRow.query.all()}
     duplicate_counts = {}
     now = datetime.utcnow()
     added = 0
     updated = 0
-
-    for sr in sheet_rows:
-        base_key = clean(sr.get('row_key'))
+    for sheet_row in sheet_rows:
+        base_key = clean(sheet_row.get('row_key'))
         if not base_key:
             continue
         duplicate_counts[base_key] = duplicate_counts.get(base_key, 0) + 1
-        row_key = (base_key if duplicate_counts[base_key] == 1
-                   else f"{base_key}#{duplicate_counts[base_key]}")
-        sr = dict(sr)
-        sr['row_key'] = row_key
-        incoming = rfq_dashboard_payload(sr)
+        row_key = base_key if duplicate_counts[base_key] == 1 else f"{base_key}#{duplicate_counts[base_key]}"
+        sheet_row = dict(sheet_row)
+        sheet_row['row_key'] = row_key
+        incoming = rfq_dashboard_payload(sheet_row)
         current = existing.get(row_key)
-
-        if current:
-            local = rfq_json_load(current.data_json, {})
-            dirty_fields = set(rfq_json_load(
-                current.dirty_fields_json, []))
-            changed = False
-            for field, value in incoming.items():
-                if field in dirty_fields and field in RFQ_EDITABLE_FIELDS:
-                    continue
-                if local.get(field) != value:
-                    local[field] = value
-                    changed = True
-            if changed:
-                local['row_key'] = row_key
-                local['sheet_row'] = incoming.get('sheet_row')
-                apply_rfq_computed_fields(local)
-                current.data_json = json.dumps(local, ensure_ascii=False)
-                current.sheet_row = incoming.get('sheet_row')
-                current.last_seen_at = fetched_at or now
-                current.updated_at = now
-                updated += 1
-            else:
-                current.last_seen_at = fetched_at or now
-        else:
+        if not current:
             db.session.add(RFQDashboardRow(
                 row_key=row_key,
                 sheet_row=incoming.get('sheet_row'),
@@ -1999,89 +1732,26 @@ def sync_rfq_incremental():
                 updated_at=now,
             ))
             added += 1
-
+            continue
+        local = rfq_json_load(current.data_json, {})
+        dirty_fields = set(rfq_json_load(current.dirty_fields_json, []))
+        for field, value in incoming.items():
+            if field in dirty_fields and field in RFQ_EDITABLE_FIELDS:
+                continue
+            local[field] = value
+        local['row_key'] = row_key
+        local['sheet_row'] = incoming.get('sheet_row')
+        apply_rfq_computed_fields(local)
+        current.sheet_row = incoming.get('sheet_row')
+        current.data_json = json.dumps(local, ensure_ascii=False)
+        current.last_seen_at = fetched_at or now
+        current.updated_at = now
+        updated += 1
     db.session.commit()
-
-    # Save fingerprint after successful sync
-    fingerprint = _rfq_sheet_fingerprint()
-    _rfq_save_fingerprint(fingerprint)
-
-    # Refresh runtime cache
     rows, loaded_at = load_rfq_dashboard_rows()
     clear_runtime_caches()
     set_rfq_runtime_rows(rows, loaded_at or fetched_at)
-
-    return {
-        'added': added, 'updated': updated,
-        'sheet_rows': len(sheet_rows),
-        'synced_at': utc_isoformat(now),
-    }
-
-
-def _merge_rfq_edits(rows):
-    """Merge dashboard-only edits (Private Remarks) with data rows.
-    Single query for all edits instead of per-row."""
-    edits = RFQCellEdit.query.filter(
-        RFQCellEdit.field.in_(list(RFQ_DASHBOARD_ONLY_FIELDS))
-    ).all()
-    edit_map = {}
-    for edit in edits:
-        edit_map.setdefault(edit.row_key, {})[edit.field] = edit.value
-
-    merged = []
-    for row in rows:
-        item = dict(row)
-        for field, value in edit_map.get(item.get('row_key'), {}).items():
-            item[field] = value
-        merged.append(item)
-    return merged
-
-
-def rfq_rows_with_edits_smart(force=False):
-    """Smart RFQ read: auto-sync only when sheet has changes.
-
-    Flow:
-    1. force=True → sync from sheet
-    2. In-memory cache alive → return cache (instant)
-    3. Read from SQLite (instant)
-    4. Fingerprint check (~200ms, rate-limited to 5 min)
-    5. No changes → return DB data
-    6. Changes detected → incremental sync → return new data
-    """
-    now = datetime.utcnow()
-
-    # Force sync (admin "Sync Now" button)
-    if force:
-        result = sync_rfq_incremental()
-        rows, fetched_at = load_rfq_dashboard_rows()
-        return _merge_rfq_edits(rows), fetched_at, result
-
-    # In-memory cache alive
-    if (RFQ_CACHE.get('expires_at') and
-            RFQ_CACHE['expires_at'] > now and
-            RFQ_CACHE.get('rows')):
-        return (_merge_rfq_edits(RFQ_CACHE['rows']),
-                RFQ_CACHE.get('fetched_at'), None)
-
-    # Read from SQLite
-    rows, fetched_at = load_rfq_dashboard_rows()
-
-    # No data yet
-    if not rows:
-        return [], None, {'needs_sync': True}
-
-    # Smart change detection
-    sync_result = None
-    try:
-        if rfq_sheet_has_changes():
-            sync_result = sync_rfq_incremental()
-            rows, fetched_at = load_rfq_dashboard_rows()
-    except Exception as e:
-        print(f'RFQ change check failed, using cached: {e}')
-
-    set_rfq_runtime_rows(rows, fetched_at)
-    return _merge_rfq_edits(rows), fetched_at, sync_result
-
+    return {'added': added, 'updated': updated, 'sheet_rows': len(sheet_rows), 'fetched_at': loaded_at or fetched_at}
 
 def set_rfq_dashboard_cell(row_key, field, value, dirty=True, commit=True):
     row = RFQDashboardRow.query.filter_by(row_key=row_key).first()
@@ -2098,8 +1768,7 @@ def set_rfq_dashboard_cell(row_key, field, value, dirty=True, commit=True):
     else:
         dirty_fields.discard(field)
     row.data_json = json.dumps(data, ensure_ascii=False)
-    row.dirty_fields_json = json.dumps(
-        sorted(dirty_fields), ensure_ascii=False)
+    row.dirty_fields_json = json.dumps(sorted(dirty_fields), ensure_ascii=False)
     row.updated_at = datetime.utcnow()
     if commit:
         db.session.commit()
@@ -2107,70 +1776,91 @@ def set_rfq_dashboard_cell(row_key, field, value, dirty=True, commit=True):
         clear_runtime_caches()
     return True
 
+def clear_rfq_dashboard_dirty_fields(updates, commit=True):
+    grouped = {}
+    for item in updates or []:
+        row_key = clean(item.get('row_key'))
+        field = clean(item.get('field'))
+        if row_key and field:
+            grouped.setdefault(row_key, set()).add(field)
+    if not grouped:
+        return
+    for row in RFQDashboardRow.query.filter(RFQDashboardRow.row_key.in_(grouped.keys())).all():
+        dirty_fields = set(rfq_json_load(row.dirty_fields_json, []))
+        dirty_fields.difference_update(grouped.get(row.row_key, set()))
+        row.dirty_fields_json = json.dumps(sorted(dirty_fields), ensure_ascii=False)
+        row.updated_at = datetime.utcnow()
+    if commit:
+        db.session.commit()
+        RFQ_CACHE['expires_at'] = None
+        clear_runtime_caches()
 
-def sync_rfq_cell_to_google_sheet(row, field, value):
-    column = RFQ_SHEET_COLUMN_BY_FIELD.get(field)
-    if field in RFQ_DASHBOARD_ONLY_FIELDS:
-        return {'synced': False, 'local_only': True,
-                'reason': 'Dashboard-only field'}
-    if not column:
-        return {'synced': False,
-                'reason': 'Field not mapped to RFQ sheet column'}
-    sheet_row = row.get('sheet_row')
-    if not sheet_row:
-        return {'synced': False, 'reason': 'RFQ sheet row missing'}
-    range_name = f"'{RFQ_SHEET_NAME}'!{column}{sheet_row}"
-    google_sheets_values_update(RFQ_SHEET_ID, range_name, [[value or '']])
-    RFQ_CACHE['expires_at'] = None
-    return {'synced': True, 'range': range_name}
+def cleanup_rfq_sheet_backed_edits(commit=False):
+    """Remove stale local RFQ edits for fields whose source of truth is Google Sheet.
+
+    Private Remarks stay local-only in RFQCellEdit. Unit Price, Vendor, Remarks,
+    and other mapped quotation fields must be read from and written to the RFQ
+    Google Sheet, otherwise old local edits can mask newer sheet values.
+    """
+    try:
+        deleted = RFQCellEdit.query.filter(~RFQCellEdit.field.in_(list(RFQ_DASHBOARD_ONLY_FIELDS))).delete(synchronize_session=False)
+        if commit and deleted:
+            db.session.commit()
+        return deleted or 0
+    except Exception:
+        if commit:
+            db.session.rollback()
+        return 0
 
 
-# ─── RFQ Similarity (batch precompute, read from cache) ─────────────────
+def rfq_rows_with_edits(force=False, prefer_stale_cache=False):
+    now = datetime.utcnow()
+    if force:
+        sync_rfq_sheet_to_dashboard()
+        rows, fetched_at = load_rfq_dashboard_rows()
+    elif RFQDashboardRow.query.count() == 0:
+        sync_rfq_sheet_to_dashboard()
+        rows, fetched_at = load_rfq_dashboard_rows()
+    elif prefer_stale_cache and RFQ_CACHE.get('rows'):
+        rows, fetched_at = RFQ_CACHE['rows'], RFQ_CACHE['fetched_at']
+    elif RFQ_CACHE.get('expires_at') and RFQ_CACHE['expires_at'] > now and RFQ_CACHE.get('rows'):
+        rows, fetched_at = RFQ_CACHE['rows'], RFQ_CACHE['fetched_at']
+    else:
+        rows, fetched_at = load_rfq_dashboard_rows()
+        set_rfq_runtime_rows(rows, fetched_at)
 
-def _similarity_token(val):
-    s = (clean(val) or '').strip().lower()
-    return s[:50] if s else ''
-
-
-def calculate_similarity(a, b):
-    """Simple Jaccard-ish similarity on tokens."""
-    if not a or not b:
-        return 0.0
-    a_tokens = set(str(a).lower().split())
-    b_tokens = set(str(b).lower().split())
-    if not a_tokens or not b_tokens:
-        return 0.0
-    intersection = a_tokens & b_tokens
-    union = a_tokens | b_tokens
-    return (len(intersection) / len(union)) * 100 if union else 0.0
-
+    edits = RFQCellEdit.query.filter(RFQCellEdit.field.in_(list(RFQ_DASHBOARD_ONLY_FIELDS))).all()
+    edit_map = {}
+    for edit in edits:
+        edit_map.setdefault(edit.row_key, {})[edit.field] = edit.value
+    merged = []
+    for row in rows:
+        item = dict(row)
+        for field, value in edit_map.get(item['row_key'], {}).items():
+            item[field] = value
+        merged.append(item)
+    return merged, fetched_at
 
 def _candidate_registered_items_for_rfq_similarity(row, limit=1200):
     name_token = _similarity_token(row.get('item_name'))
     spec_token = _similarity_token(row.get('detail_spec'))
 
-    if (not clean(row.get('unit')) or
-            not clean(row.get('item_name')) or
-            not clean(row.get('detail_spec'))):
+    if not clean(row.get('unit')) or not clean(row.get('item_name')) or not clean(row.get('detail_spec')):
         return []
 
     q = ProductIDDB.query.filter(
         ProductIDDB.product_id.isnot(None),
         ProductIDDB.product_id != '',
-        db.or_(ProductIDDB.product_status.is_(None),
-               ProductIDDB.product_status == '',
-               func.lower(ProductIDDB.product_status) == 'use'))
+        db.or_(ProductIDDB.product_status.is_(None), ProductIDDB.product_status == '', func.lower(ProductIDDB.product_status) == 'use')
+    )
     token_filters = []
     if name_token:
-        token_filters.append(
-            ProductIDDB.product_name.ilike(f'%{name_token}%'))
+        token_filters.append(ProductIDDB.product_name.ilike(f'%{name_token}%'))
     if spec_token:
-        token_filters.append(
-            ProductIDDB.specification.ilike(f'%{spec_token}%'))
+        token_filters.append(ProductIDDB.specification.ilike(f'%{spec_token}%'))
     if token_filters:
         q = q.filter(db.or_(*token_filters))
     return q.limit(limit).all()
-
 
 def find_similar_rfq_registered_items(row):
     try:
@@ -2178,8 +1868,7 @@ def find_similar_rfq_registered_items(row):
             return None
         if clean_product_id(row.get('product_id')):
             return None
-        key_fields = [row.get('item_name'), row.get('detail_spec'),
-                      row.get('unit')]
+        key_fields = [row.get('item_name'), row.get('detail_spec'), row.get('unit')]
         if not all(clean(v) for v in key_fields):
             return None
 
@@ -2198,18 +1887,13 @@ def find_similar_rfq_registered_items(row):
         similar_items = []
         for reg in _candidate_registered_items_for_rfq_similarity(row):
             reg_prod_id = clean_product_id(reg.product_id)
-            if not reg_prod_id or (
-                    current_prod_id and reg_prod_id == current_prod_id):
+            if not reg_prod_id or (current_prod_id and reg_prod_id == current_prod_id):
                 continue
-            if not (clean(reg.product_name) and
-                    clean(reg.specification) and clean(reg.order_unit)):
+            if not (clean(reg.product_name) and clean(reg.specification) and clean(reg.order_unit)):
                 continue
-            item_score = calculate_similarity(
-                row.get('item_name'), reg.product_name)
-            spec_score = calculate_similarity(
-                row.get('detail_spec'), reg.specification)
-            unit_score = calculate_similarity(
-                row.get('unit'), reg.order_unit)
+            item_score = calculate_similarity(row.get('item_name'), reg.product_name)
+            spec_score = calculate_similarity(row.get('detail_spec'), reg.specification)
+            unit_score = calculate_similarity(row.get('unit'), reg.order_unit)
             if item_score >= 70.0 and spec_score >= 70.0 and unit_score >= 70.0:
                 total_sim = (item_score + spec_score + unit_score) / 3
                 similar_items.append({
@@ -2221,24 +1905,17 @@ def find_similar_rfq_registered_items(row):
                     'similarity': round(total_sim, 1),
                 })
 
-        similar_items.sort(
-            key=lambda x: (-x['similarity'], x['product_id']))
+        similar_items.sort(key=lambda x: (-x['similarity'], x['product_id']))
         if not similar_items:
             result = None
         else:
             result = {
-                'product_ids': '\n'.join(
-                    x['product_id'] for x in similar_items),
-                'product_name': '\n'.join(
-                    x['product_name'] or '-' for x in similar_items),
-                'specification': '\n'.join(
-                    x['specification'] or '-' for x in similar_items),
-                'manufacturer_name': '\n'.join(
-                    x['manufacturer_name'] or '-' for x in similar_items),
-                'order_unit': '\n'.join(
-                    x['order_unit'] or '-' for x in similar_items),
-                'similarity': '\n'.join(
-                    f"{x['similarity']:.0f}%" for x in similar_items),
+                'product_ids': '\n'.join(x['product_id'] for x in similar_items),
+                'product_name': '\n'.join(x['product_name'] or '-' for x in similar_items),
+                'specification': '\n'.join(x['specification'] or '-' for x in similar_items),
+                'manufacturer_name': '\n'.join(x['manufacturer_name'] or '-' for x in similar_items),
+                'order_unit': '\n'.join(x['order_unit'] or '-' for x in similar_items),
+                'similarity': '\n'.join(f"{x['similarity']:.0f}%" for x in similar_items),
                 'count': len(similar_items),
             }
         _SIMILARITY_CACHE[cache_key] = result
@@ -2246,7 +1923,6 @@ def find_similar_rfq_registered_items(row):
     except Exception as e:
         print(f"Error finding RFQ similar items: {e}")
         return None
-
 
 def apply_rfq_similarity(row):
     if (clean(row.get('check')) or '').lower() != 'open':
@@ -2258,10 +1934,7 @@ def apply_rfq_similarity(row):
         row['similar_score'] = None
         return row
     similar = find_similar_rfq_registered_items(row)
-    has_pid = clean_product_id(row.get('product_id'))
-    row['similar_prod_ids'] = (
-        (similar or {}).get('product_ids', '') if has_pid
-        else (similar or {}).get('product_ids', 'No Similar Item'))
+    row['similar_prod_ids'] = (similar or {}).get('product_ids', '') if clean_product_id(row.get('product_id')) else (similar or {}).get('product_ids', 'No Similar Item')
     row['similar_prod_name'] = (similar or {}).get('product_name', '')
     row['similar_spec'] = (similar or {}).get('specification', '')
     row['similar_mfr_name'] = (similar or {}).get('manufacturer_name', '')
@@ -2269,10 +1942,139 @@ def apply_rfq_similarity(row):
     row['similar_score'] = (similar or {}).get('similarity', None)
     return row
 
+def rfq_sheet_sync_credentials():
+    raw_json = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON') or os.environ.get('GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON')
+    raw_file = os.environ.get('GOOGLE_SERVICE_ACCOUNT_FILE') or os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+    if raw_json:
+        try:
+            return json.loads(raw_json)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f'Invalid GOOGLE_SERVICE_ACCOUNT_JSON: {e}')
+    if raw_file and os.path.exists(raw_file):
+        with open(raw_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return None
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 13. VENDOR CONTROL HELPERS
-# ═══════════════════════════════════════════════════════════════════════════
+GOOGLE_SHEETS_SCOPE = ['https://www.googleapis.com/auth/spreadsheets']
+
+def google_sheets_access_token():
+    credentials_info = rfq_sheet_sync_credentials()
+    if not credentials_info:
+        raise RuntimeError('Google service account credential is not configured')
+    try:
+        from google.oauth2.service_account import Credentials
+        from google.auth.transport.requests import Request
+    except ImportError as e:
+        raise RuntimeError('google-auth and requests are required for Google Sheets access') from e
+    creds = Credentials.from_service_account_info(credentials_info, scopes=GOOGLE_SHEETS_SCOPE)
+    creds.refresh(Request())
+    return creds.token
+
+def google_sheets_request(method, spreadsheet_id, path, params=None, body=None):
+    try:
+        import requests
+        from urllib.parse import quote
+    except ImportError as e:
+        raise RuntimeError('requests is required for Google Sheets access') from e
+    token = google_sheets_access_token()
+    encoded_path = '/'.join(quote(str(part), safe='') for part in path)
+    url = f'https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/{encoded_path}'
+    headers = {'Authorization': f'Bearer {token}'}
+    if body is not None:
+        headers['Content-Type'] = 'application/json'
+    proxies = {}
+    if os.environ.get('HTTPS_PROXY'):
+        proxies['https'] = os.environ.get('HTTPS_PROXY')
+    if os.environ.get('HTTP_PROXY'):
+        proxies['http'] = os.environ.get('HTTP_PROXY')
+    kwargs = {'headers': headers, 'params': params or {}, 'timeout': 60}
+    if body is not None:
+        kwargs['json'] = body
+    if proxies:
+        kwargs['proxies'] = proxies
+    response = requests.request(method, url, **kwargs)
+    if not response.ok:
+        detail = response.text[:500]
+        raise RuntimeError(f'Google Sheets API {method} {path} failed: {response.status_code} {detail}')
+    return response.json() if response.text else {}
+
+def google_sheets_metadata(spreadsheet_id):
+    try:
+        import requests
+    except ImportError as e:
+        raise RuntimeError('requests is required for Google Sheets access') from e
+    token = google_sheets_access_token()
+    url = f'https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}'
+    headers = {'Authorization': f'Bearer {token}'}
+    proxies = {}
+    if os.environ.get('HTTPS_PROXY'):
+        proxies['https'] = os.environ.get('HTTPS_PROXY')
+    if os.environ.get('HTTP_PROXY'):
+        proxies['http'] = os.environ.get('HTTP_PROXY')
+    kwargs = {'headers': headers, 'timeout': 60}
+    if proxies:
+        kwargs['proxies'] = proxies
+    response = requests.get(url, **kwargs)
+    if not response.ok:
+        raise RuntimeError(f'Google Sheets metadata failed: {response.status_code} {response.text[:500]}')
+    return response.json()
+
+def google_sheets_values_get(spreadsheet_id, range_name, value_render_option='UNFORMATTED_VALUE'):
+    return google_sheets_request('GET', spreadsheet_id, ['values', range_name], params={'valueRenderOption': value_render_option})
+
+def google_sheets_values_update(spreadsheet_id, range_name, values):
+    return google_sheets_request(
+        'PUT', spreadsheet_id, ['values', range_name],
+        params={'valueInputOption': 'USER_ENTERED'},
+        body={'values': values}
+    )
+
+def google_sheets_values_batch_update(spreadsheet_id, ranges):
+    return google_sheets_request(
+        'POST', spreadsheet_id, ['values:batchUpdate'],
+        body={'valueInputOption': 'USER_ENTERED', 'data': ranges}
+    )
+
+def sync_rfq_cell_to_google_sheet(row, field, value):
+    column = RFQ_SHEET_COLUMN_BY_FIELD.get(field)
+    if field in RFQ_DASHBOARD_ONLY_FIELDS:
+        return {'synced': False, 'local_only': True, 'reason': 'Dashboard-only field'}
+    if not column:
+        return {'synced': False, 'reason': 'Field is not mapped to RFQ sheet column'}
+    sheet_row = row.get('sheet_row')
+    if not sheet_row:
+        return {'synced': False, 'reason': 'RFQ sheet row is missing'}
+
+    range_name = f"'{RFQ_SHEET_NAME}'!{column}{sheet_row}"
+    google_sheets_values_update(RFQ_SHEET_ID, range_name, [[value or '']])
+    RFQ_CACHE['expires_at'] = None
+    return {'synced': True, 'range': range_name}
+
+def sync_rfq_cells_to_google_sheet(updates):
+    ranges = []
+    local_only_count = 0
+    for item in updates:
+        row = item.get('row') or {}
+        field = item.get('field')
+        value = item.get('value')
+        if field in RFQ_DASHBOARD_ONLY_FIELDS:
+            local_only_count += 1
+            continue
+        column = RFQ_SHEET_COLUMN_BY_FIELD.get(field)
+        sheet_row = row.get('sheet_row')
+        if column and sheet_row:
+            ranges.append({
+                'range': f"'{RFQ_SHEET_NAME}'!{column}{sheet_row}",
+                'values': [[value or '']]
+            })
+    if not ranges:
+        if local_only_count:
+            return {'synced': False, 'local_only': True, 'reason': 'Dashboard-only fields'}
+        return {'synced': False, 'reason': 'No mapped RFQ sheet cells to sync'}
+
+    google_sheets_values_batch_update(RFQ_SHEET_ID, ranges)
+    RFQ_CACHE['expires_at'] = None
+    return {'synced': True, 'ranges': len(ranges), 'local_only': local_only_count}
 
 def column_letter_from_index(index):
     result = ''
@@ -2280,7 +2082,6 @@ def column_letter_from_index(index):
         index, rem = divmod(index - 1, 26)
         result = chr(65 + rem) + result
     return result
-
 
 def vendor_control_sheet_name():
     if VENDOR_CONTROL_CACHE.get('sheet_name'):
@@ -2293,15 +2094,12 @@ def vendor_control_sheet_name():
             return VENDOR_CONTROL_CACHE['sheet_name']
     sheets = meta.get('sheets', [])
     if sheets:
-        VENDOR_CONTROL_CACHE['sheet_name'] = (
-            sheets[0].get('properties', {}).get('title'))
+        VENDOR_CONTROL_CACHE['sheet_name'] = sheets[0].get('properties', {}).get('title')
         return VENDOR_CONTROL_CACHE['sheet_name']
     raise RuntimeError('Vendor Control sheet not found')
 
-
 def normalized_header(value):
     return re.sub(r'[^a-z0-9]+', '', str(value or '').lower())
-
 
 def find_vendor_control_columns(headers):
     normalized = {}
@@ -2309,69 +2107,51 @@ def find_vendor_control_columns(headers):
         key = normalized_header(header)
         if key and key not in normalized:
             normalized[key] = idx + 1
-
     def pick(names):
         for name in names:
             idx = normalized.get(normalized_header(name))
             if idx:
                 return idx
         return None
-
     return {
-        'vendor_name': pick(['Vendor Name', 'Vendor Nm', 'Vendor',
-                              'Supplier Name', 'Supplier']),
-        'vendor_id': pick(['Vendor ID', 'Vendor Id', 'VendorID',
-                            'ID', 'User ID']),
+        'vendor_name': pick(['Vendor Name', 'Vendor Nm', 'Vendor', 'Supplier Name', 'Supplier']),
+        'vendor_id': pick(['Vendor ID', 'Vendor Id', 'VendorID', 'ID', 'User ID']),
         'password': pick(['Password', 'Pass', 'PWD', 'Pwd']),
     }
-
 
 def vendor_control_rows(force=False):
     now = datetime.utcnow()
     if (not force and VENDOR_CONTROL_CACHE.get('expires_at') and
-            VENDOR_CONTROL_CACHE['expires_at'] > now and
-            VENDOR_CONTROL_CACHE.get('rows')):
-        return VENDOR_CONTROL_CACHE['rows'], VENDOR_CONTROL_CACHE.get(
-            'fetched_at')
+            VENDOR_CONTROL_CACHE['expires_at'] > now and VENDOR_CONTROL_CACHE.get('rows')):
+        return VENDOR_CONTROL_CACHE['rows'], VENDOR_CONTROL_CACHE.get('fetched_at')
 
     sheet_name = vendor_control_sheet_name()
-    result = google_sheets_values_get(
-        VENDOR_CONTROL_SHEET_ID, f"'{sheet_name}'!A:Z")
+    result = google_sheets_values_get(VENDOR_CONTROL_SHEET_ID, f"'{sheet_name}'!A:Z")
     values = result.get('values', [])
     if not values:
         rows = []
         fetched_at = datetime.utcnow()
-        VENDOR_CONTROL_CACHE.update({
-            'rows': rows, 'fetched_at': fetched_at,
-            'expires_at': fetched_at + timedelta(
-                seconds=VENDOR_CONTROL_CACHE_TTL_SECONDS),
-            'columns': {},
-        })
+        VENDOR_CONTROL_CACHE.update({'rows': rows, 'fetched_at': fetched_at, 'expires_at': fetched_at + timedelta(seconds=VENDOR_CONTROL_CACHE_TTL_SECONDS), 'columns': {}})
         return rows, fetched_at
 
     header_index = 0
     columns = {}
     for idx, candidate_headers in enumerate(values[:20]):
         candidate_columns = find_vendor_control_columns(candidate_headers)
-        if all(candidate_columns.get(name)
-               for name in ('vendor_name', 'vendor_id', 'password')):
+        if all(candidate_columns.get(name) for name in ('vendor_name', 'vendor_id', 'password')):
             header_index = idx
             columns = candidate_columns
             break
-
-    missing = [name for name in ('vendor_name', 'vendor_id', 'password')
-               if not columns.get(name)]
+    missing = [name for name in ('vendor_name', 'vendor_id', 'password') if not columns.get(name)]
     if missing:
-        raise RuntimeError(
-            f"Vendor Control sheet missing columns: {', '.join(missing)}")
+        raise RuntimeError(f"Vendor Control sheet missing required columns: {', '.join(missing)}")
 
     def cell(row, col_index):
         idx = col_index - 1
         return clean(row[idx]) if idx < len(row) else ''
 
     rows = []
-    for sheet_row, raw in enumerate(
-            values[header_index + 1:], start=header_index + 2):
+    for sheet_row, raw in enumerate(values[header_index + 1:], start=header_index + 2):
         vendor_name = cell(raw, columns['vendor_name'])
         vendor_id = cell(raw, columns['vendor_id'])
         password = cell(raw, columns['password'])
@@ -2386,16 +2166,14 @@ def vendor_control_rows(force=False):
             'vendor_id': vendor_id,
             'password': password,
         })
-
     fetched_at = datetime.utcnow()
     VENDOR_CONTROL_CACHE.update({
-        'rows': rows, 'fetched_at': fetched_at,
-        'expires_at': fetched_at + timedelta(
-            seconds=VENDOR_CONTROL_CACHE_TTL_SECONDS),
+        'rows': rows,
+        'fetched_at': fetched_at,
+        'expires_at': fetched_at + timedelta(seconds=VENDOR_CONTROL_CACHE_TTL_SECONDS),
         'columns': columns,
     })
     return rows, fetched_at
-
 
 def sync_vendor_control_cell(sheet_row, field, value):
     if field not in ('vendor_id', 'password'):
@@ -2407,1619 +2185,5165 @@ def sync_vendor_control_cell(sheet_row, field, value):
         columns = VENDOR_CONTROL_CACHE.get('columns') or {}
     column_index = columns.get(field)
     if not column_index:
-        return {'synced': False,
-                'reason': f'Sheet column for {field} not found'}
-    range_name = (f"'{sheet_name}'!"
-                  f"{column_letter_from_index(column_index)}{sheet_row}")
-    google_sheets_values_update(
-        VENDOR_CONTROL_SHEET_ID, range_name, [[value or '']])
+        return {'synced': False, 'reason': f'Sheet column for {field} was not found'}
+    range_name = f"'{sheet_name}'!{column_letter_from_index(column_index)}{sheet_row}"
+    google_sheets_values_update(VENDOR_CONTROL_SHEET_ID, range_name, [[value or '']])
     VENDOR_CONTROL_CACHE['expires_at'] = None
     return {'synced': True, 'range': range_name}
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 14. IMPORT DASHBOARD HELPERS
-# ═══════════════════════════════════════════════════════════════════════════
-
-IMPORT_LAYOUT_SHEET_ID = '1i0N4VdF_vMHjr_0gjrUdS7nCKUpxPYvDWW-HOWSanEM'
-IMPORT_LAYOUT_GID = '73188127'
-IMPORT_SOURCE_SHEETS = [
-    {'key': 'source_1',
-     'spreadsheet_id': '1OSISIb3-D_-oxj2LXH4Q3jcG2IZWnjFGWAmTmdcPBJg',
-     'gid': '0', 'label': 'Source 1'},
-    {'key': 'source_2',
-     'spreadsheet_id': '17P7_JsUGF5mqlz-j2fdvFZ9-gX8l-WGPqZABjng5Hnc',
-     'gid': '0', 'label': 'Source 2'},
-]
-IMPORT_LAYOUT_VENDOR_COLUMNS = (5, 28)
-IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS = (16,)
-
-
-def import_meta_get(key):
-    row = ImportDashboardMeta.query.filter_by(meta_key=key).first()
-    if not row:
-        return None
+def parse_date(val):
+    if val is None: return None
     try:
-        return json.loads(row.value_json or 'null')
-    except (TypeError, json.JSONDecodeError):
+        if pd.isna(val): return None
+    except (TypeError, ValueError): pass
+    raw = str(val).strip()
+    if re.match(r'^\d{8}(\.0)?$', raw):
+        try:
+            return datetime.strptime(raw[:8], '%Y%m%d').date()
+        except ValueError:
+            pass
+    try: return pd.to_datetime(val).date()
+    except: return None
+
+def safe_float(val, default=0.0):
+    try:
+        if pd.isna(val): return default
+    except (TypeError, ValueError): pass
+    try: return float(val)
+    except: return default
+
+def find_column(df, names):
+    low = {c.lower().strip(): c for c in df.columns}
+    for n in names:
+        if n.lower().strip() in low: return low[n.lower().strip()]
+    return None
+
+def uploaded_files():
+    files = []
+    for key in ('file', 'files'):
+        files.extend(request.files.getlist(key))
+    return [f for f in files if f and f.filename]
+
+def read_upload_excel(file):
+    raw = file.read()
+    file.seek(0)
+    filename = (file.filename or '').lower()
+    is_xls_format = raw[:4] == b'\xd0\xcf\x11\xe0'
+    engine = 'xlrd' if is_xls_format or filename.endswith('.xls') else 'openpyxl'
+    return pd.read_excel(file, sheet_name=0, engine=engine)
+
+
+
+# ─── Shared upload input helpers: Excel and JSON ──────────────────────────────
+def _json_rows_to_dataframe(rows, columns=None):
+    """Convert JSON rows into a pandas DataFrame.
+
+    Supported row formats:
+    - list[dict]: [{"SO Number": "...", ...}]
+    - list[list] + columns: {"columns": ["SO Number", ...], "rows": [[...], ...]}
+    """
+    if rows is None:
+        rows = []
+    if not isinstance(rows, list):
+        raise ValueError('JSON rows/data must be a list')
+
+    if columns:
+        return pd.DataFrame(rows, columns=[str(c).strip() for c in columns])
+
+    if not rows:
+        return pd.DataFrame()
+
+    if all(isinstance(r, dict) for r in rows):
+        return pd.DataFrame(rows)
+
+    return pd.DataFrame(rows)
+
+
+def _json_payload_to_uploads(payload, default_filename='json_upload'):
+    """Normalize one JSON request body into [{'filename': str, 'df': DataFrame}].
+
+    Accepted payloads:
+    1. {"filename": "x.json", "rows": [{...}]}
+    2. {"filename": "x.json", "columns": [...], "rows": [[...]]}
+    3. {"files": [{"filename": "a.json", "rows": [...]}, ...]}
+    4. [{"col": "value"}, ...]
+    5. {"col": "value"}  -> treated as one row
+    """
+    if payload is None:
+        raise ValueError('Invalid or empty JSON body')
+
+    def one(obj, index=1):
+        if isinstance(obj, dict):
+            filename = clean(obj.get('filename')) or clean(obj.get('name')) or f'{default_filename}_{index}.json'
+            columns = obj.get('columns')
+            rows = (
+                obj.get('rows')
+                if 'rows' in obj else
+                obj.get('data')
+                if 'data' in obj else
+                obj.get('records')
+                if 'records' in obj else
+                obj.get('items')
+                if 'items' in obj else
+                None
+            )
+
+            if rows is None:
+                # Treat plain JSON object as a single row if it does not use rows/data.
+                row = {k: v for k, v in obj.items() if k not in ('filename', 'name', 'columns')}
+                rows = [row] if row else []
+
+            df = _json_rows_to_dataframe(rows, columns=columns)
+            df.columns = [str(c).strip() for c in df.columns]
+            return {'filename': filename, 'df': df}
+
+        if isinstance(obj, list):
+            filename = f'{default_filename}_{index}.json'
+            df = _json_rows_to_dataframe(obj)
+            df.columns = [str(c).strip() for c in df.columns]
+            return {'filename': filename, 'df': df}
+
+        raise ValueError('Each JSON upload must be an object or list')
+
+    uploads = []
+    if isinstance(payload, dict) and isinstance(payload.get('files'), list):
+        for idx, item in enumerate(payload.get('files') or [], start=1):
+            uploads.append(one(item, idx))
+    else:
+        uploads.append(one(payload, 1))
+
+    return [u for u in uploads if u['df'] is not None]
+
+
+def request_upload_dataframes(default_filename='upload'):
+    """Return uploads from either Excel multipart/form-data or JSON body.
+
+    This keeps manual Excel upload working, while allowing the same endpoint
+    to receive JSON from automation.
+    """
+    content_type = (request.content_type or '').lower()
+    if request.is_json or 'application/json' in content_type:
+        payload = request.get_json(silent=True)
+        uploads = _json_payload_to_uploads(payload, default_filename=default_filename)
+        return uploads, 'json'
+
+    files = uploaded_files()
+    uploads = []
+    for file in files:
+        df = read_upload_excel(file)
+        df.columns = [str(c).strip() for c in df.columns]
+        uploads.append({'filename': file.filename, 'df': df})
+    return uploads, 'excel'
+
+def upload_replace_mode():
+    """Return True only when caller explicitly wants DB to mirror upload rows."""
+    raw = request.args.get('replace') or request.args.get('snapshot') or ''
+    if not raw and request.is_json:
+        payload = request.get_json(silent=True) or {}
+        if isinstance(payload, dict):
+            raw = payload.get('replace') or payload.get('snapshot') or ''
+    return str(raw).strip().lower() in ('1', 'true', 'yes', 'replace', 'snapshot')
+
+def validate_upload_columns(filename, label, col_map, expected, required, max_missing=3):
+    missing_expected = [display for key, display in expected if not col_map.get(key)]
+    if len(missing_expected) > max_missing:
+        raise ValueError(
+            f'Struktur kolom tidak cocok untuk {label}: lebih dari {max_missing} kolom penting tidak ditemukan '
+            f'({", ".join(missing_expected)}). Pastikan file yang diupload benar.'
+        )
+    missing_required = [display for key, display in required if not col_map.get(key)]
+    if missing_required:
+        raise ValueError(
+            f'Struktur kolom tidak cocok untuk {label}: kolom wajib tidak ditemukan: '
+            f'{", ".join(missing_required)}.'
+        )
+
+def _product_id_columns(df):
+    return {
+        'product_id': find_column(df, ['Product ID', 'Prod. ID', 'Prod ID']),
+        'category_id': find_column(df, ['Category ID', 'Category Id', 'CategoryID', 'Cat. ID', 'Cat. ID.']),
+        'category_name': find_column(df, ['Category Name', 'Category Nm.', 'Cat. Nm.', 'Cat. Nm']),
+        'product_name': find_column(df, ['Product Name', 'Prod. Nm.', 'Prod. Nm', 'Product Name(EN)']),
+        'product_status': find_column(df, ['Product Status', 'Prod. Status', 'Prod Status']),
+        'specification': find_column(df, ['Specification', 'Spec.', 'Spec']),
+        'manufacturer_name': find_column(df, ['Manufacturer Name', 'Mfr. Nm.', 'Mfr. Nm', 'Maker Nm.']),
+        'vendor_name': find_column(df, ['Vendor Name', 'Vendor Nm.', 'Vendor Nm', 'Supplier Name', 'Supplier']),
+        'order_unit': find_column(df, ['Order Unit', 'Odr. Unit', 'Odr. Unit.']),
+        'hub_handling_check': find_column(df, ['HUB Handling Check', 'HUB Handling Chk.', 'HUB Handling Chk']),
+        'tax_type': find_column(df, ['Purchasing Price Tax Type', 'Tax Type', 'Tax Type.', 'Tax']),
+        'registration_date': find_column(df, ['Registration Date', 'Prod. Reg. Date', 'Product Registration Date', 'Product Reg. Date', 'Reg. Date']),
+        'product_registry_pic': find_column(df, [
+            'Product Registy PIC(Name)', 'Product Registry PIC(Name)',
+            'Product Registy PIC', 'Product Registry PIC',
+            'Product Registered by(Name)', 'Prod. Reg. PIC Nm.', 'Prod. Reg. PIC Nm',
+            'Prod. Reg. PIC', 'Product Registry PIC Name'
+        ]),
+    }
+
+def _master_pic_columns(df):
+    return {
+        'category_id': find_column(df, ['Category ID', 'Category Id', 'CategoryID', 'Cat. ID', 'Cat. ID.']),
+        'category_name': find_column(df, ['Category Name', 'Category Nm.', 'Cat. Nm.', 'Cat. Nm']),
+        'pic': find_column(df, ['PIC', 'PIC Name', 'Pur. PIC', 'Purchase PIC', 'Current PIC', 'Nama PIC']),
+        'pic_update': find_column(df, ['Update New PIC', 'New PIC', 'Update PIC', 'PIC Baru', 'New PIC Name']),
+    }
+
+def selected_clients(args=None):
+    args = args if args is not None else request.args
+    return [c.strip() for c in args.getlist('client') if c and c.strip()]
+
+def selected_pics(args=None):
+    args = args if args is not None else request.args
+    return [p.strip() for p in args.getlist('pic') if p and p.strip()]
+
+def matches_selected_client(value, clients):
+    if not clients:
+        return True
+    v = (value or '').strip().lower()
+    return any(v == c.lower() for c in clients)
+
+def apply_so_client_filter(query, clients):
+    if clients:
+        return query.filter(SOData.operation_unit_name.in_(clients))
+    return query
+
+def apply_so_pic_filter(query, pics):
+    if not pics:
+        return query
+    if '__NONE_PLACEHOLDER__' in pics:
+        return query.filter(SOData.id.is_(None))
+    non_yupi_op_unit = db.or_(SOData.operation_unit_name.is_(None), db.not_(SOData.operation_unit_name.ilike('%YUPI%')))
+    if 'ANDRE' in pics:
+        others = [p for p in pics if p != 'ANDRE']
+        andre_filter = db.or_(SOData.pic_name == 'ANDRE', SOData.operation_unit_name.ilike('%YUPI%'))
+        if others:
+            others_filter = db.and_(SOData.pic_name.in_(others), non_yupi_op_unit)
+            return query.filter(db.or_(others_filter, andre_filter))
+        return query.filter(andre_filter)
+    if '(Kosong)' in pics:
+        others = [p for p in pics if p != '(Kosong)']
+        empty_pic = db.and_(db.or_(SOData.pic_name.is_(None), SOData.pic_name == ''), non_yupi_op_unit)
+        if others:
+            others_filter = db.and_(SOData.pic_name.in_(others), non_yupi_op_unit)
+            return query.filter(db.or_(others_filter, empty_pic))
+        return query.filter(empty_pic)
+    return query.filter(SOData.pic_name.in_(pics), non_yupi_op_unit)
+
+def canonical_pending_pic(pic, client_or_op_unit=None):
+    if client_or_op_unit and 'YUPI' in str(client_or_op_unit).upper():
+        return 'ANDRE'
+    return pic or 'Unassigned'
+
+def canonical_rfq_pic(row):
+    return canonical_pending_pic(clean(row.get('purchase_pic')), row.get('client_name'))
+
+def sort_pic_kpis(rows):
+    return sorted(rows, key=lambda x: (0 if x.get('pic') == 'ANDRE' else 1, -x.get('count', 0), x.get('pic') or ''))
+
+def apply_item_registration_pic_filter(query, pics):
+    if not pics:
+        return query
+    non_yupi_client = db.or_(ItemRegistration.client_name.is_(None), db.not_(ItemRegistration.client_name.ilike('%YUPI%')))
+    if 'ANDRE' in pics:
+        others = [p for p in pics if p != 'ANDRE']
+        andre_filter = db.or_(ItemRegistration.pic == 'ANDRE', ItemRegistration.client_name.ilike('%YUPI%'))
+        if others:
+            others_filter = db.and_(ItemRegistration.pic.in_(others), non_yupi_client)
+            return query.filter(db.or_(others_filter, andre_filter))
+        return query.filter(andre_filter)
+    return query.filter(ItemRegistration.pic.in_(pics), non_yupi_client)
+
+def item_registration_dict(row, registered_items=None, include_similarity=True):
+    pic = resolve_item_registration_pic(row)
+    similar_items = find_similar_registered_items(row, registered_items) if include_similarity else None
+    return {
+        'id': row.id,
+        'proc_status': row.proc_status or '',
+        'req_date': row.req_date.isoformat() if row.req_date else '',
+        'existing_owner': row.existing_owner or '',
+        'client_name': row.client_name or '',
+        'category': source_category_level1(row.category),
+        'pic': pic,
+        'req_no': row.req_no or '',
+        'prod_id': row.prod_id or '',
+        'batch_grp_no': row.batch_grp_no or '',
+        'prod_name': row.prod_name or '',
+        'spec': row.spec or '',
+        'mfr_name': row.mfr_name or '',
+        'odr_unit': row.odr_unit or '',
+        'vendor_name': row.vendor_name or '',
+        'prod_price': row.prod_price or 0,
+        'curr': row.curr or '',
+        'remarks': row.remarks or '',
+        'uploaded_at': utc_isoformat(row.uploaded_at),
+        'similar_items': similar_items,
+        'similar_prod_ids': (similar_items or {}).get('product_ids', ''),
+        'similar_prod_name': (similar_items or {}).get('product_name', ''),
+        'similar_spec': (similar_items or {}).get('specification', ''),
+        'similar_mfr_name': (similar_items or {}).get('manufacturer_name', ''),
+        'similar_odr_unit': (similar_items or {}).get('order_unit', ''),
+        'similar_score': (similar_items or {}).get('similarity', None),
+        'similar_count': (similar_items or {}).get('count', 0),
+    }
+
+def product_category_level1(product_id):
+    if not product_id:
+        return ''
+    prod = db.session.query(ProductIDDB).filter_by(product_id=str(product_id).strip()).first()
+    if not prod or not prod.category_name:
+        return ''
+    full_category = prod.category_name.strip()
+    return full_category.split('>')[0].strip() if '>' in full_category else full_category
+
+def source_category_level1(category_value):
+    """Use the source Item Registration Cat. Nm. column and keep the text before first >."""
+    category = clean(category_value)
+    if not category:
+        return ''
+    if '>' in category:
+        return category.split('>', 1)[0].strip()
+    return category.strip()
+
+def normalize_category_id(value):
+    cat_id = clean(value)
+    if not cat_id:
+        return ''
+    if re.match(r'^\d+\.0$', cat_id):
+        return cat_id[:-2]
+    return cat_id.strip()
+
+def normalize_category_name(value):
+    category = source_category_level1(value)
+    if not category:
+        return ''
+    return re.sub(r'\s+', ' ', category).strip().lower()
+
+def master_pic_category_key(category_name):
+    """Stable internal key for MasterPIC rows created from Category Name only."""
+    norm = normalize_category_name(category_name)
+    if not norm:
+        return ''
+    return f"CATNAME_{hashlib.sha1(norm.encode('utf-8')).hexdigest()[:16]}"
+
+def find_master_pic_by_category_name(category_name):
+    norm = normalize_category_name(category_name)
+    if not norm:
         return None
+    generated_key = master_pic_category_key(category_name)
+    if generated_key:
+        existing = db.session.query(MasterPIC).filter_by(category_id=generated_key).first()
+        if existing:
+            return existing
+    # Backward compatibility: old rows may still have a real Category ID but the
+    # same Category Name. Treat Category Name as the unique business key.
+    for item in db.session.query(MasterPIC).order_by(MasterPIC.updated_at.desc()).all():
+        if normalize_category_name(item.category_name) == norm:
+            return item
+    return None
+
+def master_pic_unique_category_count():
+    return len({
+        normalize_category_name(m.category_name)
+        for m in db.session.query(MasterPIC.category_name).all()
+        if normalize_category_name(m.category_name)
+    })
+
+def invalidate_master_pic_cache():
+    _MASTER_PIC_CACHE['signature'] = None
+    _MASTER_PIC_CACHE['by_id'] = {}
+    _MASTER_PIC_CACHE['by_name'] = {}
+
+def master_pic_maps():
+    if _MASTER_PIC_CACHE.get('signature') is not None:
+        return _MASTER_PIC_CACHE['by_id'], _MASTER_PIC_CACHE['by_name']
+
+    signature = db.session.query(func.count(MasterPIC.id), func.max(MasterPIC.updated_at)).one()
+    signature = tuple(signature)
+
+    by_id = {}
+    by_name = {}
+    for m in MasterPIC.query.with_entities(MasterPIC.category_id, MasterPIC.category_name, MasterPIC.pic_name).order_by(MasterPIC.updated_at.desc()).all():
+        pic = clean(m.pic_name)
+        if not pic:
+            continue
+        cat_id = normalize_category_id(m.category_id)
+        if cat_id and cat_id not in by_id:
+            by_id[cat_id] = pic
+        cat_name = normalize_category_name(m.category_name)
+        if cat_name and cat_name not in by_name:
+            by_name[cat_name] = pic
+    _MASTER_PIC_CACHE['signature'] = signature
+    _MASTER_PIC_CACHE['by_id'] = by_id
+    _MASTER_PIC_CACHE['by_name'] = by_name
+    return by_id, by_name
+
+def _lookup_pic_by_category(category_id=None, category_name=None):
+    by_id, by_name = master_pic_maps()
+    cat_id = normalize_category_id(category_id)
+    if cat_id and cat_id in by_id:
+        return by_id[cat_id]
+    cat_name = normalize_category_name(category_name)
+    if cat_name and cat_name in by_name:
+        return by_name[cat_name]
+    return None
+
+def resolve_item_registration_pic(row):
+    mapped = _lookup_pic_by_category(row.category_id, row.category)
+    return canonical_pending_pic(mapped or row.pic or '', row.client_name)
+
+def is_existing_owner_pur_pic(value):
+    return (clean(value) or '').strip().lower() == 'pur. pic'
+
+ITEM_REG_KPI_EXCLUDED_STATUSES = {
+    'sales pic terminate(pur. pic)',
+    'purchase exception termination',
+    'sales pic confirmation req.(pur. pic)',
+    'pre-reg. prod. proc.(pur.)',
+}
+
+def item_registration_kpi_status_expr():
+    return func.lower(func.trim(func.coalesce(ItemRegistration.proc_status, '')))
+
+def apply_item_registration_kpi_status_filter(query):
+    """KPI Item Registration counts only active pending rows.
+
+Excluded statuses are business-stop / confirmation / pre-registration process
+statuses that should remain visible in the table but not inflate PIC KPI cards.
+"""
+    status_expr = item_registration_kpi_status_expr()
+    return query.filter(
+        ~status_expr.in_(list(ITEM_REG_KPI_EXCLUDED_STATUSES)),
+        ~status_expr.like('%sales%')
+    )
+
+def apply_item_registration_visible_status_filter(query):
+    return query.filter(~item_registration_kpi_status_expr().like('%sales%'))
+
+def refresh_item_registration_mappings():
+    rows = ItemRegistration.query.all()
+    changed = False
+    for row in rows:
+        category = source_category_level1(row.category)
+        normalized_cat_id = normalize_category_id(row.category_id)
+        if row.category_id != normalized_cat_id:
+            row.category_id = normalized_cat_id
+            changed = True
+        if row.category != category:
+            row.category = category
+            changed = True
+        pic = _lookup_pic_by_category(normalized_cat_id, category) or ''
+        if row.pic != pic:
+            row.pic = pic
+            changed = True
+    if changed:
+        db.session.commit()
+
+def _item_registration_columns(df):
+    return {
+        'proc_status':  find_column(df, ['Proc. Status', 'Proc Status', 'Process Status']),
+        'req_date':     find_column(df, ['Req. Date', 'Req Date', 'Request Date']),
+        'existing_owner': find_column(df, ['Existing Owner', 'Existing Owner.', 'Owner']),
+        'client_name':  find_column(df, ['Client Nm.', 'Client Nm', 'Client Name']),
+        'category':     find_column(df, ['Cat. Nm.', 'Cat. Nm', 'Category', 'Cate. Nm.', 'Category Name']),
+        'category_id':  find_column(df, ['Cat. ID', 'Cat. ID.', 'Category ID', 'Category Id', 'CategoryID']),
+        'pic':          find_column(df, ['PIC', 'Pur. PIC', 'Purchase PIC']),
+        'req_no':       find_column(df, ['Req. No', 'Req. No.', 'Request No', 'Request Number']),
+        'prod_id':      find_column(df, ['Prod. ID', 'Prod ID', 'Product ID']),
+        'product_status': find_column(df, ['Product Status', 'Prod. Status', 'Prod Status']),
+        'batch_grp_no': find_column(df, ['Batch Grp. No.', 'Batch Grp. No', 'Batch Group No']),
+        'prod_name':    find_column(df, ['Prod. Nm.', 'Prod. Nm', 'Product Name', 'Prod. Nm.(Eng.)']),
+        'spec':         find_column(df, ['Spec.', 'Spec', 'Specification']),
+        'mfr_name':     find_column(df, ['Mfr. Nm.', 'Mfr. Nm', 'Manufacturer Name', 'Maker Nm.']),
+        'odr_unit':     find_column(df, ['Odr. Unit', 'Odr. Unit.', 'Order Unit']),
+        'vendor_name':  find_column(df, ['Vendor Nm.', 'Vendor Nm', 'Vendor Name']),
+        'prod_price':   find_column(df, ['Prod. Price', 'Product Price', 'Price']),
+        'curr':         find_column(df, ['Curr.', 'Curr', 'Currency']),
+        'hub_handling_check': find_column(df, [
+            'HUB Handling Chk.', 'HUB Handling Chk', 'HUB Handling Check',
+            'Hub Handling Check', 'Hub Handling Chk.'
+        ]),
+        'tax_type': find_column(df, ['Tax Type', 'Tax Type.', 'Tax']),
+        'registration_date': find_column(df, [
+            'Prod. Reg. Date', 'Product Reg. Date', 'Product Registration Date',
+            'Registration Date', 'Reg. Date'
+        ]),
+        'product_registry_pic': find_column(df, [
+            'Prod. Reg. PIC Nm.', 'Prod. Reg. PIC Nm', 'Prod. Reg. PIC',
+            'Product Registry PIC', 'Product Registration PIC', 'Product Reg. PIC'
+        ]),
+    }
+
+def validate_item_registration_source_file(df, filename='Item Registration'):
+    """Accept only SAP Process Pur. Info. Reg. exports for Item Registration.
+
+    Prod. Reg. Status is a different SAP export with similar registration-looking
+    columns. It must be rejected here because the Item Registration page is built
+    from Process Pur. Info. Reg. data.
+    """
+    marker_cols = {str(c).strip().lower() for c in df.columns}
+
+    process_markers = {
+        'unified vendor', 'bid/quo.', 'multi. bidding required',
+        'bid no.', 'deadline', 'pur. info. proc. compl. date',
+        'vendor confirm req. detail', 'vendor confirm proc. detail',
+    }
+    prod_reg_markers = {
+        'register request',
+        'prod. req. skip reason',
+        'prod. reg. req. compl. date',
+        'prod. reg. req. reject date',
+    }
+
+    matched_process = sorted(process_markers & marker_cols)
+    matched_prod_reg = sorted(prod_reg_markers & marker_cols)
+
+    if matched_prod_reg and not matched_process:
+        raise ValueError(
+            'Struktur kolom tidak cocok untuk Item Registration. '
+            'Upload yang benar adalah struktur SAP Process Pur. Info. Reg., bukan Prod. Reg. Status.'
+        )
+
+    if not matched_process:
+        raise ValueError(
+            'Struktur kolom tidak terlihat seperti SAP Process Pur. Info. Reg. '
+            'Kolom marker wajib tidak ditemukan: Unified Vendor / Bid/Quo. / Multi. Bidding Required / Bid No. / Deadline.'
+        )
 
 
-def import_meta_set(key, value):
-    row = ImportDashboardMeta.query.filter_by(meta_key=key).first()
-    if not row:
-        row = ImportDashboardMeta(meta_key=key)
-        db.session.add(row)
-    row.value_json = json.dumps(value, ensure_ascii=False)
-    row.updated_at = datetime.utcnow()
+def import_item_registration_dataframe(df, filename='Item Registration'):
+    df.columns = [str(c).strip() for c in df.columns]
+    validate_item_registration_source_file(df, filename)
+    col = _item_registration_columns(df)
+    expected = [
+        ('proc_status', 'Proc. Status'), ('client_name', 'Client Nm.'),
+        ('category', 'Cat. Nm.'), ('category_id', 'Category ID'),
+        ('req_no', 'Req. No'), ('prod_name', 'Product Name'),
+        ('spec', 'Specification'), ('mfr_name', 'Manufacturer Name'),
+        ('odr_unit', 'Order Unit'), ('vendor_name', 'Vendor Name'),
+        ('prod_price', 'Prod. Price'), ('curr', 'Curr.')
+    ]
+    required = [
+        ('proc_status', 'Proc. Status'), ('client_name', 'Client Nm.'),
+        ('category', 'Cat. Nm.'), ('category_id', 'Category ID'),
+        ('req_no', 'Req. No'), ('prod_name', 'Product Name')
+    ]
+    validate_upload_columns(filename, 'Item Registration', col, expected, required)
+
+    incoming = {}
+    for _, row in df.iterrows():
+        req_no = clean(df_val(row, col['req_no']))
+        prod_id = clean_product_id(df_val(row, col['prod_id']))
+        prod_name = clean(df_val(row, col['prod_name']))
+        if not req_no:
+            continue
+        category_id = normalize_category_id(df_val(row, col['category_id']))
+        category = source_category_level1(df_val(row, col['category']))
+        incoming[req_no] = {
+            'proc_status': clean(df_val(row, col['proc_status'])),
+            'req_date': parse_date(df_val(row, col['req_date'])),
+            'existing_owner': clean(df_val(row, col['existing_owner'])),
+            'client_name': clean(df_val(row, col['client_name'])),
+            'category': category,
+            'category_id': category_id,
+            'pic': _lookup_pic_by_category(category_id, category) or '',
+            'req_no': req_no,
+            'prod_id': prod_id,
+            'product_status': clean(df_val(row, col['product_status'])),
+            'batch_grp_no': clean(df_val(row, col['batch_grp_no'])),
+            'prod_name': prod_name,
+            'spec': clean(df_val(row, col['spec'])),
+            'mfr_name': clean(df_val(row, col['mfr_name'])),
+            'odr_unit': clean(df_val(row, col['odr_unit'])),
+            'vendor_name': clean(df_val(row, col['vendor_name'])),
+            'prod_price': safe_float(df_val(row, col['prod_price'])),
+            'curr': clean(df_val(row, col['curr'])),
+            'hub_handling_check': clean(df_val(row, col['hub_handling_check'])),
+            'tax_type': clean(df_val(row, col['tax_type'])),
+            'registration_date': parse_date(df_val(row, col['registration_date'])),
+            'product_registry_pic': clean(df_val(row, col['product_registry_pic'])),
+            'uploaded_at': datetime.utcnow(),
+        }
+
+    req_numbers = list(incoming.keys())
+    existing_map = {}
+    duplicate_rows = []
+    if req_numbers:
+        existing_rows = ItemRegistration.query.filter(ItemRegistration.req_no.in_(req_numbers)).order_by(ItemRegistration.id.asc()).all()
+        for existing in existing_rows:
+            if existing.req_no in existing_map:
+                duplicate_rows.append(existing)
+            else:
+                existing_map[existing.req_no] = existing
+
+    added = updated = removed_duplicates = 0
+    for dup in duplicate_rows:
+        db.session.delete(dup)
+        removed_duplicates += 1
+
+    for req_no, payload in incoming.items():
+        existing = existing_map.get(req_no)
+        if existing:
+            for key, value in payload.items():
+                setattr(existing, key, value)
+            updated += 1
+        else:
+            db.session.add(ItemRegistration(**payload))
+            added += 1
+
+    db.session.add(UploadLog(file_type='ITEM_REG', filename=filename, records_count=len(incoming)))
+    return {
+        'processed': len(incoming),
+        'added': added,
+        'updated': updated,
+        'removed_duplicates': removed_duplicates,
+        'keys': list(incoming.keys()),
+    }
+
+def ensure_default_item_registration_loaded():
+    if db.session.query(func.count(ItemRegistration.id)).scalar():
+        return
+    default_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'Process+Pur.+Info.+Reg._20260526143511.xlsx')
+    if not os.path.exists(default_path):
+        return
+    df = pd.read_excel(default_path, engine='openpyxl')
+    import_item_registration_dataframe(df, os.path.basename(default_path))
     db.session.commit()
 
+def df_val(row, col):
+    return row.get(col) if col else None
 
-def import_clean_header(value, fallback):
-    label = (clean(value) or '').replace('\r', '').replace('\n', ' / ')
-    return label or fallback
+def get_aging_label(workday_count):
+    """Classify aging bucket based on working days. None (no date) → '180+' bucket."""
+    if workday_count is None: return '180+'
+    if workday_count >= 180: return '180+'
+    if workday_count >= 90:  return '90-180'
+    if workday_count >= 30:  return '30-90'
+    return '0-30'
 
-
-def import_header_key(value):
-    return re.sub(r'[^a-z0-9]+', '', (clean(value) or '').lower())
-
-
-def import_layout_columns(force=False):
-    cache_key = ('import_layout_columns',)
-    cached = None if force else runtime_cache_get(cache_key)
-    if cached is not None:
-        return cached
-    cached = None if force else import_meta_get('layout_columns')
-    if cached is not None:
-        runtime_cache_set(cache_key, cached, ttl_seconds=900)
-        return cached
-    df = read_public_sheet_csv(
-        IMPORT_LAYOUT_SHEET_ID, IMPORT_LAYOUT_GID, nrows=3)
-    header_row = df.iloc[1] if len(df) > 1 else (
-        df.iloc[0] if len(df) else [])
-    columns = []
-    seen = {}
-    for idx, raw in enumerate(list(header_row)):
-        label = import_clean_header(raw, '')
-        if not label:
-            continue
-        base = (re.sub(r'[^a-z0-9]+', '_', label.lower()).strip('_')
-                or f'col_{idx}')
-        count = seen.get(base, 0) + 1
-        seen[base] = count
-        field = base if count == 1 else f'{base}_{count}'
-        columns.append(
-            {'field': field, 'label': label, 'col_idx': idx})
-    import_meta_set('layout_columns', columns)
-    runtime_cache_set(cache_key, columns, ttl_seconds=900)
-    return columns
-
-
-def import_default_vendors_from_layout(force=False):
-    cache_key = ('import_default_vendors_from_layout',)
-    cached = None if force else runtime_cache_get(cache_key)
-    if cached is not None:
-        return cached
-    cached = None if force else import_meta_get('default_vendors')
-    if cached is not None:
-        runtime_cache_set(cache_key, cached, ttl_seconds=900)
-        return cached
-    try:
-        df = read_public_sheet_csv(
-            IMPORT_LAYOUT_SHEET_ID, IMPORT_LAYOUT_GID)
-    except Exception:
-        return []
-    vendors = set()
-    for row_idx in range(2, len(df)):
-        for col_idx in IMPORT_LAYOUT_VENDOR_COLUMNS:
-            if col_idx >= df.shape[1]:
-                continue
-            name = clean(df.iloc[row_idx, col_idx])
-            if not name or name.lower() in ('vendor', 'vendor name'):
-                continue
-            vendors.add(name)
-    vendors = sorted(vendors, key=lambda s: s.lower())
-    import_meta_set('default_vendors', vendors)
-    runtime_cache_set(cache_key, vendors, ttl_seconds=900)
-    return vendors
-
-
-def import_vendor_names(force_default=False):
-    rows = ImportVendor.query.order_by(
-        ImportVendor.vendor_name.asc()).all()
-    uploaded = [r.vendor_name for r in rows if clean(r.vendor_name)]
-    return uploaded or import_default_vendors_from_layout(
-        force=force_default)
-
-
-def import_detect_data_start(df):
-    for idx in range(min(len(df), 12)):
-        item = clean(df.iloc[idx, 7]) if df.shape[1] > 7 else ''
-        vendor = clean(df.iloc[idx, 16]) if df.shape[1] > 16 else ''
-        qty = clean(df.iloc[idx, 12]) if df.shape[1] > 12 else ''
-        if (item and item.lower() != 'item name' and (vendor or qty)):
-            return idx
-    return 3
-
-
-def import_detect_header_row(df):
-    for idx in range(min(len(df), 12)):
-        labels = [import_header_key(v) for v in df.iloc[idx].tolist()]
-        if ('itemname' in labels and
-                ('vendorname' in labels or 'posementara' in labels)):
-            return idx
-    return max(import_detect_data_start(df) - 1, 0)
-
-
-def import_source_column_map(df, columns):
-    header_idx = import_detect_header_row(df)
-    header_values = list(df.iloc[header_idx]) if len(df) else []
-    by_key = {}
-    for idx, raw in enumerate(header_values):
-        key = import_header_key(raw)
-        if key and key not in by_key:
-            by_key[key] = idx
-    aliases = {
-        'site': ['siteidnkrg'],
-        'vendor': ['vendorname'],
-        'so': ['noso'],
-        'purchaseprice': ['purchaseprice', 'price', 'unitprice'],
-        'deliverystatus': [
-            'deliverystatus', 'createsopodeliverycompletefelix'],
-        'importcheck': ['importcheck', 'importautoinput'],
-        'happycall': ['happycall', 'poconfirmhappycall'],
-    }
-    source_map = {}
-    for col in columns:
-        keys = [import_header_key(col.get('label')),
-                import_header_key(col.get('field'))]
-        keys.extend(aliases.get(keys[0], []))
-        source_idx = next(
-            (by_key[k] for k in keys if k in by_key), None)
-        if source_idx is not None:
-            source_map[col['field']] = source_idx
-    return source_map
-
-
-def import_row_vendor_candidates(values, source_map, columns):
-    candidates = []
-    for field in ('vendor_name', 'vendor'):
-        col_idx = source_map.get(field)
-        if col_idx is not None and col_idx < len(values):
-            candidates.append(values[col_idx])
-    for col_idx in IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS:
-        if col_idx < len(values):
-            candidates.append(values[col_idx])
-    return [clean(v) for v in candidates if clean(v)]
-
-
-def import_sheet_rows(force_metadata=False):
-    columns = import_layout_columns(force=force_metadata)
-    vendor_set = {
-        v.strip().lower()
-        for v in import_vendor_names(force_default=force_metadata)
-        if v.strip()}
-    rows = []
-    for source in IMPORT_SOURCE_SHEETS:
-        df = read_public_sheet_csv(
-            source['spreadsheet_id'], source['gid'])
-        source_map = import_source_column_map(df, columns)
-        start_idx = import_detect_data_start(df)
-        for idx in range(start_idx, len(df)):
-            values = [clean(v) or '' for v in df.iloc[idx].tolist()]
-            vendor_candidates = import_row_vendor_candidates(
-                values, source_map, columns)
-            row_vendor = next((v for v in vendor_candidates if v), '')
-            if vendor_set and not any(
-                    v.strip().lower() in vendor_set
-                    for v in vendor_candidates if v):
-                continue
-            row = {
-                '_row_key': f"{source['key']}:{idx + 1}",
-                '_source_key': source['key'],
-                '_source_label': source['label'],
-                '_spreadsheet_id': source['spreadsheet_id'],
-                '_gid': source['gid'],
-                '_sheet_row': idx + 1,
-                '_vendor_name': row_vendor,
-            }
-            for col in columns:
-                col_idx = source_map.get(col['field'])
-                row[col['field']] = (
-                    values[col_idx]
-                    if col_idx is not None and col_idx < len(values)
-                    else '')
-            if not any(row.get(col['field']) for col in columns):
-                continue
-            rows.append(row)
-    return columns, rows
-
-
-def import_row_payload(row, columns):
-    return {col['field']: '' if row.get(col['field']) is None
-            else str(row.get(col['field'])) for col in columns}
-
-
-def import_row_source_uid(row, columns):
-    values = [clean(row.get(col['field'])) or '' for col in columns]
-    payload = {
-        'source': clean(row.get('_source_key')) or '',
-        'vendor': clean(row.get('_vendor_name')) or '',
-        'values': values,
-    }
-    raw = json.dumps(
-        payload, ensure_ascii=False,
-        sort_keys=True, separators=(',', ':'))
-    return hashlib.sha1(raw.encode('utf-8')).hexdigest()
-
-
-def import_dashboard_row_to_dict(row, columns):
-    try:
-        data = json.loads(row.data_json or '{}')
-    except (TypeError, json.JSONDecodeError):
-        data = {}
-    out = {col['field']: data.get(col['field'], '') for col in columns}
-    out.update({
-        '_row_key': row.row_key,
-        '_source_key': row.source_key,
-        '_source_label': row.source_label,
-        '_sheet_row': row.sheet_row,
-        '_vendor_name': row.vendor_name,
-        '_dashboard_id': row.id,
-    })
-    return out
-
-
-def sync_import_sheet_to_dashboard():
-    columns, sheet_rows = import_sheet_rows(force_metadata=True)
-    vendor_count = len(import_vendor_names(force_default=True))
-    existing = {r.row_key: r for r in ImportDashboardRow.query.all()}
-    duplicate_counts = {}
-    now = datetime.utcnow()
-    added = 0
-    seen = 0
-    for sheet_row in sheet_rows:
-        source_uid = import_row_source_uid(sheet_row, columns)
-        duplicate_base = (
-            f"{sheet_row.get('_source_key')}:{source_uid}")
-        duplicate_counts[duplicate_base] = (
-            duplicate_counts.get(duplicate_base, 0) + 1)
-        row_key = (
-            f"{duplicate_base}:{duplicate_counts[duplicate_base]}")
-        current = existing.get(row_key)
-        if current:
-            current.sheet_row = sheet_row.get('_sheet_row')
-            current.source_label = sheet_row.get('_source_label')
-            current.vendor_name = (
-                sheet_row.get('_vendor_name') or current.vendor_name)
-            current.last_seen_at = now
-            seen += 1
-            continue
-        db.session.add(ImportDashboardRow(
-            row_key=row_key,
-            source_key=sheet_row.get('_source_key') or '',
-            source_label=sheet_row.get('_source_label') or '',
-            source_uid=source_uid,
-            sheet_row=sheet_row.get('_sheet_row'),
-            vendor_name=sheet_row.get('_vendor_name') or '',
-            data_json=json.dumps(
-                import_row_payload(sheet_row, columns),
-                ensure_ascii=False),
-            first_seen_at=now,
-            last_seen_at=now,
-            updated_at=now,
-        ))
-        added += 1
-    db.session.commit()
-    clear_runtime_caches()
+def so_dict(s):
+    today = date.today()
+    age_days = workdays_since(s.so_create_date, today)
+    
+    # Get category from in-memory cache (no DB query per row).
+    category_name = _pid_category_lookup(s.product_id) if s.product_id else ''
+    
     return {
-        'added': added, 'seen': seen,
-        'sheet_rows': len(sheet_rows),
-        'vendor_count': vendor_count,
-        'columns': columns,
+        'id': s.id, 'so_number': s.so_number, 'so_item': s.so_item,
+        'so_status': s.so_status, 'operation_unit_name': s.operation_unit_name,
+        'vendor_id': s.vendor_id or '', 'vendor_name': s.vendor_name,
+        'customer_po_number': s.customer_po_number,
+        'delivery_memo': s.delivery_memo, 'product_name': s.product_name,
+        'specification': s.specification, 'manufacturer_name': s.manufacturer_name or '',
+        'product_id': s.product_id,
+        'category_name': category_name,
+        'svo_po': s.matched_po_number or '',
+        'so_qty': s.so_qty, 'sales_unit': s.sales_unit or '',
+        'sales_price': s.sales_price, 'sales_amount': s.sales_amount,
+        'currency': s.currency or '',
+        'purchasing_price': s.purchasing_price, 'purchasing_amount': s.purchasing_amount,
+        'purchasing_currency': s.purchasing_currency,
+        'so_create_date': s.so_create_date.isoformat() if s.so_create_date else '',
+        'delivery_possible_date': s.delivery_possible_date.isoformat() if s.delivery_possible_date else '',
+        'delivery_plan_date': s.delivery_plan_date.isoformat() if s.delivery_plan_date else '',
+        'remarks': s.remarks or '',
+        'pic_name': canonical_pending_pic(s.pic_name, s.operation_unit_name),
+        'aging_days': age_days,
+        'aging_label': get_aging_label(age_days)
     }
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 15. EXCEL EXPORT HELPERS
-# ═══════════════════════════════════════════════════════════════════════════
-
-def _excel_style_header():
-    return {
-        'font': Font(bold=True, color='FFFFFF', size=11),
-        'fill': PatternFill('solid', fgColor='2F5496'),
-        'alignment': Alignment(horizontal='center', vertical='center',
-                                wrap_text=True),
-        'border': Border(
-            left=Side(style='thin'),
-            right=Side(style='thin'),
-            top=Side(style='thin'),
-            bottom=Side(style='thin')),
-    }
+# ─── Build hidden set from delete requests ────────────────────────────────
+def get_hidden_so_items():
+    """Hide feature disabled: old callers remain compatible, but nothing is excluded."""
+    return set()
 
 
-def _excel_style_cell():
-    return {
-        'border': Border(
-            left=Side(style='thin'),
-            right=Side(style='thin'),
-            top=Side(style='thin'),
-            bottom=Side(style='thin')),
-        'alignment': Alignment(vertical='top', wrap_text=True),
-    }
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 16. API ENDPOINTS
-# ═══════════════════════════════════════════════════════════════════════════
-
-# ─── Health Check ────────────────────────────────────────────────────────
-
-@app.route('/')
-def index():
-    return jsonify({'status': 'ok', 'service': 'SO Dashboard API'})
-
-
-@app.route('/api/health')
-def api_health():
+@app.route('/api/dashboard/stats', methods=['GET'])
+def get_dashboard_stats():
     try:
-        db.session.execute(text('SELECT 1'))
-        db_ok = True
-    except Exception:
-        db_ok = False
-    return jsonify({
-        'status': 'ok' if db_ok else 'degraded',
-        'database': 'connected' if db_ok else 'error',
-        'exchange_rates_cached': len(_RATE_CACHE),
-        'timestamp': utc_isoformat(datetime.utcnow()),
-    })
+        cache_key = runtime_cache_key('dashboard_stats')
+        cached = runtime_cache_get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        hidden_so = get_hidden_so_items()
+
+        # SO Create Date filter (applied to every SO-based aggregate below).
+        # PO-based metrics (total_po_amount, po_without_so_count) and the data
+        # range / last_updated metadata are intentionally NOT filtered.
+        date_year, date_from, date_to = parse_so_date_args()
+        clients = selected_clients()
+        pics = selected_pics()
+
+        def so_q(*extra_filters):
+            q = db.session.query(SOData).filter(*extra_filters) if extra_filters else db.session.query(SOData)
+            q = apply_so_client_filter(q, clients)
+            q = apply_so_pic_filter(q, pics)
+            return apply_so_create_date_filter(q, date_year, date_from, date_to)
+        total_po_count = 0
+        po_count = 0
+        total_po_amount = 0.0
+        po_without_so_count = 0
+        so_without_po_count = 0
+
+        # Single pass over open SO rows — compute total_so_count AND so_without_po_count
+        # together instead of two separate full-table scans.
+        open_so_rows = so_q(
+            open_so_filter()
+        ).all()
+
+        # Prefetch exchange rates for all rows in one shot BEFORE the loop.
+        # Without this, purchase_amount_idr() falls back to per-row HTTP calls
+        # to the Frankfurter API, making page load very slow on first request.
+        prefetch_convertible_exchange_rates(open_so_rows, fetch_missing=False)
+
+        # All SO-based dashboard aggregates below must use exactly the same
+        # canonical Open SO dataset as the KPI above:
+        #   - SO create date filter
+        #   - open status filter
+        #   - excluded operation units removed
+        #   - hidden SO removed
+        #   - non-countable SO item/customer PO/delivery memo removed
+        # This keeps KPI, status distribution, pie chart, vendor, op unit, and
+        # aging-derived drilldowns consistent.
+        canonical_open_sos = []
+        total_open_so_amount = 0.0
+        monthly = {}
+        vendor_map = {}
+        op_unit_map = {}
+        status_map = {}
+        monthly_by_status = {}
+        all_months_set = set()
+
+        # Single pass — total_so_count is just len(canonical_open_sos) below.
+        # (Previously this was a second separate loop calling so_is_countable
+        # again for every row, doubling the regex-based has_internal_po_ref
+        # checks across the whole open-SO dataset.)
+        for s in open_so_rows:
+            if s.so_item in hidden_so or s.so_number in hidden_so:
+                continue
+            if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
+                continue
+
+            canonical_open_sos.append(s)
+            amount = float(s.sales_amount or 0)
+            total_open_so_amount += amount
+
+            if s.so_create_date:
+                month_key = s.so_create_date.strftime('%b %Y')
+                if month_key not in monthly:
+                    monthly[month_key] = {
+                        'month': month_key,
+                        'so_count': 0,
+                        'amount': 0.0,
+                        'purchase_amount': 0.0,
+                        '_s': s.so_create_date.replace(day=1)
+                    }
+                monthly[month_key]['so_count'] += 1
+                monthly[month_key]['amount'] += round(amount / 1_000_000, 2)
+                monthly[month_key]['purchase_amount'] += round(purchase_amount_idr(s) / 1_000_000, 2)
+                all_months_set.add((s.so_create_date.replace(day=1), month_key))
+            else:
+                month_key = None
+
+            if s.vendor_name:
+                if s.vendor_name not in vendor_map:
+                    vendor_map[s.vendor_name] = {'vendor': s.vendor_name, 'so_count': 0, 'total_amount': 0.0}
+                vendor_map[s.vendor_name]['so_count'] += 1
+                vendor_map[s.vendor_name]['total_amount'] += amount
+
+            if s.operation_unit_name:
+                if s.operation_unit_name not in op_unit_map:
+                    op_unit_map[s.operation_unit_name] = {
+                        'op_unit': s.operation_unit_name,
+                        'so_count': 0,
+                        'total_amount': 0.0
+                    }
+                op_unit_map[s.operation_unit_name]['so_count'] += 1
+                op_unit_map[s.operation_unit_name]['total_amount'] += amount
+
+            status_name = s.so_status or 'Unknown'
+            if status_name not in status_map:
+                status_map[status_name] = {'name': status_name, 'value': 0, 'amount': 0.0}
+            status_map[status_name]['value'] += 1
+            status_map[status_name]['amount'] += amount
+
+            if status_name not in monthly_by_status:
+                monthly_by_status[status_name] = {'monthly': {}, 'total': 0, 'amount': 0.0}
+            monthly_by_status[status_name]['total'] += 1
+            monthly_by_status[status_name]['amount'] += amount
+            if month_key:
+                monthly_by_status[status_name]['monthly'][month_key] = (
+                    monthly_by_status[status_name]['monthly'].get(month_key, 0) + 1
+                )
+
+        total_so_count = len(canonical_open_sos)
+
+        monthly_trend = sorted(monthly.values(), key=lambda x: x['_s'])
+        for m in monthly_trend:
+            del m['_s']
+
+        top_vendors = sorted(
+            [{'vendor': v['vendor'], 'so_count': v['so_count'], 'total_amount': round(v['total_amount'], 2)}
+             for v in vendor_map.values()],
+            key=lambda x: x['total_amount'],
+            reverse=True
+        )[:5]
+
+        top_op_units = sorted(
+            [{'op_unit': v['op_unit'], 'so_count': v['so_count'], 'total_amount': round(v['total_amount'], 2)}
+             for v in op_unit_map.values()],
+            key=lambda x: x['total_amount'],
+            reverse=True
+        )[:10]
+
+        total_open_for_pct = total_so_count or 1
+        so_status = sorted(
+            [{'name': v['name'], 'value': v['value'],
+              'percentage': round(v['value'] / total_open_for_pct * 100, 1),
+              'amount': round(v['amount'], 2)}
+             for v in status_map.values()],
+            key=lambda x: x['value'],
+            reverse=True
+        )
+
+        sorted_months = [mk for _, mk in sorted(all_months_set)]
+        so_status_monthly = sorted(
+            [{'name': st, 'monthly': d['monthly'], 'total': d['total'],
+              'percentage': round(d['total'] / total_open_for_pct * 100, 1),
+              'amount': round(d['amount'], 2)}
+             for st, d in monthly_by_status.items()],
+            key=lambda x: x['total'], reverse=True
+        )
+
+        item_reg_base_q = apply_item_registration_kpi_status_filter(db.session.query(ItemRegistration))
+        if clients:
+            item_reg_base_q = item_reg_base_q.filter(ItemRegistration.client_name.in_(clients))
+
+        def item_registration_distribution(column, limit=None):
+            label_expr = func.coalesce(func.nullif(func.trim(column), ''), '(Kosong)')
+            rows = (
+                item_reg_base_q
+                .with_entities(label_expr.label('name'), func.count(ItemRegistration.id).label('value'))
+                .group_by(label_expr)
+                .order_by(func.count(ItemRegistration.id).desc(), label_expr.asc())
+            )
+            if limit:
+                rows = rows.limit(limit)
+            return [{'name': name or '(Kosong)', 'value': int(value or 0)} for name, value in rows.all()]
+
+        item_registration_proc_status = item_registration_distribution(ItemRegistration.proc_status)
+        item_registration_clients = item_registration_distribution(ItemRegistration.client_name, limit=10)
+
+        options_q = apply_so_create_date_filter(
+            db.session.query(SOData).filter(open_so_filter()),
+            date_year, date_from, date_to,
+        )
+        option_rows = [
+            s for s in options_q.all()
+            if s.so_item not in hidden_so
+            and s.so_number not in hidden_so
+            and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)
+        ]
+        client_options = sorted({s.operation_unit_name for s in option_rows if s.operation_unit_name})
+        pic_options = sorted({s.pic_name for s in option_rows if s.pic_name})
+
+        po_date_range = (None, None)
+        so_date_range = db.session.query(func.min(SOData.so_create_date), func.max(SOData.so_create_date)).first()
+
+        # Last updated: latest successful upload timestamp per source file.
+        last_po_upload = None
+        last_so_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'SO').scalar()
+        last_item_reg_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'ITEM_REG').scalar()
+        if not last_so_upload:
+            last_so_upload = db.session.query(func.max(SOData.uploaded_at)).scalar()
+        candidates = [x for x in [last_so_upload] if x]
+        last_upload = max(candidates) if candidates else None
+
+        # SO coverage: which year/months currently exist in the DB.
+        # Kept for API compatibility with any older frontend/client.
+        so_covered_months = {}
+        is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
+        if is_sqlite:
+            month_rows = db.session.query(
+                func.strftime('%Y', SOData.so_create_date).label('yr'),
+                func.strftime('%m', SOData.so_create_date).label('mo'),
+            ).filter(SOData.so_create_date.isnot(None)).distinct().all()
+        else:
+            month_rows = db.session.query(
+                func.extract('year', SOData.so_create_date).label('yr'),
+                func.extract('month', SOData.so_create_date).label('mo'),
+            ).filter(SOData.so_create_date.isnot(None)).distinct().all()
+            month_rows = [(str(int(yr)), f'{int(mo):02d}') for yr, mo in month_rows]
+
+        _MONTH_NAMES = ['January','February','March','April','May','June',
+                        'July','August','September','October','November','December']
+
+        for yr, mo in month_rows:
+            if yr and mo:
+                year_str = str(yr)
+                month_name = _MONTH_NAMES[int(mo) - 1]
+                so_covered_months.setdefault(year_str, []).append((int(mo), month_name))
+
+        so_covered_months = {
+            yr: [name for _, name in sorted(months)]
+            for yr, months in sorted(so_covered_months.items())
+        }
+
+        # Months whose SO rows were actually touched by an SO upload TODAY.
+        # uploaded_at is stored as naive UTC, while the business day follows WIB
+        # (UTC+7). Use explicit WIB day boundaries so uploads between 00:00 and
+        # 06:59 WIB are not incorrectly counted as the previous day.
+        wib_today = (datetime.utcnow() + timedelta(hours=7)).date()
+        today_start_utc = datetime.combine(wib_today, datetime.min.time()) - timedelta(hours=7)
+        tomorrow_start_utc = today_start_utc + timedelta(days=1)
+
+        updated_today_filters = (
+            SOData.so_create_date.isnot(None),
+            SOData.uploaded_at.isnot(None),
+            SOData.uploaded_at >= today_start_utc,
+            SOData.uploaded_at < tomorrow_start_utc,
+        )
+
+        if is_sqlite:
+            updated_month_rows = db.session.query(
+                func.strftime('%Y', SOData.so_create_date).label('yr'),
+                func.strftime('%m', SOData.so_create_date).label('mo'),
+            ).filter(*updated_today_filters).distinct().all()
+        else:
+            updated_month_rows = db.session.query(
+                func.extract('year', SOData.so_create_date).label('yr'),
+                func.extract('month', SOData.so_create_date).label('mo'),
+            ).filter(*updated_today_filters).distinct().all()
+            updated_month_rows = [
+                (str(int(yr)), f'{int(mo):02d}')
+                for yr, mo in updated_month_rows
+                if yr is not None and mo is not None
+            ]
+
+        so_updated_months_today = {}
+        for yr, mo in updated_month_rows:
+            if yr and mo:
+                year_str = str(yr)
+                month_number = int(mo)
+                month_name = _MONTH_NAMES[month_number - 1]
+                so_updated_months_today.setdefault(year_str, []).append(
+                    (month_number, month_name)
+                )
+
+        so_updated_months_today = {
+            yr: [name for _, name in sorted(months)]
+            for yr, months in sorted(so_updated_months_today.items())
+        }
+
+        # RFQ last updated: from the in-process cache (Google Sheets last fetch)
+        rfq_fetched_at = RFQ_CACHE.get('fetched_at')
+
+        payload = {
+            'po_without_so': po_without_so_count,
+            'so_without_po': so_without_po_count,
+            'total_po_count': total_po_count,
+            'total_po_line_count': po_count,
+            'total_po_amount': float(total_po_amount),
+            'total_so_count': total_so_count,
+            'total_open_so_amount': float(total_open_so_amount),
+            'monthly_trend': monthly_trend,
+            'top_vendors': top_vendors,
+            'top_op_units': top_op_units,
+            'so_status': so_status,
+            'so_status_monthly': so_status_monthly,
+            'status_months': sorted_months,
+            'item_registration_proc_status': item_registration_proc_status,
+            'item_registration_clients': item_registration_clients,
+            'filters': {
+                'clients': client_options,
+                'pics': pic_options,
+            },
+            'last_updated': utc_isoformat(last_upload),
+            'last_updated_po': utc_isoformat(last_po_upload),
+            'last_updated_smro': utc_isoformat(last_so_upload),
+            'last_updated_item_registration': utc_isoformat(last_item_reg_upload),
+            'last_updated_rfq': utc_isoformat(rfq_fetched_at),
+            'so_covered_months': so_covered_months,
+            'so_updated_months_today': so_updated_months_today,
+            'so_updated_months_today_date': wib_today.isoformat(),
+            'po_date_range': {
+                'min': po_date_range[0].isoformat() if po_date_range and po_date_range[0] else None,
+                'max': po_date_range[1].isoformat() if po_date_range and po_date_range[1] else None,
+            },
+            'so_date_range': {
+                'min': so_date_range[0].isoformat() if so_date_range and so_date_range[0] else None,
+                'max': so_date_range[1].isoformat() if so_date_range and so_date_range[1] else None,
+            },
+        }
+        runtime_cache_set(cache_key, payload, ttl_seconds=20)
+        return jsonify(payload)
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 
-# ─── Exchange Rate Endpoints ─────────────────────────────────────────────
+@app.route('/api/debug/so-fields', methods=['GET'])
+@app.route('/api/debug/so-fields', methods=['GET'])
+def debug_so_fields():
+    """Debug endpoint — inspect spec/product_id fill rate and a sample of SO data."""
+    try:
+        total = db.session.query(func.count(SOData.id)).scalar() or 0
+        has_spec = db.session.query(func.count(SOData.id)).filter(
+            SOData.specification.isnot(None), SOData.specification != ''
+        ).scalar() or 0
+        has_pid = db.session.query(func.count(SOData.id)).filter(
+            SOData.product_id.isnot(None), SOData.product_id != ''
+        ).scalar() or 0
+        samples = db.session.query(
+            SOData.so_item, SOData.product_name, SOData.specification, SOData.product_id
+        ).limit(10).all()
+        return jsonify({
+            'total_so_records': total,
+            'records_with_specification': has_spec,
+            'records_with_product_id': has_pid,
+            'spec_fill_pct': round(has_spec / total * 100, 1) if total else 0,
+            'pid_fill_pct': round(has_pid / total * 100, 1) if total else 0,
+            'sample_rows': [
+                {'so_item': r[0], 'product_name': r[1], 'specification': r[2], 'product_id': r[3]}
+                for r in samples
+            ],
+            'hint': (
+                'If spec_fill_pct and pid_fill_pct are 0%, your SMRO Excel file likely uses '
+                'different column headers. Re-upload SMRO after checking column names. '
+                'Supported names: Specification|Spec|Specifications — Product ID|Product Id|'
+                'Product Code|Material|Material No|Material Number|Material Code|SKU'
+            )
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/debug/smro-columns', methods=['POST'])
+def debug_smro_columns():
+    """Inspect column names of an uploaded SMRO file without saving anything.
+    Returns all column names and which ones were detected as spec/pid/so_item."""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
+        file = request.files['file']
+        df = pd.read_excel(file, engine='openpyxl', nrows=3)
+        df.columns = [str(c).strip() for c in df.columns]
+        all_cols = df.columns.tolist()
+
+        detected = {
+            'col_so_item':  find_column(df, ['SO Item', 'SO Item No', 'SO Line', 'Item No', 'Line']),
+            'col_so_number': find_column(df, ['SO Number','SO No','SO No.','SO','Sales Order Number','No SO','Nomor SO']),
+            'col_spec':    find_column(df, ['Specification','Spec','Specifications','Product Specification','Material Description','Material Desc','Short Text']),
+            'col_pid':     find_column(df, ['Product ID','Product Id','Product Code','Material','Material No','Material Number','Material Code','SKU','Article','Article Number']),
+            'col_prod':    find_column(df, ['Product Name','Item Name','Description','Product']),
+            'col_status':  find_column(df, ['SO Status','Status','Order Status']),
+            'col_vendor':  find_column(df, ['Vendor Name','Vendor','Supplier']),
+            'col_sodate':  find_column(df, ['SO Create Date','Order Date','SO Date','Create Date']),
+        }
+
+        col_primary = detected['col_so_item'] or detected['col_so_number']
+        missing_critical = []
+        if not col_primary:
+            missing_critical.append('col_so_item / col_so_number')
+        for k in ('col_spec', 'col_pid'):
+            if not detected[k]:
+                missing_critical.append(k)
+
+        return jsonify({
+            'total_columns': len(all_cols),
+            'all_columns': all_cols,
+            'detected': detected,
+            'primary_key_column': col_primary,
+            'missing_critical': missing_critical,
+            'diagnosis': (
+                'col_spec and/or col_pid NOT detected — column names in this file do not match any known alias. '
+                'Check "all_columns" list and update backend aliases.'
+                if missing_critical else
+                'SO Item key, col_spec, and col_pid all detected — upload should work correctly.'
+            )
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/data/aging', methods=['GET'])
+@app.route('/api/data/aging', methods=['GET'])
+def get_aging_data():
+    """SO Aging by vendor.
+    Uses IDENTICAL filtering logic as total_so_count in /api/dashboard/stats so
+    the TOTAL row in the aging table always matches the KPI card:
+      - open SO only (open_so_filter)
+      - includes all operation units, including HLI GREEN POWER (CONSUMABLE)
+      - excludes hidden SO items
+      - includes return SO/statuses
+      - excludes internal PO refs
+      - SO records without so_create_date are bucketed as '180+' (not silently dropped)
+    """
+    try:
+        cache_key = runtime_cache_key('aging')
+        cached = runtime_cache_get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        today = date.today()
+        hidden_so = get_hidden_so_items()
+        clients = selected_clients()
+        pics = selected_pics()
+        date_year, date_from, date_to = parse_so_date_args()
+        vendors = {}
+
+        q = db.session.query(SOData).filter(
+            open_so_filter()
+        )
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, pics)
+        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
+        for s in q.all():
+            # Apply same exclusions as total_so_count
+            if s.so_item in hidden_so or s.so_number in hidden_so:
+                continue
+            if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
+                continue
+
+            v = s.vendor_name or 'Unknown'
+            if v not in vendors:
+                vendors[v] = {'vendor': v, 'less_30': 0, 'days_30_90': 0,
+                              'days_90_180': 0, 'more_180': 0, 'total_open': 0, 'sales_amount': 0.0}
+
+            age = workdays_since(s.so_create_date, today) if s.so_create_date else None
+            if age is None:
+                # No SO create date — put in 180+ bucket (same as total_so_count which counts them)
+                vendors[v]['more_180'] += 1
+            elif age < 30:
+                vendors[v]['less_30'] += 1
+            elif age < 90:
+                vendors[v]['days_30_90'] += 1
+            elif age < 180:
+                vendors[v]['days_90_180'] += 1
+            else:
+                vendors[v]['more_180'] += 1
+            vendors[v]['total_open'] += 1
+            vendors[v]['sales_amount'] += float(s.sales_amount or 0)
+
+        payload = sorted(vendors.values(), key=lambda x: x['total_open'], reverse=True)
+        runtime_cache_set(cache_key, payload, ttl_seconds=20)
+        return jsonify(payload)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/data/aging-detail/<path:vendor_name>', methods=['GET'])
+def get_aging_detail(vendor_name):
+    try:
+        bucket = request.args.get('bucket')
+        today = date.today()
+        hidden_so = get_hidden_so_items()
+        date_year, date_from, date_to = parse_so_date_args()
+        clients = selected_clients()
+        pics = selected_pics()
+        q = db.session.query(SOData).filter(
+            open_so_filter(),
+            SOData.vendor_name == vendor_name
+        )
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, pics)
+        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
+        sos = q.order_by(SOData.so_create_date.asc()).all()
+        sos = [s for s in sos
+               if s.so_item not in hidden_so and s.so_number not in hidden_so
+               and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
+        if bucket:
+            bucket = bucket.strip().replace(' ', '+')
+            sos = [s for s in sos if get_aging_label(workdays_since(s.so_create_date, today) if s.so_create_date else None) == bucket]
+        return jsonify([so_dict(s) for s in sos])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/data/aging-detail-all', methods=['GET'])
+def get_aging_detail_all():
+    try:
+        bucket = request.args.get('bucket')
+        if bucket:
+            bucket = bucket.strip().replace(' ', '+')
+        today = date.today()
+        hidden_so = get_hidden_so_items()
+        date_year, date_from, date_to = parse_so_date_args()
+        clients = selected_clients()
+        pics = selected_pics()
+        q = db.session.query(SOData).filter(
+            open_so_filter()
+        )
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, pics)
+        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
+        sos = q.order_by(SOData.vendor_name.asc(), SOData.so_create_date.asc()).all()
+        sos = [s for s in sos
+               if s.so_item not in hidden_so and s.so_number not in hidden_so
+               and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
+        if bucket:
+            sos = [s for s in sos if get_aging_label(workdays_since(s.so_create_date, today) if s.so_create_date else None) == bucket]
+        return jsonify([so_dict(s) for s in sos])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/dashboard/pending-total', methods=['GET'])
+def get_dashboard_pending_total():
+    """Tiny Pending Delivery count for dashboard KPI.
+
+    The paginated SO endpoint returns table rows, filter options, approval rows,
+    and PIC aggregations. Dashboard only needs this one number, so keep the
+    response and selected DB columns small.
+    """
+    try:
+        cache_key = runtime_cache_key('dashboard_pending_total')
+        cached = runtime_cache_get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        date_year, date_from, date_to = parse_so_date_args()
+        clients = selected_clients()
+        pics = selected_pics()
+        hidden_so = get_hidden_so_items()
+
+        q = db.session.query(
+            SOData.so_item,
+            SOData.so_number,
+            SOData.customer_po_number,
+            SOData.delivery_memo,
+        ).filter(open_so_filter())
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, pics)
+        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
+
+        total = 0
+        for so_item, so_number, customer_po_number, delivery_memo in q.all():
+            if so_item in hidden_so or so_number in hidden_so:
+                continue
+            if not so_is_countable(
+                so_item,
+                customer_po_number=customer_po_number,
+                delivery_memo=delivery_memo,
+            ):
+                continue
+            total += 1
+
+        payload = {'total': total}
+        runtime_cache_set(cache_key, payload, ttl_seconds=60)
+        return jsonify(payload)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/data/all-so', methods=['GET'])
+def get_all_so():
+    """Paginated SO list with filters."""
+    try:
+        cache_key = runtime_cache_key('all_so')
+        cached = runtime_cache_get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 10))
+        op_units = request.args.getlist('op_unit')
+        vendors = request.args.getlist('vendor')
+        manufacturers = request.args.getlist('manufacturer')
+        statuses = request.args.getlist('status')
+        aging_list = request.args.getlist('aging')
+        so_items = request.args.getlist('so_item')
+        pics = request.args.getlist('pic')
+        kpi_pic = (request.args.get('kpi_pic') or '').strip()
+        global_pics = request.args.getlist('global_pic')
+        clients = selected_clients()
+        margin_filter = request.args.get('margin_filter', 'all')
+        sort_order = request.args.get('sort_order', 'newest')  # 'newest' or 'oldest'
+        date_year, date_from, date_to = parse_so_date_args()
+
+        q = SOData.query.filter(open_so_filter())
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, global_pics)
+        if op_units: q = q.filter(SOData.operation_unit_name.in_(op_units))
+        if vendors: q = q.filter(SOData.vendor_name.in_(vendors))
+        if manufacturers: q = q.filter(SOData.manufacturer_name.in_(manufacturers))
+        if statuses: q = q.filter(SOData.so_status.in_(statuses))
+        if so_items: q = q.filter(SOData.so_item.in_(so_items))
+
+        # SO Create Date filter
+        is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
+        if date_year:
+            try:
+                yr = int(date_year)
+                if is_sqlite:
+                    q = q.filter(func.strftime('%Y', SOData.so_create_date) == str(yr))
+                else:
+                    q = q.filter(func.extract('year', SOData.so_create_date) == yr)
+            except ValueError:
+                pass
+        else:
+            if date_from:
+                q = q.filter(SOData.so_create_date >= date_from)
+            if date_to:
+                q = q.filter(SOData.so_create_date <= date_to)
+
+        # Apply sort order (deterministic by SO Create Date, then SO Item).
+        if sort_order == 'oldest':
+            all_sos = q.order_by(SOData.so_create_date.asc(), SOData.so_item.asc()).all()
+        else:  # newest
+            all_sos = q.order_by(SOData.so_create_date.desc(), SOData.so_item.asc()).all()
+
+        # Keep Open SO table count aligned with dashboard total_so_count KPI:
+        # exclude hidden SO rows and internal/HLI-referenced rows.
+        hidden_so = get_hidden_so_items()
+        all_sos = [
+            s for s in all_sos
+            if s.so_item not in hidden_so
+            and s.so_number not in hidden_so
+            and so_is_countable(
+                s.so_item,
+                customer_po_number=s.customer_po_number,
+                delivery_memo=s.delivery_memo
+            )
+        ]
+
+        if aging_list:
+            today = date.today()
+            def matches_aging(s):
+                age = workdays_since(s.so_create_date, today)
+                return get_aging_label(age) in aging_list
+            all_sos = [s for s in all_sos if matches_aging(s)]
+
+        if margin_filter in ('positive', 'negative'):
+            # Warm cache before filtering loop to avoid per-row HTTP calls.
+            prefetch_convertible_exchange_rates(all_sos)
+
+            def calc_margin(s):
+                po_amt = convert_to_idr((s.purchasing_amount or 0) or (s.purchasing_price or 0) * (s.so_qty or 0), s.purchasing_currency, s.so_create_date, cache_only=True)
+                return float(s.sales_amount or 0) - po_amt
+            if margin_filter == 'negative':
+                all_sos = [s for s in all_sos if calc_margin(s) < 0]
+            else:
+                all_sos = [s for s in all_sos if calc_margin(s) >= 0]
+
+        approval_statuses = {'Approval Apply', 'Approval Reject'}
+        approval_q = SOData.query.filter(SOData.so_status.in_(list(approval_statuses)))
+        approval_q = apply_so_client_filter(approval_q, clients)
+        approval_q = apply_so_pic_filter(approval_q, global_pics)
+        if op_units: approval_q = approval_q.filter(SOData.operation_unit_name.in_(op_units))
+        if vendors: approval_q = approval_q.filter(SOData.vendor_name.in_(vendors))
+        if manufacturers: approval_q = approval_q.filter(SOData.manufacturer_name.in_(manufacturers))
+        if statuses: approval_q = approval_q.filter(SOData.so_status.in_(statuses))
+        if so_items: approval_q = approval_q.filter(SOData.so_item.in_(so_items))
+        approval_q = apply_so_create_date_filter(approval_q, date_year, date_from, date_to, is_sqlite)
+        if sort_order == 'oldest':
+            approval_sos = approval_q.order_by(SOData.so_create_date.asc(), SOData.so_item.asc()).all()
+        else:
+            approval_sos = approval_q.order_by(SOData.so_create_date.desc(), SOData.so_item.asc()).all()
+        approval_sos = [
+            s for s in approval_sos
+            if s.so_item not in hidden_so
+            and s.so_number not in hidden_so
+            and so_is_countable(
+                s.so_item,
+                customer_po_number=s.customer_po_number,
+                delivery_memo=s.delivery_memo
+            )
+        ]
+
+        # KPI PIC cards should stay visible when one PIC is selected. Build the
+        # KPI source after all non-PIC filters, then apply PIC filters only to
+        # the table data.
+        kpi_source_sos = list(all_sos)
+
+        if pics:
+            pic_set = set(pics)
+            all_sos = [s for s in all_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) in pic_set]
+            approval_sos = [s for s in approval_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) in pic_set]
+
+        if kpi_pic:
+            all_sos = [s for s in all_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) == kpi_pic]
+            approval_sos = [s for s in approval_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) == kpi_pic]
+
+        total = len(all_sos)
+        subtotal_amount = sum(float(s.sales_amount or 0) for s in all_sos)
+        paged = all_sos[(page-1)*per_page : page*per_page]
+
+        op_units_opts = sorted({s.operation_unit_name for s in kpi_source_sos if s.operation_unit_name})
+        vendors_opts  = sorted({s.vendor_name for s in kpi_source_sos if s.vendor_name})
+        manufacturers_opts = sorted({s.manufacturer_name for s in kpi_source_sos if s.manufacturer_name})
+        statuses_opts = sorted({s.so_status for s in kpi_source_sos if s.so_status})
+        pics_opts     = sorted({canonical_pending_pic(s.pic_name, s.operation_unit_name) for s in kpi_source_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) != 'Unassigned'})
+
+        # Calculate PIC aggregations from ALL filtered records (not just current page)
+        pic_aggregations = {}
+        for s in kpi_source_sos:
+            pic = canonical_pending_pic(s.pic_name, s.operation_unit_name)
+            if not pic or pic == 'Unassigned':
+                continue
+            if pic not in pic_aggregations:
+                pic_aggregations[pic] = {'pic': pic, 'count': 0, 'amount': 0}
+            pic_aggregations[pic]['count'] += 1
+            pic_aggregations[pic]['amount'] += float(s.sales_amount or 0)
+        
+        # Sort with ANDRE first, then by count descending and name.
+        pic_aggs_list = sort_pic_kpis(list(pic_aggregations.values()))
+
+        payload = {
+            'data': [so_dict(s) for s in paged],
+            'approval_data': [so_dict(s) for s in approval_sos],
+            'total': total, 'subtotal_amount': round(subtotal_amount, 2), 'page': page, 'per_page': per_page,
+            'filters': {'op_units': list(op_units_opts), 'vendors': list(vendors_opts), 'manufacturers': list(manufacturers_opts), 'statuses': list(statuses_opts), 'pics': list(pics_opts)},
+            'pic_aggregations': pic_aggs_list
+        }
+        runtime_cache_set(cache_key, payload, ttl_seconds=60)
+        return jsonify(payload)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/data/so-status-detail/<path:status>', methods=['GET'])
+def get_so_status_detail(status):
+    try:
+        month = request.args.get('month')
+        hidden_so = get_hidden_so_items()
+        date_year, date_from, date_to = parse_so_date_args()
+        clients = selected_clients()
+        pics = selected_pics()
+        q = SOData.query.filter_by(so_status=status)
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, pics)
+        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
+        sos = q.all()
+        if month:
+            sos = [s for s in sos if s.so_create_date and s.so_create_date.strftime('%b %Y') == month]
+        sos = [s for s in sos
+               if s.so_item not in hidden_so and s.so_number not in hidden_so
+               and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
+        return jsonify([so_dict(s) for s in sos])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/data/so-status-detail-all', methods=['GET'])
+def get_so_status_detail_all():
+    try:
+        month = request.args.get('month')
+        hidden_so = get_hidden_so_items()
+        date_year, date_from, date_to = parse_so_date_args()
+        clients = selected_clients()
+        pics = selected_pics()
+        q = SOData.query.filter(open_so_filter())
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, pics)
+        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
+        sos = q.order_by(SOData.so_create_date.desc()).all()
+        if month:
+            sos = [s for s in sos if s.so_create_date and s.so_create_date.strftime('%b %Y') == month]
+        sos = [s for s in sos
+               if s.so_item not in hidden_so and s.so_number not in hidden_so
+               and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
+        return jsonify([so_dict(s) for s in sos])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/data/top-vendor-detail/<path:vendor_name>', methods=['GET'])
+def get_top_vendor_detail(vendor_name):
+    try:
+        hidden_so = get_hidden_so_items()
+        date_year, date_from, date_to = parse_so_date_args()
+        clients = selected_clients()
+        pics = selected_pics()
+        q = db.session.query(SOData).filter(open_so_filter(), SOData.vendor_name == vendor_name)
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, pics)
+        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
+        sos = q.all()
+        sos = [s for s in sos
+               if s.so_item not in hidden_so and s.so_number not in hidden_so
+               and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
+        return jsonify([so_dict(s) for s in sos])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════
+# EXCHANGE RATE ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════
 
 @app.route('/api/exchange-rate', methods=['GET'])
-def api_get_exchange_rates():
-    page = request.args.get('page', 1, type=int)
-    page_size = min(request.args.get('page_size', 50, type=int), 200)
-
-    query = ExchangeRate.query.order_by(ExchangeRate.rate_date.desc())
-    total = query.count()
-    rows = query.offset((page - 1) * page_size).limit(page_size).all()
-
-    return jsonify({
-        'data': [{
-            'rate_date': r.rate_date.isoformat() if r.rate_date else None,
-            'usd_to_idr': r.usd_to_idr,
-            'source': r.source,
-        } for r in rows],
-        'total': total,
-        'page': page,
-        'page_size': page_size,
-    })
+def list_exchange_rates():
+    """Return all stored USD->IDR rates, newest first."""
+    try:
+        rates = ExchangeRate.query.order_by(ExchangeRate.rate_date.desc()).limit(120).all()
+        return jsonify([{
+            'id': r.id, 'date': r.rate_date.isoformat(),
+            'usd_to_idr': r.usd_to_idr, 'source': r.source,
+        } for r in rates])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/exchange-rate', methods=['POST'])
-def api_set_exchange_rate():
-    data = request.get_json() or {}
-    rate_date = parse_date(data.get('rate_date'))
-    rate = data.get('usd_to_idr')
-    if not rate_date or rate is None:
-        return jsonify({'error': 'rate_date and usd_to_idr required'}), 400
-
-    existing = ExchangeRate.query.filter_by(rate_date=rate_date).first()
-    if existing:
-        existing.usd_to_idr = float(rate)
-        existing.source = 'manual'
-    else:
-        db.session.add(ExchangeRate(
-            rate_date=rate_date, usd_to_idr=float(rate), source='manual'))
-    db.session.commit()
-    _RATE_CACHE[rate_date] = float(rate)
-    return jsonify({'success': True})
+def upsert_exchange_rate():
+    """Manually set or update a USD->IDR rate for a specific date."""
+    try:
+        data = request.json
+        d = parse_date(data.get('date'))
+        rate = float(data.get('usd_to_idr', 0))
+        if not d:
+            return jsonify({'error': 'Invalid date'}), 400
+        if rate <= 0:
+            return jsonify({'error': 'Rate must be > 0'}), 400
+        rec = ExchangeRate.query.filter_by(rate_date=d).first()
+        if rec:
+            rec.usd_to_idr = rate
+            rec.source = 'manual'
+        else:
+            rec = ExchangeRate(rate_date=d, usd_to_idr=rate, source='manual')
+            db.session.add(rec)
+        db.session.commit()
+        # Invalidate cache for this date
+        _RATE_CACHE.pop(d, None)
+        return jsonify({'success': True, 'date': d.isoformat(), 'usd_to_idr': rate})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/exchange-rate/fetch', methods=['POST'])
-def api_fetch_exchange_rates():
-    """Backfill missing exchange rates from Frankfurter API.
-    Admin-only operation — called once after initial deployment."""
-    data = request.get_json() or {}
-    start_date = parse_date(data.get('start_date'))
-    end_date = parse_date(data.get('end_date')) or date.today()
+def fetch_exchange_rates_bulk():
+    """Auto-fetch USD->IDR rates from Frankfurter API for all SO create dates
+    that have USD purchasing currency but no rate stored yet.
+    Returns count of rates fetched."""
+    try:
+        # Find distinct SO create dates where purchasing_currency = USD and no rate stored
+        is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
+        usd_rows = db.session.query(SOData.so_create_date).filter(
+            SOData.purchasing_currency == 'USD',
+            SOData.so_create_date.isnot(None)
+        ).distinct().all()
 
-    if not start_date:
-        # Default: 2 years back
-        start_date = date.today() - timedelta(days=730)
+        dates_needed = {r[0] for r in usd_rows}
+        existing_dates = {r[0] for r in db.session.query(ExchangeRate.rate_date).all()}
+        to_fetch = sorted(dates_needed - existing_dates)
 
-    # Find existing dates
-    existing = {
-        r.rate_date for r in
-        ExchangeRate.query.filter(
-            ExchangeRate.rate_date >= start_date,
-            ExchangeRate.rate_date <= end_date).all()
-    }
-
-    current = start_date
-    fetched = 0
-    while current <= end_date:
-        if current.weekday() < 5 and current not in existing:
-            rate = _fetch_rate_from_api(current)
+        fetched = 0
+        failed = []
+        for d in to_fetch:
+            rate = _fetch_rate_from_api(d)
             if rate:
-                db.session.add(ExchangeRate(
-                    rate_date=current, usd_to_idr=rate,
-                    source='frankfurter'))
-                _RATE_CACHE[current] = rate
-                fetched += 1
-                if fetched % 50 == 0:
-                    db.session.commit()
-            time.sleep(0.2)  # Rate limit
-        current += timedelta(days=1)
+                try:
+                    db.session.add(ExchangeRate(rate_date=d, usd_to_idr=rate, source='frankfurter'))
+                    db.session.flush()
+                    _RATE_CACHE[d] = rate
+                    fetched += 1
+                except Exception:
+                    db.session.rollback()
+            else:
+                failed.append(d.isoformat())
 
-    db.session.commit()
-    return jsonify({'fetched': fetched, 'total_dates': len(existing)})
+        db.session.commit()
 
+        # Backfill both USD and EUR transaction values. EUR rates are kept in
+        # the in-process cache for this request, while the converted IDR amount
+        # itself is persisted permanently on each SO row.
+        pending_fx_rows = SOData.query.filter(
+            SOData.purchasing_amount_idr.is_(None),
+            func.upper(func.coalesce(SOData.purchasing_currency, '')).in_(['USD', 'EUR'])
+        ).all()
+        converted_rows = ensure_purchase_amount_idr_cache(
+            pending_fx_rows,
+            fetch_missing=True,
+        )
 
-# ─── SO Data Upload ──────────────────────────────────────────────────────
-
-@app.route('/api/so/upload', methods=['POST'])
-def api_so_upload():
-    try:
-        uploads, source_type = request_upload_dataframes()
+        return jsonify({
+            'dates_needed': len(dates_needed),
+            'already_stored': len(existing_dates & dates_needed),
+            'fetched': fetched,
+            'converted_rows': converted_rows,
+            'failed': failed,
+            'message': f'{fetched} kurs USD berhasil di-fetch dan {converted_rows} transaksi USD/EUR dikonversi.'
+                       + (f' {len(failed)} tanggal gagal: {", ".join(failed[:5])}' if failed else '')
+        })
     except Exception as e:
-        return jsonify({'error': str(e)}), 400
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
-    if not uploads:
-        return jsonify({'error': 'No files uploaded'}), 400
 
-    total_records = 0
-    for upload in uploads:
-        df = upload['df']
-        col_map = {
-            'so_number': find_column(df, ['SO Number', 'SO No.']),
-            'so_item': find_column(df, ['SO Item', 'Item']),
-            'so_status': find_column(df, ['SO Status', 'Status']),
-            'operation_unit_name': find_column(df, [
-                'Operation Unit Name', 'Op Unit', 'Client']),
-            'vendor_id': find_column(df, ['Vendor ID']),
-            'vendor_name': find_column(df, [
-                'Vendor Name', 'Vendor Nm.', 'Supplier']),
-            'customer_po_number': find_column(df, [
-                'Customer PO Number', 'PO Number', 'Cust PO']),
-            'delivery_memo': find_column(df, [
-                'Delivery Memo', 'Memo']),
-            'product_name': find_column(df, [
-                'Product Name', 'Prod. Nm.']),
-            'specification': find_column(df, [
-                'Specification', 'Spec.', 'Spec']),
-            'manufacturer_name': find_column(df, [
-                'Manufacturer Name', 'Mfr. Nm.']),
-            'product_id': find_column(df, [
-                'Product ID', 'Prod. ID']),
-            'so_qty': find_column(df, ['SO Qty', 'Qty', 'Quantity']),
-            'sales_unit': find_column(df, ['Sales Unit', 'Unit']),
-            'sales_price': find_column(df, ['Sales Price']),
-            'sales_amount': find_column(df, ['Sales Amount']),
-            'currency': find_column(df, ['Currency', 'Curr']),
-            'purchasing_price': find_column(df, [
-                'Purchasing Price', 'Pur. Price']),
-            'purchasing_amount': find_column(df, [
-                'Purchasing Amount', 'Pur. Amount']),
-            'purchasing_currency': find_column(df, [
-                'Purchasing Currency', 'Pur. Currency', 'Pur. Curr']),
-            'so_create_date': find_column(df, [
-                'SO Create Date', 'Create Date']),
-            'delivery_possible_date': find_column(df, [
-                'Delivery Possible Date']),
-            'matched_po_number': find_column(df, [
-                'Matched PO Number', 'Matched PO']),
-            'delivery_plan_date': find_column(df, [
-                'Delivery Plan Date', 'Plan Date']),
-            'remarks': find_column(df, ['Remarks', 'Remark']),
-            'pic_name': find_column(df, ['PIC Name', 'PIC', 'Name']),
+@app.route('/api/exchange-rate/preview', methods=['GET'])
+def preview_exchange_rate():
+    """Preview what rate would be used for a given date (for debugging)."""
+    try:
+        d = parse_date(request.args.get('date', ''))
+        if not d:
+            return jsonify({'error': 'Provide ?date=YYYY-MM-DD'}), 400
+        rate = get_usd_to_idr(d)
+        rec = ExchangeRate.query.filter_by(rate_date=d).first()
+        return jsonify({
+            'date': d.isoformat(),
+            'usd_to_idr': rate,
+            'source': rec.source if rec else 'fallback/nearest',
+            'stored_exact': rec is not None,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════
+# UPLOAD ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════
+
+CHUNK_SIZE = 200
+
+
+# Source-table cleanup helpers. Full Excel uploads are treated as the latest
+# snapshot: rows with the same business key are merged, duplicates from older
+# logic are deleted, and rows not present in the latest full upload are removed.
+def _norm_key(v):
+    return str(v or '').strip()
+
+def _latest_row(rows, timestamp_fields=('uploaded_at', 'updated_at')):
+    def score(row):
+        ts = None
+        for field in timestamp_fields:
+            val = getattr(row, field, None)
+            if val is not None:
+                ts = val
+                break
+        return (ts or datetime.min, getattr(row, 'id', 0) or 0)
+    return max(rows, key=score)
+
+def _latest_nonblank_value(rows, field, timestamp_fields=('uploaded_at', 'updated_at')):
+    candidates = [r for r in rows if str(getattr(r, field, '') or '').strip()]
+    if not candidates:
+        return None
+    return getattr(_latest_row(candidates, timestamp_fields), field)
+
+def cleanup_source_table_snapshot(model, key_attr, valid_keys=None, *, manual_fields=(), timestamp_fields=('uploaded_at', 'updated_at'), delete_blank=True, key_normalizer=_norm_key):
+    """Clean a source table by its business key.
+
+    If valid_keys is provided, the table becomes an exact snapshot of those keys.
+    If valid_keys is None, only old duplicate rows and blank-key rows are removed.
+    Returns {'removed_duplicates': n, 'removed_stale': n, 'removed_blank': n}.
+    """
+    valid_set = None if valid_keys is None else {key_normalizer(k) for k in valid_keys if key_normalizer(k)}
+    groups = {}
+    blank_rows = []
+    for row in db.session.query(model).order_by(model.id.asc()).all():
+        key = key_normalizer(getattr(row, key_attr, None))
+        if not key:
+            blank_rows.append(row)
+            continue
+        groups.setdefault(key, []).append(row)
+
+    removed_duplicates = removed_stale = removed_blank = 0
+
+    if delete_blank:
+        for row in blank_rows:
+            db.session.delete(row)
+            removed_blank += 1
+
+    for key, rows in groups.items():
+        if valid_set is not None and key not in valid_set:
+            for row in rows:
+                db.session.delete(row)
+                removed_stale += 1
+            continue
+
+        if len(rows) <= 1:
+            continue
+
+        winner = _latest_row(rows, timestamp_fields)
+        for field in manual_fields or ():
+            val = _latest_nonblank_value(rows, field, timestamp_fields)
+            if val is not None:
+                setattr(winner, field, val)
+
+        for row in rows:
+            if row is winner:
+                continue
+            db.session.delete(row)
+            removed_duplicates += 1
+
+    return {
+        'removed_duplicates': removed_duplicates,
+        'removed_stale': removed_stale,
+        'removed_blank': removed_blank,
+    }
+
+def cleanup_master_pic_by_category_name(valid_category_names=None):
+    valid_set = None if valid_category_names is None else {normalize_category_name(x) for x in valid_category_names if normalize_category_name(x)}
+    groups = {}
+    blank_rows = []
+    for row in db.session.query(MasterPIC).order_by(MasterPIC.id.asc()).all():
+        key = normalize_category_name(row.category_name)
+        if not key:
+            blank_rows.append(row)
+            continue
+        groups.setdefault(key, []).append(row)
+
+    removed_duplicates = removed_stale = removed_blank = 0
+    for row in blank_rows:
+        db.session.delete(row)
+        removed_blank += 1
+
+    for key, rows in groups.items():
+        if valid_set is not None and key not in valid_set:
+            for row in rows:
+                db.session.delete(row)
+                removed_stale += 1
+            continue
+        if len(rows) <= 1:
+            continue
+        winner = _latest_row(rows, ('updated_at', 'uploaded_at'))
+        pic = _latest_nonblank_value(rows, 'pic_name', ('updated_at', 'uploaded_at'))
+        if pic is not None:
+            winner.pic_name = pic
+        # Keep the newest visible Category Name spelling, but normalize generated category_id.
+        winner.category_name = source_category_level1(winner.category_name)
+        if str(winner.category_id or '').startswith('CATNAME_'):
+            winner.category_id = master_pic_category_key(winner.category_name)
+        for row in rows:
+            if row is winner:
+                continue
+            db.session.delete(row)
+            removed_duplicates += 1
+    return {'removed_duplicates': removed_duplicates, 'removed_stale': removed_stale, 'removed_blank': removed_blank}
+
+def cleanup_item_registration_duplicates_only():
+    return cleanup_source_table_snapshot(ItemRegistration, 'req_no', None, timestamp_fields=('uploaded_at',), delete_blank=True)
+
+
+@app.route('/api/upload/scor-json', methods=['POST'])
+@app.route('/api/upload/scor-json', methods=['POST'])
+@app.route('/api/upload/scor', methods=['POST'])
+@app.route('/api/upload/smro-json', methods=['POST'])
+@app.route('/api/upload/smro', methods=['POST'])
+def upload_smro():
+    """SMRO upload: upsert by SO Item and preserve manual remarks/plan date."""
+    try:
+        uploads, upload_mode = request_upload_dataframes('smro')
+        if not uploads:
+            return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
+        replace_existing = upload_replace_mode()
+
+        # SO Item adalah primary key upsert (format: "7001664545-10").
+        # Upload JSON dari SAP hanya punya kolom "SO Item" — SO Number di-derive otomatis dari prefix.
+        # Upload Excel lama tetap bisa pakai "SO Number" atau "SO Item No" dll.
+        required_smro_cols = {
+            'SO Item': ['SO Item', 'SO Item No', 'SO Number', 'SO No', 'SO No.', 'SO', 'Sales Order', 'Sales Order Number', 'No SO', 'Nomor SO'],
+            'SO Status': ['SO Status', 'Status', 'Order Status'],
+            'Operation Unit': ['Operation Unit Name', 'Op Unit', 'Client Name', 'Client', 'Operation Unit'],
+            'Vendor Name': ['Vendor Name', 'Vendor', 'Supplier'],
+            'Customer PO': ['Customer PO number', 'Customer PO Number', 'Customer PO', 'PO Ref', 'PO Reference'],
+            'Sales Amount': ['Sales Amount(Exclude Tax)', 'Sales Amount', 'Amount', 'Total'],
+            'SO Create Date': ['SO Create Date', 'Order Date', 'SO Date', 'Create Date', 'Create Sales Order Date'],
         }
 
-        new_rows = []
-        for _, row in df.iterrows():
-            so_status = clean(row.get(col_map['so_status'])) if col_map[
-                'so_status'] else None
-            if so_status in DISCARDABLE_STATUSES:
-                continue
-
-            so_item = clean(row.get(col_map['so_item'])) if col_map[
-                'so_item'] else None
-            cust_po = clean(row.get(
-                col_map['customer_po_number'])) if col_map[
-                'customer_po_number'] else None
-            del_memo = clean(row.get(
-                col_map['delivery_memo'])) if col_map[
-                'delivery_memo'] else None
-
-            record = SOData(
-                so_number=clean(row.get(col_map['so_number'])) if col_map[
-                    'so_number'] else None,
-                so_item=so_item,
-                so_status=so_status,
-                operation_unit_name=clean(row.get(
-                    col_map['operation_unit_name'])) if col_map[
-                    'operation_unit_name'] else None,
-                vendor_id=clean(row.get(col_map['vendor_id'])) if col_map[
-                    'vendor_id'] else None,
-                vendor_name=clean(row.get(
-                    col_map['vendor_name'])) if col_map[
-                    'vendor_name'] else None,
-                customer_po_number=cust_po,
-                delivery_memo=del_memo,
-                product_name=clean(row.get(
-                    col_map['product_name'])) if col_map[
-                    'product_name'] else None,
-                specification=clean(row.get(
-                    col_map['specification'])) if col_map[
-                    'specification'] else None,
-                manufacturer_name=clean(row.get(
-                    col_map['manufacturer_name'])) if col_map[
-                    'manufacturer_name'] else None,
-                product_id=clean_product_id(
-                    row.get(col_map['product_id'])) if col_map[
-                    'product_id'] else None,
-                so_qty=safe_float(row.get(col_map['so_qty'])) if col_map[
-                    'so_qty'] else None,
-                sales_unit=clean(row.get(
-                    col_map['sales_unit'])) if col_map[
-                    'sales_unit'] else None,
-                sales_price=safe_float(row.get(
-                    col_map['sales_price'])) if col_map[
-                    'sales_price'] else None,
-                sales_amount=safe_float(row.get(
-                    col_map['sales_amount'])) if col_map[
-                    'sales_amount'] else None,
-                currency=clean(row.get(col_map['currency'])) if col_map[
-                    'currency'] else None,
-                purchasing_price=safe_float(row.get(
-                    col_map['purchasing_price'])) if col_map[
-                    'purchasing_price'] else None,
-                purchasing_amount=safe_float(row.get(
-                    col_map['purchasing_amount'])) if col_map[
-                    'purchasing_amount'] else None,
-                purchasing_currency=clean(row.get(
-                    col_map['purchasing_currency'])) if col_map[
-                    'purchasing_currency'] else None,
-                so_create_date=parse_date(
-                    row.get(col_map['so_create_date'])) if col_map[
-                    'so_create_date'] else None,
-                delivery_possible_date=parse_date(
-                    row.get(col_map['delivery_possible_date'])) if col_map[
-                    'delivery_possible_date'] else None,
-                matched_po_number=clean(row.get(
-                    col_map['matched_po_number'])) if col_map[
-                    'matched_po_number'] else None,
-                delivery_plan_date=parse_date(
-                    row.get(col_map['delivery_plan_date'])) if col_map[
-                    'delivery_plan_date'] else None,
-                remarks=clean(row.get(col_map['remarks'])) if col_map[
-                    'remarks'] else None,
-                pic_name=clean(row.get(col_map['pic_name'])) if col_map[
-                    'pic_name'] else None,
-            )
-            new_rows.append(record)
-
-        # Bulk add
-        db.session.bulk_save_objects(new_rows)
+        # Build an existing map while merging possible duplicate SO Item rows
+        # from old append logic. The latest row wins, manual Plan Date/Remarks
+        # are preserved from the latest non-blank duplicate.
+        cleanup_pre = cleanup_source_table_snapshot(
+            SOData,
+            'so_item',
+            None,
+            manual_fields=('delivery_plan_date', 'remarks'),
+            timestamp_fields=('uploaded_at',),
+            delete_blank=True,
+        )
         db.session.flush()
+        existing_so = {s.so_item: s for s in SOData.query.all() if s.so_item}
+        total_count = total_updated = total_inserted = 0
+        total_removed_duplicates = cleanup_pre.get('removed_duplicates', 0)
+        total_removed_stale = cleanup_pre.get('removed_stale', 0)
+        total_removed_blank = cleanup_pre.get('removed_blank', 0)
+        latest_so_items = set()
+        diagnostics_by_file = []
 
-        # Backfill exchange rates ONLY for non-IDR rows
-        backfill_exchange_rates_for_rows(new_rows)
+        for upload in uploads:
+            filename = upload['filename']
+            df = upload['df']
+            df.columns = [str(c).strip() for c in df.columns]
 
-        # Compute and cache purchasing_amount_idr for ALL rows
-        for s in new_rows:
-            compute_and_cache_purchase_amount_idr(s)
+            # Validasi kolom: SO Item (atau SO Number) wajib ada.
+            # Kolom lain seperti Vendor Name, Sales Amount, SO Create Date mungkin tidak ada
+            # di JSON SAP — itu normal, field tersebut tetap NULL / tidak diupdate di DB.
+            has_primary_key = (
+                find_column(df, ['SO Item', 'SO Item No', 'SO Number', 'SO No', 'SO No.', 'SO',
+                                  'Sales Order', 'Sales Order Number', 'No SO', 'Nomor SO'])
+            )
+            if not has_primary_key:
+                return jsonify({
+                    'error': (
+                        f'Invalid file "{filename}" - kolom SO Item / SO Number tidak ditemukan. '
+                        f'Available columns: {df.columns.tolist()}'
+                    )
+                }), 400
 
-        db.session.commit()
-        total_records += len(new_rows)
+            # Soft-check kolom lain: hanya log warning, tidak reject
+            missing_required = [name for name, aliases in required_smro_cols.items() if not find_column(df, aliases)]
+            # Untuk upload Excel lengkap: reject jika lebih dari 4 kolom penting tidak ada
+            # Untuk JSON dari SAP: kolom Vendor/Amount/Date mungkin memang tidak ada — tetap lanjut
+            if upload_mode == 'excel' and len(missing_required) > 4:
+                return jsonify({
+                    'error': (
+                        f'Invalid file "{filename}" - {len(missing_required)} required columns not found: '
+                        f'{", ".join(missing_required)}. Please make sure you are uploading the correct SMRO file.'
+                    )
+                }), 400
 
-        # Log upload
-        db.session.add(UploadLog(
-            file_type='so_data',
-            filename=upload['filename'],
-            records_count=len(new_rows)))
-        db.session.commit()
+            # col_soitem = primary key untuk upsert (value: "8061874935-10")
+            # Prioritas: kolom bernama "SO Item" dulu (JSON dari SAP), fallback ke "SO Number" dll (Excel lama)
+            # Deteksi kolom — alias diurutkan dari nama paling spesifik/exact ke nama fallback
+            # Nama kolom exact dari SMRO Excel diletakkan di depan list alias
 
-    clear_runtime_caches()
-    return jsonify({
-        'success': True,
-        'total_records': total_records,
-        'source': source_type,
-    })
+            # Primary key: "SO Item" di SMRO = format "7001664545-10"
+            col_soitem = find_column(df, ['SO Item', 'SO Item No', 'SO Line', 'Item No', 'Line'])
+            # SO Number numeric (angka saja, tanpa suffix -10) — optional, di-derive kalau tidak ada
+            col_so = find_column(df, ['SO Number', 'SO No', 'SO No.', 'SO', 'Sales Order', 'Sales Order Number', 'No SO', 'Nomor SO'])
+            col_primary = col_soitem or col_so
+            if not col_primary:
+                return jsonify({'error': f'SO Item / SO Number column not found in "{filename}". Available columns: {df.columns.tolist()}'}), 400
 
+            col_status   = find_column(df, ['SO Status', 'Status', 'Order Status', 'SO Status Code'])
+            col_opunit   = find_column(df, ['Operation Unit Name', 'Op Unit', 'Client Name', 'Client', 'Operation Unit'])
+            col_vendor_id = find_column(df, ['Vendor ID', 'Vendor Id', 'Vendor Code', 'Supplier ID', 'Supplier Code'])
+            col_vendor   = find_column(df, ['Vendor Name', 'Vendor', 'Supplier'])
+            # SMRO Excel: "Customer PO number" (n lowercase) dan "Customer PR number"
+            col_custpo   = find_column(df, ['Customer PO number', 'Customer PO Number', 'Customer PO', 'PO Ref', 'PO Reference'])
+            col_memo     = find_column(df, ['Delivery Memo', 'Memo', 'Delivery Note'])
+            col_prod     = find_column(df, ['Product Name', 'Item Name', 'Description', 'Product'])
+            col_spec     = find_column(df, ['Specification', 'Spec', 'Specifications', 'Product Specification', 'Material Description', 'Material Desc', 'Short Text'])
+            col_mfr      = find_column(df, ['Manufacturer Name', 'Mfr. Nm.', 'Mfr. Nm', 'Maker Nm.', 'Manufacturer'])
+            col_pid      = find_column(df, ['Product ID', 'Product Id', 'Product Code', 'Material', 'Material No', 'Material Number', 'Material Code', 'SKU', 'Article', 'Article Number'])
+            col_qty      = find_column(df, ['SO Quantity', 'SO Qty', 'Qty', 'Quantity'])
+            col_sunit    = find_column(df, ['Sales Unit', 'Unit', 'UOM'])
+            col_sprice   = find_column(df, ['Sales Price(Exclude Tax)', 'Sales Price', 'Price', 'Unit Price'])
+            col_samt     = find_column(df, ['Sales Amount(Exclude Tax)', 'Sales Amount', 'Amount', 'Total'])
+            col_cur      = find_column(df, ['Currency', 'Curr'])
+            col_pprice   = find_column(df, ['Purchasing Price', 'Purchase Price', 'PO Price'])
+            col_pamt     = find_column(df, ['Purchasing Amount', 'Purchase Amount', 'PO Amount'])
+            col_pcur     = find_column(df, ['Purchasing Currency', 'Purchase Currency', 'PO Currency', 'Purchasing Curr', 'Purchase Curr'])
+            # SMRO Excel: "SO Create Date" (exact match)
+            col_sodate   = find_column(df, ['SO Create Date', 'Order Date', 'SO Date', 'Create Date', 'Create Sales Order Date'])
+            col_delposs  = find_column(df, ['Delivery Possible Date', 'Possible Delivery Date', 'Est Delivery'])
+            # SMRO Excel: "Purchasing Order Number" = matched PO
+            col_matchpo  = find_column(df, ['Purchasing Order Number', 'Matched PO Number', 'Matched PO', 'PO HLI', 'PO HLI Number', 'PO Number'])
 
-# ─── SO Dashboard (Paginated, Read-Only, No API Calls) ───────────────────
+            count = updated = inserted = spec_filled = pid_filled = 0
 
-@app.route('/api/so/dashboard')
-def api_so_dashboard():
-    # Parse filters
-    date_year, date_from, date_to = parse_so_date_args()
-    clients = selected_clients()
-    pics = selected_pics()
-    search = request.args.get('search', '').strip()
-    page = request.args.get('page', 1, type=int)
-    page_size = min(request.args.get('page_size', 50, type=int), 200)
-    sort_field = request.args.get('sort', 'so_create_date')
-    sort_dir = request.args.get('sort_dir', 'desc')
+            for _, row in df.iterrows():
+                primary_val = clean(df_val(row, col_primary))
+                if not primary_val:
+                    continue
 
-    # Check runtime cache
-    cache_key = runtime_cache_key('so_dashboard')
-    cached = runtime_cache_get(cache_key)
-    if cached:
-        return jsonify(cached)
+                # Skip rows whose status is never used by any analytics endpoint.
+                # Storing them only wastes disk space. If the row already exists
+                # in DB from an older upload, delete it now.
+                row_status = clean(df_val(row, col_status)) if col_status else None
+                if row_status and row_status in DISCARDABLE_STATUSES:
+                    if primary_val in existing_so:
+                        db.session.delete(existing_so.pop(primary_val))
+                    continue
 
-    # Build query
-    query = SOData.query.filter(open_so_filter())
-    query = apply_so_create_date_filter(
-        query, date_year, date_from, date_to)
-    query = apply_so_client_filter(query, clients)
-    query = apply_so_pic_filter(query, pics)
+                # so_item = primary key DB (format "8061874935-10")
+                # so_number = prefix sebelum "-" (auto-derive jika tidak ada kolom SO Number terpisah)
+                if col_soitem:
+                    so_item_val = primary_val
+                    # Jika ada kolom SO Number terpisah, pakai itu; jika tidak, derive dari prefix
+                    so_val = clean(df_val(row, col_so)) if col_so else None
+                    if not so_val:
+                        so_val = so_item_val.rsplit('-', 1)[0] if '-' in so_item_val else so_item_val
+                else:
+                    # Upload Excel lama: primary dari kolom SO Number
+                    so_val = primary_val
+                    so_item_val = so_val  # tidak ada SO Item terpisah, pakai SO Number sebagai so_item
 
-    if search:
-        like = f'%{search}%'
-        query = query.filter(db.or_(
-            SOData.so_number.ilike(like),
-            SOData.product_name.ilike(like),
-            SOData.vendor_name.ilike(like),
-            SOData.customer_po_number.ilike(like),
-            SOData.product_id.ilike(like),
-        ))
+                if so_item_val:
+                    latest_so_items.add(so_item_val)
 
-    # Sort
-    sort_column = getattr(SOData, sort_field, SOData.so_create_date)
-    if sort_dir == 'asc':
-        query = query.order_by(sort_column.asc())
-    else:
-        query = query.order_by(sort_column.desc())
+                spec_val = clean(df_val(row, col_spec)) if col_spec else None
+                pid_val = clean(df_val(row, col_pid)) if col_pid else None
+                if spec_val:
+                    spec_filled += 1
+                if pid_val:
+                    pid_filled += 1
 
-    # Paginate (cursor-style for speed on SQLite)
-    total = query.count()
-    rows = query.offset((page - 1) * page_size).limit(page_size).all()
+                new_data = {
+                    'so_number': so_val,
+                    'so_item': so_item_val,
+                    'so_status': clean(df_val(row, col_status)),
+                    'operation_unit_name': clean(df_val(row, col_opunit)),
+                    'vendor_id': clean(df_val(row, col_vendor_id)),
+                    'vendor_name': clean(df_val(row, col_vendor)),
+                    'customer_po_number': clean(df_val(row, col_custpo)),
+                    'delivery_memo': clean(df_val(row, col_memo)),
+                    'product_name': clean(df_val(row, col_prod)),
+                    'specification': spec_val,
+                    'manufacturer_name': clean(df_val(row, col_mfr)),
+                    'product_id': pid_val,
+                    'so_qty': safe_float(df_val(row, col_qty)),
+                    'sales_unit': clean(df_val(row, col_sunit)),
+                    'sales_price': safe_float(df_val(row, col_sprice)),
+                    'sales_amount': safe_float(df_val(row, col_samt)),
+                    'currency': clean(df_val(row, col_cur)) or 'IDR',
+                    'purchasing_price': safe_float(df_val(row, col_pprice)),
+                    'purchasing_amount': safe_float(df_val(row, col_pamt)),
+                    'purchasing_currency': clean(df_val(row, col_pcur)) if col_pcur else None,
+                    'purchasing_amount_idr': None,
+                    'purchasing_amount_idr_cached_at': None,
+                    'so_create_date': parse_date(df_val(row, col_sodate)),
+                    'delivery_possible_date': parse_date(df_val(row, col_delposs)),
+                    'matched_po_number': clean(df_val(row, col_matchpo)),
+                    'uploaded_at': datetime.utcnow(),
+                }
 
-    # Prefetch exchange rates from memory/DB only (NO API)
-    dates = {s.so_create_date for s in rows if s.so_create_date}
-    prefetch_exchange_rates(dates, fetch_missing=False)
+                if so_item_val and so_item_val in existing_so:
+                    existing = existing_so[so_item_val]
+                    preserved_remarks = existing.remarks
+                    preserved_plan_date = existing.delivery_plan_date
+                    preserved_spec = existing.specification
+                    preserved_pid = existing.product_id
+                    preserved_amount_idr = existing.purchasing_amount_idr
+                    preserved_amount_idr_cached_at = existing.purchasing_amount_idr_cached_at
+                    old_purchase_signature = (
+                        float(existing.purchasing_amount or 0),
+                        float(existing.purchasing_price or 0),
+                        float(existing.so_qty or 0),
+                        (existing.purchasing_currency or 'IDR').strip().upper(),
+                        existing.so_create_date,
+                    )
+                    new_purchase_signature = (
+                        float(new_data.get('purchasing_amount') or 0),
+                        float(new_data.get('purchasing_price') or 0),
+                        float(new_data.get('so_qty') or 0),
+                        (new_data.get('purchasing_currency') or 'IDR').strip().upper(),
+                        new_data.get('so_create_date'),
+                    )
+                    purchase_inputs_changed = old_purchase_signature != new_purchase_signature
+                    for field, val in new_data.items():
+                        setattr(existing, field, val)
+                    existing.remarks = preserved_remarks
+                    existing.delivery_plan_date = preserved_plan_date
+                    if not purchase_inputs_changed:
+                        existing.purchasing_amount_idr = preserved_amount_idr
+                        existing.purchasing_amount_idr_cached_at = preserved_amount_idr_cached_at
+                    if not col_spec or spec_val is None:
+                        existing.specification = preserved_spec
+                    if not col_pid or pid_val is None:
+                        existing.product_id = preserved_pid
+                    if existing.product_id:
+                        existing.pic_name = _lookup_pic(existing.product_id)
+                    updated += 1
+                else:
+                    new_rec = SOData(**new_data)
+                    if new_rec.product_id:
+                        new_rec.pic_name = _lookup_pic(new_rec.product_id)
+                    db.session.add(new_rec)
+                    if so_item_val:
+                        existing_so[so_item_val] = new_rec
+                    inserted += 1
 
-    data = []
-    for s in rows:
-        data.append({
-            'id': s.id,
-            'so_number': s.so_number,
-            'so_item': s.so_item,
-            'so_status': s.so_status,
-            'operation_unit_name': s.operation_unit_name,
-            'vendor_name': s.vendor_name,
-            'customer_po_number': s.customer_po_number,
-            'product_name': s.product_name,
-            'specification': s.specification,
-            'manufacturer_name': s.manufacturer_name,
-            'product_id': s.product_id,
-            'so_qty': s.so_qty,
-            'sales_amount': s.sales_amount,
-            'currency': s.currency,
-            'purchasing_amount_idr': purchase_amount_idr(
-                s, allow_persist=False),
-            'purchasing_currency': s.purchasing_currency,
-            'so_create_date': (s.so_create_date.isoformat()
-                               if s.so_create_date else None),
-            'delivery_possible_date': (
-                s.delivery_possible_date.isoformat()
-                if s.delivery_possible_date else None),
-            'delivery_plan_date': (
-                s.delivery_plan_date.isoformat()
-                if s.delivery_plan_date else None),
-            'matched_po_number': s.matched_po_number,
-            'remarks': s.remarks,
-            'pic_name': s.pic_name,
-            'workdays_since_create': workdays_since(s.so_create_date),
-        })
+                count += 1
+                if count % CHUNK_SIZE == 0:
+                    db.session.flush()
 
-    result = {
-        'data': data,
-        'total': total,
-        'page': page,
-        'page_size': page_size,
-        'total_pages': (total + page_size - 1) // page_size,
-    }
-    runtime_cache_set(cache_key, result, ttl_seconds=120)
-    return jsonify(result)
+            db.session.add(UploadLog(file_type='SO', filename=filename, records_count=count))
+            total_count += count
+            total_updated += updated
+            total_inserted += inserted
 
-
-# ─── SO Single Record Update ─────────────────────────────────────────────
-
-@app.route('/api/so/<int:so_id>', methods=['PUT'])
-def api_so_update(so_id):
-    s = SOData.query.get_or_404(so_id)
-    data = request.get_json() or {}
-
-    updatable = [
-        'remarks', 'pic_name', 'delivery_possible_date',
-        'delivery_plan_date', 'matched_po_number',
-    ]
-    for field in updatable:
-        if field in data:
-            val = data[field]
-            if 'date' in field and val:
-                val = parse_date(val)
-            setattr(s, field, val)
-
-    db.session.commit()
-    clear_runtime_caches()
-    return jsonify({'success': True})
-
-
-# ─── SO Delete ───────────────────────────────────────────────────────────
-
-@app.route('/api/so/<int:so_id>', methods=['DELETE'])
-def api_so_delete(so_id):
-    s = SOData.query.get_or_404(so_id)
-    db.session.delete(s)
-    db.session.commit()
-    clear_runtime_caches()
-    return jsonify({'success': True})
-
-
-# ─── SO Backfill IDR (Admin, one-time) ───────────────────────────────────
-
-@app.route('/api/so/backfill-idr', methods=['POST'])
-def api_backfill_idr():
-    missing = SOData.query.filter(
-        SOData.purchasing_amount_idr.is_(None),
-        SOData.purchasing_currency.isnot(None),
-        SOData.purchasing_currency != '',
-        SOData.purchasing_currency != 'IDR',
-    ).all()
-
-    if not missing:
-        return jsonify({'message': 'All rows already cached', 'updated': 0})
-
-    # Bulk prefetch exchange rates
-    dates = {s.so_create_date for s in missing if s.so_create_date}
-    prefetch_exchange_rates(dates, fetch_missing=True)
-
-    updated = 0
-    for s in missing:
-        compute_and_cache_purchase_amount_idr(s)
-        updated += 1
-
-    db.session.commit()
-    clear_runtime_caches()
-    return jsonify({'updated': updated, 'total_missing': len(missing)})
-
-
-# ─── SO Summary / Analytics (Read-Only, Cached) ─────────────────────────
-
-@app.route('/api/so/summary')
-def api_so_summary():
-    cache_key = runtime_cache_key('so_summary')
-    cached = runtime_cache_get(cache_key)
-    if cached:
-        return jsonify(cached)
-
-    date_year, date_from, date_to = parse_so_date_args()
-    clients = selected_clients()
-    pics = selected_pics()
-
-    query = SOData.query.filter(open_so_filter())
-    query = apply_so_create_date_filter(
-        query, date_year, date_from, date_to)
-    query = apply_so_client_filter(query, clients)
-    query = apply_so_pic_filter(query, pics)
-
-    rows = query.all()
-
-    # Prefetch rates from cache/DB only
-    dates = {s.so_create_date for s in rows if s.so_create_date}
-    prefetch_exchange_rates(dates, fetch_missing=False)
-
-    total_count = len(rows)
-    total_sales = sum(float(s.sales_amount or 0) for s in rows)
-    total_purchasing_idr = sum(
-        purchase_amount_idr(s, allow_persist=False) for s in rows)
-
-    result = {
-        'total_count': total_count,
-        'total_sales': total_sales,
-        'total_purchasing_idr': total_purchasing_idr,
-    }
-    runtime_cache_set(cache_key, result, ttl_seconds=120)
-    return jsonify(result)
-
-
-# ─── Product ID DB Upload ────────────────────────────────────────────────
-
-@app.route('/api/product-id/upload', methods=['POST'])
-def api_product_id_upload():
-    uploads, source_type = request_upload_dataframes()
-    if not uploads:
-        return jsonify({'error': 'No files uploaded'}), 400
-
-    total = 0
-    for upload in uploads:
-        df = upload['df']
-        col_map = _product_id_columns(df)
-
-        for _, row in df.iterrows():
-            pid = clean_product_id(
-                row.get(col_map['product_id'])) if col_map[
-                'product_id'] else None
-            if not pid:
-                continue
-
-            existing = ProductIDDB.query.filter_by(product_id=pid).first()
-            if existing:
-                rec = existing
+            diagnostics = {
+                'filename': filename,
+                'columns_detected': {
+                    'so_item': col_primary,
+                    'so_item_col': col_soitem,
+                    'so_number_col': col_so,
+                    'specification': col_spec,
+                    'product_id': col_pid,
+                },
+                'rows_with_specification': spec_filled,
+                'rows_with_product_id': pid_filled,
+                'all_file_columns': df.columns.tolist(),
+            }
+            warnings = []
+            if not col_spec and not col_pid:
+                warnings.append("File ini tidak mengandung kolom 'Specification' maupun 'Product ID'. Spec/Product ID di DB tidak diubah.")
             else:
-                rec = ProductIDDB(product_id=pid)
-                db.session.add(rec)
+                if not col_spec:
+                    warnings.append("Kolom 'Specification' tidak ditemukan di file ini - Specification di DB dipertahankan.")
+                elif spec_filled == 0:
+                    warnings.append(f"Kolom '{col_spec}' terdeteksi tapi semua baris kosong.")
+                if not col_pid:
+                    warnings.append("Kolom 'Product ID' tidak ditemukan di file ini - Product ID di DB dipertahankan.")
+                elif pid_filled == 0:
+                    warnings.append(f"Kolom '{col_pid}' terdeteksi tapi semua baris kosong.")
+            if warnings:
+                diagnostics['warning'] = ' '.join(warnings)
+            diagnostics_by_file.append(diagnostics)
 
-            if col_map['category_id']:
-                rec.category_id = clean(row.get(col_map['category_id']))
-            if col_map['category_name']:
-                rec.category_name = clean(row.get(col_map['category_name']))
-            if col_map['product_name']:
-                rec.product_name = clean(row.get(col_map['product_name']))
-            if col_map['product_status']:
-                rec.product_status = clean(
-                    row.get(col_map['product_status']))
-            if col_map['specification']:
-                rec.specification = clean(
-                    row.get(col_map['specification']))
-            if col_map['manufacturer_name']:
-                rec.manufacturer_name = clean(
-                    row.get(col_map['manufacturer_name']))
-            if col_map['vendor_name']:
-                rec.vendor_name = clean(row.get(col_map['vendor_name']))
-            if col_map['order_unit']:
-                rec.order_unit = clean(row.get(col_map['order_unit']))
-            if col_map['hub_handling_check']:
-                rec.hub_handling_check = clean(
-                    row.get(col_map['hub_handling_check']))
-            if col_map['tax_type']:
-                rec.tax_type = clean(row.get(col_map['tax_type']))
-            if col_map['registration_date']:
-                rec.registration_date = parse_date(
-                    row.get(col_map['registration_date']))
-            if col_map['product_registry_pic']:
-                rec.product_registry_pic = clean(
-                    row.get(col_map['product_registry_pic']))
-
-            rec.updated_at = datetime.utcnow()
-            total += 1
+        # Default manual upload is merge/upsert. Only delete rows missing from
+        # the uploaded file when caller explicitly requests replace/snapshot.
+        db.session.flush()
+        cleanup_post = cleanup_source_table_snapshot(
+            SOData,
+            'so_item',
+            latest_so_items if replace_existing else None,
+            manual_fields=('delivery_plan_date', 'remarks'),
+            timestamp_fields=('uploaded_at',),
+            delete_blank=True,
+        )
+        total_removed_duplicates += cleanup_post.get('removed_duplicates', 0)
+        total_removed_stale += cleanup_post.get('removed_stale', 0)
+        total_removed_blank += cleanup_post.get('removed_blank', 0)
 
         db.session.commit()
 
-    # Invalidate category cache
-    _pid_category_cache_invalidate()
-    # Warm it immediately
-    _pid_category_cache_load()
+        # WAL checkpoint after every large upload so the WAL file stays small
+        # on PythonAnywhere's shared hosting where workers are short-lived.
+        try:
+            db.session.execute(text('PRAGMA wal_checkpoint(TRUNCATE)'))
+            db.session.commit()
+        except Exception:
+            pass
 
-    return jsonify({'success': True, 'total_records': total})
+        # Convert and persist new/changed USD/EUR transactions once during the
+        # upload flow. Dashboard endpoints only read the stored IDR amount.
+        fx_warning = None
+        try:
+            pending_fx_rows = SOData.query.filter(
+                SOData.purchasing_amount_idr.is_(None),
+                func.upper(func.coalesce(SOData.purchasing_currency, '')).in_(['USD', 'EUR'])
+            ).all()
+            converted_fx_rows = ensure_purchase_amount_idr_cache(
+                pending_fx_rows,
+                fetch_missing=True,
+            )
+        except Exception as fx_exc:
+            # The upload itself is already committed. Keep it successful and
+            # allow the dedicated backfill endpoint to retry FX later.
+            db.session.rollback()
+            converted_fx_rows = 0
+            fx_warning = str(fx_exc)
 
+        clear_runtime_caches()
+        diagnostics = diagnostics_by_file[-1] if diagnostics_by_file else {}
+        if len(diagnostics_by_file) > 1:
+            diagnostics = {**diagnostics, 'files': diagnostics_by_file}
 
-# ─── Product ID List (Paginated) ─────────────────────────────────────────
-
-@app.route('/api/product-id/list')
-def api_product_id_list():
-    page = request.args.get('page', 1, type=int)
-    page_size = min(request.args.get('page_size', 50, type=int), 200)
-    search = request.args.get('search', '').strip()
-
-    query = ProductIDDB.query
-    if search:
-        like = f'%{search}%'
-        query = query.filter(db.or_(
-            ProductIDDB.product_id.ilike(like),
-            ProductIDDB.product_name.ilike(like),
-            ProductIDDB.specification.ilike(like),
-            ProductIDDB.manufacturer_name.ilike(like),
-        ))
-
-    total = query.count()
-    rows = query.order_by(ProductIDDB.product_id).offset(
-        (page - 1) * page_size).limit(page_size).all()
-
-    return jsonify({
-        'data': [{
-            'product_id': r.product_id,
-            'category_id': r.category_id,
-            'category_name': r.category_name,
-            'product_name': r.product_name,
-            'product_status': r.product_status,
-            'specification': r.specification,
-            'manufacturer_name': r.manufacturer_name,
-            'vendor_name': r.vendor_name,
-            'order_unit': r.order_unit,
-        } for r in rows],
-        'total': total,
-        'page': page,
-        'page_size': page_size,
-    })
-
-
-# ─── Master PIC Upload ───────────────────────────────────────────────────
-
-@app.route('/api/master-pic/upload', methods=['POST'])
-def api_master_pic_upload():
-    uploads, source_type = request_upload_dataframes()
-    if not uploads:
-        return jsonify({'error': 'No files uploaded'}), 400
-
-    total = 0
-    for upload in uploads:
-        df = upload['df']
-        col_map = _master_pic_columns(df)
-
-        for _, row in df.iterrows():
-            cat_id = clean(row.get(col_map['category_id'])) if col_map[
-                'category_id'] else None
-            cat_name = clean(row.get(col_map['category_name'])) if col_map[
-                'category_name'] else None
-
-            # Use category_name as business key, fall back to category_id
-            existing = None
-            if cat_name:
-                existing = MasterPIC.query.filter_by(
-                    category_name=cat_name).first()
-            if not existing and cat_id:
-                existing = MasterPIC.query.filter_by(
-                    category_id=cat_id).first()
-
-            if existing:
-                rec = existing
-            else:
-                rec = MasterPIC(
-                    category_id=cat_id or cat_name or f'auto_{total}')
-                db.session.add(rec)
-
-            rec.category_id = cat_id or rec.category_id
-            rec.category_name = cat_name or rec.category_name
-
-            # Determine PIC: prefer "Update New PIC" column, else "PIC"
-            new_pic = (clean(row.get(col_map['pic_update']))
-                       if col_map['pic_update'] else None)
-            old_pic = (clean(row.get(col_map['pic']))
-                       if col_map['pic'] else None)
-            rec.pic_name = new_pic or old_pic or rec.pic_name
-            rec.updated_at = datetime.utcnow()
-            total += 1
-
-        db.session.commit()
-
-    # Refresh Master PIC cache
-    _warm_master_pic_cache()
-
-    return jsonify({'success': True, 'total_records': total})
-
-
-def _warm_master_pic_cache():
-    global _MASTER_PIC_CACHE
-    try:
-        rows = MasterPIC.query.all()
-        by_id = {}
-        by_name = {}
-        for r in rows:
-            if r.category_id:
-                by_id[r.category_id] = r.pic_name
-            if r.category_name:
-                by_name[r.category_name.lower()] = r.pic_name
-        _MASTER_PIC_CACHE = {
-            'signature': str(len(rows)),
-            'by_id': by_id,
-            'by_name': by_name,
-        }
-        print(f'Master PIC cache warmed: {len(rows)} entries')
-    except Exception as e:
-        print(f'Master PIC warm skipped: {e}')
-
-
-# ─── Master PIC List ─────────────────────────────────────────────────────
-
-@app.route('/api/master-pic/list')
-def api_master_pic_list():
-    rows = MasterPIC.query.order_by(MasterPIC.category_name).all()
-    return jsonify({
-        'data': [{
-            'category_id': r.category_id,
-            'category_name': r.category_name,
-            'pic_name': r.pic_name,
-        } for r in rows],
-        'total': len(rows),
-    })
-
-
-# ─── Item Registration Upload ────────────────────────────────────────────
-
-@app.route('/api/item-registration/upload', methods=['POST'])
-def api_item_registration_upload():
-    uploads, source_type = request_upload_dataframes()
-    if not uploads:
-        return jsonify({'error': 'No files uploaded'}), 400
-
-    total = 0
-    for upload in uploads:
-        df = upload['df']
-
-        col_map = {
-            'proc_status': find_column(df, ['Proc. Status', 'Proc Status']),
-            'req_date': find_column(df, ['Req. Date', 'Request Date']),
-            'existing_owner': find_column(df, [
-                'Existing Owner', 'Owner', 'Existing Owner(Nm)']),
-            'client_name': find_column(df, [
-                'Client Name', 'Client', 'Client Nm.']),
-            'category': find_column(df, ['Category', 'Cat.']),
-            'category_id': find_column(df, ['Category ID', 'Cat. ID']),
-            'pic': find_column(df, ['PIC', 'PIC Name']),
-            'pic_name': find_column(df, [
-                'PIC Name', 'Pur. PIC Nm.', 'Purchase PIC Name']),
-            'req_no': find_column(df, [
-                'Req. No.', 'Request Number', 'Req No']),
-            'prod_id': find_column(df, [
-                'Prod. ID', 'Product ID', 'Prod ID']),
-            'product_status': find_column(df, [
-                'Product Status', 'Prod. Status']),
-            'batch_grp_no': find_column(df, [
-                'Batch/Grp No.', 'Batch Grp No']),
-            'prod_name': find_column(df, [
-                'Prod. Name', 'Product Name', 'Prod Name']),
-            'spec': find_column(df, ['Spec.', 'Specification', 'Spec']),
-            'mfr_name': find_column(df, [
-                'Mfr. Name', 'Manufacturer Name', 'Mfr. Nm.']),
-            'odr_unit': find_column(df, [
-                'Odr. Unit', 'Order Unit', 'Odr. Unit.']),
-            'vendor_name': find_column(df, [
-                'Vendor Name', 'Vendor Nm.', 'Supplier']),
-            'prod_price': find_column(df, [
-                'Prod. Price', 'Product Price', 'Price']),
-            'curr': find_column(df, ['Curr', 'Currency']),
-            'hub_handling_check': find_column(df, [
-                'HUB Handling Check', 'HUB Handling Chk.']),
-            'tax_type': find_column(df, ['Tax Type', 'Tax']),
-            'registration_date': find_column(df, [
-                'Registration Date', 'Reg. Date',
-                'Product Registration Date']),
-            'product_registry_pic': find_column(df, [
-                'Product Registy PIC(Name)',
-                'Product Registry PIC(Name)',
-                'Product Registry PIC']),
-            'remarks': find_column(df, ['Remarks', 'Remark']),
-        }
-
-        for _, row in df.iterrows():
-            req_no = clean(row.get(col_map['req_no'])) if col_map[
-                'req_no'] else None
-            prod_id = clean_product_id(
-                row.get(col_map['prod_id'])) if col_map['prod_id'] else ''
-
-            existing = None
-            if req_no and prod_id:
-                existing = ItemRegistration.query.filter_by(
-                    req_no=req_no, prod_id=prod_id).first()
-            if not existing and req_no:
-                existing = ItemRegistration.query.filter_by(
-                    req_no=req_no).first()
-
-            if existing:
-                rec = existing
-            else:
-                rec = ItemRegistration()
-                db.session.add(rec)
-
-            rec.proc_status = clean(row.get(
-                col_map['proc_status'])) if col_map['proc_status'] else None
-            rec.req_date = parse_date(row.get(
-                col_map['req_date'])) if col_map['req_date'] else None
-            rec.existing_owner = clean(row.get(
-                col_map['existing_owner'])) if col_map[
-                'existing_owner'] else None
-            rec.client_name = clean(row.get(
-                col_map['client_name'])) if col_map['client_name'] else None
-            rec.category = clean(row.get(
-                col_map['category'])) if col_map['category'] else None
-            rec.category_id = clean(row.get(
-                col_map['category_id'])) if col_map['category_id'] else None
-            rec.pic = clean(row.get(
-                col_map['pic'])) if col_map['pic'] else None
-            rec.pic_name = clean(row.get(
-                col_map['pic_name'])) if col_map['pic_name'] else None
-            rec.req_no = req_no
-            rec.prod_id = prod_id
-            rec.product_status = clean(row.get(
-                col_map['product_status'])) if col_map[
-                'product_status'] else None
-            rec.batch_grp_no = clean(row.get(
-                col_map['batch_grp_no'])) if col_map[
-                'batch_grp_no'] else None
-            rec.prod_name = clean(row.get(
-                col_map['prod_name'])) if col_map['prod_name'] else None
-            rec.spec = clean(row.get(
-                col_map['spec'])) if col_map['spec'] else None
-            rec.mfr_name = clean(row.get(
-                col_map['mfr_name'])) if col_map['mfr_name'] else None
-            rec.odr_unit = clean(row.get(
-                col_map['odr_unit'])) if col_map['odr_unit'] else None
-            rec.vendor_name = clean(row.get(
-                col_map['vendor_name'])) if col_map['vendor_name'] else None
-            rec.prod_price = safe_float(row.get(
-                col_map['prod_price'])) if col_map['prod_price'] else None
-            rec.curr = clean(row.get(
-                col_map['curr'])) if col_map['curr'] else None
-            rec.hub_handling_check = clean(row.get(
-                col_map['hub_handling_check'])) if col_map[
-                'hub_handling_check'] else None
-            rec.tax_type = clean(row.get(
-                col_map['tax_type'])) if col_map['tax_type'] else None
-            rec.registration_date = parse_date(row.get(
-                col_map['registration_date'])) if col_map[
-                'registration_date'] else None
-            rec.product_registry_pic = clean(row.get(
-                col_map['product_registry_pic'])) if col_map[
-                'product_registry_pic'] else None
-            rec.remarks = clean(row.get(
-                col_map['remarks'])) if col_map['remarks'] else None
-            rec.uploaded_at = datetime.utcnow()
-            total += 1
-
-        db.session.commit()
-
-    clear_runtime_caches()
-    return jsonify({'success': True, 'total_records': total})
-
-
-# ─── Item Registration Dashboard (Paginated) ─────────────────────────────
-
-@app.route('/api/item-registration/dashboard')
-def api_item_registration_dashboard():
-    page = request.args.get('page', 1, type=int)
-    page_size = min(request.args.get('page_size', 50, type=int), 200)
-    search = request.args.get('search', '').strip()
-    date_year, date_from, date_to = parse_so_date_args()
-    clients = selected_clients()
-    pics = selected_pics()
-
-    cache_key = runtime_cache_key('item_reg_dashboard')
-    cached = runtime_cache_get(cache_key)
-    if cached:
-        return jsonify(cached)
-
-    query = ItemRegistration.query
-    query = apply_item_registration_date_filter(
-        query, date_year, date_from, date_to)
-    query = apply_so_client_filter(query, clients)  # reuse
-    if pics:
-        query = apply_item_registration_pic_filter(query, pics)
-
-    if search:
-        like = f'%{search}%'
-        query = query.filter(db.or_(
-            ItemRegistration.req_no.ilike(like),
-            ItemRegistration.prod_name.ilike(like),
-            ItemRegistration.prod_id.ilike(like),
-            ItemRegistration.mfr_name.ilike(like),
-            ItemRegistration.client_name.ilike(like),
-        ))
-
-    total = query.count()
-    rows = query.order_by(ItemRegistration.req_date.desc()).offset(
-        (page - 1) * page_size).limit(page_size).all()
-
-    data = [{
-        'id': r.id,
-        'proc_status': r.proc_status,
-        'req_date': r.req_date.isoformat() if r.req_date else None,
-        'existing_owner': r.existing_owner,
-        'client_name': r.client_name,
-        'category': r.category,
-        'pic': r.pic,
-        'pic_name': r.pic_name,
-        'req_no': r.req_no,
-        'prod_id': r.prod_id,
-        'product_status': r.product_status,
-        'prod_name': r.prod_name,
-        'spec': r.spec,
-        'mfr_name': r.mfr_name,
-        'odr_unit': r.odr_unit,
-        'vendor_name': r.vendor_name,
-        'prod_price': r.prod_price,
-        'curr': r.curr,
-        'registration_date': (r.registration_date.isoformat()
-                              if r.registration_date else None),
-        'remarks': r.remarks,
-    } for r in rows]
-
-    result = {
-        'data': data,
-        'total': total,
-        'page': page,
-        'page_size': page_size,
-        'total_pages': (total + page_size - 1) // page_size,
-    }
-    runtime_cache_set(cache_key, result, ttl_seconds=120)
-    return jsonify(result)
-
-
-# ─── RFQ Dashboard (Smart Sync, Paginated) ───────────────────────────────
-
-@app.route('/api/rfq/dashboard')
-def api_rfq_dashboard():
-    page = request.args.get('page', 1, type=int)
-    page_size = min(request.args.get('page_size', 50, type=int), 200)
-    search = request.args.get('search', '').strip()
-    check_filter = request.args.get('check', '').strip()
-    sort_order = request.args.get('sort', 'newest')
-
-    rows, fetched_at, sync_info = rfq_rows_with_edits_smart()
-
-    # Handle empty state
-    if not rows and fetched_at is None:
         return jsonify({
-            'data': [], 'total': 0,
-            'needs_initial_sync': True,
-            'message': ('RFQ data not synced yet. '
-                        'Click Sync to load data.'),
-        })
-
-    # Filter
-    if search:
-        rows = filter_rfq_rows_by_multiline_search(rows, search)
-    if check_filter:
-        rows = [r for r in rows if (r.get('check') or '') == check_filter]
-
-    # Sort
-    sort_rfq_rows(rows, sort_order)
-
-    # Paginate
-    total = len(rows)
-    start = (page - 1) * page_size
-    paginated = rows[start:start + page_size]
-
-    return jsonify({
-        'data': paginated,
-        'total': total,
-        'page': page,
-        'page_size': page_size,
-        'total_pages': (total + page_size - 1) // page_size,
-        'last_synced': utc_isoformat(fetched_at) if fetched_at else None,
-        'synced_ago_seconds': (
-            int((datetime.utcnow() - fetched_at).total_seconds())
-            if fetched_at else None),
-        'sync_info': sync_info,
-    })
-
-
-# ─── RFQ Sync (Manual or Scheduled) ─────────────────────────────────────
-
-@app.route('/api/rfq/sync', methods=['POST'])
-def api_rfq_sync():
-    result = sync_rfq_incremental()
-    return jsonify({
-        'success': True,
-        'added': result.get('added', 0),
-        'updated': result.get('updated', 0),
-        'sheet_rows': result.get('sheet_rows', 0),
-        'synced_at': utc_isoformat(datetime.utcnow()),
-    })
-
-
-# ─── RFQ Cell Edit ──────────────────────────────────────────────────────
-
-@app.route('/api/rfq/cell', methods=['PUT'])
-def api_rfq_cell_edit():
-    data = request.get_json() or {}
-    row_key = data.get('row_key')
-    field = data.get('field')
-    value = data.get('value')
-
-    if not row_key or not field:
-        return jsonify({'error': 'row_key and field required'}), 400
-    if field not in RFQ_EDITABLE_FIELDS:
-        return jsonify({'error': f'Field {field} not editable'}), 400
-
-    # Update local DB
-    ok = set_rfq_dashboard_cell(row_key, field, value, dirty=True)
-    if not ok:
-        return jsonify({'error': 'Row not found'}), 404
-
-    # Sync to Google Sheet (if not dashboard-only field)
-    if field not in RFQ_DASHBOARD_ONLY_FIELDS:
-        row_data = RFQDashboardRow.query.filter_by(
-            row_key=row_key).first()
-        if row_data:
-            row_dict = rfq_json_load(row_data.data_json, {})
-            sync_result = sync_rfq_cell_to_google_sheet(
-                row_dict, field, value)
-            return jsonify({
-                'success': True, 'sync': sync_result})
-
-    return jsonify({'success': True, 'local_only': True})
-
-
-# ─── RFQ Similarity (Read from Cache) ────────────────────────────────────
-
-@app.route('/api/rfq/similarity/refresh', methods=['POST'])
-def api_rfq_similarity_refresh():
-    """Admin: pre-compute similarity for all open RFQ rows.
-    Results stored in memory cache for fast dashboard reads."""
-    rows, _ = rfq_rows_with_edits_smart()
-    computed = 0
-    for row in rows:
-        if (clean(row.get('check')) or '').lower() == 'open':
-            apply_rfq_similarity(row)
-            computed += 1
-    return jsonify({'computed': computed})
-
-
-# ─── Vendor Control ──────────────────────────────────────────────────────
-
-@app.route('/api/vendor-control/list')
-def api_vendor_control_list():
-    try:
-        rows, fetched_at = vendor_control_rows()
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-    return jsonify({
-        'data': rows,
-        'total': len(rows),
-        'fetched_at': utc_isoformat(fetched_at),
-    })
-
-
-@app.route('/api/vendor-control/sync', methods=['POST'])
-def api_vendor_control_sync():
-    try:
-        rows, fetched_at = vendor_control_rows(force=True)
-        return jsonify({
-            'success': True,
-            'total': len(rows),
-            'synced_at': utc_isoformat(fetched_at),
+            'message': f'Berhasil upload {len(uploads)} file: {total_inserted} SO baru ditambahkan, {total_updated} SO diperbarui, {total_removed_duplicates} duplicate lama dihapus, {total_removed_stale} SO lama dibuang.',
+            'uploaded': total_count,
+            'files': len(uploads),
+            'mode': upload_mode,
+            'replace': replace_existing,
+            'inserted': total_inserted,
+            'updated': total_updated,
+            'removed_duplicates': total_removed_duplicates,
+            'removed_stale': total_removed_stale,
+            'removed_blank': total_removed_blank,
+            'fx_converted': converted_fx_rows,
+            'fx_warning': fx_warning,
+            'diagnostics': diagnostics,
         })
     except Exception as e:
+        db.session.rollback(); import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/vendor-control/cell', methods=['PUT'])
-def api_vendor_control_cell():
-    data = request.get_json() or {}
-    sheet_row = data.get('sheet_row')
-    field = data.get('field')
-    value = data.get('value')
+@app.route('/api/admin/cleanup-discardable', methods=['POST'])
+def admin_cleanup_discardable():
+    """One-time (and periodic) cleanup: delete SO rows whose status is in
+    DISCARDABLE_STATUSES. These are closed statuses that are never queried
+    by any analytics endpoint and only waste storage.
 
-    if not sheet_row or not field:
-        return jsonify({'error': 'sheet_row and field required'}), 400
-
-    result = sync_vendor_control_cell(sheet_row, field, value)
-    if result.get('synced'):
-        # Refresh cache
-        vendor_control_rows(force=True)
-        return jsonify({'success': True, **result})
-    return jsonify({'error': result.get('reason', 'Sync failed')}), 400
-
-
-@app.route('/api/vendor-control/login', methods=['POST'])
-def api_vendor_control_login():
-    data = request.get_json() or {}
-    vendor_name = (data.get('vendor_name') or '').strip()
-    vendor_id = (data.get('vendor_id') or '').strip()
-    password = (data.get('password') or '').strip()
-
-    if not all([vendor_name, vendor_id, password]):
-        return jsonify({
-            'authenticated': False,
-            'error': 'All fields required'}), 400
-
+    Safe to call at any time — Delivery Completed is NOT in DISCARDABLE_STATUSES
+    so delivery analytics data is preserved.
+    """
     try:
-        rows, _ = vendor_control_rows()
-    except Exception as e:
-        return jsonify({'authenticated': False, 'error': str(e)}), 500
+        deleted = db.session.query(SOData).filter(
+            SOData.so_status.in_(list(DISCARDABLE_STATUSES))
+        ).delete(synchronize_session=False)
+        db.session.commit()
 
-    for row in rows:
-        if (row['vendor_name'].strip().lower() == vendor_name.lower() and
-                row['vendor_id'].strip() == vendor_id and
-                row['password'].strip() == password):
-            return jsonify({
-                'authenticated': True,
-                'vendor_name': row['vendor_name'],
+        # Checkpoint WAL and reclaim freed pages
+        db.session.execute(text('PRAGMA wal_checkpoint(TRUNCATE)'))
+        db.session.commit()
+
+        clear_runtime_caches()
+        return jsonify({
+            'deleted': deleted,
+            'message': f'{deleted} SO rows dengan status discardable berhasil dihapus.',
+        })
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/upload/smro-backfill-spec-json', methods=['POST'])
+@app.route('/api/upload/smro-backfill-spec', methods=['POST'])
+def upload_smro_backfill_spec():
+    """Backfill-only upload from Excel or JSON.
+
+    Reads Specification and Product ID and updates those two fields on existing SO records.
+    Accepts either multipart Excel upload or JSON body with rows/data.
+    """
+    try:
+        uploads, upload_mode = request_upload_dataframes('smro_backfill_spec')
+        if not uploads:
+            return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
+
+        # Ensure columns exist in DB before writing
+        _ensure_so_extra_columns()
+
+        # Build lookups from all SO records in DB
+        all_so = SOData.query.all()
+        by_soitem = {}
+        by_sonum = {}
+        for s in all_so:
+            if s.so_item:
+                by_soitem[s.so_item] = s
+            if s.so_number:
+                by_sonum.setdefault(s.so_number, []).append(s)
+
+        updated = 0
+        skipped_no_match = 0
+        skipped_no_data = 0
+        flush_counter = 0
+        diagnostics = []
+
+        for upload in uploads:
+            filename = upload['filename']
+            df = upload['df']
+            df.columns = [str(c).strip() for c in df.columns]
+
+            col_sonum  = find_column(df, ['SO Number', 'SO No', 'SO No.', 'SO'])
+            col_soitem = find_column(df, ['SO Item', 'SO Item No', 'SO Line', 'Item No', 'Line'])
+            col_spec   = find_column(df, ['Specification', 'Spec', 'Specifications', 'Product Specification'])
+            col_pid    = find_column(df, ['Product ID', 'Product Id', 'Product Code',
+                                          'Material', 'Material No', 'Material Number', 'Material Code', 'SKU'])
+
+            if not col_soitem and not col_sonum:
+                return jsonify({'error': f'SO Item / SO Number column not found in "{filename}". Columns: {df.columns.tolist()}'}), 400
+            if not col_spec and not col_pid:
+                return jsonify({'error': f'Neither Specification nor Product ID column found in "{filename}".'}), 400
+
+            file_updated = 0
+            file_skipped_no_match = 0
+            file_skipped_no_data = 0
+
+            for _, row in df.iterrows():
+                so_item_val = clean(df_val(row, col_soitem)) if col_soitem else None
+                so_num_val  = clean(df_val(row, col_sonum))  if col_sonum  else None
+                spec_val    = clean(df_val(row, col_spec))   if col_spec   else None
+                pid_val     = clean(df_val(row, col_pid))    if col_pid    else None
+
+                if spec_val is None and pid_val is None:
+                    skipped_no_data += 1
+                    file_skipped_no_data += 1
+                    continue
+
+                matched_recs = []
+
+                if so_item_val:
+                    rec = by_soitem.get(so_item_val)
+                    if rec:
+                        matched_recs = [rec]
+                    else:
+                        parts = so_item_val.rsplit('-', 1)
+                        so_num_from_item = parts[0] if len(parts) == 2 else so_item_val
+                        candidates = by_sonum.get(so_num_from_item, [])
+                        if len(parts) == 2:
+                            item_line = parts[1]
+                            line_matched = [
+                                c for c in candidates
+                                if c.so_item and c.so_item.endswith(f'-{item_line}')
+                            ]
+                            matched_recs = line_matched or candidates
+                        else:
+                            matched_recs = candidates
+
+                if not matched_recs and so_num_val:
+                    matched_recs = by_sonum.get(so_num_val, [])
+
+                if not matched_recs:
+                    skipped_no_match += 1
+                    file_skipped_no_match += 1
+                    continue
+
+                for rec in matched_recs:
+                    changed = False
+                    if spec_val is not None and rec.specification != spec_val:
+                        rec.specification = spec_val
+                        changed = True
+                    if pid_val is not None and rec.product_id != pid_val:
+                        rec.product_id = pid_val
+                        changed = True
+                    if changed:
+                        updated += 1
+                        file_updated += 1
+                        flush_counter += 1
+                        if flush_counter % 300 == 0:
+                            db.session.flush()
+
+            diagnostics.append({
+                'filename': filename,
+                'updated': file_updated,
+                'skipped_no_match': file_skipped_no_match,
+                'skipped_no_data': file_skipped_no_data,
+                'spec_column_detected': col_spec,
+                'pid_column_detected': col_pid,
+                'soitem_column_detected': col_soitem,
+                'sonumber_column_detected': col_sonum,
             })
 
-    return jsonify({'authenticated': False, 'error': 'Invalid credentials'}), 401
+        db.session.commit()
+        clear_runtime_caches()
+        return jsonify({
+            'message': (
+                f'Backfill selesai: {updated} SO record diperbarui'
+                + (f', {skipped_no_match} baris tidak cocok di DB' if skipped_no_match else '')
+                + (f', {skipped_no_data} baris tidak ada data Spec/PID' if skipped_no_data else '')
+                + '.'
+            ),
+            'mode': upload_mode,
+            'files': len(uploads),
+            'updated': updated,
+            'skipped_no_match': skipped_no_match,
+            'skipped_no_data': skipped_no_data,
+            'diagnostics': diagnostics[-1] if len(diagnostics) == 1 else diagnostics,
+        })
+    except ValueError as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+@app.route('/api/data/so/<int:so_id>', methods=['PUT'])
+def update_so(so_id):
+    try:
+        data = request.json
+        so = db.session.get(SOData, so_id)
+        if not so: return jsonify({'error': 'Not found'}), 404
+        if 'delivery_plan_date' in data: so.delivery_plan_date = parse_date(data['delivery_plan_date'])
+        if 'remarks' in data: so.remarks = data['remarks']
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback(); return jsonify({'error': str(e)}), 500
 
 
-# ─── Import Dashboard ────────────────────────────────────────────────────
+@app.route('/api/data/so/by-item/<path:so_item>', methods=['PUT'])
+def update_so_by_item(so_item):
+    """Update editable SO fields when a detail response only has SO Item."""
+    try:
+        data = request.json or {}
+        so = SOData.query.filter_by(so_item=so_item).first()
+        if not so:
+            return jsonify({'error': 'Not found'}), 404
+        if 'delivery_plan_date' in data:
+            so.delivery_plan_date = parse_date(data['delivery_plan_date'])
+        if 'remarks' in data:
+            so.remarks = data['remarks']
+        db.session.commit()
+        return jsonify({'success': True, 'id': so.id, 'so_item': so.so_item})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
 
-@app.route('/api/import/dashboard')
-def api_import_dashboard():
-    page = request.args.get('page', 1, type=int)
-    page_size = min(request.args.get('page_size', 50, type=int), 200)
-    vendor_filter = request.args.get('vendor', '').strip()
+
+@app.route('/api/data/so/template', methods=['GET'])
+@app.route('/api/data/so/template', methods=['GET'])
+def download_so_batch_template():
+    """Download Excel template for SO batch upload.
+    If filters are supplied (same params as /api/data/all-so), the filtered SO Items
+    are pre-populated in the template starting from row 3, with existing
+    delivery_plan_date and remarks already filled in so the user only needs to
+    update what changed.  Either column may be left blank on upload.
+    """
+    try:
+        # ── Apply same filters as fetchSOData ──────────────────────────────
+        op_units   = request.args.getlist('op_unit')
+        vendors    = request.args.getlist('vendor')
+        manufacturers = request.args.getlist('manufacturer')
+        statuses   = request.args.getlist('status')
+        aging_list = request.args.getlist('aging')
+        so_items   = request.args.getlist('so_item')
+        pics       = request.args.getlist('pic')
+        kpi_pic = (request.args.get('kpi_pic') or '').strip()
+        global_pics = request.args.getlist('global_pic')
+        clients = selected_clients()
+        margin_filter = request.args.get('margin_filter', 'all')
+        date_year, date_from, date_to = parse_so_date_args()
+
+        q = SOData.query.filter(open_so_filter())
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, global_pics)
+        if op_units:  q = q.filter(SOData.operation_unit_name.in_(op_units))
+        if vendors:   q = q.filter(SOData.vendor_name.in_(vendors))
+        if manufacturers: q = q.filter(SOData.manufacturer_name.in_(manufacturers))
+        if statuses:  q = q.filter(SOData.so_status.in_(statuses))
+        if so_items:  q = q.filter(SOData.so_item.in_(so_items))
+        q = apply_so_pic_filter(q, pics)
+        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
+        all_sos = q.order_by(SOData.so_create_date.asc()).all()
+
+        # Aging filter (post-query, same as all-so endpoint)
+        if aging_list:
+            today = date.today()
+            def matches_aging(s):
+                return get_aging_label(workdays_since(s.so_create_date, today)) in aging_list
+            all_sos = [s for s in all_sos if matches_aging(s)]
+
+        # Margin filter
+        if margin_filter in ('positive', 'negative'):
+            # Warm cache before filtering loop to avoid per-row HTTP calls.
+            prefetch_convertible_exchange_rates(all_sos)
+
+            def calc_margin(s):
+                po_amt = convert_to_idr((s.purchasing_amount or 0) or (s.purchasing_price or 0) * (s.so_qty or 0), s.purchasing_currency, s.so_create_date, cache_only=True)
+                return float(s.sales_amount or 0) - po_amt
+            if margin_filter == 'negative':
+                all_sos = [s for s in all_sos if calc_margin(s) < 0]
+            else:
+                all_sos = [s for s in all_sos if calc_margin(s) >= 0]
+
+        if kpi_pic:
+            all_sos = [s for s in all_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) == kpi_pic]
+
+        # ── Build workbook ─────────────────────────────────────────────────
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "SO Batch Upload"
+
+        headers = ['SO Item', 'Delivery Plan Date', 'Remarks']
+        ws.append(headers)
+        ws.freeze_panes = 'A2'
+
+        # Row 1: header — yellow, bold, centered
+        header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+        col_widths   = [35, 25, 50]
+        for i, cell in enumerate(ws[1], 1):
+            cell.fill = header_fill
+            cell.font = Font(bold=True, color="000000")
+            cell.alignment = Alignment(horizontal='center')
+            ws.column_dimensions[get_column_letter(i)].width = col_widths[i - 1]
+
+        # Row 2: example — red font, light grey background
+        grey_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+        red_font  = Font(color="FF0000")
+        ws.append(['example : 9008988017-10', 'example : 2025-12-31', 'example : Waiting for vendor confirmation'])
+        for cell in ws[2]:
+            cell.font = red_font
+            cell.fill = grey_fill
+
+        # Rows 3+: pre-populate with filtered SO items (if any filter active)
+        for s in all_sos:
+            if not s.so_item:
+                continue
+            plan = s.delivery_plan_date.isoformat() if s.delivery_plan_date else ''
+            ws.append([s.so_item, plan, s.remarks or ''])
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return send_file(output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f"Template_SO_BatchUpload_{datetime.now().strftime('%Y%m%d')}.xlsx")
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/data/so/batch-upload', methods=['POST'])
+def batch_upload_so():
+    try:
+        if 'file' not in request.files: return jsonify({'error': 'No file'}), 400
+        file = request.files['file']
+        # Row 0 = header, row 1 = example (red row) → skip with skiprows so
+        # actual data starts at row index 0 of the resulting DataFrame (Excel row 3+).
+        df = pd.read_excel(file, engine='openpyxl', skiprows=[1])
+        df.columns = [str(c).strip() for c in df.columns]
+        col_so_item = find_column(df, ['SO Item', 'SO Item No', 'SO Item Number'])
+        col_plan    = find_column(df, ['Delivery Plan Date', 'Plan Date'])
+        col_rem     = find_column(df, ['Remarks', 'Remark'])
+        if not col_so_item:
+            return jsonify({'error': f'Column "SO Item" not found. Available: {df.columns.tolist()}'}), 400
+        updated = 0
+        not_found = 0
+        for _, row in df.iterrows():
+            so_item_val = clean(df_val(row, col_so_item)) if col_so_item else None
+            if not so_item_val: continue
+            # Lookup by so_item (unique identifier) — NOT so_number
+            so = SOData.query.filter_by(so_item=so_item_val).first()
+            if so:
+                if col_plan:
+                    # Column exists, so a blank cell intentionally clears the old plan date.
+                    so.delivery_plan_date = parse_date(df_val(row, col_plan))
+                if col_rem:
+                    # Column exists, so a blank cell intentionally clears the old remarks.
+                    so.remarks = clean(df_val(row, col_rem)) or ''
+                updated += 1
+            else:
+                not_found += 1
+        db.session.commit()
+        return jsonify({'updated': updated, 'not_found': not_found})
+    except Exception as e:
+        db.session.rollback(); import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+def _style_wb(ws, headers, num_cols=None):
+    ws.append(headers)
+    ws.freeze_panes = 'A2'
+    fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
+    for i, cell in enumerate(ws[1], 1):
+        cell.fill = fill
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.alignment = Alignment(horizontal='center')
+        ws.column_dimensions[get_column_letter(i)].width = 20
+    if num_cols:
+        for row in ws.iter_rows(min_row=2):
+            for ci in num_cols:
+                row[ci-1].number_format = '#,##0.00'
+
+
+@app.route('/api/export/all-so', methods=['GET'])
+def export_all_so():
+    try:
+        q = SOData.query.filter(open_so_filter())
+        op_units = request.args.getlist('op_unit')
+        vendors  = request.args.getlist('vendor')
+        manufacturers = request.args.getlist('manufacturer')
+        statuses = request.args.getlist('status')
+        aging_list = request.args.getlist('aging')
+        so_items = request.args.getlist('so_item')
+        pics = request.args.getlist('pic')
+        kpi_pic = (request.args.get('kpi_pic') or '').strip()
+        global_pics = request.args.getlist('global_pic')
+        clients = selected_clients()
+        margin_filter = request.args.get('margin_filter', 'all')
+        sort_order = request.args.get('sort_order', 'oldest')
+        date_year, date_from, date_to = parse_so_date_args()
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, global_pics)
+        if op_units: q = q.filter(SOData.operation_unit_name.in_(op_units))
+        if vendors:  q = q.filter(SOData.vendor_name.in_(vendors))
+        if manufacturers: q = q.filter(SOData.manufacturer_name.in_(manufacturers))
+        if statuses: q = q.filter(SOData.so_status.in_(statuses))
+        if so_items: q = q.filter(SOData.so_item.in_(so_items))
+        q = apply_so_pic_filter(q, pics)
+        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
+        if sort_order == 'newest':
+            sos = q.order_by(SOData.so_create_date.desc(), SOData.so_item.asc()).all()
+        else:
+            sos = q.order_by(SOData.so_create_date.asc(), SOData.so_item.asc()).all()
+
+        today = date.today()
+        hidden_so = get_hidden_so_items()
+        sos = [
+            s for s in sos
+            if s.so_item not in hidden_so
+            and s.so_number not in hidden_so
+            and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)
+        ]
+        if aging_list:
+            sos = [s for s in sos if get_aging_label(workdays_since(s.so_create_date, today)) in aging_list]
+        if margin_filter in ('positive', 'negative'):
+            def calc_margin(s):
+                po_amt = raw_purchase_amount(s)
+                return float(s.sales_amount or 0) - po_amt
+            if margin_filter == 'negative':
+                sos = [s for s in sos if calc_margin(s) < 0]
+            else:
+                sos = [s for s in sos if calc_margin(s) >= 0]
+        if kpi_pic:
+            sos = [s for s in sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) == kpi_pic]
+
+        wb = Workbook(); ws = wb.active; ws.title = "SO List"
+        headers = [
+            'Aging', 'Day', 'SO Create Date', 'SO Item', 'PO No.', 'SO Status',
+            'Category', 'PIC', 'Product ID', 'Product Name', 'Specification',
+            'Manufacturer Name', 'SO Quantity', 'Sales Unit', 'Operation Unit Name',
+            'Vendor ID', 'Vendor Name', 'Currency', 'Sales Price(Exclude Tax)',
+            'Sales Amount(Exclude Tax)', 'Purchasing Currency', 'Purchasing Price',
+            'Margin', '%Margin', 'Delivery Memo', 'Plan Date', 'Remarks'
+        ]
+        _style_wb(ws, headers, num_cols=[2,13,19,20,22,23,24])
+        widths = [14, 10, 16, 22, 22, 24, 22, 16, 18, 30, 44, 28, 14, 14, 30, 16, 28, 12, 22, 24, 20, 18, 18, 12, 30, 16, 70]
+        for i, width in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = width
+        for s in sos:
+            day = workdays_since(s.so_create_date, today)
+            po_amount = raw_purchase_amount(s)
+            sales_amount = float(s.sales_amount or 0)
+            margin = sales_amount - po_amount
+            margin_pct = (margin / po_amount * 100) if po_amount else None
+            ws.append([
+                get_aging_label(day),
+                day if day is not None else '',
+                s.so_create_date.isoformat() if s.so_create_date else '',
+                s.so_item or '',
+                s.matched_po_number or '',
+                s.so_status or '',
+                product_category_level1(s.product_id),
+                canonical_pending_pic(s.pic_name, s.operation_unit_name),
+                s.product_id or '',
+                s.product_name or '',
+                s.specification or '',
+                s.manufacturer_name or '',
+                s.so_qty or 0,
+                s.sales_unit or '',
+                s.operation_unit_name or '',
+                s.vendor_id or '',
+                s.vendor_name or '',
+                s.currency or '',
+                s.sales_price or 0,
+                sales_amount,
+                s.purchasing_currency or '',
+                s.purchasing_price or 0,
+                margin,
+                margin_pct if margin_pct is not None else '',
+                s.delivery_memo or '',
+                s.delivery_plan_date.isoformat() if s.delivery_plan_date else '',
+                s.remarks or '',
+            ])
+        output = io.BytesIO(); wb.save(output); output.seek(0)
+        return send_file(output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True, download_name=f"SO_List_{datetime.now().strftime('%Y%m%d')}.xlsx")
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/completed/summary', methods=['GET'])
+def completed_summary():
+    try:
+        year_filter = request.args.get('year', 'all')
+        date_year   = request.args.get('date_year', '')
+        date_from   = request.args.get('date_from', '')
+        date_to     = request.args.get('date_to', '')
+        yoy_base_year = request.args.get('yoy_base_year', '')
+        is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
+        clients = selected_clients()
+        pics = selected_pics()
+
+        q = db.session.query(SOData).filter(SOData.so_status == 'Delivery Completed')
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, pics)
+        yoy_q = db.session.query(SOData).filter(SOData.so_status == 'Delivery Completed')
+        yoy_q = apply_so_client_filter(yoy_q, clients)
+        yoy_q = apply_so_pic_filter(yoy_q, pics)
+
+        # Apply SO Create Date filter (date_year takes precedence over range,
+        # and falls back to legacy `year` query param when present).
+        effective_year = date_year or (year_filter if year_filter and year_filter != 'all' else '')
+        if effective_year:
+            try:
+                yr = int(effective_year)
+                if is_sqlite:
+                    q = q.filter(func.strftime('%Y', SOData.so_create_date) == str(yr))
+                else:
+                    q = q.filter(func.extract('year', SOData.so_create_date) == yr)
+            except ValueError:
+                pass
+        else:
+            if date_from:
+                q = q.filter(SOData.so_create_date >= date_from)
+            if date_to:
+                q = q.filter(SOData.so_create_date <= date_to)
+
+        # Exclude consumable / non-revenue op units, matching every other
+        # SOData query in the codebase (see /api/completed/margin-detail, etc.).
+        q = q.filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS)))
+        yoy_q = yoy_q.filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS)))
+
+        cache_key = (
+            _RUNTIME_CACHE_VERSION,
+            year_filter or 'all',
+            date_year or '',
+            date_from or '',
+            date_to or '',
+            yoy_base_year or '',
+            tuple(sorted(clients)),
+            tuple(sorted(pics)),
+        )
+        now_ts = datetime.utcnow().timestamp()
+        with _COMPLETED_CACHE_LOCK:
+            cache_entry = _COMPLETED_SUMMARY_CACHE.get(cache_key)
+            if cache_entry and now_ts - cache_entry.get('created_at', 0) < _COMPLETED_SUMMARY_CACHE_TTL_SECONDS:
+                return jsonify(cache_entry['payload'])
+
+        completed_summary_fields = (
+            SOData.so_number,
+            SOData.so_item,
+            SOData.operation_unit_name,
+            SOData.vendor_name,
+            SOData.product_name,
+            SOData.specification,
+            SOData.product_id,
+            SOData.so_qty,
+            SOData.sales_amount,
+            SOData.purchasing_price,
+            SOData.purchasing_amount,
+            SOData.purchasing_currency,
+            SOData.purchasing_amount_idr,
+            SOData.so_create_date,
+        )
+        purchase_summary_fields = (
+            SOData.so_qty,
+            SOData.purchasing_price,
+            SOData.purchasing_amount,
+            SOData.purchasing_currency,
+            SOData.purchasing_amount_idr,
+            SOData.so_create_date,
+        )
+
+        rows = q.options(load_only(*completed_summary_fields)).all()
+        yoy_rows = yoy_q.options(load_only(*purchase_summary_fields)).all()
+
+        missing_conversion_count = sum(
+            1 for s in rows
+            if s.purchasing_amount_idr is None
+            and str(s.purchasing_currency or 'IDR').strip().upper() != 'IDR'
+            and raw_purchase_amount(s) > 0
+        )
+
+        # Read endpoints must never wait on external FX fetches. Missing
+        # conversions are filled during upload/backfill, then cached in DB.
+        converted_count = ensure_purchase_amount_idr_cache(rows, fetch_missing=False)
+
+        def po_amt_of(s):
+            return purchase_amount_idr(s)
+
+        # Pre-compute per-row sales/purchase/margin once, then reuse.
+        enriched = []
+        for s in rows:
+            po_amt = po_amt_of(s)
+            sales = float(s.sales_amount or 0)
+            # Margin is only calculated if purchase price exists and is not 0
+            # If purchase price is 0 or missing, margin should be None (displayed as "-")
+            has_purchase_data = (
+                (s.purchasing_amount is not None and s.purchasing_amount != 0) or
+                (s.purchasing_price is not None and s.purchasing_price != 0)
+            )
+            # Only calculate margin if we have valid purchase data
+            margin = (sales - po_amt) if has_purchase_data else None
+            enriched.append((s, po_amt, sales, margin))
+
+        # Monthly trend
+        monthly = {}
+        for s, po_amt, sales, _m in enriched:
+            if not s.so_create_date:
+                continue
+            key = s.so_create_date.strftime('%Y-%m')
+            if key not in monthly:
+                monthly[key] = {'month': key, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0}
+            monthly[key]['count'] += 1
+            monthly[key]['sales_amount'] += sales
+            monthly[key]['purchase_amount'] += po_amt
+
+        monthly_trend = sorted(monthly.values(), key=lambda x: x['month'])
+
+        # Year-on-year purchase amount for the other two years in the latest
+        # three-year window. The base year follows the selected bar/range year.
+        current_year = datetime.utcnow().year
+        def _int_year(value):
+            try:
+                return int(str(value)[:4])
+            except (TypeError, ValueError):
+                return None
+
+        base_year = (
+            _int_year(yoy_base_year)
+            or _int_year(effective_year)
+            or _int_year(date_from)
+            or current_year
+        )
+        latest_three_years = sorted({current_year, current_year - 1, current_year - 2})
+        yoy_years = [year for year in latest_three_years if year != base_year]
+        if len(yoy_years) > 2:
+            yoy_years = yoy_years[-2:]
+        yoy_fields = {year: f'purchase_{year}' for year in yoy_years}
+        purchase_yoy_trend = []
+        purchase_yoy_by_month = {}
+        for month_num in range(1, 13):
+            row = {
+                'month': month_num,
+                'month_label': datetime(current_year, month_num, 1).strftime('%B'),
+            }
+            for field in yoy_fields.values():
+                row[field] = 0.0
+            purchase_yoy_trend.append(row)
+            purchase_yoy_by_month[month_num] = row
+
+        ensure_purchase_amount_idr_cache(yoy_rows, fetch_missing=False)
+        for s in yoy_rows:
+            if not s.so_create_date:
+                continue
+            year = s.so_create_date.year
+            if year not in yoy_fields:
+                continue
+            purchase_yoy_by_month[s.so_create_date.month][yoy_fields[year]] += purchase_amount_idr(s)
+
+        for row in purchase_yoy_trend:
+            for field in yoy_fields.values():
+                row[field] = round(row[field], 2)
+
+        # Vendor summary (top 5 by sales)
+        def currency_bucket(s):
+            cur = (s.purchasing_currency or 'IDR').strip().upper()
+            return 'local' if cur in ('', 'IDR') else 'import'
+
+        def add_vendor(target, s, po_amt, sales, m):
+            v = s.vendor_name or 'Unknown'
+            if v not in target:
+                target[v] = {'vendor': v, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0, 'margin': 0.0}
+            target[v]['count'] += 1
+            target[v]['sales_amount'] += sales
+            target[v]['purchase_amount'] += po_amt
+            if m is not None:
+                target[v]['margin'] += m
+
+        vendor_map = {}
+        vendor_local_map = {}
+        vendor_import_map = {}
+        client_map = {}
+        for s, po_amt, sales, m in enriched:
+            add_vendor(vendor_map, s, po_amt, sales, m)
+            if currency_bucket(s) == 'local':
+                add_vendor(vendor_local_map, s, po_amt, sales, m)
+            else:
+                add_vendor(vendor_import_map, s, po_amt, sales, m)
+
+            client = s.operation_unit_name or 'Unknown'
+            if client not in client_map:
+                client_map[client] = {'client': client, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0, 'margin': 0.0}
+            client_map[client]['count'] += 1
+            client_map[client]['sales_amount'] += sales
+            client_map[client]['purchase_amount'] += po_amt
+            if m is not None:
+                client_map[client]['margin'] += m
+
+        def top_purchase_vendors(mapping):
+            return sorted(
+                (row for row in mapping.values() if float(row.get('purchase_amount') or 0) > 0),
+                key=lambda x: x['purchase_amount'],
+                reverse=True
+            )[:5]
+
+        top_vendors = top_purchase_vendors(vendor_map)
+        top_vendors_local = top_purchase_vendors(vendor_local_map)
+        top_vendors_import = top_purchase_vendors(vendor_import_map)
+        top_clients = sorted(client_map.values(), key=lambda x: x['sales_amount'], reverse=True)[:5]
+
+        # Margin distribution + totals (KPI cards)
+        pos = neg = zero = 0
+        total_sales = 0.0
+        total_purchase = 0.0
+        for _s, po_amt, sales, m in enriched:
+            total_sales += sales
+            total_purchase += po_amt
+            if m is not None:
+                if m > 0:
+                    pos += 1
+                elif m < 0:
+                    neg += 1
+                else:
+                    zero += 1
+
+        # Top 20 items by sales amount (grouped by product / item label).
+        # Also surface Specification + Product ID so the frontend table can
+        # display them.  Group key prefers Product ID when present so the
+        # same product across multiple SOs aggregates correctly even when
+        # `product_name` differs slightly.
+        item_map = {}
+        for s, po_amt, sales, m in enriched:
+            pid = (s.product_id or '').strip()
+            label = s.product_name or s.so_item or 'Unknown'
+            key = pid or label
+            if key not in item_map:
+                item_map[key] = {
+                    'item': label,
+                    'specification': s.specification or '',
+                    'product_id': pid,
+                    'count': 0, 'sales_amount': 0.0,
+                    'purchase_amount': 0.0, 'margin': 0.0,
+                }
+            agg = item_map[key]
+            agg['count'] += 1
+            agg['sales_amount'] += sales
+            agg['purchase_amount'] += po_amt
+            if m is not None:
+                agg['margin'] += m
+            # Backfill spec from later rows if the first one was empty.
+            if not agg['specification'] and s.specification:
+                agg['specification'] = s.specification
+
+        top_items = sorted(item_map.values(), key=lambda x: x['sales_amount'], reverse=True)[:20]
+
+        # Worst-margin vendors: vendors with one or more negative-margin txns,
+        # ranked by total negative margin (most negative first).
+        neg_vendor_map = {}
+        for s, po_amt, sales, m in enriched:
+            if m is None or m >= 0:
+                continue
+            v = s.vendor_name or 'Unknown'
+            if v not in neg_vendor_map:
+                neg_vendor_map[v] = {
+                    'vendor': v, 'margin': 0.0, 'count': 0,
+                    'total_sales': 0.0, 'total_purchase': 0.0,
+                }
+            neg_vendor_map[v]['margin'] += m
+            neg_vendor_map[v]['count'] += 1
+            neg_vendor_map[v]['total_sales'] += sales
+            neg_vendor_map[v]['total_purchase'] += po_amt
+
+        worst_margin_vendors = sorted(neg_vendor_map.values(), key=lambda x: x['margin'])[:50]
+
+        # Top 30 worst-margin transactions (UI scrolls within fixed-height box)
+        neg_txns = [(s, po_amt, sales, m) for s, po_amt, sales, m in enriched if m is not None and m < 0]
+        neg_txns.sort(key=lambda x: x[3])  # most negative first
+        worst_margin_transactions = []
+        for s, po_amt, sales, m in neg_txns[:30]:
+            pct = round(m / sales * 100, 1) if sales else None
+            worst_margin_transactions.append({
+                'so_item': s.so_item,
+                'so_number': s.so_number,
+                'item_code': (s.item_code if hasattr(s, 'item_code') and s.item_code else (s.so_item or '-')),
+                'product': s.product_name or '-',
+                'vendor': s.vendor_name or '-',
+                'sales_amount': sales,
+                'purchase_amount': po_amt,
+                'margin': m,
+                'margin_pct': pct,
+                'count': 1,
+                'date': s.so_create_date.isoformat() if s.so_create_date else None,
+            })
+
+        payload = {
+            'total_count': len(rows),
+            'total_sales': total_sales,
+            'total_purchase': total_purchase,
+            'total_margin': (total_sales - total_purchase) if (total_sales > 0 and total_purchase > 0) else None,
+            'monthly_trend': monthly_trend,
+            'purchase_yoy_years': yoy_years,
+            'purchase_yoy_trend': purchase_yoy_trend,
+            'top_vendors': top_vendors,
+            'top_vendors_local': top_vendors_local,
+            'top_vendors_import': top_vendors_import,
+            'top_clients': top_clients,
+            'top_items': top_items,
+            'worst_margin_vendors': worst_margin_vendors,
+            'worst_margin_transactions': worst_margin_transactions,
+            'margin_distribution': {
+                'positive': pos,
+                'negative': neg,
+                'zero': zero
+            },
+            'conversion_status': {
+                'checked': True,
+                'had_missing_cache': missing_conversion_count > 0,
+                'converted_count': converted_count,
+                'pending_count': max(missing_conversion_count - converted_count, 0),
+                'message': (
+                    f'Konversi currency selesai dan disimpan untuk {converted_count} data baru.'
+                    if converted_count
+                    else 'Tidak ada data currency baru yang perlu dikonversi.'
+                )
+            }
+        }
+        with _COMPLETED_CACHE_LOCK:
+            _COMPLETED_SUMMARY_CACHE[cache_key] = {
+                'created_at': now_ts,
+                'payload': payload,
+            }
+        return jsonify(payload)
+
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+
+@app.route('/api/completed/margin-detail', methods=['GET'])
+def completed_margin_detail():
+    """Return rows for a specific margin category (positive/negative/zero) for popup."""
+    try:
+        category = request.args.get('category', 'positive')  # positive|negative|zero
+        date_from = request.args.get('date_from', '')
+        date_to   = request.args.get('date_to', '')
+        date_year = request.args.get('date_year', '')
+        is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
+        clients = selected_clients()
+        pics = selected_pics()
+
+        q = db.session.query(SOData).filter(SOData.so_status == 'Delivery Completed')
+        q = apply_so_client_filter(q, clients)
+        q = apply_so_pic_filter(q, pics)
+        if date_year:
+            try:
+                yr = int(date_year)
+                if is_sqlite:
+                    q = q.filter(func.strftime('%Y', SOData.so_create_date) == str(yr))
+                else:
+                    q = q.filter(func.extract('year', SOData.so_create_date) == yr)
+            except ValueError:
+                pass
+        elif date_from or date_to:
+            if date_from:
+                q = q.filter(SOData.so_create_date >= date_from)
+            if date_to:
+                q = q.filter(SOData.so_create_date <= date_to)
+
+        rows = q.filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all()
+
+        # Persist missing converted purchase amounts once. Subsequent popup
+        # loads reuse the stored IDR value.
+        ensure_purchase_amount_idr_cache(rows)
+
+        def get_po_amt(s):
+            return purchase_amount_idr(s)
+
+        result = []
+        for s in rows:
+            po_amt = get_po_amt(s)
+            # Check if purchase data exists (not 0 or None)
+            has_purchase_data = (
+                (s.purchasing_amount is not None and s.purchasing_amount != 0) or
+                (s.purchasing_price is not None and s.purchasing_price != 0)
+            )
+            # Only calculate margin if we have valid purchase data
+            m = (float(s.sales_amount or 0) - po_amt) if has_purchase_data else None
+            
+            # Skip rows without margin data for positive/negative categories
+            if m is None and category in ('positive', 'negative'):
+                continue
+            if category == 'positive' and (m is None or m <= 0):
+                continue
+            elif category == 'negative' and (m is None or m >= 0):
+                continue
+            elif category == 'zero' and (m is None or m != 0):
+                continue
+            result.append({
+                'id': s.id,
+                'so_item': s.so_item,
+                'so_number': s.so_number,
+                'product': s.product_name or '-',
+                'vendor': s.vendor_name or '-',
+                'item_code': (s.item_code if hasattr(s, 'item_code') and s.item_code else '-'),
+                'sales_amount': float(s.sales_amount or 0),
+                'purchase_amount': po_amt,
+                'margin': m,
+                'margin_pct': round(m / float(s.sales_amount) * 100, 1) if s.sales_amount else None,
+                'date': s.so_create_date.isoformat() if s.so_create_date else None,
+                'so_status': s.so_status,
+                'pic_name': canonical_pending_pic(s.pic_name, s.operation_unit_name),
+                'operation_unit_name': s.operation_unit_name,
+            })
+
+        result.sort(key=lambda x: x['margin'])
+        return jsonify(result)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+
+
+# ─── Product ID Database & Master PIC endpoints ───────────────────────────
+
+@app.route('/api/clients', methods=['GET'])
+def get_clients():
+    try:
+        ensure_default_item_registration_loaded()
+        clients = set()
+        clients.update(c for (c,) in db.session.query(SOData.operation_unit_name).distinct().all() if c)
+        clients.update(c for (c,) in db.session.query(ItemRegistration.client_name).distinct().all() if c)
+        return jsonify(sorted(c for c in clients if c))
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+def load_similarity_cache():
+    """Load similarity cache from file."""
+    global _SIMILARITY_CACHE
+    try:
+        if os.path.exists(_SIMILARITY_CACHE_FILE):
+            with open(_SIMILARITY_CACHE_FILE, 'r', encoding='utf-8') as f:
+                _SIMILARITY_CACHE = json.load(f)
+    except Exception as e:
+        print(f"Error loading similarity cache: {e}")
+        _SIMILARITY_CACHE = {}
+
+
+def save_similarity_cache():
+    """Save similarity cache to file."""
+    try:
+        os.makedirs(os.path.dirname(_SIMILARITY_CACHE_FILE), exist_ok=True)
+        with open(_SIMILARITY_CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(_SIMILARITY_CACHE, f, ensure_ascii=False, separators=(',', ':'))
+    except Exception as e:
+        print(f"Error saving similarity cache: {e}")
+
+
+def calculate_similarity(str1, str2):
+    """Calculate similarity percentage between two strings using token-based approach."""
+    if not str1 or not str2:
+        return 0.0
+    
+    # Normalize strings
+    s1 = str(str1).lower().strip()
+    s2 = str(str2).lower().strip()
+    
+    if s1 == s2:
+        return 100.0
+    
+    # Token-based similarity
+    tokens1 = set(s1.split())
+    tokens2 = set(s2.split())
+    
+    if not tokens1 or not tokens2:
+        return 0.0
+    
+    intersection = tokens1.intersection(tokens2)
+    union = tokens1.union(tokens2)
+    
+    # Jaccard similarity
+    jaccard = len(intersection) / len(union) * 100
+    
+    # Also check substring match
+    if s1 in s2 or s2 in s1:
+        substring_bonus = 20.0
+    else:
+        substring_bonus = 0.0
+    
+    return min(100.0, jaccard + substring_bonus)
+
+def _similarity_token(value):
+    text_value = (clean(value) or '').lower()
+    tokens = [t for t in re.split(r'[^a-z0-9]+', text_value) if len(t) >= 3]
+    return max(tokens, key=len) if tokens else ''
+
+def _candidate_registered_items_for_similarity(item, registered_items=None, limit=1200):
+    unit = (clean(item.odr_unit) or '').lower()
+    mfr_token = _similarity_token(item.mfr_name)
+    name_token = _similarity_token(item.prod_name)
+
+    if registered_items is not None:
+        candidates = []
+        for reg in registered_items:
+            if unit and (clean(reg.order_unit) or '').lower() != unit:
+                continue
+            reg_mfr = (clean(reg.manufacturer_name) or '').lower()
+            reg_name = (clean(reg.product_name) or '').lower()
+            token_matches = []
+            if mfr_token:
+                token_matches.append(mfr_token in reg_mfr)
+            if name_token:
+                token_matches.append(name_token in reg_name)
+            if token_matches and not any(token_matches):
+                continue
+            candidates.append(reg)
+            if len(candidates) >= limit:
+                break
+        return candidates
+
+    q = ProductIDDB.query.filter(
+        ProductIDDB.product_id.isnot(None),
+        ProductIDDB.product_id != ''
+    )
+    if unit:
+        q = q.filter(func.lower(ProductIDDB.order_unit) == unit)
+    token_filters = []
+    if mfr_token:
+        token_filters.append(ProductIDDB.manufacturer_name.ilike(f'%{mfr_token}%'))
+    if name_token:
+        token_filters.append(ProductIDDB.product_name.ilike(f'%{name_token}%'))
+    if token_filters:
+        q = q.filter(db.or_(*token_filters))
+    elif not unit:
+        return []
+    return q.limit(limit).all()
+
+
+def _similarity_score(values):
+    scores = []
+    for left, right in values:
+        if clean(left) and clean(right):
+            scores.append(calculate_similarity(left, right))
+    if not scores:
+        return 0.0
+    return sum(scores) / len(scores)
+
+
+def find_similar_registered_items(item, registered_items=None):
+    """Find Product ID master rows similar to an Item Registration row.
+
+    Similarity uses Product Name, Specification, Manufacturer Name, and Order
+    Unit. Rows with an overall score above 80% are returned. If more than one
+    registered product matches, Product IDs are joined with commas while the
+    descriptive fields are shown once from the best match.
+    """
+    try:
+        key_fields = [item.prod_name, item.spec, item.mfr_name, item.odr_unit]
+        if not any(clean(v) for v in key_fields):
+            return None
+
+        current_prod_id = clean_product_id(item.prod_id)
+        cache_key = '|'.join([
+            'similar_v4',
+            clean(item.req_no),
+            current_prod_id,
+            clean(item.prod_name).lower(),
+            clean(item.spec).lower(),
+            clean(item.mfr_name).lower(),
+            clean(item.odr_unit).lower(),
+        ])
+        if cache_key in _SIMILARITY_CACHE:
+            return _SIMILARITY_CACHE[cache_key]
+
+        registered_items = _candidate_registered_items_for_similarity(item, registered_items)
+
+        similar_items = []
+        for reg in registered_items:
+            reg_prod_id = clean_product_id(reg.product_id)
+            if not reg_prod_id or (current_prod_id and reg_prod_id == current_prod_id):
+                continue
+
+            has_descriptive_pair = any(
+                clean(left) and clean(right)
+                for left, right in [
+                    (item.prod_name, reg.product_name),
+                    (item.spec, reg.specification),
+                    (item.mfr_name, reg.manufacturer_name),
+                ]
+            )
+            if not has_descriptive_pair:
+                continue
+
+            total_sim = _similarity_score([
+                (item.prod_name, reg.product_name),
+                (item.spec, reg.specification),
+                (item.mfr_name, reg.manufacturer_name),
+                (item.odr_unit, reg.order_unit),
+            ])
+
+            if total_sim > 80.0:
+                similar_items.append({
+                    'product_id': reg_prod_id,
+                    'product_name': reg.product_name or '',
+                    'specification': reg.specification or '',
+                    'manufacturer_name': reg.manufacturer_name or '',
+                    'order_unit': reg.order_unit or '',
+                    'similarity': round(total_sim, 1)
+                })
+
+        similar_items.sort(key=lambda x: (-x['similarity'], x['product_id']))
+        if not similar_items:
+            result = None
+        else:
+            best = similar_items[0]
+            result = {
+                'product_ids': ', '.join(x['product_id'] for x in similar_items),
+                'product_name': best['product_name'],
+                'specification': best['specification'],
+                'manufacturer_name': best['manufacturer_name'],
+                'order_unit': best['order_unit'],
+                'similarity': best['similarity'],
+                'count': len(similar_items)
+            }
+
+        _SIMILARITY_CACHE[cache_key] = result
+        return result
+    except Exception as e:
+        print(f"Error finding similar items: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+@app.route('/api/item-registration/data', methods=['GET'])
+def get_item_registration_data():
+    try:
+        cache_key = runtime_cache_key('item_registration_data')
+        cached = runtime_cache_get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        ensure_default_item_registration_loaded()
+        # Safe auto-clean for old append bugs: duplicates with the same Req. No
+        # are merged before the page count is calculated. Stale rows with a
+        # different Req. No are cleaned on the next full Item Registration upload.
+        try:
+            total_rows = db.session.query(func.count(ItemRegistration.id)).scalar() or 0
+            distinct_req = db.session.query(func.count(func.distinct(ItemRegistration.req_no))).filter(
+                ItemRegistration.req_no.isnot(None), func.trim(ItemRegistration.req_no) != ''
+            ).scalar() or 0
+            if total_rows > distinct_req:
+                cleanup_item_registration_duplicates_only()
+                db.session.commit()
+                clear_runtime_caches()
+        except Exception:
+            db.session.rollback()
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 10))
+        search = request.args.get('search', '').strip()
+        req_numbers = [n.strip() for n in request.args.getlist('req_no') if n.strip()]
+        date_year, date_from, date_to = parse_so_date_args()
+        clients = selected_clients()
+        global_pics = [p.strip() for p in request.args.getlist('global_pic') if p.strip()]
+        item_clients = [c.strip() for c in request.args.getlist('item_client') if c.strip()]
+        categories = [c.strip() for c in request.args.getlist('category') if c.strip()]
+        pics = [p.strip() for p in request.args.getlist('pic') if p.strip()]
+        kpi_pic = (request.args.get('kpi_pic') or '').strip()
+        proc_statuses = [s.strip() for s in request.args.getlist('proc_status') if s.strip()]
+        mfr_names = [s.strip() for s in request.args.getlist('mfr_name') if s.strip()]
+        q = apply_item_registration_visible_status_filter(
+            apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to)
+        )
+        if clients:
+            q = q.filter(ItemRegistration.client_name.in_(clients))
+        q = apply_item_registration_pic_filter(q, global_pics)
+        if item_clients:
+            q = q.filter(ItemRegistration.client_name.in_(item_clients))
+        if categories:
+            q = q.filter(ItemRegistration.category.in_(categories))
+        if proc_statuses:
+            q = q.filter(ItemRegistration.proc_status.in_(proc_statuses))
+        if mfr_names:
+            q = q.filter(ItemRegistration.mfr_name.in_(mfr_names))
+        if req_numbers:
+            q = q.filter(ItemRegistration.req_no.in_(req_numbers))
+        if search:
+            pattern = f'%{search}%'
+            q = q.filter(db.or_(
+                ItemRegistration.req_no.ilike(pattern),
+                ItemRegistration.prod_id.ilike(pattern),
+                ItemRegistration.prod_name.ilike(pattern),
+                ItemRegistration.vendor_name.ilike(pattern),
+                ItemRegistration.mfr_name.ilike(pattern),
+                ItemRegistration.remarks.ilike(pattern),
+            ))
+
+        # KPI PIC cards should stay visible when one PIC is selected. Build the
+        # KPI source after all non-PIC filters, then apply PIC filters only to
+        # the table data.
+        kpi_q = q
+
+        missing_q = apply_item_registration_kpi_status_filter(kpi_q).filter(
+            db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-')
+        )
+        missing_prod_rows = missing_q.all()
+        missing_by_pic = {}
+        for r in missing_prod_rows:
+            pic = resolve_item_registration_pic(r)
+            if not pic or pic == 'Unassigned':
+                continue
+            missing_by_pic[pic] = missing_by_pic.get(pic, 0) + 1
+        missing_prod_id_by_pic = [
+            {'pic': pic, 'count': count}
+            for pic, count in [(row['pic'], row['count']) for row in sort_pic_kpis([{'pic': pic, 'count': count} for pic, count in missing_by_pic.items()])]
+        ]
+
+        q = apply_item_registration_pic_filter(q, pics)
+
+        if kpi_pic:
+            q = apply_item_registration_pic_filter(q, [kpi_pic])
+            q = q.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-'))
+
+        total = q.count()
+        rows = q.order_by(ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()).offset((page-1)*per_page).limit(per_page).all()
+        option_q = apply_item_registration_visible_status_filter(
+            apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to)
+        )
+        if clients:
+            option_q = option_q.filter(ItemRegistration.client_name.in_(clients))
+        option_q = apply_item_registration_pic_filter(option_q, global_pics)
+        option_rows = option_q.with_entities(
+            ItemRegistration.client_name,
+            ItemRegistration.category,
+            ItemRegistration.category_id,
+            ItemRegistration.pic,
+            ItemRegistration.proc_status,
+            ItemRegistration.mfr_name,
+        ).all()
+        all_clients = sorted({r.client_name for r in option_rows if r.client_name})
+        all_categories = sorted({r.category for r in option_rows if r.category})
+        all_pics = sorted({resolve_item_registration_pic(r) for r in option_rows if resolve_item_registration_pic(r) != 'Unassigned'})
+        all_proc_statuses = sorted({r.proc_status for r in option_rows if r.proc_status})
+        all_mfr_names = sorted({r.mfr_name for r in option_rows if r.mfr_name})
+        last_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'ITEM_REG').scalar()
+
+        response_rows = [item_registration_dict(r, include_similarity=False) for r in rows]
+
+        payload = {
+            'data': response_rows,
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'client_options': all_clients,
+            'category_options': all_categories,
+            'pic_options': all_pics,
+            'proc_status_options': all_proc_statuses,
+            'mfr_name_options': all_mfr_names,
+            'missing_prod_id_by_pic': missing_prod_id_by_pic,
+            'last_updated': utc_isoformat(last_upload),
+        }
+        runtime_cache_set(cache_key, payload, ttl_seconds=60)
+        return jsonify(payload)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+
+@app.route('/api/upload/item-registration-json', methods=['POST'])
+@app.route('/api/upload/item-registration', methods=['POST'])
+def upload_item_registration():
+    try:
+        uploads, upload_mode = request_upload_dataframes('item_registration')
+        if not uploads:
+            return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
+        replace_existing = upload_replace_mode()
+
+        summary = {'processed': 0, 'added': 0, 'updated': 0, 'removed_duplicates': 0, 'removed_stale': 0, 'removed_blank': 0}
+        latest_req_numbers = set()
+        for upload in uploads:
+            df = upload['df']
+            result = import_item_registration_dataframe(df, upload['filename'])
+            latest_req_numbers.update(result.get('keys', []))
+            for key in summary:
+                summary[key] += result.get(key, 0)
+
+        # Default manual upload is merge/upsert. Only delete rows missing from
+        # the uploaded file when caller explicitly requests replace/snapshot.
+        db.session.flush()
+        cleanup = cleanup_source_table_snapshot(
+            ItemRegistration,
+            'req_no',
+            latest_req_numbers if replace_existing else None,
+            timestamp_fields=('uploaded_at',),
+            delete_blank=True,
+        )
+        for key, value in cleanup.items():
+            summary[key] = summary.get(key, 0) + value
+
+        db.session.commit()
+        clear_runtime_caches()
+        return jsonify({
+            'message': (
+                f'Berhasil upload {len(uploads)} file Item Registration: '
+                f'+{summary["added"]} added, {summary["updated"]} updated, '
+                f'{summary["removed_duplicates"]} duplicate lama dihapus, '
+                f'{summary["removed_stale"]} data lama dibuang'
+            ),
+            'uploaded': summary['processed'],
+            'files': len(uploads),
+            'mode': upload_mode,
+            'replace': replace_existing,
+            **summary,
+        })
+    except ValueError as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/item-registration/<int:item_id>', methods=['PUT'])
+def update_item_registration(item_id):
+    try:
+        data = request.json or {}
+        item = db.session.get(ItemRegistration, item_id)
+        if not item:
+            return jsonify({'error': 'Not found'}), 404
+        if 'remarks' in data:
+            item.remarks = data['remarks'] or ''
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+def apply_item_registration_request_filters(query):
     search = request.args.get('search', '').strip()
+    req_numbers = [n.strip() for n in request.args.getlist('req_no') if n.strip()]
+    date_year, date_from, date_to = parse_so_date_args()
+    clients = selected_clients()
+    global_pics = [p.strip() for p in request.args.getlist('global_pic') if p.strip()]
+    item_clients = [c.strip() for c in request.args.getlist('item_client') if c.strip()]
+    categories = [c.strip() for c in request.args.getlist('category') if c.strip()]
+    pics = [p.strip() for p in request.args.getlist('pic') if p.strip()]
+    kpi_pic = (request.args.get('kpi_pic') or '').strip()
+    proc_statuses = [s.strip() for s in request.args.getlist('proc_status') if s.strip()]
+    mfr_names = [s.strip() for s in request.args.getlist('mfr_name') if s.strip()]
+    query = apply_item_registration_date_filter(query, date_year, date_from, date_to)
+    if clients:
+        query = query.filter(ItemRegistration.client_name.in_(clients))
+    query = apply_item_registration_pic_filter(query, global_pics)
+    if item_clients:
+        query = query.filter(ItemRegistration.client_name.in_(item_clients))
+    if categories:
+        query = query.filter(ItemRegistration.category.in_(categories))
+    query = apply_item_registration_pic_filter(query, pics)
+    if proc_statuses:
+        query = query.filter(ItemRegistration.proc_status.in_(proc_statuses))
+    if mfr_names:
+        query = query.filter(ItemRegistration.mfr_name.in_(mfr_names))
+    if req_numbers:
+        query = query.filter(ItemRegistration.req_no.in_(req_numbers))
+    if search:
+        pattern = f'%{search}%'
+        query = query.filter(db.or_(
+            ItemRegistration.req_no.ilike(pattern),
+            ItemRegistration.prod_id.ilike(pattern),
+            ItemRegistration.prod_name.ilike(pattern),
+            ItemRegistration.vendor_name.ilike(pattern),
+            ItemRegistration.mfr_name.ilike(pattern),
+            ItemRegistration.remarks.ilike(pattern),
+        ))
+    if kpi_pic:
+        query = apply_item_registration_pic_filter(query, [kpi_pic])
+        query = apply_item_registration_kpi_status_filter(query)
+        query = query.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-'))
+    return query
 
-    columns = import_layout_columns()
 
-    query = ImportDashboardRow.query
-    if vendor_filter:
-        query = query.filter(
-            ImportDashboardRow.vendor_name.ilike(f'%{vendor_filter}%'))
+@app.route('/api/item-registration/template', methods=['GET'])
+def download_item_registration_batch_template():
+    try:
+        ensure_default_item_registration_loaded()
+        refresh_item_registration_mappings()
+        rows = apply_item_registration_request_filters(ItemRegistration.query).order_by(
+            ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()
+        ).all()
 
-    total = query.count()
-    db_rows = query.order_by(
-        ImportDashboardRow.last_seen_at.desc()).offset(
-        (page - 1) * page_size).limit(page_size).all()
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Item Reg Batch Upload"
+        headers = ['Req. No', 'Remarks']
+        ws.append(headers)
+        ws.freeze_panes = 'A2'
 
-    data = [import_dashboard_row_to_dict(r, columns) for r in db_rows]
+        header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+        col_widths = [28, 70]
+        for i, cell in enumerate(ws[1], 1):
+            cell.fill = header_fill
+            cell.font = Font(bold=True, color="000000")
+            cell.alignment = Alignment(horizontal='center')
+            ws.column_dimensions[get_column_letter(i)].width = col_widths[i - 1]
+
+        grey_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+        red_font = Font(color="FF0000")
+        ws.append(['example : 100010723616', 'example : Waiting for product registration'])
+        for cell in ws[2]:
+            cell.font = red_font
+            cell.fill = grey_fill
+
+        seen = set()
+        for row in rows:
+            req_no = clean(row.req_no)
+            if not req_no or req_no in seen:
+                continue
+            seen.add(req_no)
+            ws.append([req_no, row.remarks or ''])
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return send_file(output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f"Template_ItemRegistration_BatchUpload_{datetime.now().strftime('%Y%m%d')}.xlsx")
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/export/item-registration', methods=['GET'])
+def export_item_registration():
+    try:
+        ensure_default_item_registration_loaded()
+        refresh_item_registration_mappings()
+        rows = apply_item_registration_request_filters(ItemRegistration.query).order_by(
+            ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()
+        ).all()
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Item Registration"
+        headers = [
+            'Proc. Status', 'Client Nm.', 'Category', 'PIC', 'Req. No', 'Prod. ID',
+            'Prod. Nm.', 'Spec.', 'Mfr. Nm.', 'Odr. Unit', 'Prod. Price', 'Curr.', 'Remarks'
+        ]
+        _style_wb(ws, headers, num_cols=[11])
+        widths = [26, 34, 24, 16, 18, 18, 28, 48, 24, 14, 16, 12, 60]
+        for i, width in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = width
+        for row in rows:
+            ws.append([
+                row.proc_status or '',
+                row.client_name or '',
+                source_category_level1(row.category),
+                row.pic or '',
+                row.req_no or '',
+                row.prod_id or '',
+                row.prod_name or '',
+                row.spec or '',
+                row.mfr_name or '',
+                row.odr_unit or '',
+                row.prod_price or 0,
+                row.curr or '',
+                row.remarks or '',
+            ])
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return send_file(output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f"Item_Registration_{datetime.now().strftime('%Y%m%d')}.xlsx")
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/item-registration/batch-upload', methods=['POST'])
+def batch_upload_item_registration():
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file'}), 400
+        file = request.files['file']
+        df = pd.read_excel(file, engine='openpyxl', skiprows=[1])
+        df.columns = [str(c).strip() for c in df.columns]
+        col_req = find_column(df, ['Req. No', 'Req. No.', 'Request No', 'Request Number'])
+        col_rem = find_column(df, ['Remarks', 'Remark'])
+        if not col_req:
+            return jsonify({'error': f'Column "Req. No" not found. Available: {df.columns.tolist()}'}), 400
+        if not col_rem:
+            return jsonify({'error': f'Column "Remarks" not found. Available: {df.columns.tolist()}'}), 400
+
+        updated = 0
+        not_found = 0
+        for _, row in df.iterrows():
+            req_no = clean(df_val(row, col_req))
+            if not req_no or req_no.lower().startswith('example'):
+                continue
+            req_no = req_no.replace('example :', '').replace('example:', '').strip()
+            matches = ItemRegistration.query.filter_by(req_no=req_no).all()
+            if not matches:
+                not_found += 1
+                continue
+            remarks = clean(df_val(row, col_rem)) or ''
+            for item in matches:
+                item.remarks = remarks
+                updated += 1
+        db.session.commit()
+        return jsonify({'updated': updated, 'not_found': not_found})
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+def _lookup_pic_by_category_id(category_id):
+    """Return PIC name for a Master PIC category id, or None if not found."""
+    return _lookup_pic_by_category(category_id, None)
+
+
+def _lookup_pic(product_id_str):
+    """Return PIC name for a product_id string, or None if not found."""
+    if not product_id_str:
+        return None
+    pid = str(product_id_str).strip()
+    prod = db.session.query(ProductIDDB).filter_by(product_id=pid).first()
+    if not prod:
+        return None
+    return _lookup_pic_by_category(prod.category_id, prod.category_name)
+
+
+@app.route('/api/upload/product-id-json', methods=['POST'])
+@app.route('/api/upload/product-id', methods=['POST'])
+def upload_product_id():
+    """Upload Prod_ID Excel from SAP. Upserts product_id → category_id mapping."""
+    try:
+        uploads, upload_mode = request_upload_dataframes('product_id')
+        if not uploads:
+            return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
+        replace_existing = upload_replace_mode()
+
+        cleanup_pre = cleanup_source_table_snapshot(
+            ProductIDDB,
+            'product_id',
+            None,
+            timestamp_fields=('updated_at',),
+            delete_blank=True,
+        )
+        db.session.flush()
+        added = updated = 0
+        removed_duplicates = cleanup_pre.get('removed_duplicates', 0)
+        removed_stale = cleanup_pre.get('removed_stale', 0)
+        removed_blank = cleanup_pre.get('removed_blank', 0)
+        latest_product_ids = set()
+        pic_cache = {}  # category_id → pic_name
+
+        expected = [
+            ('product_id', 'Product ID'), ('category_id', 'Category ID'),
+            ('category_name', 'Category Name'), ('product_name', 'Product Name'),
+            ('product_status', 'Product Status'), ('specification', 'Specification'),
+            ('manufacturer_name', 'Manufacturer Name'), ('order_unit', 'Order Unit'),
+            ('hub_handling_check', 'HUB Handling Check'), ('tax_type', 'Tax Type'),
+            ('registration_date', 'Registration Date'), ('product_registry_pic', 'Product Registry PIC')
+        ]
+        required = [('product_id', 'Product ID')]
+
+        for upload in uploads:
+            df = upload['df']
+            df.columns = [str(c).strip() for c in df.columns]
+            col = _product_id_columns(df)
+            validate_upload_columns(upload['filename'], 'Prod ID', col, expected, required)
+
+            for _, row in df.iterrows():
+                pid = clean_product_id(df_val(row, col['product_id']))
+                if not pid:
+                    continue
+                latest_product_ids.add(pid)
+                cat_id = normalize_category_id(df_val(row, col['category_id']))
+                payload = {
+                    'category_id': cat_id,
+                    'category_name': clean(df_val(row, col['category_name'])),
+                    'product_name': clean(df_val(row, col['product_name'])),
+                    'product_status': clean(df_val(row, col['product_status'])),
+                    'specification': clean(df_val(row, col['specification'])),
+                    'manufacturer_name': clean(df_val(row, col['manufacturer_name'])),
+                    'vendor_name': clean(df_val(row, col['vendor_name'])),
+                    'order_unit': clean(df_val(row, col['order_unit'])),
+                    'hub_handling_check': clean(df_val(row, col['hub_handling_check'])),
+                    'tax_type': clean(df_val(row, col['tax_type'])),
+                    'registration_date': parse_date(df_val(row, col['registration_date'])),
+                    'product_registry_pic': clean(df_val(row, col['product_registry_pic'])),
+                    'updated_at': datetime.utcnow(),
+                }
+
+                existing = db.session.query(ProductIDDB).filter_by(product_id=pid).first()
+                if existing:
+                    for key, value in payload.items():
+                        setattr(existing, key, value)
+                    updated += 1
+                else:
+                    db.session.add(ProductIDDB(product_id=pid, **payload))
+                    added += 1
+
+        db.session.flush()
+        cleanup_post = cleanup_source_table_snapshot(
+            ProductIDDB,
+            'product_id',
+            latest_product_ids if replace_existing else None,
+            timestamp_fields=('updated_at',),
+            delete_blank=True,
+        )
+        removed_duplicates += cleanup_post.get('removed_duplicates', 0)
+        removed_stale += cleanup_post.get('removed_stale', 0)
+        removed_blank += cleanup_post.get('removed_blank', 0)
+
+        db.session.commit()
+        _pid_category_cache_invalidate()
+        clear_runtime_caches()
+
+        global _SIMILARITY_CACHE
+        _SIMILARITY_CACHE = {}
+
+        # After upserting ProductIDDB, refresh pic_name on SO rows that have a product_id.
+        # Master PIC is now keyed by Category Name, with Category ID kept only as
+        # a backward-compatible fallback.
+        so_rows = db.session.query(SOData).filter(
+            SOData.product_id.isnot(None), SOData.product_id != ''
+        ).all()
+        refreshed = 0
+        for s in so_rows:
+            prod = db.session.query(ProductIDDB).filter_by(product_id=str(s.product_id).strip()).first()
+            if not prod:
+                continue
+            cache_key = (normalize_category_id(prod.category_id), normalize_category_name(prod.category_name))
+            if cache_key not in pic_cache:
+                pic_cache[cache_key] = _lookup_pic_by_category(prod.category_id, prod.category_name)
+            new_pic = pic_cache[cache_key]
+            if s.pic_name != new_pic:
+                s.pic_name = new_pic
+                refreshed += 1
+        db.session.commit()
+        clear_runtime_caches()
+
+        return jsonify({
+            'status': 'ok',
+            'files': len(uploads),
+            'mode': upload_mode,
+            'added': added, 'updated': updated,
+            'removed_duplicates': removed_duplicates,
+            'removed_stale': removed_stale,
+            'removed_blank': removed_blank,
+            'so_pic_refreshed': refreshed,
+            'total_in_db': db.session.query(ProductIDDB).count()
+        })
+    except ValueError as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/upload/master-pic-json', methods=['POST'])
+@app.route('/api/upload/master-pic', methods=['POST'])
+def upload_master_pic():
+    """Upload Master PIC Excel. Upserts Category Name → PIC mapping, then refreshes SO pic_name."""
+    try:
+        uploads, upload_mode = request_upload_dataframes('master_pic')
+        if not uploads:
+            return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
+        replace_existing = upload_replace_mode()
+
+        cleanup_pre = cleanup_master_pic_by_category_name(None)
+        db.session.flush()
+        added = updated = unchanged = 0
+        removed_duplicates = cleanup_pre.get('removed_duplicates', 0)
+        removed_stale = cleanup_pre.get('removed_stale', 0)
+        removed_blank = cleanup_pre.get('removed_blank', 0)
+        latest_category_names = set()
+        expected = [
+            ('category_name', 'Category Name'),
+            ('pic', 'PIC'),
+            ('pic_update', 'Update New PIC'),
+        ]
+        required = [('category_name', 'Category Name')]
+
+        for upload in uploads:
+            df = upload['df']
+            df.columns = [str(c).strip() for c in df.columns]
+            col = _master_pic_columns(df)
+            validate_upload_columns(upload['filename'], 'Update PIC', col, expected, required)
+
+            for _, row in df.iterrows():
+                cat_name = source_category_level1(df_val(row, col['category_name']))
+                if not cat_name:
+                    continue
+
+                current_pic = clean(df_val(row, col['pic']))
+                update_pic = clean(df_val(row, col['pic_update']))
+                pic_name = update_pic or current_pic
+
+                # Template rows with blank Update New PIC and blank current PIC are
+                # informational only; skip them instead of clearing the mapping.
+                if not pic_name:
+                    continue
+
+                latest_category_names.add(cat_name)
+                existing = find_master_pic_by_category_name(cat_name)
+                if existing:
+                    # If older data still contains several Category ID rows for
+                    # the same Category Name, update all of them to the same PIC
+                    # so Category Name behaves as the single business key.
+                    norm_cat_name = normalize_category_name(cat_name)
+                    targets = [
+                        m for m in db.session.query(MasterPIC).all()
+                        if normalize_category_name(m.category_name) == norm_cat_name
+                    ]
+                    if existing not in targets:
+                        targets.append(existing)
+
+                    changed = False
+                    for target in targets:
+                        new_key = master_pic_category_key(cat_name) or target.category_id
+                        if (
+                            normalize_category_name(target.category_name) != norm_cat_name
+                            or clean(target.pic_name) != pic_name
+                            or (str(target.category_id or '').startswith('CATNAME_') and target.category_id != new_key)
+                        ):
+                            changed = True
+                        target.category_name = cat_name
+                        if str(target.category_id or '').startswith('CATNAME_'):
+                            target.category_id = new_key
+                        target.pic_name = pic_name
+                        target.updated_at = datetime.utcnow()
+                    if changed:
+                        updated += 1
+                    else:
+                        unchanged += 1
+                else:
+                    db.session.add(MasterPIC(
+                        category_id=master_pic_category_key(cat_name),
+                        category_name=cat_name,
+                        pic_name=pic_name,
+                        updated_at=datetime.utcnow()
+                    ))
+                    added += 1
+
+        db.session.flush()
+        cleanup_post = cleanup_master_pic_by_category_name(latest_category_names if replace_existing else None)
+        removed_duplicates += cleanup_post.get('removed_duplicates', 0)
+        removed_stale += cleanup_post.get('removed_stale', 0)
+        removed_blank += cleanup_post.get('removed_blank', 0)
+
+        db.session.commit()
+        invalidate_master_pic_cache()
+
+        # Refresh SO rows using ProductIDDB Category Name first, Category ID as fallback.
+        prod_map = {
+            str(p.product_id).strip(): (p.category_id, p.category_name)
+            for p in db.session.query(ProductIDDB).all()
+            if p.product_id
+        }
+        pic_cache = {}
+        so_rows = db.session.query(SOData).filter(
+            SOData.product_id.isnot(None), SOData.product_id != ''
+        ).all()
+        refreshed = 0
+        for s in so_rows:
+            cat_id, cat_name = prod_map.get(str(s.product_id).strip(), (None, None))
+            cache_key = (normalize_category_id(cat_id), normalize_category_name(cat_name))
+            if cache_key not in pic_cache:
+                pic_cache[cache_key] = _lookup_pic_by_category(cat_id, cat_name)
+            new_pic = pic_cache[cache_key]
+            if s.pic_name != new_pic:
+                s.pic_name = new_pic
+                refreshed += 1
+        db.session.commit()
+        clear_runtime_caches()
+        refresh_item_registration_mappings()
+
+        return jsonify({
+            'status': 'ok',
+            'files': len(uploads),
+            'mode': upload_mode,
+            'replace': replace_existing,
+            'added': added,
+            'updated': updated,
+            'unchanged': unchanged,
+            'removed_duplicates': removed_duplicates,
+            'removed_stale': removed_stale,
+            'removed_blank': removed_blank,
+            'so_pic_refreshed': refreshed,
+            'total_categories': master_pic_unique_category_count()
+        })
+    except ValueError as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/master-pic/status', methods=['GET'])
+def master_pic_status():
+    """Return summary of Master PIC and ProductID database."""
+    try:
+        total_pid = db.session.query(ProductIDDB).count()
+        last_pid = db.session.query(func.max(ProductIDDB.updated_at)).scalar()
+        total_pic = master_pic_unique_category_count()
+        last_pic = db.session.query(func.max(MasterPIC.updated_at)).scalar()
+        return jsonify({
+            'product_id_count': total_pid,
+            'last_product_id_upload': last_pid.isoformat() if last_pid else None,
+            'master_pic_count': total_pic,
+            'last_pic_update': last_pic.isoformat() if last_pic else None,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/vendor-control/debug', methods=['GET'])
+def vendor_control_debug():
+    """Small production diagnostic for Google Sheet access. Does not return passwords."""
+    try:
+        raw_file = os.environ.get('GOOGLE_SERVICE_ACCOUNT_FILE') or os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+        raw_json = bool(os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON') or os.environ.get('GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON'))
+        info = {
+            'credential_file': raw_file or '',
+            'credential_file_exists': bool(raw_file and os.path.exists(raw_file)),
+            'credential_json_env_set': raw_json,
+            'sheet_id': VENDOR_CONTROL_SHEET_ID,
+            'sheet_gid': VENDOR_CONTROL_SHEET_GID,
+        }
+        sheet_name = vendor_control_sheet_name()
+        info['sheet_name'] = sheet_name
+        result = google_sheets_values_get(VENDOR_CONTROL_SHEET_ID, f"'{sheet_name}'!A1:Z20")
+        values = result.get('values', [])
+        info['sample_rows'] = len(values)
+        info['header_candidates'] = []
+        matched = None
+        for idx, candidate_headers in enumerate(values[:20]):
+            candidate_columns = find_vendor_control_columns(candidate_headers)
+            looks_like_header = all(candidate_columns.get(name) for name in ('vendor_name', 'vendor_id', 'password'))
+            info['header_candidates'].append({
+                'row': idx + 1,
+                'non_empty_cells': sum(1 for cell in candidate_headers if clean(cell)),
+                'detected_columns': candidate_columns,
+                'looks_like_header': looks_like_header,
+            })
+            if looks_like_header:
+                matched = {'header_row': idx + 1, 'columns': candidate_columns, 'headers': candidate_headers}
+                break
+        info['matched_header'] = matched
+        return jsonify(info)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vendor-control/data', methods=['GET'])
+def get_vendor_control_data():
+    try:
+        page = max(int(request.args.get('page', 1)), 1)
+        per_page = min(max(int(request.args.get('per_page', 10)), 1), 500)
+        search = (clean(request.args.get('search')) or '').lower()
+        vendors = [clean(v) for v in request.args.getlist('vendor') if clean(v)]
+        force = str(request.args.get('refresh', '')).lower() in ('1', 'true', 'yes')
+        rows, fetched_at = vendor_control_rows(force=force)
+        if vendors:
+            vendor_needles = [v.lower() for v in vendors]
+            rows = [row for row in rows if any(
+                needle == str(row.get('vendor_name') or '').lower()
+                or needle == str(row.get('vendor_id') or '').lower()
+                or needle in str(row.get('vendor_name') or '').lower()
+                or needle in str(row.get('vendor_id') or '').lower()
+                for needle in vendor_needles
+            )]
+        if search:
+            rows = [row for row in rows if search in str(row.get('vendor_name') or '').lower() or search in str(row.get('vendor_id') or '').lower()]
+        rows = sorted(rows, key=lambda row: (str(row.get('vendor_name') or '').lower(), str(row.get('vendor_id') or '').lower()))
+        total = len(rows)
+        start = (page - 1) * per_page
+        return jsonify({
+            'data': rows[start:start + per_page],
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'suggestions': [row.get('vendor_name') for row in rows[:20] if row.get('vendor_name')],
+            'last_updated': utc_isoformat(fetched_at),
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({
+            'error': str(e),
+            'hint': 'Check PythonAnywhere WSGI credential path, google-api-python-client/google-auth installation, service account sheet permission, and Vendor Control sheet headers.'
+        }), 500
+
+@app.route('/api/vendor-control/<path:row_key>', methods=['PUT'])
+def update_vendor_control(row_key):
+    try:
+        data = request.json or {}
+        field = clean(data.get('field')) or ''
+        value = clean(data.get('value')) or ''
+        if field not in ('vendor_id', 'password'):
+            return jsonify({'error': 'Only Vendor ID and Password can be edited'}), 400
+        try:
+            sheet_row = int(str(row_key).strip())
+        except ValueError:
+            return jsonify({'error': 'Invalid vendor row key'}), 400
+        sync = sync_vendor_control_cell(sheet_row, field, value)
+        if sync.get('synced'):
+            for row in VENDOR_CONTROL_CACHE.get('rows') or []:
+                if str(row.get('row_key')) == str(row_key):
+                    row[field] = value
+        return jsonify({'success': True, 'sheet_sync': sync})
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vendor-control/login/<path:row_key>', methods=['GET'])
+def vendor_control_login(row_key):
+    try:
+        rows, _ = vendor_control_rows(force=False)
+        row = next((item for item in rows if str(item.get('row_key')) == str(row_key)), None)
+        if not row:
+            return '<h3>Vendor credential was not found or incomplete.</h3>', 404
+        vendor_id = row.get('vendor_id') or ''
+        password = row.get('password') or ''
+        action = 'https://mall.serveone.id/vendor/cmm/doLogin.dev?signData=noSign'
+        if vendor_id.upper().startswith('FW'):
+            action = 'https://mall.serveone.id/vendor/fwdr/fwdr/doChkFirstLogin.dev?mallType=FORWARDER'
+        vendor_name = row.get('vendor_name') or vendor_id
+        return f'''<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vendor Login - {html.escape(str(vendor_name))}</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; background: #f8fafc; color: #0f172a; display: grid; min-height: 100vh; place-items: center; margin: 0; }}
+    .box {{ background: white; border: 1px solid #e2e8f0; border-radius: 14px; padding: 24px; width: min(420px, calc(100vw - 32px)); box-shadow: 0 20px 50px rgba(15,23,42,.12); }}
+    h1 {{ font-size: 18px; margin: 0 0 6px; }}
+    p {{ color: #475569; font-size: 13px; line-height: 1.5; margin: 0 0 18px; }}
+    button {{ width: 100%; border: 0; border-radius: 10px; background: #2563eb; color: white; font-weight: 700; padding: 12px; cursor: pointer; }}
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>Logging in to {html.escape(str(vendor_name))}</h1>
+    <p>This tab will submit the vendor login form automatically. If it does not continue, click the button below.</p>
+    <form id="vendorLoginForm" method="post" action="{html.escape(action)}">
+      <input type="hidden" name="cprtcpUsrId" value="{html.escape(str(vendor_id))}">
+      <input type="hidden" name="cprtcpSectNo" value="{html.escape(str(password))}">
+      <input type="hidden" name="agreType" value="">
+      <input type="hidden" name="signData" value="noSign">
+      <button type="submit">Log-In</button>
+    </form>
+  </div>
+  <script>setTimeout(function(){{ document.getElementById('vendorLoginForm').submit(); }}, 250);</script>
+</body>
+</html>'''
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return f'<h3>Vendor login failed to prepare.</h3><p>{html.escape(str(e))}</p>', 500
+
+@app.route('/api/rfq/data', methods=['GET'])
+def get_rfq_data():
+    try:
+        force = str(request.args.get('refresh', '')).lower() in ('1', 'true', 'yes')
+        cache_key = runtime_cache_key('rfq_data')
+        if not force:
+            cached = runtime_cache_get(cache_key)
+            if cached is not None:
+                return jsonify(cached)
+
+        page = max(int(request.args.get('page', 1)), 1)
+        per_page = min(max(int(request.args.get('per_page', 10)), 1), 500)
+        search = clean(request.args.get('search')) or ''
+        pic = clean(request.args.get('pic')) or ''
+        clients = [clean(v) for v in request.args.getlist('client_name') if clean(v)]
+        rfq_numbers = [clean(v) for v in request.args.getlist('rfq_no') if clean(v)]
+        brands = [clean(v) for v in request.args.getlist('brand_manufacturer') if clean(v)]
+        purchase_pics = [clean(v) for v in request.args.getlist('purchase_pic') if clean(v)]
+        vendors = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
+        checks = [clean(v).lower() for v in request.args.getlist('check') if clean(v)]
+        include_similarity = str(request.args.get('similarity', '')).lower() in ('1', 'true', 'yes')
+
+        rows, fetched_at = rfq_rows_with_edits(force=force)
+        if search:
+            rows = filter_rfq_rows_by_multiline_search(rows, search)
+
+        option_rows = rows
+        if clients:
+            rows = [row for row in rows if clean(row.get('client_name')) in clients]
+        if rfq_numbers:
+            rows = [row for row in rows if clean(row.get('rfq_code')) in rfq_numbers]
+        if brands:
+            rows = [row for row in rows if clean(row.get('brand_manufacturer')) in brands]
+        if vendors:
+            rows = [row for row in rows if clean(row.get('vendor_name')) in vendors]
+        if checks:
+            rows = [row for row in rows if clean(row.get('check')) and clean(row.get('check')).lower() in checks]
+
+        # KPI PIC cards should stay visible when one PIC is selected. Build the
+        # KPI source after all non-PIC filters, then apply PIC filters only to
+        # the table data.
+        kpi_rows = list(rows)
+        pending_by_pic = {}
+        for row in kpi_rows:
+            if clean(row.get('check')) != 'open':
+                continue
+            if clean_product_id(row.get('product_id')):
+                continue
+            if not row.get('unit_price_missing'):
+                continue
+            row_pic = clean(row.get('purchase_pic'))
+            if not row_pic or row_pic.lower() == 'unassigned':
+                continue
+            pending_by_pic[row_pic] = pending_by_pic.get(row_pic, 0) + 1
+        pic_kpis = [{'pic': key, 'count': val} for key, val in sorted(pending_by_pic.items(), key=lambda item: (-item[1], item[0]))]
+
+        if purchase_pics:
+            rows = [row for row in rows if clean(row.get('purchase_pic')) in purchase_pics]
+        # Keep RFQ order identical to the sheet.
+
+        if pic:
+            rows = [row for row in rows if clean(row.get('purchase_pic')) == pic and clean(row.get('check')) == 'open' and row.get('unit_price_missing') and not clean_product_id(row.get('product_id'))]
+
+        total = len(rows)
+        start = (page - 1) * per_page
+        page_rows = [dict(row) for row in rows[start:start + per_page]]
+        if include_similarity:
+            page_rows = [apply_rfq_similarity(row) for row in page_rows]
+            save_similarity_cache()
+        payload = {
+            'data': page_rows,
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'columns': [{'field': field, 'label': label} for field, label in RFQ_TEMPLATE_COLUMNS],
+            'similarity_columns': [{'field': field, 'label': label} for field, label in RFQ_SIMILARITY_COLUMNS],
+            'editable_fields': sorted(RFQ_EDITABLE_FIELDS),
+            'pic_kpis': pic_kpis,
+            'filters': {
+                'clients': sorted({clean(row.get('client_name')) for row in option_rows if clean(row.get('client_name'))}),
+                'rfq_numbers': sorted({clean(row.get('rfq_code')) for row in option_rows if clean(row.get('rfq_code'))}),
+                'brands': sorted({clean(row.get('brand_manufacturer')) for row in option_rows if clean(row.get('brand_manufacturer'))}),
+                'purchase_pics': sorted({clean(row.get('purchase_pic')) for row in option_rows if clean(row.get('purchase_pic')) and clean(row.get('purchase_pic')).lower() != 'unassigned'}),
+                'vendors': sorted({clean(row.get('vendor_name')) for row in option_rows if clean(row.get('vendor_name'))}),
+                'checks': [rfq_check_label(key) for key in ['complete', 'reject', 'closed', 'open']],
+            },
+            'last_updated': utc_isoformat(fetched_at),
+        }
+        runtime_cache_set(cache_key, payload, ttl_seconds=20)
+        return jsonify(payload)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+def rfq_filtered_rows_from_request(force=False):
+    search = clean(request.args.get('search')) or ''
+    pic = clean(request.args.get('pic')) or ''
+    clients = [clean(v) for v in request.args.getlist('client_name') if clean(v)]
+    rfq_numbers = [clean(v) for v in request.args.getlist('rfq_no') if clean(v)]
+    brands = [clean(v) for v in request.args.getlist('brand_manufacturer') if clean(v)]
+    purchase_pics = [clean(v) for v in request.args.getlist('purchase_pic') if clean(v)]
+    vendors = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
+    checks = [clean(v).lower() for v in request.args.getlist('check') if clean(v)]
+    rows, fetched_at = rfq_rows_with_edits(force=force)
+    if search:
+        rows = filter_rfq_rows_by_multiline_search(rows, search)
+    if clients:
+        rows = [row for row in rows if clean(row.get('client_name')) in clients]
+    if rfq_numbers:
+        rows = [row for row in rows if clean(row.get('rfq_code')) in rfq_numbers]
+    if brands:
+        rows = [row for row in rows if clean(row.get('brand_manufacturer')) in brands]
+    if purchase_pics:
+        rows = [row for row in rows if clean(row.get('purchase_pic')) in purchase_pics]
+    if vendors:
+        rows = [row for row in rows if clean(row.get('vendor_name')) in vendors]
+    if checks:
+        rows = [row for row in rows if clean(row.get('check')) and clean(row.get('check')).lower() in checks]
+    if pic:
+        rows = [row for row in rows if clean(row.get('purchase_pic')) == pic and clean(row.get('check')) == 'open' and row.get('unit_price_missing') and not clean_product_id(row.get('product_id'))]
+    # Keep RFQ order identical to the sheet.
+    return rows, fetched_at
+
+@app.route('/api/rfq/template', methods=['GET'])
+def download_rfq_batch_template():
+    try:
+        rows, _ = rfq_filtered_rows_from_request(force=False)
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'RFQ Batch Upload'
+        context_fields = ['item_name', 'detail_spec']
+        headers = ['No'] + [rfq_label(field) for field in context_fields] + [rfq_label(field) for field in RFQ_BATCH_FIELDS]
+        _style_wb(ws, headers)
+        widths = [12, 28, 50, 20, 28, 18, 28, 42, 18, 14, 14, 18, 20, 28, 50]
+        for i, width in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = width
+        seen = set()
+        for row in rows:
+            no = clean(row.get('no'))
+            if not no or no in seen:
+                continue
+            seen.add(no)
+            ws.append([no] + [row.get(field) or '' for field in context_fields] + [row.get(field) or '' for field in RFQ_BATCH_FIELDS])
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return send_file(output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f'Template_RFQ_BatchUpload_{datetime.now().strftime("%Y%m%d")}.xlsx')
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/rfq/batch-upload-json', methods=['POST'])
+@app.route('/api/rfq/batch-upload', methods=['POST'])
+def batch_upload_rfq():
+    try:
+        uploads, upload_mode = request_upload_dataframes('rfq_batch')
+        if not uploads:
+            return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
+        rows, _ = rfq_rows_with_edits(force=False)
+        no_map = {}
+        row_by_key = {}
+        for row in rows:
+            row_by_key[row['row_key']] = row
+            no = clean(row.get('no'))
+            if no:
+                no_map.setdefault(no, []).append(row['row_key'])
+
+        updated = 0
+        not_found = 0
+        sheet_updates = []
+        local_updates = 0
+        for upload in uploads:
+            df = upload['df']
+            df.columns = [str(c).strip() for c in df.columns]
+            col_no = find_column(df, ['No'])
+            if not col_no:
+                return jsonify({'error': f'Column "No" not found. Available: {df.columns.tolist()}'}), 400
+            col_map = {field: find_column(df, [rfq_label(field), field]) for field in RFQ_BATCH_FIELDS}
+            for _, src in df.iterrows():
+                no = clean(df_val(src, col_no))
+                if not no or no.lower().startswith('example'):
+                    continue
+                keys = no_map.get(no, [])
+                if not keys:
+                    not_found += 1
+                    continue
+                for field, col in col_map.items():
+                    if not col:
+                        continue
+                    value = clean(df_val(src, col)) or ''
+                    for row_key in keys:
+                        if field in RFQ_DASHBOARD_ONLY_FIELDS:
+                            edit = RFQCellEdit.query.filter_by(row_key=row_key, field=field).first()
+                            if not edit:
+                                edit = RFQCellEdit(row_key=row_key, field=field)
+                                db.session.add(edit)
+                            edit.value = str(value)
+                            edit.updated_at = datetime.utcnow()
+                            set_rfq_dashboard_cell(row_key, field, str(value), dirty=False, commit=False)
+                            local_updates += 1
+                        else:
+                            base_row = row_by_key.get(row_key)
+                            if base_row:
+                                set_rfq_dashboard_cell(row_key, field, str(value), dirty=True, commit=False)
+                                sheet_updates.append({'row': base_row, 'field': field, 'value': str(value)})
+                        updated += 1
+
+        db.session.commit()
+
+        try:
+            sheet_sync = sync_rfq_cells_to_google_sheet(sheet_updates) if sheet_updates else {'synced': True, 'updated_ranges': 0}
+            if sheet_sync.get('synced'):
+                clear_rfq_dashboard_dirty_fields(sheet_updates)
+        except Exception as sync_error:
+            sheet_sync = {'synced': False, 'reason': str(sync_error)}
+
+        clear_runtime_caches()
+        return jsonify({
+            'updated': updated,
+            'sheet_updates': len(sheet_updates),
+            'local_updates': local_updates,
+            'not_found': not_found,
+            'files': len(uploads),
+            'mode': upload_mode,
+            'sheet_sync': sheet_sync,
+        })
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+def _style_rfq_export_sheet(ws, headers, editable_start_col=19):
+    last_col = len(headers)
+    last_col_letter = get_column_letter(last_col)
+    ref_end_col = editable_start_col - 1
+
+    ws.freeze_panes = 'A3'
+    ws.auto_filter.ref = f'A2:{last_col_letter}{ws.max_row}'
+
+    ref_header_fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
+    ref_body_fill = PatternFill(start_color='EDEDED', end_color='EDEDED', fill_type='solid')
+    input_header_fill = PatternFill(start_color='2563EB', end_color='2563EB', fill_type='solid')
+    note_font = Font(color='0070C0')
+    ref_header_font = Font(bold=True, color='000000')
+    input_header_font = Font(bold=True, color='FFFFFF')
+    thin_border = Border(
+        left=Side(style='thin', color='D9E2EF'),
+        right=Side(style='thin', color='D9E2EF'),
+        top=Side(style='thin', color='D9E2EF'),
+        bottom=Side(style='thin', color='D9E2EF'),
+    )
+
+    # Instruction row, starts exactly at the first editable quotation column.
+    note_cell = ws.cell(row=1, column=editable_start_col)
+    note_cell.value = 'Silahkan isi penawaran di Kolom Biru / Kindly fill in your quotation in the blue columns'
+    note_cell.font = note_font
+
+    for cell in ws[2]:
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        cell.border = thin_border
+        if cell.column <= ref_end_col:
+            cell.fill = ref_header_fill
+            cell.font = ref_header_font
+        else:
+            cell.fill = input_header_fill
+            cell.font = input_header_font
+
+    for row in ws.iter_rows(min_row=3, max_row=ws.max_row, min_col=1, max_col=last_col):
+        for cell in row:
+            cell.alignment = Alignment(vertical='center', wrap_text=True)
+            cell.border = thin_border
+            if cell.column <= ref_end_col:
+                cell.fill = ref_body_fill
+
+    widths = [
+        10, 10, 10, 7, 55, 14, 18, 12, 28, 14, 24, 42, 20, 8, 8, 24, 18, 20,
+        17, 18, 18, 18, 24, 42, 18, 12, 12, 18, 18, 28, 50, 32, 32
+    ]
+    for i, width in enumerate(widths[:last_col], 1):
+        ws.column_dimensions[get_column_letter(i)].width = width
+
+    for row_idx in range(3, ws.max_row + 1):
+        ws.row_dimensions[row_idx].height = 30
+    ws.row_dimensions[2].height = 26
+
+@app.route('/api/export/rfq', methods=['GET'])
+def export_rfq():
+    try:
+        rows, _ = rfq_filtered_rows_from_request(force=False)
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'RFQ'
+        headers = [label for _, label in RFQ_TEMPLATE_COLUMNS]
+
+        # Row 1 = instruction note. Row 2 = header. Row 3+ = data, matching
+        # the RFQ example file style and preserving the sheet order.
+        ws.append([''] * len(headers))
+        ws.append(headers)
+        for row in rows:
+            values = []
+            for field, _label in RFQ_TEMPLATE_COLUMNS:
+                if field == 'check':
+                    values.append(rfq_check_label(row.get('check')))
+                elif field == 'days_left':
+                    values.append(row.get('days_left') if row.get('days_left') is not None else '-')
+                else:
+                    values.append(row.get(field) or '')
+            ws.append(values)
+
+        _style_rfq_export_sheet(ws, headers, editable_start_col=19)
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return send_file(output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f'RFQ_{datetime.now().strftime("%Y%m%d")}.xlsx')
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/rfq/batch-cells', methods=['PUT'])
+def update_rfq_cells_batch():
+    try:
+        payload = request.get_json(silent=True) or {}
+        updates = payload.get('updates') or []
+        if not isinstance(updates, list) or not updates:
+            return jsonify({'error': 'No RFQ cell updates supplied'}), 400
+        if len(updates) > 1000:
+            return jsonify({'error': 'Maximum 1000 cells can be updated at once'}), 400
+
+        base_rows, _ = rfq_rows_with_edits(force=False, prefer_stale_cache=True)
+        row_map = {row.get('row_key'): row for row in base_rows}
+        sheet_updates = []
+        updated = 0
+        skipped = []
+
+        for idx, item in enumerate(updates):
+            row_key = clean(item.get('row_key'))
+            field = clean(item.get('field'))
+            value = item.get('value')
+            if field not in RFQ_EDITABLE_FIELDS and field not in RFQ_DIRECT_UPDATE_FIELDS:
+                skipped.append({'index': idx, 'reason': 'Field is not editable', 'field': field})
+                continue
+            base_row = row_map.get(row_key)
+            if not base_row:
+                skipped.append({'index': idx, 'reason': 'RFQ row not found', 'row_key': row_key})
+                continue
+
+            clean_value = clean_product_id(value) if field == 'product_id' else ('' if value is None else str(value))
+            if field in RFQ_DASHBOARD_ONLY_FIELDS:
+                edit = RFQCellEdit.query.filter_by(row_key=row_key, field=field).first()
+                if not edit:
+                    edit = RFQCellEdit(row_key=row_key, field=field)
+                    db.session.add(edit)
+                edit.value = clean_value
+                edit.updated_at = datetime.utcnow()
+                set_rfq_dashboard_cell(row_key, field, clean_value, dirty=False, commit=False)
+            else:
+                set_rfq_dashboard_cell(row_key, field, clean_value, dirty=True, commit=False)
+                sheet_updates.append({'row': base_row, 'field': field, 'value': clean_value})
+            updated += 1
+
+        db.session.commit()
+        clear_runtime_caches()
+        try:
+            sheet_sync = sync_rfq_cells_to_google_sheet(sheet_updates) if sheet_updates else {'synced': True, 'local_only': True}
+            if sheet_sync.get('synced'):
+                clear_rfq_dashboard_dirty_fields(sheet_updates)
+        except Exception as sync_error:
+            sheet_sync = {'synced': False, 'reason': str(sync_error)}
+        return jsonify({'success': True, 'updated': updated, 'skipped': skipped, 'sheet_sync': sheet_sync})
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/rfq/<path:row_key>', methods=['PUT'])
+def update_rfq_cell(row_key):
+    try:
+        payload = request.get_json(silent=True) or {}
+        field = clean(payload.get('field'))
+        value = payload.get('value')
+        if field not in RFQ_EDITABLE_FIELDS and field not in RFQ_DIRECT_UPDATE_FIELDS:
+            return jsonify({'error': 'Field is not editable'}), 400
+        base_rows, _ = rfq_rows_with_edits(force=False, prefer_stale_cache=True)
+        base_row = next((row for row in base_rows if row.get('row_key') == row_key), None)
+        if not base_row:
+            return jsonify({'error': 'RFQ row not found'}), 404
+        clean_value = clean_product_id(value) if field == 'product_id' else ('' if value is None else str(value))
+        if field in RFQ_DASHBOARD_ONLY_FIELDS:
+            edit = RFQCellEdit.query.filter_by(row_key=row_key, field=field).first()
+            if not edit:
+                edit = RFQCellEdit(row_key=row_key, field=field)
+                db.session.add(edit)
+            edit.value = clean_value
+            edit.updated_at = datetime.utcnow()
+            set_rfq_dashboard_cell(row_key, field, clean_value, dirty=False, commit=False)
+            db.session.commit()
+            clear_runtime_caches()
+            sheet_sync = {'synced': True, 'local_only': True}
+        else:
+            RFQCellEdit.query.filter_by(row_key=row_key, field=field).delete()
+            db.session.commit()
+            set_rfq_dashboard_cell(row_key, field, clean_value, dirty=True)
+            try:
+                sheet_sync = sync_rfq_cell_to_google_sheet(base_row, field, clean_value)
+                if sheet_sync.get('synced'):
+                    clear_rfq_dashboard_dirty_fields([{'row_key': row_key, 'field': field}])
+            except Exception as sync_error:
+                sheet_sync = {'synced': False, 'reason': str(sync_error)}
+            clear_runtime_caches()
+        return jsonify({'success': True, 'row_key': row_key, 'field': field, 'value': clean_value, 'sheet_sync': sheet_sync})
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+def import_sheet_title_for_gid(spreadsheet_id, gid):
+    metadata = google_sheets_metadata(spreadsheet_id)
+    gid_int = int(gid)
+    for sheet in metadata.get('sheets', []):
+        props = sheet.get('properties', {})
+        if props.get('sheetId') == gid_int:
+            return props.get('title')
+    raise RuntimeError(f'Sheet gid {gid} not found')
+
+@app.route('/api/import/data', methods=['GET'])
+def get_import_data():
+    try:
+        force = str(request.args.get('refresh', '')).lower() in ('1', 'true', 'yes')
+        page = max(int(request.args.get('page', 1)), 1)
+        per_page = min(max(int(request.args.get('per_page', 25)), 1), 500)
+        search = clean(request.args.get('search')) or ''
+        sync_info = None
+        if force or ImportDashboardRow.query.count() == 0:
+            sync_info = sync_import_sheet_to_dashboard()
+        columns = sync_info['columns'] if sync_info else import_layout_columns()
+        vendor_count = sync_info.get('vendor_count') if sync_info else len(import_vendor_names())
+        db_rows = ImportDashboardRow.query.order_by(
+            ImportDashboardRow.first_seen_at.desc(),
+            ImportDashboardRow.id.desc(),
+        ).all()
+        rows = [import_dashboard_row_to_dict(row, columns) for row in db_rows]
+        if search:
+            terms = [t.strip().lower() for t in re.split(r'[\n,]+', search) if t.strip()]
+            if terms:
+                rows = [row for row in rows if any(term in ' '.join(str(v or '').lower() for v in row.values()) for term in terms)]
+        total = len(rows)
+        start = (page - 1) * per_page
+        paged = rows[start:start + per_page]
+        return jsonify({
+            'data': paged,
+            'columns': columns,
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'vendor_count': vendor_count,
+            'sources': [{'key': s['key'], 'label': s['label']} for s in IMPORT_SOURCE_SHEETS],
+            'sync': sync_info,
+        })
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/import/cell', methods=['PUT'])
+def update_import_cell():
+    try:
+        payload = request.get_json(silent=True) or {}
+        row_key = clean(payload.get('row_key'))
+        field = clean(payload.get('field'))
+        value = '' if payload.get('value') is None else str(payload.get('value'))
+        if not row_key or not field:
+            return jsonify({'error': 'row_key and field are required'}), 400
+        columns = import_layout_columns()
+        column = next((col for col in columns if col['field'] == field), None)
+        if not column:
+            return jsonify({'error': 'Unknown import column'}), 400
+        row = ImportDashboardRow.query.filter_by(row_key=row_key).first()
+        if not row:
+            return jsonify({'error': 'Import dashboard row not found'}), 404
+        try:
+            data = json.loads(row.data_json or '{}')
+        except (TypeError, json.JSONDecodeError):
+            data = {}
+        data[field] = value
+        row.data_json = json.dumps(data, ensure_ascii=False)
+        row.updated_at = datetime.utcnow()
+        db.session.commit()
+        clear_runtime_caches()
+        return jsonify({'success': True, 'row_key': row_key, 'field': field, 'value': value, 'sheet_sync': {'synced': False, 'local_only': True}})
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e), 'sheet_sync': {'synced': False, 'reason': str(e)}}), 500
+
+@app.route('/api/import/vendor-template', methods=['GET'])
+def download_import_vendor_template():
+    try:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'Import Vendors'
+        ws.append(['Vendor Name'])
+        for vendor in import_vendor_names():
+            ws.append([vendor])
+        ws.column_dimensions['A'].width = 42
+        ws['A1'].font = Font(bold=True, color='FFFFFF')
+        ws['A1'].fill = PatternFill('solid', fgColor='2563EB')
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return send_file(output, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', as_attachment=True, download_name='Import_Vendor_Template.xlsx')
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/import/vendors/upload', methods=['POST'])
+def upload_import_vendors():
+    try:
+        files = request.files.getlist('file') or request.files.getlist('files')
+        if not files:
+            return jsonify({'error': 'No file uploaded'}), 400
+        vendors = set()
+        for file in files:
+            name = (file.filename or '').lower()
+            if name.endswith('.csv'):
+                df = pd.read_csv(file, dtype=str, keep_default_na=False)
+            else:
+                df = pd.read_excel(file, dtype=str, keep_default_na=False)
+            if df.empty:
+                continue
+            col = next((c for c in df.columns if str(c).strip().lower() in ('vendor name', 'vendor', 'vendor_name')), df.columns[0])
+            for value in df[col].tolist():
+                vendor = clean(value)
+                if vendor and vendor.lower() not in ('vendor', 'vendor name'):
+                    vendors.add(vendor)
+        ImportVendor.query.delete()
+        now = datetime.utcnow()
+        for vendor in sorted(vendors, key=lambda s: s.lower()):
+            db.session.add(ImportVendor(vendor_name=vendor, uploaded_at=now))
+        db.session.commit()
+        clear_runtime_caches()
+        return jsonify({'success': True, 'count': len(vendors), 'message': f'Import vendor list updated: {len(vendors)} vendors'})
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+def base_all_registered_items_query():
+    return db.session.query(ProductIDDB).filter(db.or_(
+        ProductIDDB.product_status.is_(None),
+        ProductIDDB.product_status == '',
+        func.lower(ProductIDDB.product_status) == 'use'
+    ))
+
+
+def apply_all_registered_items_filters(q, args):
+    search = (args.get('search', '') or '').strip()
+    prod_ids = [clean_product_id(p) for p in args.getlist('prod_id') if clean_product_id(p)]
+    date_filter = args.get('date_filter', 'all')
+    date_from = args.get('date_from', '')
+    date_to = args.get('date_to', '')
+    pic_name = (args.get('pic_name', '') or '').strip()
+    mfr_names = [clean(v) for v in args.getlist('mfr_name') if clean(v)]
+    vendor_names = [clean(v) for v in args.getlist('vendor_name') if clean(v)]
+
+    if date_filter != 'all':
+        today = datetime.now().date()
+        if date_filter == 'today':
+            q = q.filter(func.date(ProductIDDB.registration_date) == today)
+        elif date_filter == 'week':
+            week_start = today - timedelta(days=today.weekday())
+            q = q.filter(ProductIDDB.registration_date >= week_start)
+        elif date_filter == 'month':
+            q = q.filter(ProductIDDB.registration_date >= today.replace(day=1))
+        elif date_filter == 'year':
+            q = q.filter(ProductIDDB.registration_date >= today.replace(month=1, day=1))
+        elif date_filter == 'custom':
+            if date_from:
+                q = q.filter(ProductIDDB.registration_date >= date_from)
+            if date_to:
+                q = q.filter(ProductIDDB.registration_date <= date_to)
+
+    if pic_name:
+        q = q.filter(ProductIDDB.product_registry_pic.ilike(f'%{pic_name}%'))
+    if prod_ids:
+        q = q.filter(ProductIDDB.product_id.in_(prod_ids))
+    if mfr_names:
+        q = q.filter(ProductIDDB.manufacturer_name.in_(mfr_names))
+    if vendor_names:
+        q = q.filter(ProductIDDB.vendor_name.in_(vendor_names))
 
     if search:
-        search_lower = search.lower()
-        data = [r for r in data if any(
-            search_lower in str(v).lower() for v in r.values())]
-
-    vendors = import_vendor_names()
-
-    return jsonify({
-        'data': data,
-        'total': total,
-        'page': page,
-        'page_size': page_size,
-        'columns': columns,
-        'vendors': vendors,
-    })
-
-
-@app.route('/api/import/sync', methods=['POST'])
-def api_import_sync():
-    result = sync_import_sheet_to_dashboard()
-    return jsonify({'success': True, **result})
+        terms = rfq_multiline_search_terms(search)
+        term_filters = []
+        for term in terms:
+            pattern = f'%{term}%'
+            term_filters.append(db.or_(
+                ProductIDDB.product_id.ilike(pattern),
+                ProductIDDB.product_name.ilike(pattern),
+                ProductIDDB.specification.ilike(pattern),
+                ProductIDDB.manufacturer_name.ilike(pattern),
+                ProductIDDB.vendor_name.ilike(pattern),
+                ProductIDDB.category_name.ilike(pattern),
+            ))
+        if term_filters:
+            q = q.filter(db.or_(*term_filters))
+    return q
 
 
-@app.route('/api/import/vendor', methods=['POST'])
-def api_import_vendor_add():
-    data = request.get_json() or {}
-    name = (data.get('vendor_name') or '').strip()
-    if not name:
-        return jsonify({'error': 'vendor_name required'}), 400
-
-    existing = ImportVendor.query.filter_by(vendor_name=name).first()
-    if existing:
-        return jsonify({'message': 'Already exists'})
-
-    db.session.add(ImportVendor(vendor_name=name))
-    db.session.commit()
-    return jsonify({'success': True})
-
-
-@app.route('/api/import/vendor/<int:vendor_id>', methods=['DELETE'])
-def api_import_vendor_delete(vendor_id):
-    v = ImportVendor.query.get_or_404(vendor_id)
-    db.session.delete(v)
-    db.session.commit()
-    return jsonify({'success': True})
-
-
-# ─── Dashboard Aggregate Endpoints ───────────────────────────────────────
-
-@app.route('/api/dashboard/clients')
-def api_dashboard_clients():
-    cache_key = ('dashboard_clients',)
-    cached = runtime_cache_get(cache_key)
-    if cached:
-        return jsonify(cached)
-
-    clients = db.session.query(
-        SOData.operation_unit_name,
-        func.count(SOData.id)
-    ).filter(open_so_filter()).group_by(
-        SOData.operation_unit_name
-    ).order_by(func.count(SOData.id).desc()).all()
-
-    result = [{
-        'name': name, 'count': count
-    } for name, count in clients if name]
-    runtime_cache_set(cache_key, result, ttl_seconds=300)
-    return jsonify(result)
-
-
-@app.route('/api/dashboard/pics')
-def api_dashboard_pics():
-    cache_key = ('dashboard_pics',)
-    cached = runtime_cache_get(cache_key)
-    if cached:
-        return jsonify(cached)
-
-    pics = db.session.query(
-        SOData.pic_name,
-        func.count(SOData.id)
-    ).filter(open_so_filter()).group_by(
-        SOData.pic_name
-    ).order_by(func.count(SOData.id).desc()).all()
-
-    result = [{'name': name or '(Kosong)', 'count': count}
-              for name, count in pics]
-    runtime_cache_set(cache_key, result, ttl_seconds=300)
-    return jsonify(result)
-
-
-@app.route('/api/dashboard/date-range')
-def api_dashboard_date_range():
-    cache_key = ('dashboard_date_range',)
-    cached = runtime_cache_get(cache_key)
-    if cached:
-        return jsonify(cached)
-
-    min_date = db.session.query(
-        func.min(SOData.so_create_date)).scalar()
-    max_date = db.session.query(
-        func.max(SOData.so_create_date)).scalar()
-
-    result = {
-        'min_date': min_date.isoformat() if min_date else None,
-        'max_date': max_date.isoformat() if max_date else None,
+def serialize_registered_product(row, pic_map=None):
+    pic_map = pic_map or {}
+    cat_id = normalize_category_id(row.category_id)
+    return {
+        'id': row.id,
+        'prod_id': clean_product_id(row.product_id),
+        'category': source_category_level1(row.category_name),
+        'pic': pic_map.get(cat_id) or '',
+        'prod_name': row.product_name or '',
+        'spec': row.specification or '',
+        'mfr_name': row.manufacturer_name or '',
+        'vendor_name': row.vendor_name or '',
+        'odr_unit': row.order_unit or '',
+        'hub_handling_check': row.hub_handling_check or '',
+        'tax_type': row.tax_type or '',
+        'registration_date': row.registration_date.isoformat() if row.registration_date else '',
+        'product_registry_pic': row.product_registry_pic or '',
+        'client_name': '',
+        'req_no': '',
+        'proc_status': row.product_status or '',
+        'prod_price': 0,
+        'curr': '',
+        'batch_grp_no': '',
     }
-    runtime_cache_set(cache_key, result, ttl_seconds=600)
-    return jsonify(result)
 
 
-# ─── Static Files ────────────────────────────────────────────────────────
+@app.route('/api/all-registered-items', methods=['GET'])
+def get_all_registered_items():
+    """Return all registered items from uploaded Prod ID master data."""
+    try:
+        cache_key = runtime_cache_key('all_registered_items')
+        cached = runtime_cache_get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
 
-@app.route('/static/<path:filename>')
-def serve_static(filename):
-    return send_from_directory('static', filename)
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 10))
+        q = apply_all_registered_items_filters(base_all_registered_items_query(), request.args)
+        total = q.count()
+        rows = q.order_by(ProductIDDB.registration_date.desc(), ProductIDDB.product_id.asc()).offset((page-1)*per_page).limit(per_page).all()
+        pic_map = {normalize_category_id(m.category_id): m.pic_name for m in db.session.query(MasterPIC).all()}
+        option_q = base_all_registered_items_query()
+        data = [serialize_registered_product(row, pic_map) for row in rows]
+        payload = {
+            'data': data,
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'filters': {
+                'mfr_names': sorted([r[0] for r in option_q.with_entities(ProductIDDB.manufacturer_name).distinct().all() if r[0]]),
+                'vendor_names': sorted([r[0] for r in option_q.with_entities(ProductIDDB.vendor_name).distinct().all() if r[0]]),
+            }
+        }
+        runtime_cache_set(cache_key, payload, ttl_seconds=60)
+        return jsonify(payload)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/export/all-registered-items', methods=['GET'])
+def export_all_registered_items():
+    """Export all registered items with current filters to Excel."""
+    try:
+        q = apply_all_registered_items_filters(base_all_registered_items_query(), request.args)
+        rows = q.order_by(ProductIDDB.registration_date.desc(), ProductIDDB.product_id.asc()).all()
+        pic_map = {normalize_category_id(m.category_id): m.pic_name for m in db.session.query(MasterPIC).all()}
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'All Registered Items'
+        headers = ['Product ID', 'Category', 'PIC', 'Product Name', 'Specification', 'Manufacturer Name', 'Vendor Name', 'Order Unit', 'Hub Handling Check', 'Tax Type', 'Registration Date', 'Registry PIC', 'Status']
+        ws.append(headers)
+        header_fill = PatternFill(start_color="1D4ED8", end_color="1D4ED8", fill_type="solid")
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.alignment = Alignment(horizontal='center')
+        for row in rows:
+            item = serialize_registered_product(row, pic_map)
+            ws.append([
+                item['prod_id'], item['category'], item['pic'], item['prod_name'], item['spec'],
+                item['mfr_name'], item['vendor_name'], item['odr_unit'], item['hub_handling_check'],
+                item['tax_type'], item['registration_date'], item['product_registry_pic'], item['proc_status']
+            ])
+        widths = [18, 28, 18, 35, 45, 28, 28, 14, 20, 14, 18, 24, 16]
+        for i, width in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = width
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return send_file(output, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', as_attachment=True, download_name=f"All_Registered_Items_{datetime.now().strftime('%Y%m%d')}.xlsx")
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+
+@app.route('/api/dashboard/status-detail', methods=['GET'])
+def get_dashboard_status_detail():
+    """Return detailed SO list for a specific status from dashboard/heatmap."""
+    try:
+        status = request.args.get('status', '').strip()
+        month = request.args.get('month', '').strip()
+        hidden_so = get_hidden_so_items()
+        date_year, date_from, date_to = parse_so_date_args()
+        clients = selected_clients()
+        pics = selected_pics()
+
+        def so_q(*extra_filters):
+            q = db.session.query(SOData).filter(*extra_filters) if extra_filters else db.session.query(SOData)
+            q = apply_so_client_filter(q, clients)
+            q = apply_so_pic_filter(q, pics)
+            return apply_so_create_date_filter(q, date_year, date_from, date_to)
+
+        q = so_q(open_so_filter())
+        if status:
+            q = q.filter(SOData.so_status == status)
+        if month:
+            try:
+                month_date = datetime.strptime(month, '%b %Y')
+                q = q.filter(func.strftime('%Y-%m', SOData.so_create_date) == month_date.strftime('%Y-%m'))
+            except Exception:
+                pass
+
+        rows = q.all()
+        result = []
+        for s in rows:
+            if s.so_item in hidden_so or s.so_number in hidden_so:
+                continue
+            if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
+                continue
+            result.append({
+                'so_item': s.so_item,
+                'so_number': s.so_number,
+                'so_status': s.so_status,
+                'pic_name': canonical_pending_pic(s.pic_name, s.operation_unit_name),
+                'operation_unit_name': s.operation_unit_name,
+                'vendor_name': s.vendor_name,
+                'product_name': s.product_name,
+                'so_qty': s.so_qty,
+                'sales_price': s.sales_price,
+                'sales_amount': s.sales_amount,
+                'customer_po_number': s.customer_po_number,
+                'delivery_memo': s.delivery_memo,
+                'so_create_date': s.so_create_date.isoformat() if s.so_create_date else None,
+                'delivery_plan_date': s.delivery_plan_date.isoformat() if s.delivery_plan_date else None,
+                'remarks': s.remarks,
+            })
+        return jsonify(result)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/data/pic-kpi', methods=['GET'])
+def get_pic_kpi():
+    """Return KPI metrics per PIC for Open SO."""
+    try:
+        # Get date filter params
+        date_from = request.args.get('date_from', '')
+        date_to = request.args.get('date_to', '')
+        date_year = request.args.get('date_year', '')
+        is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
+        
+        # Base query: Open SO only (exclude Delivery Completed and SO Cancel)
+        q = db.session.query(SOData).filter(
+            SOData.so_status.notin_(['Delivery Completed', 'SO Cancel'])
+        )
+        
+        # Apply date filters
+        if date_year:
+            try:
+                yr = int(date_year)
+                if is_sqlite:
+                    q = q.filter(func.strftime('%Y', SOData.so_create_date) == str(yr))
+                else:
+                    q = q.filter(func.extract('year', SOData.so_create_date) == yr)
+            except ValueError:
+                pass
+        elif date_from or date_to:
+            if date_from:
+                q = q.filter(SOData.so_create_date >= date_from)
+            if date_to:
+                q = q.filter(SOData.so_create_date <= date_to)
+        
+        rows = q.all()
+        
+        # Group by PIC
+        pic_map = {}
+        for s in rows:
+            pic = s.pic_name or 'Unassigned'
+            if pic not in pic_map:
+                pic_map[pic] = {
+                    'pic_name': pic,
+                    'so_count': 0,
+                    'total_sales': 0.0,
+                    'total_purchase': 0.0,
+                    'total_margin': 0.0,
+                    'positive_margin_count': 0,
+                    'negative_margin_count': 0,
+                }
+            
+            pic_map[pic]['so_count'] += 1
+            sales = float(s.sales_amount or 0)
+            po_price = float(s.purchasing_price or 0)
+            qty = float(s.so_qty or 0)
+            po_amount = po_price * qty
+            margin = sales - po_amount
+            
+            pic_map[pic]['total_sales'] += sales
+            pic_map[pic]['total_purchase'] += po_amount
+            pic_map[pic]['total_margin'] += margin
+            
+            if margin > 0:
+                pic_map[pic]['positive_margin_count'] += 1
+            elif margin < 0:
+                pic_map[pic]['negative_margin_count'] += 1
+        
+        # Convert to list and sort by SO count descending
+        result = sorted(pic_map.values(), key=lambda x: x['so_count'], reverse=True)
+        
+        return jsonify(result)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/template/master-pic', methods=['GET'])
+def download_master_pic_template():
+    """Generate Master PIC update template using Category Name as the unique key."""
+    try:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'Master PIC'
+
+        headers = ['Category Name', 'PIC', 'Update New PIC']
+        ws.append(headers)
+        ws.freeze_panes = 'A2'
+
+        # Match the uploaded example: Category/PIC are reference columns,
+        # Update New PIC is the editable blue column.
+        ref_header_fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
+        input_header_fill = PatternFill(start_color='0070C0', end_color='0070C0', fill_type='solid')
+        input_font = Font(bold=True, color='FFFFFF', size=10)
+        ref_font = Font(bold=True, color='000000', size=10)
+        body_font = Font(size=10)
+        center = Alignment(horizontal='center', vertical='center')
+        left = Alignment(horizontal='left', vertical='center')
+
+        for cell in ws[1]:
+            cell.alignment = center
+            if cell.column <= 2:
+                cell.fill = ref_header_fill
+                cell.font = ref_font
+            else:
+                cell.fill = input_header_fill
+                cell.font = input_font
+
+        # Existing Master PIC categories plus ProductIDDB categories that have not
+        # been mapped yet. User can append a new Category Name manually too.
+        category_rows = {}
+        for m in db.session.query(MasterPIC).order_by(MasterPIC.category_name).all():
+            cat_name = source_category_level1(m.category_name)
+            norm = normalize_category_name(cat_name)
+            if norm:
+                category_rows[norm] = {'category_name': cat_name, 'pic': clean(m.pic_name)}
+        for (cat_name_raw,) in db.session.query(ProductIDDB.category_name).filter(
+            ProductIDDB.category_name.isnot(None), ProductIDDB.category_name != ''
+        ).distinct().all():
+            cat_name = source_category_level1(cat_name_raw)
+            norm = normalize_category_name(cat_name)
+            if norm and norm not in category_rows:
+                category_rows[norm] = {'category_name': cat_name, 'pic': _lookup_pic_by_category(None, cat_name) or ''}
+
+        for item in sorted(category_rows.values(), key=lambda x: x['category_name'].lower()):
+            ws.append([item['category_name'], item['pic'], ''])
+
+        # Add blank rows so new categories can be inserted without changing format.
+        min_rows = max(20, len(category_rows) + 5)
+        while ws.max_row < min_rows:
+            ws.append(['', '', ''])
+
+        for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=3):
+            for cell in row:
+                cell.font = body_font
+                cell.alignment = left if cell.column == 1 else center
+                cell.number_format = '@'
+
+        ws.column_dimensions['A'].width = 32
+        ws.column_dimensions['B'].width = 12
+        ws.column_dimensions['C'].width = 20
+        ws.auto_filter.ref = f'A1:C{ws.max_row}'
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        return send_file(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name='Master_PIC_Update_Template.xlsx'
+        )
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 17. STARTUP: Schema + Cache Warming
+#  DELIVERY MONITORING
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _warm_all_caches():
-    """Called once at worker startup. Loads permanent data into memory
-    so dashboard reads are instant (no DB query per request)."""
-    _warm_exchange_rate_cache()
-    _pid_category_cache_load()
-    _warm_master_pic_cache()
-    print('All caches warmed.')
+# Process stages in business order.
+# Important:
+# - SO Create is the first process, then PO Create.
+# - HUB stages only apply to import items.
+# - Import is determined from Pur. Curr.; anything other than IDR is import.
+DLV_PROCESS_STAGES = [
+    ('so_erp_create_date', 'SO(ERP) Create Date', 'SO ERP Created'),
+    ('po_create_date',     'PO Create Date',      'PO Created'),
+    ('po_rcvd_date',       'PO Rcvd. Date',       'PO Received'),
+    ('ship_odr_date',      'Ship. Odr. Date',     'Shipping Order'),
+    ('ship_compl_date',    'Ship. Compl. Date',   'Shipping Confirmed'),
+    ('hub_rcv_date',       'HUB Rcv. Date',       'HUB Received'),
+    ('hub_ship_date',      'HUB Ship. Date',      'HUB Shipped'),
+    ('dlv_compl_date',     'Dlv. Compl. Date',    'Delivery Completed'),
+]
+
+DLV_LOCAL_PROCESS_STAGES = [
+    ('so_erp_create_date', 'SO(ERP) Create Date', 'SO ERP Created'),
+    ('po_create_date',     'PO Create Date',      'PO Created'),
+    ('po_rcvd_date',       'PO Rcvd. Date',       'PO Received'),
+    ('ship_odr_date',      'Ship. Odr. Date',     'Shipping Order'),
+    ('ship_compl_date',    'Ship. Compl. Date',   'Shipping Confirmed'),
+    ('dlv_compl_date',     'Dlv. Compl. Date',    'Delivery Completed'),
+]
 
 
-try:
-    with app.app_context():
-        db.create_all()
-        _ensure_extra_columns()
-        _ensure_performance_indexes()
-        _warm_all_caches()
-        print('DB schema ready, caches warmed.')
-except Exception as exc:
-    print(f'DB schema setup skipped (will retry next reload): {exc}')
+def _is_import_delivery(row):
+    """Return True when Pur. Curr. indicates an import item."""
+    pur_curr = (getattr(row, 'pur_curr', None) or 'IDR').strip().upper()
+    return bool(pur_curr and pur_curr != 'IDR')
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 18. BACKGROUND SYNC SCRIPT (for PythonAnywhere scheduled tasks)
-# ═══════════════════════════════════════════════════════════════════════════
-# Save this as sync_background.py and set up in PythonAnywhere Tasks:
-#
-#   Schedule: Every 2-4 hours
-#   Command: python /home/username/mysite/sync_background.py
-#
-# ┌──────────────────────────────────────────────────────────────┐
-# │ # sync_background.py                                         │
-# │ import requests, os                                          │
-# │                                                              │
-# │ BASE = 'https://yourusername.pythonanywhere.com'             │
-# │ SECRET = os.environ.get('SYNC_SECRET', '')                   │
-# │                                                              │
-# │ def sync_all():                                              │
-# │     headers = {'Authorization': f'Bearer {SECRET}'}          │
-# │     endpoints = [                                            │
-# │         '/api/vendor-control/sync',                          │
-# │         '/api/import/sync',                                  │
-# │     ]                                                        │
-# │     for ep in endpoints:                                     │
-# │         try:                                                 │
-# │             r = requests.post(f'{BASE}{ep}',                 │
-# │                              headers=headers, timeout=120)   │
-# │             print(f'{ep}: {r.status_code}')                  │
-# │         except Exception as e:                               │
-# │             print(f'{ep} failed: {e}')                       │
-# │                                                              │
-# │ if __name__ == '__main__':                                   │
-# │     sync_all()                                               │
-# └──────────────────────────────────────────────────────────────┘
+def _delivery_stage_flow(row):
+    """Return the applicable delivery process flow for a row."""
+    return DLV_PROCESS_STAGES if _is_import_delivery(row) else DLV_LOCAL_PROCESS_STAGES
+
+
+def _delivery_stage_pairs_for_row(row):
+    stages = _delivery_stage_flow(row)
+    return [
+        (stages[i][0], stages[i + 1][0], stages[i][2], stages[i + 1][2])
+        for i in range(len(stages) - 1)
+    ]
+
+
+def _delivery_stage_pairs_all():
+    """Canonical output order for Avg. Leadtime, including local and import paths."""
+    return [
+        ('so_erp_create_date', 'po_create_date', 'SO ERP Created', 'PO Created'),
+        ('po_create_date', 'po_rcvd_date', 'PO Created', 'PO Received'),
+        ('po_rcvd_date', 'ship_odr_date', 'PO Received', 'Shipping Order'),
+        ('ship_odr_date', 'ship_compl_date', 'Shipping Order', 'Shipping Confirmed'),
+        ('ship_compl_date', 'dlv_compl_date', 'Shipping Confirmed', 'Delivery Completed'),
+        ('ship_compl_date', 'hub_rcv_date', 'Shipping Confirmed', 'HUB Received'),
+        ('hub_rcv_date', 'hub_ship_date', 'HUB Received', 'HUB Shipped'),
+        ('hub_ship_date', 'dlv_compl_date', 'HUB Shipped', 'Delivery Completed'),
+    ]
+
+
+def _parse_dt(val):
+    """Parse a value to date/datetime, return None if not parseable."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    if isinstance(val, (datetime, date)):
+        return val
+    try:
+        import pandas as _pd
+        ts = _pd.to_datetime(val, errors='coerce')
+        if _pd.isna(ts):
+            return None
+        return ts.to_pydatetime()
+    except Exception:
+        return None
+
+
+def _dt_to_date(val):
+    """Convert datetime/date to date object."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, date):
+        return val
+    return None
+
+
+def _calc_stage_leadtimes(row):
+    """
+    Calculate workday leadtime between consecutive process stages.
+    Returns list of dicts: {stage_from, stage_to, label_from, label_to, workdays, pending}
+    pending=True means the 'to' date is still not set (process not completed yet).
+    """
+    if row.po_status and 'cancel' in row.po_status.lower():
+        return []
+
+    results = []
+    for field_from, field_to, label_from, label_to in _delivery_stage_pairs_for_row(row):
+        dt_from = getattr(row, field_from, None)
+        dt_to   = getattr(row, field_to,   None)
+        d_from  = _dt_to_date(dt_from) if dt_from else None
+        d_to    = _dt_to_date(dt_to)   if dt_to   else None
+
+        if d_from is None:
+            # Can't compute; skip
+            continue
+
+        if d_to is None:
+            # Stage not yet completed — pending, count from d_from to today
+            today = date.today()
+            wdays = count_workdays(d_from, today)
+            results.append({
+                'stage_from': field_from,
+                'stage_to':   field_to,
+                'label_from': label_from,
+                'label_to':   label_to,
+                'workdays':   wdays,
+                'pending':    True,
+            })
+        else:
+            wdays = count_workdays(d_from, d_to)
+            results.append({
+                'stage_from': field_from,
+                'stage_to':   field_to,
+                'label_from': label_from,
+                'label_to':   label_to,
+                'workdays':   wdays,
+                'pending':    False,
+            })
+    return results
+
+
+_COMPLETED_WARMUP_STARTED = False
+_RFQ_WARMUP_STARTED = False
+
+def warm_completed_summary_cache_async():
+    """Precompute the two Delivery Completed summaries used by Dashboard."""
+    global _COMPLETED_WARMUP_STARTED
+    if _COMPLETED_WARMUP_STARTED or os.environ.get('PO_MONITOR_DISABLE_WARMUP') == '1':
+        return
+    _COMPLETED_WARMUP_STARTED = True
+
+    def _worker():
+        try:
+            # Give the WSGI worker a few seconds to finish booting and answer
+            # PythonAnywhere's post-reload check before we start hammering
+            # the DB with this heavy analytics query.
+            time.sleep(8)
+            current_year = datetime.utcnow().year
+            urls = [
+                '/api/completed/summary',
+                f'/api/completed/summary?date_year={current_year}&yoy_base_year={current_year}',
+            ]
+            with app.app_context():
+                client = app.test_client()
+                for url in urls:
+                    client.get(url)
+        except Exception as exc:
+            print(f'Completed summary warmup skipped: {exc}')
+
+    threading.Thread(target=_worker, daemon=True, name='completed-summary-warmup').start()
+
+def warm_rfq_dashboard_cache_async():
+    """Warm RFQ from local DB only; never hits Google Sheet."""
+    global _RFQ_WARMUP_STARTED
+    if _RFQ_WARMUP_STARTED or os.environ.get('PO_MONITOR_DISABLE_WARMUP') == '1':
+        return
+    _RFQ_WARMUP_STARTED = True
+
+    def _worker():
+        try:
+            time.sleep(8)
+            with app.app_context():
+                if RFQDashboardRow.query.count() == 0:
+                    return
+                rows, fetched_at = load_rfq_dashboard_rows()
+                set_rfq_runtime_rows(rows, fetched_at)
+                app.test_client().get('/api/rfq/data?page=1&per_page=10')
+        except Exception as exc:
+            print(f'RFQ dashboard warmup skipped: {exc}')
+
+    threading.Thread(target=_worker, daemon=True, name='rfq-dashboard-warmup').start()
+
+FRONTEND_DIST_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'frontend', 'dist'))
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve_frontend(path):
+    if path.startswith('api/'):
+        return jsonify({'error': 'Not found'}), 404
+    if os.path.isdir(FRONTEND_DIST_DIR):
+        target = os.path.join(FRONTEND_DIST_DIR, path)
+        if path and os.path.isfile(target):
+            return send_from_directory(FRONTEND_DIST_DIR, path)
+        index_path = os.path.join(FRONTEND_DIST_DIR, 'index.html')
+        if os.path.isfile(index_path):
+            return send_from_directory(FRONTEND_DIST_DIR, 'index.html')
+    return jsonify({'status': 'ok', 'message': 'PO Monitoring API running'}), 200
+
+warm_completed_summary_cache_async()
+warm_rfq_dashboard_cache_async()
+
+if __name__ == '__main__':
+    load_similarity_cache()
+    warm_completed_summary_cache_async()
+    warm_rfq_dashboard_cache_async()
+    print("Backend: http://127.0.0.1:5001")
+    app.run(debug=True, host='0.0.0.0', port=5001)
