@@ -20,6 +20,11 @@ import { useLocation, useNavigate } from 'react-router-dom';
 const BACKEND = import.meta.env.VITE_API_URL || 'http://127.0.0.1:5001';
 const api = axios.create({ baseURL: BACKEND, timeout: 600000 });
 const DASHBOARD_SUMMARY_CACHE_PREFIX = 'po-monitoring:dashboard-summary:';
+const DASHBOARD_STATS_CACHE_KEY = 'po-monitoring:dashboard-stats';
+const DASHBOARD_AGING_CACHE_KEY = 'po-monitoring:dashboard-aging';
+// Cache TTL: 10 minutes — long enough to survive page reload, short enough to
+// not show stale data if someone uploads new SO data and refreshes.
+const DASHBOARD_CACHE_TTL_MS = 10 * 60 * 1000;
 
 const readDashboardSummaryCache = (url) => {
   try {
@@ -45,6 +50,32 @@ const clearDashboardSummaryCache = () => {
     Object.keys(sessionStorage)
       .filter((key) => key.startsWith(DASHBOARD_SUMMARY_CACHE_PREFIX))
       .forEach((key) => sessionStorage.removeItem(key));
+  } catch {}
+};
+
+// ─── Stats & aging session cache (survives page reload, not tab close) ────────
+const readStatsCache = (key) => {
+  try {
+    const raw = sessionStorage.getItem(key);
+    if (!raw) return null;
+    const { at, data } = JSON.parse(raw);
+    if (Date.now() - at > DASHBOARD_CACHE_TTL_MS) return null;
+    return data;
+  } catch {
+    return null;
+  }
+};
+
+const writeStatsCache = (key, data) => {
+  try {
+    sessionStorage.setItem(key, JSON.stringify({ at: Date.now(), data }));
+  } catch {}
+};
+
+const clearStatsCache = () => {
+  try {
+    sessionStorage.removeItem(DASHBOARD_STATS_CACHE_KEY);
+    sessionStorage.removeItem(DASHBOARD_AGING_CACHE_KEY);
   } catch {}
 };
 
@@ -1431,11 +1462,30 @@ const App = () => {
     const cachedMargin = completedUrl === marginUrl ? cachedCompleted : readDashboardSummaryCache(marginUrl);
     const hasSummaryCache = Boolean(cachedCompleted && cachedMargin);
 
+    // ── Cold-start optimisation ────────────────────────────────────────────
+    // 1. Show cached stats & aging immediately so the dashboard is not blank.
+    // 2. Fire a lightweight /api/ping first to wake the PythonAnywhere worker
+    //    before the heavy stats request arrives (reduces perceived latency by
+    //    absorbing the cold-start penalty in parallel).
+    const cachedStats = readStatsCache(DASHBOARD_STATS_CACHE_KEY);
+    const cachedAging = readStatsCache(DASHBOARD_AGING_CACHE_KEY);
+    if (cachedStats && isCurrent()) {
+      setStats(cachedStats);
+      setSummaryPendingTotal(Number(cachedStats?.total_so_count) || 0);
+      setDashboardFilterOptions(cachedStats?.filters || { clients: [], pics: [] });
+    }
+    if (cachedAging && isCurrent()) {
+      setAgingData(cachedAging);
+    }
+
     setLoading(true);
     setCompletedLoading(!hasSummaryCache);
     setCompletedLoaded(hasSummaryCache);
     setCompletedData(hasSummaryCache ? cachedCompleted : null);
     setDashboardMarginData(hasSummaryCache ? cachedMargin : null);
+
+    // Pre-ping to wake the worker (fire-and-forget, failure is harmless)
+    api.get('/api/ping').catch(() => {});
 
     try {
       const [sRes, aRes, pendingRes] = await Promise.all([
@@ -1448,6 +1498,9 @@ const App = () => {
       setSummaryPendingTotal(Number(pendingRes.data?.total) || 0);
       setDashboardFilterOptions(sRes.data?.filters || { clients: [], pics: [] });
       setAgingData(Array.isArray(aRes.data) ? aRes.data : []);
+      // Persist to session cache so next reload is instant
+      writeStatsCache(DASHBOARD_STATS_CACHE_KEY, sRes.data);
+      writeStatsCache(DASHBOARD_AGING_CACHE_KEY, Array.isArray(aRes.data) ? aRes.data : []);
     } catch (e) {
       if (isCurrent()) {
         addToast(`Error: ${e.response?.data?.error || e.message}`, 'error');
@@ -1840,6 +1893,7 @@ const App = () => {
       }
       addToast(toastMsg, toastKind);
       clearDashboardSummaryCache();
+      clearStatsCache();
       if (activePage === 'dashboard') fetchDashboard();
       if (activePage === 'all-so') fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
       setSoPage(1);
@@ -1872,6 +1926,7 @@ const App = () => {
       setUploadProgress(null);
       setPicUploadMsg(`✅ Prod ID (${d.files || files.length} file): +${d.added} added, ${d.updated} updated (total: ${d.total_in_db}). SO PIC refreshed: ${d.so_pic_refreshed} rows.`);
       clearDashboardSummaryCache();
+      clearStatsCache();
       fetchPicDbStatus();
       fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
     } catch (err) {
@@ -1898,6 +1953,7 @@ const App = () => {
       setUploadProgress(null);
       setPicUploadMsg(`✅ Master PIC (${d.files || files.length} file): +${d.added} added, ${d.updated} updated${d.unchanged ? `, ${d.unchanged} unchanged` : ''} (total category names: ${d.total_categories}). SO rows updated: ${d.so_pic_refreshed}.`);
       clearDashboardSummaryCache();
+      clearStatsCache();
       fetchPicDbStatus();
       fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
     } catch (err) {
@@ -1922,6 +1978,7 @@ const App = () => {
       setUploadProgress(null);
       addToast(`✅ ${res.data.message || 'Item Registration uploaded successfully'}`, 'success');
       clearDashboardSummaryCache();
+      clearStatsCache();
       setItemRegPage(1);
       if (activePage === 'dashboard') fetchDashboard();
       if (activePage === 'item-registration') fetchItemRegistration(1, itemRegPerPage, itemRegAppliedSearch, itemRegFilters);
@@ -1944,6 +2001,7 @@ const App = () => {
       setUploadProgress(null);
       addToast(`✅ Batch update: ${res.data.updated} records updated`, 'success');
       clearDashboardSummaryCache();
+      clearStatsCache();
       fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
     } catch (e) {
       setUploadProgress(null);
@@ -1964,6 +2022,7 @@ const App = () => {
       setUploadProgress(null);
       addToast(`Item Registration batch: ${res.data.updated} records updated${res.data.not_found ? `, ${res.data.not_found} Req. No not found` : ''}`, 'success');
       clearDashboardSummaryCache();
+      clearStatsCache();
       fetchItemRegistration(itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters);
     } catch (e) {
       setUploadProgress(null);
@@ -5120,6 +5179,30 @@ const App = () => {
                   ))}
                 </tbody>
               </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Cold-start / loading overlay ─────────────────────────────────────
+          Shows only when stats is null AND the dashboard page is active.
+          This prevents the user seeing a completely empty screen while the
+          first fetch is in flight (typical on PythonAnywhere cold starts).
+          The overlay disappears automatically once any data arrives.       */}
+      {activePage === 'dashboard' && stats === null && (
+        <div className="fixed inset-0 bg-black/50 z-[55] flex items-center justify-center backdrop-blur-sm">
+          <div className={`${darkMode?'bg-gray-800':'bg-white'} p-8 rounded-2xl shadow-2xl flex flex-col items-center gap-5 w-80 text-center`}>
+            <div className="relative w-16 h-16">
+              <div className="w-16 h-16 border-4 border-blue-200 rounded-full"/>
+              <div className="absolute inset-0 w-16 h-16 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"/>
+            </div>
+            <div>
+              <p className={`font-bold text-lg mb-1 ${darkMode?'text-white':'text-gray-900'}`}>Memuat Data Dashboard</p>
+              <p className={`text-sm ${darkMode?'text-gray-400':'text-gray-500'}`}>Sedang mengambil data dari server…</p>
+              <p className={`text-xs mt-2 ${darkMode?'text-gray-500':'text-gray-400'}`}>Mohon tunggu sebentar</p>
+            </div>
+            <div className={`w-full rounded-full h-1.5 ${darkMode?'bg-gray-700':'bg-gray-100'} overflow-hidden`}>
+              <div className="h-full bg-gradient-to-r from-blue-600 to-blue-400 rounded-full animate-pulse" style={{width:'60%'}}/>
             </div>
           </div>
         </div>
