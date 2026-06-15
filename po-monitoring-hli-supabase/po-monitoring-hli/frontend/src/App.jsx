@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area, ComposedChart
@@ -494,7 +495,20 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, hideL
   const [draftSelected, setDraftSelected] = useState([]);
   const [draftNone, setDraftNone] = useState(false);
   const [searchText, setSearchText] = useState('');
+  const [menuPos, setMenuPos] = useState({ top: 0, left: 0, width: 320, maxHeight: 240 });
   const ref = useRef(null);
+  const menuRef = useRef(null);
+
+  const safeOptions = useMemo(() => {
+    const seen = new Set();
+    return (Array.isArray(options) ? options : [])
+      .map(v => String(v ?? '').trim())
+      .filter(v => {
+        if (!v || seen.has(v)) return false;
+        seen.add(v);
+        return true;
+      });
+  }, [options]);
 
   const noSelection = selected === '__NONE__';
   const safeSelected = Array.isArray(selected) ? selected : [];
@@ -502,36 +516,66 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, hideL
   const currentSelected = open ? draftSelected : safeSelected;
   const currentNone = open ? draftNone : noSelection;
   const currentAll = !currentNone && currentSelected.length === 0;
-  const someSelected = !currentNone && currentSelected.length > 0 && currentSelected.length < options.length;
+  const someSelected = !currentNone && currentSelected.length > 0 && currentSelected.length < safeOptions.length;
 
-  const closeDropdown = () => {
+  const updateMenuPosition = useCallback(() => {
+    const anchor = ref.current;
+    if (!anchor || typeof window === 'undefined') return;
+    const rect = anchor.getBoundingClientRect();
+    const viewportW = window.innerWidth || 1024;
+    const viewportH = window.innerHeight || 768;
+    const width = Math.min(Math.max(rect.width, 320), Math.min(520, viewportW - 32));
+    const left = Math.min(Math.max(rect.left, 16), viewportW - width - 16);
+    const spaceBelow = viewportH - rect.bottom - 12;
+    const spaceAbove = rect.top - 12;
+    const preferAbove = spaceBelow < 260 && spaceAbove > spaceBelow;
+    const maxHeight = Math.max(168, Math.min(300, (preferAbove ? spaceAbove : spaceBelow) - 20));
+    const top = preferAbove
+      ? Math.max(8, rect.top - maxHeight - 10)
+      : Math.min(rect.bottom + 6, viewportH - 120);
+    setMenuPos({ top, left, width, maxHeight });
+  }, []);
+
+  const closeDropdown = useCallback(() => {
     setOpen(false);
     setDraftSelected([]);
     setDraftNone(false);
     setSearchText('');
-  };
-
-  useEffect(() => {
-    const handler = (e) => {
-      if (ref.current && !ref.current.contains(e.target)) {
-        closeDropdown();
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
   }, []);
 
   useEffect(() => {
-    if (!open) return;
+    const handler = (e) => {
+      const target = e.target;
+      if (ref.current?.contains(target) || menuRef.current?.contains(target)) return;
+      closeDropdown();
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [closeDropdown]);
+
+  useEffect(() => {
+    if (!open) return undefined;
     setDraftSelected(safeSelected);
     setDraftNone(noSelection);
-  }, [open, selected]);
+    updateMenuPosition();
+    const reposition = () => updateMenuPosition();
+    window.addEventListener('resize', reposition);
+    window.addEventListener('scroll', reposition, true);
+    return () => {
+      window.removeEventListener('resize', reposition);
+      window.removeEventListener('scroll', reposition, true);
+    };
+  }, [open, selected, noSelection, updateMenuPosition]);
+
+  const filteredOptions = searchText.trim()
+    ? safeOptions.filter(opt => String(opt).toLowerCase().includes(searchText.trim().toLowerCase()))
+    : safeOptions;
 
   const applySelection = () => {
     if (searchText.trim()) {
       const next = filteredOptions.length === 0
         ? '__NONE__'
-        : filteredOptions.length === options.length
+        : filteredOptions.length === safeOptions.length
         ? []
         : filteredOptions;
       onChange(next);
@@ -549,8 +593,6 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, hideL
 
   const toggleAll = () => {
     if (currentAll) {
-      // Uncheck all only changes the temporary dropdown state.
-      // It is applied only when the user clicks Apply.
       setDraftSelected([]);
       setDraftNone(true);
     } else {
@@ -561,7 +603,7 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, hideL
 
   const toggle = (val) => {
     if (currentAll) {
-      const next = options.filter(x => x !== val);
+      const next = safeOptions.filter(x => x !== val);
       if (next.length === 0) {
         setDraftSelected([]);
         setDraftNone(true);
@@ -573,8 +615,7 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, hideL
     }
 
     if (currentNone) {
-      const next = [val];
-      setDraftSelected(next);
+      setDraftSelected([val]);
       setDraftNone(false);
       return;
     }
@@ -589,7 +630,7 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, hideL
       setDraftSelected(next);
     } else {
       const next = [...currentSelected, val];
-      const normalized = next.length === options.length ? [] : next;
+      const normalized = next.length === safeOptions.length ? [] : next;
       setDraftSelected(normalized);
       setDraftNone(false);
     }
@@ -601,12 +642,6 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, hideL
     return currentSelected.includes(val);
   };
 
-  const isAllChecked = currentAll;
-
-  const filteredOptions = searchText.trim()
-    ? options.filter(opt => String(opt).toLowerCase().includes(searchText.trim().toLowerCase()))
-    : options;
-
   const displayLabel = currentNone
     ? `0 selected`
     : noneSelected
@@ -616,10 +651,77 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, hideL
     : `${safeSelected.length} selected`;
   const hasActiveFilter = noSelection || !noneSelected;
 
+  const dropdown = open ? (
+    <div
+      ref={menuRef}
+      className={`fixed z-[180] rounded-lg shadow-2xl border overflow-hidden ${darkMode?'bg-gray-700 border-gray-600':'bg-white border-gray-200'}`}
+      style={{ top: menuPos.top, left: menuPos.left, width: menuPos.width, maxWidth: 'calc(100vw - 32px)' }}
+    >
+      <div className={`px-2 pt-2 pb-1 border-b ${darkMode?'border-gray-600':'border-gray-100'}`}>
+        <input
+          type="text"
+          value={searchText}
+          onChange={e => setSearchText(e.target.value)}
+          placeholder={`Search ${label}...`}
+          autoFocus
+          className={`w-full px-2 py-1.5 rounded text-xs border ${darkMode?'bg-gray-600 border-gray-500 text-white placeholder-gray-400':'bg-gray-50 border-gray-200 text-gray-800 placeholder-gray-400'}`}
+          onClick={e => e.stopPropagation()}
+          onKeyDown={e => { if (e.key === 'Escape') closeDropdown(); if (e.key === 'Enter') applySelection(); }}
+        />
+      </div>
+      <div className="overflow-auto" style={{ maxHeight: menuPos.maxHeight }}>
+        <label style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold border-b
+          ${darkMode?'border-gray-600 hover:bg-gray-600 text-white':'border-gray-100 hover:bg-blue-50 text-gray-700'}`}>
+          <input type="checkbox"
+            checked={currentAll}
+            ref={el => { if (el) el.indeterminate = someSelected; }}
+            onChange={toggleAll}
+            className="accent-blue-600" style={{cursor:'pointer'}}/>
+          <span>(Select All)</span>
+        </label>
+        {filteredOptions.map(opt => (
+          <label key={opt} style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs
+            ${darkMode?'hover:bg-gray-600 text-white':'hover:bg-blue-50 text-gray-700'}`}>
+            <input type="checkbox" checked={isChecked(opt)} onChange={()=>toggle(opt)}
+              className="accent-blue-600" style={{cursor:'pointer'}}/>
+            <span className="min-w-0 break-words leading-snug" title={opt}>{opt}</span>
+          </label>
+        ))}
+        {filteredOptions.length === 0 && <div className={`px-3 py-2 text-xs ${darkMode?'text-gray-400':'text-gray-500'}`}>{searchText.trim() ? 'No matching options' : 'No options'}</div>}
+      </div>
+      <div className={`flex gap-2 px-3 py-2 border-t shadow-inner ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-gray-50 border-gray-200'}`}>
+        <button
+          type="button"
+          onClick={applySelection}
+          className="flex-1 px-3 py-2 rounded-lg text-xs font-bold bg-blue-600 text-white hover:bg-blue-700 shadow-sm"
+        >
+          Apply
+        </button>
+        <button
+          type="button"
+          onClick={resetSelection}
+          className={`flex-1 px-3 py-2 rounded-lg text-xs font-semibold ${darkMode ? 'bg-gray-600 text-gray-100 hover:bg-gray-500' : 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-100'}`}
+        >
+          Clear All
+        </button>
+        {searchText.trim() && (
+          <button
+            type="button"
+            onClick={() => setSearchText('')}
+            title="Clear search"
+            className={`px-3 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1 ${darkMode ? 'bg-gray-600 text-gray-100 hover:bg-gray-500' : 'bg-white border border-gray-300 text-gray-500 hover:bg-gray-100'}`}
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </div>
+    </div>
+  ) : null;
+
   return (
     <div className="relative w-full min-w-0" ref={ref}>
       {!hideLabel && <label className={`block text-xs font-medium mb-1 ${txt2}`}>{label}</label>}
-      <button onClick={()=>setOpen(o=>!o)} style={{cursor:'pointer'}}
+      <button onClick={(e)=>{ e.stopPropagation(); setOpen(o=>!o); }} style={{cursor:'pointer'}}
         className={`w-full h-10 px-3 py-2 rounded-lg text-sm border text-left flex justify-between items-center transition-colors
           ${darkMode
             ? hasActiveFilter
@@ -629,73 +731,9 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, hideL
               ? 'bg-amber-50 border-amber-300 text-amber-800 hover:bg-amber-100'
               : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
         <span className={`truncate ${hasActiveFilter ? 'font-semibold' : ''}`}>{displayLabel}</span>
-        <ChevronDown className="w-4 h-4 flex-shrink-0 ml-1"/>
+        <ChevronDown className={`w-4 h-4 flex-shrink-0 ml-1 transition-transform ${open ? 'rotate-180' : ''}`}/>
       </button>
-      {open && (
-        <div
-          className={`absolute z-50 mt-1 rounded-lg shadow-xl border overflow-hidden ${darkMode?'bg-gray-700 border-gray-600':'bg-white border-gray-200'}`}
-          style={{ width: 'max(100%, 320px)', maxWidth: 'min(520px, calc(100vw - 32px))' }}
-        >
-          {/* Search input */}
-          <div className={`px-2 pt-2 pb-1 border-b ${darkMode?'border-gray-600':'border-gray-100'}`}>
-            <input
-              type="text"
-              value={searchText}
-              onChange={e => setSearchText(e.target.value)}
-              placeholder={`Search ${label}...`}
-              autoFocus
-              className={`w-full px-2 py-1.5 rounded text-xs border ${darkMode?'bg-gray-600 border-gray-500 text-white placeholder-gray-400':'bg-gray-50 border-gray-200 text-gray-800 placeholder-gray-400'}`}
-              onClick={e => e.stopPropagation()}
-            />
-          </div>
-          <div className="max-h-48 overflow-auto">
-            <label style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold border-b
-              ${darkMode?'border-gray-600 hover:bg-gray-600 text-white':'border-gray-100 hover:bg-blue-50 text-gray-700'}`}>
-              <input type="checkbox"
-                checked={isAllChecked}
-                ref={el => { if (el) el.indeterminate = someSelected; }}
-                onChange={toggleAll}
-                className="accent-blue-600" style={{cursor:'pointer'}}/>
-              <span>(Select All)</span>
-            </label>
-            {filteredOptions.map(opt => (
-              <label key={opt} style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs
-                ${darkMode?'hover:bg-gray-600 text-white':'hover:bg-blue-50 text-gray-700'}`}>
-                <input type="checkbox" checked={isChecked(opt)} onChange={()=>toggle(opt)}
-                  className="accent-blue-600" style={{cursor:'pointer'}}/>
-                <span className="min-w-0 break-words leading-snug" title={opt}>{opt}</span>
-              </label>
-            ))}
-            {filteredOptions.length === 0 && <div className={`px-3 py-2 text-xs ${darkMode?'text-gray-400':'text-gray-500'}`}>{searchText.trim() ? 'No matching options' : 'No options'}</div>}
-          </div>
-          <div className={`flex gap-2 px-3 py-2 border-t shadow-inner ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-gray-50 border-gray-200'}`}>
-            <button
-              type="button"
-              onClick={applySelection}
-              className="flex-1 px-3 py-2 rounded-lg text-xs font-bold bg-blue-600 text-white hover:bg-blue-700 shadow-sm"
-            >
-              Apply
-            </button>
-            <button
-              type="button"
-              onClick={resetSelection}
-              className={`flex-1 px-3 py-2 rounded-lg text-xs font-semibold ${darkMode ? 'bg-gray-600 text-gray-100 hover:bg-gray-500' : 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-100'}`}
-            >
-              Clear All
-            </button>
-            {searchText.trim() && (
-              <button
-                type="button"
-                onClick={() => setSearchText('')}
-                title="Clear search"
-                className={`px-3 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1 ${darkMode ? 'bg-gray-600 text-gray-100 hover:bg-gray-500' : 'bg-white border border-gray-300 text-gray-500 hover:bg-gray-100'}`}
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-        </div>
-      )}
+      {typeof document !== 'undefined' ? createPortal(dropdown, document.body) : dropdown}
     </div>
   );
 };
@@ -878,7 +916,7 @@ const RFQMultiSearch = ({
 };
 
 const FilterPanel = ({ children, darkMode, className = '' }) => (
-  <div className={`mx-5 my-3 rounded-xl border p-3 ${darkMode ? 'border-gray-700 bg-gray-800/70' : 'border-gray-100 bg-[#f6f6f4]'} ${className}`}>
+  <div className={`relative z-[70] overflow-visible mx-5 my-3 rounded-xl border p-3 ${darkMode ? 'border-gray-700 bg-gray-800/70' : 'border-gray-100 bg-[#f6f6f4]'} ${className}`}>
     {children}
   </div>
 );
@@ -3277,8 +3315,8 @@ const App = () => {
               <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Prod ID</label>
               <SearchInput key={`registered-prod-id-${registeredItemsProdIds.join('|')}`} placeholder={'8381684\n8382076'} label="Prod ID" darkMode={darkMode} txt2={txt2} onSearch={(nums) => { setRegisteredItemsProdIds(nums); setRegisteredItemsAppliedProdIds(nums); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, nums, registeredItemsFilters); }} />
             </div>
-            <MultiSelect label="Manufacturer Name" options={registeredItemsOptions.mfr_names || []} selected={registeredItemsFilters.mfr_names} onChange={v => setRegisteredItemsFilters(f => ({ ...f, mfr_names: v }))} darkMode={darkMode} txt2={txt2} />
-            <MultiSelect label="Vendor Name" options={registeredItemsOptions.vendor_names || []} selected={registeredItemsFilters.vendor_names} onChange={v => setRegisteredItemsFilters(f => ({ ...f, vendor_names: v }))} darkMode={darkMode} txt2={txt2} />
+            <MultiSelect label="Manufacturer Name" options={registeredItemsOptions.mfr_names || []} selected={registeredItemsFilters.mfr_names} onChange={v => { const next={...registeredItemsFilters, mfr_names:v}; setRegisteredItemsFilters(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, next); }} darkMode={darkMode} txt2={txt2} />
+            <MultiSelect label="Vendor Name" options={registeredItemsOptions.vendor_names || []} selected={registeredItemsFilters.vendor_names} onChange={v => { const next={...registeredItemsFilters, vendor_names:v}; setRegisteredItemsFilters(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, next); }} darkMode={darkMode} txt2={txt2} />
             <button onClick={() => { setRegisteredItemsAppliedSearch(registeredItemsSearch); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsSearch, registeredItemsAppliedProdIds, registeredItemsFilters); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">Search</button>
             <button onClick={handleClear} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
@@ -5220,9 +5258,8 @@ const App = () => {
       )}
 
       {/* ── Full-page loading overlay ────────────────────────────────────────
-          Dashboard: stays until BOTH phases complete:
-            Phase 1 (/api/dashboard/stats)    → clears stats === null
-            Phase 2 (/api/completed/summary)  → clears completedLoading && !completedLoaded
+          Dashboard: only waits for the lightweight KPI stats. The heavier
+          completed summary has its own inline loader so first paint is faster.
           Other pages: only on first visit when the page data array is still
           empty AND a fetch is in-flight — prevents overlay flashing on every
           filter / pagination change after initial load.                     */}
@@ -5237,11 +5274,10 @@ const App = () => {
           'all-registered-items': 'Registered Items',
         };
 
-        // Dashboard: show overlay until both phase-1 (stats) AND phase-2
-        // (completedData/summary) have finished their first load.
-        const isDashboardLoading =
-          activePage === 'dashboard' &&
-          (stats === null || (completedLoading && !completedLoaded));
+        // Dashboard: unblock the page as soon as the lightweight KPI stats are ready.
+        // Completed summary keeps its own section-level loader, so the whole page
+        // no longer stays covered while the heavier margin analytics are loading.
+        const isDashboardLoading = activePage === 'dashboard' && stats === null;
 
         // Other pages: only show when the page has never loaded data yet
         // (data array is still empty) AND a fetch is actively in-flight.
