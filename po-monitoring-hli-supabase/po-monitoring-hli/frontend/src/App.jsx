@@ -25,7 +25,7 @@ const DASHBOARD_STATS_CACHE_KEY = 'po-monitoring:dashboard-stats';
 const DASHBOARD_AGING_CACHE_KEY = 'po-monitoring:dashboard-aging';
 // Cache TTL: 10 minutes — long enough to survive page reload, short enough to
 // not show stale data if someone uploads new SO data and refreshes.
-const DASHBOARD_CACHE_TTL_MS = 10 * 60 * 1000;
+const DASHBOARD_CACHE_TTL_MS = 30 * 60 * 1000;
 
 const readDashboardSummaryCache = (url) => {
   try {
@@ -1480,6 +1480,8 @@ const App = () => {
 
     const completedParams = new URLSearchParams();
     params.forEach((value, key) => completedParams.append(key, value));
+    // Dashboard uses a lightweight summary payload. Detail-heavy lists are loaded only by drilldown endpoints.
+    completedParams.set('mode', 'dashboard');
     const currentYear = String(new Date().getFullYear());
     const marginDateParams = (!f || f.mode === 'all')
       ? { date_year: currentYear, yoy_base_year: currentYear }
@@ -1490,13 +1492,17 @@ const App = () => {
     if (marginBaseYear) marginParams.set('yoy_base_year', marginBaseYear);
     appendMultiParam(marginParams, 'client', globalClientFilter);
     appendMultiParam(marginParams, 'pic', globalPicFilter);
+    marginParams.set('mode', 'dashboard');
 
     const summaryUrl = (summaryParams) => {
       const summaryQs = summaryParams.toString();
       return summaryQs ? `/api/completed/summary?${summaryQs}` : '/api/completed/summary';
     };
     const completedUrl = summaryUrl(completedParams);
-    const marginUrl = summaryUrl(marginParams);
+    // One completed-summary request is enough. The all-data response already contains
+    // monthly keys, so the chart can pick the current/filter window without firing
+    // a second heavy request in parallel.
+    const marginUrl = completedUrl;
     const cachedCompleted = readDashboardSummaryCache(completedUrl);
     const cachedMargin = completedUrl === marginUrl ? cachedCompleted : readDashboardSummaryCache(marginUrl);
     const hasSummaryCache = Boolean(cachedCompleted && cachedMargin);
@@ -1517,7 +1523,7 @@ const App = () => {
       setAgingData(cachedAging);
     }
 
-    setLoading(true);
+    setLoading(!(cachedStats && cachedAging));
     setCompletedLoading(!hasSummaryCache);
     setCompletedLoaded(hasSummaryCache);
     setCompletedData(hasSummaryCache ? cachedCompleted : null);
@@ -1550,6 +1556,15 @@ const App = () => {
       if (isCurrent()) setLoading(false);
     }
 
+    // Do not immediately occupy the backend with the heavier completed-summary query.
+    // This gives users time to switch pages and prevents a Dashboard request from
+    // making Pending Delivery / RFQ feel stuck behind summary processing.
+    await new Promise(resolve => setTimeout(resolve, 350));
+    if (!isCurrent() || activePage !== 'dashboard') {
+      setCompletedLoading(false);
+      return;
+    }
+
     try {
       if (completedUrl === marginUrl) {
         const res = await api.get(completedUrl);
@@ -1579,7 +1594,7 @@ const App = () => {
     } finally {
       if (isCurrent()) setCompletedLoading(false);
     }
-  }, [addToast, globalDateFilter, globalClientFilter, globalPicFilter]);
+  }, [addToast, activePage, globalDateFilter, globalClientFilter, globalPicFilter]);
 
   // Helper: filter array of objects by date field using a DateRangeFilter config
   const applyDateFilter = useCallback((arr, dateField, filter) => {
@@ -1832,7 +1847,15 @@ const App = () => {
 
   useEffect(() => { fetchPicDbStatus(); }, []);
   useEffect(() => {
-    if (activePage === 'dashboard') fetchDashboard(globalDateFilter);
+    if (activePage === 'dashboard') {
+      fetchDashboard(globalDateFilter);
+      return;
+    }
+    // Invalidate any Dashboard request that is still waiting for summary so it
+    // cannot keep the global loading overlay alive after the user changes page.
+    dashboardRequestSeq.current += 1;
+    setCompletedLoading(false);
+    setLoading(false);
   }, [activePage, globalDateFilter, globalClientFilter, globalPicFilter, fetchDashboard]);
   useEffect(() => {
     if (activePage === 'all-so') {
@@ -1972,7 +1995,7 @@ const App = () => {
       clearDashboardSummaryCache();
       clearStatsCache();
       fetchPicDbStatus();
-      fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+      if (activePage === 'all-so') fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
     } catch (err) {
       setUploadProgress(null);
       const msg = err?.response?.data?.error || err.message;
@@ -1999,7 +2022,7 @@ const App = () => {
       clearDashboardSummaryCache();
       clearStatsCache();
       fetchPicDbStatus();
-      fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+      if (activePage === 'all-so') fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
     } catch (err) {
       setUploadProgress(null);
       const msg = err?.response?.data?.error || err.message;
@@ -5292,7 +5315,10 @@ const App = () => {
           return false;
         })();
 
-        const shouldShow = isDashboardLoading || isOtherPageFirstLoad;
+        // Full-page overlay is reserved for Dashboard first paint only.
+        // Data-table pages keep rendering their header/filter/table while fetching,
+        // so the screen is never blocked by an empty-result overlay.
+        const shouldShow = isDashboardLoading;
         if (!shouldShow) return null;
         const pageLabel = PAGE_LABELS[activePage] || 'Data';
         return (
