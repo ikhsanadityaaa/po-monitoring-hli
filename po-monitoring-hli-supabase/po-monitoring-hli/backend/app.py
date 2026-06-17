@@ -265,6 +265,14 @@ def _set_sqlite_pragmas(dbapi_connection, connection_record):
         cursor.execute('PRAGMA cache_size=-65536')
         cursor.execute('PRAGMA wal_autocheckpoint=1000')
         cursor.close()
+        try:
+            dbapi_connection.create_function(
+                'REGEXP',
+                2,
+                lambda pattern, value: 1 if (value is not None and re.search(pattern, str(value))) else 0
+            )
+        except Exception:
+            pass
 
 class SOData(db.Model):
     __tablename__ = 'so_data'
@@ -673,6 +681,23 @@ def purchase_amount_idr(s, allow_persist=False):
     return converted
 
 
+def dashboard_purchase_sql_expr():
+    """Return SQL expression for IDR purchase amount used by Dashboard.
+
+    It never calls external FX APIs. USD/EUR rows without cached conversion are
+    treated as 0 until the exchange-rate backfill fills purchasing_amount_idr.
+    """
+    currency_expr = func.upper(func.trim(func.coalesce(SOData.purchasing_currency, '')))
+    raw_purchase_expr = case(
+        (func.coalesce(SOData.purchasing_amount, 0) != 0, func.coalesce(SOData.purchasing_amount, 0)),
+        else_=func.coalesce(SOData.purchasing_price, 0) * func.coalesce(SOData.so_qty, 0),
+    )
+    return case(
+        (SOData.purchasing_amount_idr.isnot(None), SOData.purchasing_amount_idr),
+        (currency_expr.in_(['', 'IDR']), raw_purchase_expr),
+        else_=0.0,
+    )
+
 def ensure_purchase_amount_idr_cache(rows, fetch_missing=False):
     """Persist missing USD/EUR conversions.
 
@@ -1064,6 +1089,30 @@ def so_is_countable(so_item, so_number=None, customer_po_number=None, delivery_m
         return False
     return True
 
+def so_countable_sql_filter():
+    """SQL equivalent of so_is_countable() for dashboard aggregates.
+
+    The old dashboard code materialised every open SO row in Python only to run
+    has_internal_po_ref() on customer PO / delivery memo. On large SO tables this
+    makes first Dashboard load slow. This filter pushes the same token rule into
+    the database so KPI and chart queries can use COUNT/SUM/GROUP BY directly.
+    """
+    pattern = r'(^|[\s,;]+)2\d{6,}'
+    uri = app.config.get('SQLALCHEMY_DATABASE_URI', '')
+    customer_po_expr = func.coalesce(SOData.customer_po_number, '')
+    delivery_memo_expr = func.coalesce(SOData.delivery_memo, '')
+    if 'sqlite' in uri:
+        internal_ref = db.or_(
+            customer_po_expr.op('REGEXP')(pattern),
+            delivery_memo_expr.op('REGEXP')(pattern),
+        )
+    else:
+        internal_ref = db.or_(
+            customer_po_expr.op('~')(pattern),
+            delivery_memo_expr.op('~')(pattern),
+        )
+    return db.not_(internal_ref)
+
 def clean(val):
     if val is None: return None
     try:
@@ -1207,6 +1256,116 @@ IMPORT_SOURCE_SHEETS = [
 IMPORT_LAYOUT_VENDOR_COLUMNS = (5, 28)
 IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS = (16,)
 
+
+# Import dashboard layout copied from the reference sheet, excluding columns that
+# are hidden in the original spreadsheet. Column DA:DH are checklist columns and
+# can still be shown/hidden from the UI. Formula columns are calculated in Python
+# so the web table behaves like the spreadsheet without exposing hidden helper
+# columns.
+IMPORT_STATUS_OPTIONS = ['ON PROCESS', 'ON DELIVERY', 'DELIVERED', 'CANCELED']
+IMPORT_CHECKBOX_FIELDS = {'sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo'}
+IMPORT_FORMULA_FIELDS = {'days_left', 'site', 'yupi_po', 'vendor', 'req_dlv_date', 'eta', 'arrival_check', 'purchase_amount', 'lt_days'}
+IMPORT_HYPERLINK_FIELDS = {'soft_copy_doc'}
+IMPORT_LOCAL_EDIT_FIELDS = {
+    'status', 'po_send_date', 'etd', 'eta', 'import_remarks',
+    'incoterm', 'forwarder', 'bl_number', 'inv_no', 'non_ski',
+    'sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo',
+    'soft_copy_doc',
+}
+
+IMPORT_REFERENCE_VISIBLE_COLUMNS = [
+    {'sheet_col': 'A',  'field': 'status',              'label': 'STATUS',                 'width': 132, 'type': 'status'},
+    {'sheet_col': 'B',  'field': 'days_left',           'label': 'Days Left',              'width': 96,  'formula': True},
+    {'sheet_col': 'C',  'field': 'po_send_date',        'label': 'PO Send Date',           'width': 120},
+    {'sheet_col': 'D',  'field': 'site',                'label': 'Site',                   'width': 78,  'formula': True},
+    {'sheet_col': 'E',  'field': 'yupi_po',             'label': 'YUPI PO',                'width': 118, 'formula': True},
+    {'sheet_col': 'F',  'field': 'vendor',              'label': 'Vendor',                 'width': 190, 'formula': True},
+    {'sheet_col': 'G',  'field': 'req_dlv_date',        'label': 'Req Dlv Date',           'width': 122, 'formula': True},
+    {'sheet_col': 'H',  'field': 'etd',                 'label': 'ETD',                    'width': 116},
+    {'sheet_col': 'I',  'field': 'eta',                 'label': 'ETA',                    'width': 116, 'formula': True},
+    {'sheet_col': 'J',  'field': 'arrival_check',       'label': 'Arrival Check',          'width': 154, 'formula': True},
+    {'sheet_col': 'K',  'field': 'import_remarks',      'label': 'Import Remarks',         'width': 220},
+    {'sheet_col': 'L',  'field': 'so',                  'label': 'SO',                     'width': 140},
+    {'sheet_col': 'M',  'field': 'group',               'label': 'GROUP',                  'width': 116},
+    {'sheet_col': 'O',  'field': 'po_date_by_email',    'label': 'PO DATE\n(By Email)',    'width': 132},
+    {'sheet_col': 'Q',  'field': 'po_sementara',        'label': 'PO SEMENTARA',           'width': 160},
+    {'sheet_col': 'R',  'field': 'po_yupi',             'label': 'PO YUPI',                'width': 120},
+    {'sheet_col': 'S',  'field': 'item_yupi',           'label': 'Item Yupi',              'width': 130},
+    {'sheet_col': 'T',  'field': 'item_name',           'label': 'Item name',              'width': 260},
+    {'sheet_col': 'U',  'field': 'spec',                'label': 'Spec',                   'width': 340},
+    {'sheet_col': 'V',  'field': 'remark_yupi',         'label': 'REMARK YUPI',            'width': 340},
+    {'sheet_col': 'W',  'field': 'source_req_dlv_date', 'label': 'Req. Dlv Date',          'width': 122},
+    {'sheet_col': 'X',  'field': 'reschedule',          'label': 'RESCHEDULE',             'width': 120},
+    {'sheet_col': 'Y',  'field': 'ord_qty',             'label': "Ord. Q'ty",             'width': 100, 'number': True},
+    {'sheet_col': 'Z',  'field': 'unit',                'label': 'Unit',                   'width': 76},
+    {'sheet_col': 'AA', 'field': 'unit_price',          'label': 'Unit Price',             'width': 120, 'number': True},
+    {'sheet_col': 'AB', 'field': 'amount',              'label': 'AMOUNT',                 'width': 130, 'number': True},
+    {'sheet_col': 'AC', 'field': 'vendor_name',         'label': 'Vendor Name',            'width': 190},
+    {'sheet_col': 'AG', 'field': 'purchase_price',      'label': 'PURCHASE PRICE',         'width': 128, 'number': True},
+    {'sheet_col': 'AH', 'field': 'currency',            'label': 'CURRENCY',               'width': 92},
+    {'sheet_col': 'AJ', 'field': 'purchase_amount',     'label': 'PURCHASE\nAMOUNT',       'width': 132, 'formula': True, 'number': True},
+    {'sheet_col': 'CU', 'field': 'lt_days',             'label': 'LT (Days)',              'width': 94,  'formula': True, 'number': True},
+    {'sheet_col': 'CV', 'field': 'incoterm',            'label': 'Incoterm',               'width': 98},
+    {'sheet_col': 'CW', 'field': 'forwarder',           'label': 'Forwarder',              'width': 150},
+    {'sheet_col': 'CX', 'field': 'bl_number',           'label': 'BL Number',              'width': 150},
+    {'sheet_col': 'CY', 'field': 'inv_no',              'label': 'Inv No',                 'width': 135},
+    {'sheet_col': 'CZ', 'field': 'non_ski',             'label': 'NON-SKI',                'width': 90},
+    {'sheet_col': 'DA', 'field': 'sap_input',           'label': 'SAP INPUT',              'width': 86,  'checkbox': True},
+    {'sheet_col': 'DB', 'field': 'bl_awb',              'label': 'BL / AWB',               'width': 86,  'checkbox': True},
+    {'sheet_col': 'DC', 'field': 'invoice',             'label': 'INVOICE',                'width': 86,  'checkbox': True},
+    {'sheet_col': 'DD', 'field': 'pl',                  'label': 'PL',                     'width': 74,  'checkbox': True},
+    {'sheet_col': 'DE', 'field': 'hc',                  'label': 'HC',                     'width': 74,  'checkbox': True},
+    {'sheet_col': 'DF', 'field': 'msds',                'label': 'MSDS',                   'width': 82,  'checkbox': True},
+    {'sheet_col': 'DG', 'field': 'coa',                 'label': 'COA',                    'width': 76,  'checkbox': True},
+    {'sheet_col': 'DH', 'field': 'coo',                 'label': 'COO',                    'width': 76,  'checkbox': True},
+    {'sheet_col': 'DI', 'field': 'soft_copy_doc',       'label': 'SOFT COPY DOC',          'width': 190, 'hyperlink': True},
+]
+
+IMPORT_COLUMN_ALIASES = {
+    'status': ['status'],
+    'po_send_date': ['posenddate', 'pokirimdate', 'sovopokirimdate', 'podatebyemail'],
+    'site': ['siteidnkrg', 'site'],
+    'yupi_po': ['yupipo', 'poyupi'],
+    'vendor': ['vendor', 'vendorname'],
+    'req_dlv_date': ['reqdlvdate', 'reschedule'],
+    'etd': ['etd'],
+    'eta': ['eta'],
+    'import_remarks': ['importremarks', 'remarksvo', 'remark'],
+    'so': ['so', 'noso'],
+    'group': ['group'],
+    'po_date_by_email': ['podatebyemail'],
+    'po_sementara': ['posementara'],
+    'po_yupi': ['poyupi', 'yupipo'],
+    'item_yupi': ['itemyupi'],
+    'item_name': ['itemname'],
+    'spec': ['spec', 'specification'],
+    'remark_yupi': ['remarkyupi'],
+    'source_req_dlv_date': ['reqdlvdate'],
+    'reschedule': ['reschedule'],
+    'ord_qty': ['ordqty', 'orderqty'],
+    'unit': ['unit'],
+    'unit_price': ['unitprice'],
+    'amount': ['amount'],
+    'vendor_name': ['vendorname', 'vendor'],
+    'purchase_price': ['purchaseprice'],
+    'currency': ['currency'],
+    'purchase_amount': ['purchaseamount'],
+    'incoterm': ['incoterm'],
+    'forwarder': ['forwarder'],
+    'bl_number': ['blnumber', 'blawb', 'awbnumber'],
+    'inv_no': ['invno', 'invoiceno', 'invoicenumber'],
+    'non_ski': ['nonski'],
+    'sap_input': ['sapinput'],
+    'bl_awb': ['blawb', 'blawb_1'],
+    'invoice': ['invoice'],
+    'pl': ['pl'],
+    'hc': ['hc'],
+    'msds': ['msds'],
+    'coa': ['coa'],
+    'coo': ['coo'],
+    'soft_copy_doc': ['softcopydoc', 'softcopy', 'gdrive', 'googledrive', 'documentlink'],
+}
+
 def import_meta_get(key):
     row = ImportDashboardMeta.query.filter_by(meta_key=key).first()
     if not row:
@@ -1239,29 +1398,24 @@ def import_header_key(value):
     return re.sub(r'[^a-z0-9]+', '', (clean(value) or '').lower())
 
 def import_layout_columns(force=False):
-    cache_key = ('import_layout_columns',)
-    cached = None if force else runtime_cache_get(cache_key)
-    if cached is not None:
-        return cached
-    cached = None if force else import_meta_get('layout_columns')
-    if cached is not None:
-        runtime_cache_set(cache_key, cached, ttl_seconds=900)
-        return cached
-    df = read_public_sheet_csv(IMPORT_LAYOUT_SHEET_ID, IMPORT_LAYOUT_GID, nrows=3)
-    header_row = df.iloc[1] if len(df) > 1 else (df.iloc[0] if len(df) else [])
+    """Return the fixed Import table layout from the reference sheet.
+
+    Earlier versions read the layout from Google Sheets on demand. That made the
+    Import page slower and also exposed columns that were hidden in the real
+    tracker. The dashboard now uses the exact visible-column layout from the
+    reference workbook and keeps metadata for formula, checkbox, hyperlink, and
+    status columns.
+    """
     columns = []
-    seen = {}
-    for idx, raw in enumerate(list(header_row)):
-        label = import_clean_header(raw, '')
-        if not label:
-            continue
-        base = re.sub(r'[^a-z0-9]+', '_', label.lower()).strip('_') or f'col_{idx}'
-        count = seen.get(base, 0) + 1
-        seen[base] = count
-        field = base if count == 1 else f'{base}_{count}'
-        columns.append({'field': field, 'label': label, 'col_idx': idx})
-    import_meta_set('layout_columns', columns)
-    runtime_cache_set(cache_key, columns, ttl_seconds=900)
+    for idx, col in enumerate(IMPORT_REFERENCE_VISIBLE_COLUMNS):
+        item = dict(col)
+        item['col_idx'] = idx
+        item['checkbox'] = bool(item.get('checkbox') or item.get('field') in IMPORT_CHECKBOX_FIELDS)
+        item['formula'] = bool(item.get('formula') or item.get('field') in IMPORT_FORMULA_FIELDS)
+        item['hyperlink'] = bool(item.get('hyperlink') or item.get('field') in IMPORT_HYPERLINK_FIELDS)
+        if item.get('field') == 'status':
+            item['options'] = IMPORT_STATUS_OPTIONS
+        columns.append(item)
     return columns
 
 def import_default_vendors_from_layout(force=False):
@@ -1321,23 +1475,14 @@ def import_source_column_map(df, columns):
         if key and key not in by_key:
             by_key[key] = idx
 
-    aliases = {
-        'site': ['siteidnkrg'],
-        'vendor': ['vendorname'],
-        'so': ['noso'],
-        'purchaseprice': ['purchaseprice', 'price', 'unitprice'],
-        'deliverystatus': ['deliverystatus', 'createsopodeliverycompletefelix'],
-        'importcheck': ['importcheck', 'importautoinput'],
-        'happycall': ['happycall', 'poconfirmhappycall'],
-    }
-
     source_map = {}
     for col in columns:
-        keys = [import_header_key(col.get('label')), import_header_key(col.get('field'))]
-        keys.extend(aliases.get(keys[0], []))
+        field = col.get('field')
+        keys = [import_header_key(col.get('label')), import_header_key(field)]
+        keys.extend(IMPORT_COLUMN_ALIASES.get(field, []))
         source_idx = next((by_key[key] for key in keys if key in by_key), None)
         if source_idx is not None:
-            source_map[col['field']] = source_idx
+            source_map[field] = source_idx
     return source_map
 
 def import_row_vendor_candidates(values, source_map, columns):
@@ -1382,39 +1527,171 @@ def import_sheet_rows(force_metadata=False):
             rows.append(row)
     return columns, rows
 
+def import_truthy_checkbox_value(value):
+    s = (clean(value) or '').strip().lower()
+    return s in ('true', '1', 'yes', 'ya', 'y', 'checked', 'done', 'ok', '✓', '✅')
+
+def import_normalize_checkbox(value):
+    raw = clean(value)
+    if not raw:
+        return ''
+    return 'TRUE' if import_truthy_checkbox_value(raw) else 'FALSE'
+
+def import_date_from_value(value):
+    raw = clean(value)
+    if not raw:
+        return None
+    s = str(raw).strip()
+    # Google Sheets/XLSX serial dates. Accept only the normal modern date range
+    # so IDs like PO numbers are not misread as dates.
+    if re.match(r'^\d+(\.0+)?$', s):
+        try:
+            serial = float(s)
+            if 25000 <= serial <= 60000:
+                return (datetime(1899, 12, 30) + timedelta(days=serial)).date()
+        except (TypeError, ValueError, OverflowError):
+            pass
+    for fmt in ('%d/%m/%Y', '%d-%m-%Y', '%Y-%m-%d', '%Y/%m/%d', '%m/%d/%Y'):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            pass
+    return parse_date(raw)
+
+def import_date_output(value, fallback=None):
+    raw = clean(value)
+    if raw:
+        return str(raw)
+    if fallback:
+        return fallback.isoformat()
+    return ''
+
+def import_float_value(value):
+    raw = clean(value)
+    if not raw:
+        return None
+    s = str(raw).replace(',', '').replace('Rp', '').replace('IDR', '').strip()
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+def import_format_number(value):
+    if value is None:
+        return ''
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if abs(f - round(f)) < 0.000001:
+        return str(int(round(f)))
+    return f'{f:.2f}'.rstrip('0').rstrip('.')
+
+def apply_import_formula_columns(row):
+    """Apply spreadsheet-equivalent formulas to one Import dashboard row."""
+    if not isinstance(row, dict):
+        return row
+
+    # Checklist columns match DA:DH from the reference sheet.
+    for field in IMPORT_CHECKBOX_FIELDS:
+        if field in row:
+            row[field] = import_normalize_checkbox(row.get(field))
+
+    # Status is an editable dropdown. Use ON PROCESS as the default only when
+    # the row contains import data but no explicit status yet.
+    has_business_data = any(clean(row.get(f)) for f in ('po_yupi', 'yupi_po', 'po_sementara', 'item_name', 'vendor_name', 'vendor', 'so'))
+    status = (clean(row.get('status')) or '').upper()
+    if not status and has_business_data:
+        status = 'ON PROCESS'
+    if status:
+        status = next((opt for opt in IMPORT_STATUS_OPTIONS if opt == status), status)
+        row['status'] = status
+
+    # Formula D/E/F/G in the reference sheet.
+    row['site'] = clean(row.get('site')) or ''
+    row['yupi_po'] = clean(row.get('yupi_po')) or clean(row.get('po_yupi')) or ''
+    row['vendor'] = clean(row.get('vendor')) or clean(row.get('vendor_name')) or ''
+    req_raw = clean(row.get('reschedule')) or clean(row.get('source_req_dlv_date')) or clean(row.get('req_dlv_date'))
+    row['req_dlv_date'] = req_raw or ''
+
+    etd_date = import_date_from_value(row.get('etd'))
+    eta_date = import_date_from_value(row.get('eta'))
+    if not clean(row.get('eta')) and etd_date:
+        eta_date = etd_date + timedelta(days=44)
+        row['eta'] = eta_date.isoformat()
+
+    req_date = import_date_from_value(row.get('req_dlv_date'))
+    status_upper = (clean(row.get('status')) or '').upper()
+    if not has_business_data:
+        row['days_left'] = ''
+    elif status_upper == 'DELIVERED':
+        row['days_left'] = '✅'
+    elif status_upper == 'CANCELED':
+        row['days_left'] = '❌'
+    elif req_date:
+        row['days_left'] = str((req_date - date.today()).days)
+    else:
+        row['days_left'] = ''
+
+    # Formula J: Arrival Check.
+    if row.get('days_left') == '✅':
+        row['arrival_check'] = '⚪'
+    elif not eta_date or not req_date:
+        row['arrival_check'] = ''
+    elif eta_date <= req_date:
+        row['arrival_check'] = '🟢 On Schedule'
+    else:
+        row['arrival_check'] = f'🔴 Delay ({(eta_date - req_date).days}D)'
+
+    # Formula AJ: purchase amount = purchase price x order quantity when blank.
+    purchase_amount = import_float_value(row.get('purchase_amount'))
+    if purchase_amount is None:
+        price = import_float_value(row.get('purchase_price'))
+        qty = import_float_value(row.get('ord_qty'))
+        if price is not None and qty is not None:
+            row['purchase_amount'] = import_format_number(price * qty)
+
+    # Formula CU: lead time days = ETA - ETD.
+    if etd_date and eta_date:
+        row['lt_days'] = str((eta_date - etd_date).days)
+    else:
+        row['lt_days'] = ''
+
+    return row
+
 def import_row_payload(row, columns):
-    return {col['field']: '' if row.get(col['field']) is None else str(row.get(col['field'])) for col in columns}
+    payload = {col['field']: '' if row.get(col['field']) is None else str(row.get(col['field'])) for col in columns}
+    return apply_import_formula_columns(payload)
 
 def import_row_source_uid(row, columns):
-    values = [clean(row.get(col['field'])) or '' for col in columns]
+    # Keep Import row identity stable across layout/formula changes. Formula
+    # values like Days Left are intentionally excluded because they change over
+    # time and should not create duplicate dashboard rows after a refresh.
     payload = {
         'source': clean(row.get('_source_key')) or '',
-        'vendor': clean(row.get('_vendor_name')) or '',
-        'values': values,
+        'sheet_row': row.get('_sheet_row') or '',
+        'po_yupi': clean(row.get('po_yupi')) or clean(row.get('yupi_po')) or '',
+        'po_sementara': clean(row.get('po_sementara')) or '',
+        'item_yupi': clean(row.get('item_yupi')) or '',
+        'so': clean(row.get('so')) or '',
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
     return hashlib.sha1(raw.encode('utf-8')).hexdigest()
 
-def import_dashboard_row_to_dict(row, columns):
-    try:
-        data = json.loads(row.data_json or '{}')
-    except (TypeError, json.JSONDecodeError):
-        data = {}
-    out = {col['field']: data.get(col['field'], '') for col in columns}
-    out.update({
-        '_row_key': row.row_key,
-        '_source_key': row.source_key,
-        '_source_label': row.source_label,
-        '_sheet_row': row.sheet_row,
-        '_vendor_name': row.vendor_name,
-        '_dashboard_id': row.id,
-    })
-    return out
+def merge_import_existing_payload(existing_payload, sheet_payload):
+    merged = dict(sheet_payload or {})
+    existing_payload = existing_payload or {}
+    for field in IMPORT_LOCAL_EDIT_FIELDS:
+        if clean(existing_payload.get(field)):
+            merged[field] = existing_payload.get(field)
+    return apply_import_formula_columns(merged)
 
 def sync_import_sheet_to_dashboard():
     columns, sheet_rows = import_sheet_rows(force_metadata=True)
     vendor_count = len(import_vendor_names(force_default=True))
-    existing = {r.row_key: r for r in ImportDashboardRow.query.all()}
+    existing_rows = ImportDashboardRow.query.all()
+    existing = {r.row_key: r for r in existing_rows}
+    existing_by_sheet = {(r.source_key, r.sheet_row): r for r in existing_rows if r.source_key and r.sheet_row}
     duplicate_counts = {}
     now = datetime.utcnow()
     added = 0
@@ -1425,11 +1702,21 @@ def sync_import_sheet_to_dashboard():
         duplicate_counts[duplicate_base] = duplicate_counts.get(duplicate_base, 0) + 1
         row_key = f"{duplicate_base}:{duplicate_counts[duplicate_base]}"
         current = existing.get(row_key)
+        if not current:
+            current = existing_by_sheet.get((sheet_row.get('_source_key') or '', sheet_row.get('_sheet_row')))
+        sheet_payload = import_row_payload(sheet_row, columns)
         if current:
+            try:
+                existing_payload = json.loads(current.data_json or '{}')
+            except (TypeError, json.JSONDecodeError):
+                existing_payload = {}
             current.sheet_row = sheet_row.get('_sheet_row')
             current.source_label = sheet_row.get('_source_label')
             current.vendor_name = sheet_row.get('_vendor_name') or current.vendor_name
+            current.source_uid = source_uid
+            current.data_json = json.dumps(merge_import_existing_payload(existing_payload, sheet_payload), ensure_ascii=False)
             current.last_seen_at = now
+            current.updated_at = now
             seen += 1
             continue
         db.session.add(ImportDashboardRow(
@@ -1439,7 +1726,7 @@ def sync_import_sheet_to_dashboard():
             source_uid=source_uid,
             sheet_row=sheet_row.get('_sheet_row'),
             vendor_name=sheet_row.get('_vendor_name') or '',
-            data_json=json.dumps(import_row_payload(sheet_row, columns), ensure_ascii=False),
+            data_json=json.dumps(sheet_payload, ensure_ascii=False),
             first_seen_at=now,
             last_seen_at=now,
             updated_at=now,
@@ -2859,179 +3146,154 @@ def get_hidden_so_items():
 
 @app.route('/api/dashboard/stats', methods=['GET'])
 def get_dashboard_stats():
+    """Fast Dashboard KPI endpoint.
+
+    First-load target is below 5 seconds on a warm PythonAnywhere worker. The
+    key change is that Dashboard cards/charts are calculated with SQL aggregate
+    queries instead of loading every open SO row into Python.
+    """
     try:
-        cache_key = runtime_cache_key('dashboard_stats')
+        cache_key = runtime_cache_key('dashboard_stats_v2_sql')
         cached = runtime_cache_get(cache_key)
         if cached is not None:
             return jsonify(cached)
 
-        hidden_so = get_hidden_so_items()
-
-        # SO Create Date filter (applied to every SO-based aggregate below).
-        # PO-based metrics (total_po_amount, po_without_so_count) and the data
-        # range / last_updated metadata are intentionally NOT filtered.
         date_year, date_from, date_to = parse_so_date_args()
         clients = selected_clients()
         pics = selected_pics()
+        is_sqlite = 'sqlite' in app.config.get('SQLALCHEMY_DATABASE_URI', '')
 
-        def so_q(*extra_filters):
-            q = db.session.query(SOData).filter(*extra_filters) if extra_filters else db.session.query(SOData)
-            q = apply_so_client_filter(q, clients)
-            q = apply_so_pic_filter(q, pics)
-            return apply_so_create_date_filter(q, date_year, date_from, date_to)
-        total_po_count = 0
-        po_count = 0
-        total_po_amount = 0.0
-        po_without_so_count = 0
-        so_without_po_count = 0
+        def base_open_q(apply_client=True, apply_pic=True):
+            q = db.session.query(SOData).filter(open_so_filter(), so_countable_sql_filter())
+            if apply_client:
+                q = apply_so_client_filter(q, clients)
+            if apply_pic:
+                q = apply_so_pic_filter(q, pics)
+            return apply_so_create_date_filter(q, date_year, date_from, date_to, is_sqlite=is_sqlite)
 
-        # Single pass over open SO rows — compute total_so_count AND so_without_po_count
-        # together instead of two separate full-table scans. Load only the fields
-        # used by KPI/chart aggregation; pulling Product/Spec/Remarks for every
-        # open SO row was one of the largest Dashboard slowdowns.
-        dashboard_stats_fields = (
-            SOData.id,
-            SOData.so_number,
-            SOData.so_item,
-            SOData.so_status,
-            SOData.operation_unit_name,
-            SOData.vendor_name,
-            SOData.customer_po_number,
-            SOData.delivery_memo,
-            SOData.so_create_date,
-            SOData.sales_amount,
-            SOData.purchasing_amount,
-            SOData.purchasing_price,
-            SOData.purchasing_currency,
-            SOData.purchasing_amount_idr,
-            SOData.pic_name,
-        )
-        open_so_rows = so_q(
-            open_so_filter()
-        ).options(load_only(*dashboard_stats_fields)).all()
+        q = base_open_q()
+        sales_expr = func.coalesce(SOData.sales_amount, 0.0)
+        purchase_expr = dashboard_purchase_sql_expr()
+        # Use YYYY-MM because the frontend already formats this to MMM yy.
+        # SQLite does not support strftime('%b'), so this also prevents NULL month labels.
+        month_expr = func.strftime('%Y-%m', SOData.so_create_date) if is_sqlite else func.to_char(func.date_trunc('month', SOData.so_create_date), 'YYYY-MM')
+        month_sort_expr = month_expr
+        status_label = func.coalesce(func.nullif(func.trim(SOData.so_status), ''), 'Unknown')
 
-        # Prefetch exchange rates for all rows in one shot BEFORE the loop.
-        # Without this, purchase_amount_idr() falls back to per-row HTTP calls
-        # to the Frankfurter API, making page load very slow on first request.
-        prefetch_convertible_exchange_rates(open_so_rows, fetch_missing=False)
-
-        # All SO-based dashboard aggregates below must use exactly the same
-        # canonical Open SO dataset as the KPI above:
-        #   - SO create date filter
-        #   - open status filter
-        #   - excluded operation units removed
-        #   - hidden SO removed
-        #   - non-countable SO item/customer PO/delivery memo removed
-        # This keeps KPI, status distribution, pie chart, vendor, op unit, and
-        # aging-derived drilldowns consistent.
-        canonical_open_sos = []
-        total_open_so_amount = 0.0
-        monthly = {}
-        vendor_map = {}
-        op_unit_map = {}
-        status_map = {}
-        monthly_by_status = {}
-        all_months_set = set()
-
-        # Single pass — total_so_count is just len(canonical_open_sos) below.
-        # (Previously this was a second separate loop calling so_is_countable
-        # again for every row, doubling the regex-based has_internal_po_ref
-        # checks across the whole open-SO dataset.)
-        for s in open_so_rows:
-            if s.so_item in hidden_so or s.so_number in hidden_so:
-                continue
-            if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
-                continue
-
-            canonical_open_sos.append(s)
-            amount = float(s.sales_amount or 0)
-            total_open_so_amount += amount
-
-            if s.so_create_date:
-                month_key = s.so_create_date.strftime('%b %Y')
-                if month_key not in monthly:
-                    monthly[month_key] = {
-                        'month': month_key,
-                        'so_count': 0,
-                        'amount': 0.0,
-                        'purchase_amount': 0.0,
-                        '_s': s.so_create_date.replace(day=1)
-                    }
-                monthly[month_key]['so_count'] += 1
-                monthly[month_key]['amount'] += round(amount / 1_000_000, 2)
-                monthly[month_key]['purchase_amount'] += round(purchase_amount_idr(s) / 1_000_000, 2)
-                all_months_set.add((s.so_create_date.replace(day=1), month_key))
-            else:
-                month_key = None
-
-            if s.vendor_name:
-                if s.vendor_name not in vendor_map:
-                    vendor_map[s.vendor_name] = {'vendor': s.vendor_name, 'so_count': 0, 'total_amount': 0.0}
-                vendor_map[s.vendor_name]['so_count'] += 1
-                vendor_map[s.vendor_name]['total_amount'] += amount
-
-            if s.operation_unit_name:
-                if s.operation_unit_name not in op_unit_map:
-                    op_unit_map[s.operation_unit_name] = {
-                        'op_unit': s.operation_unit_name,
-                        'so_count': 0,
-                        'total_amount': 0.0
-                    }
-                op_unit_map[s.operation_unit_name]['so_count'] += 1
-                op_unit_map[s.operation_unit_name]['total_amount'] += amount
-
-            status_name = s.so_status or 'Unknown'
-            if status_name not in status_map:
-                status_map[status_name] = {'name': status_name, 'value': 0, 'amount': 0.0}
-            status_map[status_name]['value'] += 1
-            status_map[status_name]['amount'] += amount
-
-            if status_name not in monthly_by_status:
-                monthly_by_status[status_name] = {'monthly': {}, 'total': 0, 'amount': 0.0}
-            monthly_by_status[status_name]['total'] += 1
-            monthly_by_status[status_name]['amount'] += amount
-            if month_key:
-                monthly_by_status[status_name]['monthly'][month_key] = (
-                    monthly_by_status[status_name]['monthly'].get(month_key, 0) + 1
-                )
-
-        total_so_count = len(canonical_open_sos)
-
-        monthly_trend = sorted(monthly.values(), key=lambda x: x['_s'])
-        for m in monthly_trend:
-            del m['_s']
-
-        top_vendors = sorted(
-            [{'vendor': v['vendor'], 'so_count': v['so_count'], 'total_amount': round(v['total_amount'], 2)}
-             for v in vendor_map.values()],
-            key=lambda x: x['total_amount'],
-            reverse=True
-        )[:5]
-
-        top_op_units = sorted(
-            [{'op_unit': v['op_unit'], 'so_count': v['so_count'], 'total_amount': round(v['total_amount'], 2)}
-             for v in op_unit_map.values()],
-            key=lambda x: x['total_amount'],
-            reverse=True
-        )[:10]
-
+        total_row = q.with_entities(
+            func.count(SOData.id),
+            func.coalesce(func.sum(sales_expr), 0.0),
+        ).first()
+        total_so_count = int(total_row[0] or 0) if total_row else 0
+        total_open_so_amount = float(total_row[1] or 0) if total_row else 0.0
         total_open_for_pct = total_so_count or 1
-        so_status = sorted(
-            [{'name': v['name'], 'value': v['value'],
-              'percentage': round(v['value'] / total_open_for_pct * 100, 1),
-              'amount': round(v['amount'], 2)}
-             for v in status_map.values()],
-            key=lambda x: x['value'],
-            reverse=True
-        )
 
-        sorted_months = [mk for _, mk in sorted(all_months_set)]
+        monthly_rows = (
+            q.filter(SOData.so_create_date.isnot(None))
+             .with_entities(
+                month_expr.label('month'),
+                month_sort_expr.label('month_sort'),
+                func.count(SOData.id).label('so_count'),
+                func.coalesce(func.sum(sales_expr), 0.0).label('amount'),
+                func.coalesce(func.sum(purchase_expr), 0.0).label('purchase_amount'),
+             )
+             .group_by(month_sort_expr, month_expr)
+             .order_by(month_sort_expr)
+             .all()
+        )
+        monthly_trend = [
+            {
+                'month': row.month,
+                'so_count': int(row.so_count or 0),
+                'amount': round(float(row.amount or 0) / 1_000_000, 2),
+                'purchase_amount': round(float(row.purchase_amount or 0) / 1_000_000, 2),
+            }
+            for row in monthly_rows
+        ]
+
+        def top_group(label_expr, out_key, amount_expr, limit):
+            rows = (
+                q.with_entities(
+                    label_expr.label(out_key),
+                    func.count(SOData.id).label('so_count'),
+                    func.coalesce(func.sum(amount_expr), 0.0).label('total_amount'),
+                )
+                .group_by(label_expr)
+                .order_by(desc(func.coalesce(func.sum(amount_expr), 0.0)))
+                .limit(limit)
+                .all()
+            )
+            return [
+                {out_key: getattr(row, out_key) or 'Unknown', 'so_count': int(row.so_count or 0), 'total_amount': round(float(row.total_amount or 0), 2)}
+                for row in rows
+            ]
+
+        vendor_label = func.coalesce(func.nullif(func.trim(SOData.vendor_name), ''), 'Unknown')
+        op_unit_label = func.coalesce(func.nullif(func.trim(SOData.operation_unit_name), ''), 'Unknown')
+        top_vendors = top_group(vendor_label, 'vendor', sales_expr, 5)
+        top_op_units = top_group(op_unit_label, 'op_unit', sales_expr, 10)
+
+        status_rows = (
+            q.with_entities(
+                status_label.label('name'),
+                func.count(SOData.id).label('value'),
+                func.coalesce(func.sum(sales_expr), 0.0).label('amount'),
+            )
+            .group_by(status_label)
+            .order_by(desc(func.count(SOData.id)))
+            .all()
+        )
+        so_status = [
+            {
+                'name': row.name or 'Unknown',
+                'value': int(row.value or 0),
+                'percentage': round((int(row.value or 0) / total_open_for_pct) * 100, 1),
+                'amount': round(float(row.amount or 0), 2),
+            }
+            for row in status_rows
+        ]
+
+        monthly_status_rows = (
+            q.filter(SOData.so_create_date.isnot(None))
+             .with_entities(
+                status_label.label('name'),
+                month_expr.label('month'),
+                month_sort_expr.label('month_sort'),
+                func.count(SOData.id).label('count'),
+                func.coalesce(func.sum(sales_expr), 0.0).label('amount'),
+             )
+             .group_by(status_label, month_sort_expr, month_expr)
+             .order_by(month_sort_expr)
+             .all()
+        )
+        status_months = []
+        status_month_sort = {}
+        status_acc = {}
+        for row in monthly_status_rows:
+            name = row.name or 'Unknown'
+            month = row.month
+            if month not in status_month_sort:
+                status_month_sort[month] = row.month_sort
+                status_months.append(month)
+            item = status_acc.setdefault(name, {'monthly': {}, 'total': 0, 'amount': 0.0})
+            c = int(row.count or 0)
+            item['monthly'][month] = c
+            item['total'] += c
+            item['amount'] += float(row.amount or 0)
+        status_months = sorted(status_months, key=lambda m: status_month_sort.get(m, m))
         so_status_monthly = sorted(
-            [{'name': st, 'monthly': d['monthly'], 'total': d['total'],
-              'percentage': round(d['total'] / total_open_for_pct * 100, 1),
-              'amount': round(d['amount'], 2)}
-             for st, d in monthly_by_status.items()],
-            key=lambda x: x['total'], reverse=True
+            [
+                {
+                    'name': name,
+                    'monthly': data['monthly'],
+                    'total': data['total'],
+                    'percentage': round((data['total'] / total_open_for_pct) * 100, 1),
+                    'amount': round(data['amount'], 2),
+                }
+                for name, data in status_acc.items()
+            ],
+            key=lambda x: x['total'],
+            reverse=True,
         )
 
         item_reg_base_q = apply_item_registration_kpi_status_filter(db.session.query(ItemRegistration))
@@ -3053,83 +3315,56 @@ def get_dashboard_stats():
         item_registration_proc_status = item_registration_distribution(ItemRegistration.proc_status)
         item_registration_clients = item_registration_distribution(ItemRegistration.client_name, limit=10)
 
-        options_q = apply_so_create_date_filter(
-            db.session.query(SOData).filter(open_so_filter()),
-            date_year, date_from, date_to,
-        )
-        option_rows = [
-            s for s in options_q.options(load_only(
-                SOData.so_number,
-                SOData.so_item,
-                SOData.operation_unit_name,
-                SOData.pic_name,
-                SOData.customer_po_number,
-                SOData.delivery_memo,
-            )).all()
-            if s.so_item not in hidden_so
-            and s.so_number not in hidden_so
-            and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)
-        ]
-        client_options = sorted({s.operation_unit_name for s in option_rows if s.operation_unit_name})
-        pic_options = sorted({s.pic_name for s in option_rows if s.pic_name})
+        option_q = base_open_q(apply_client=False, apply_pic=False)
+        client_options = [r[0] for r in option_q.with_entities(SOData.operation_unit_name).filter(SOData.operation_unit_name.isnot(None), SOData.operation_unit_name != '').distinct().order_by(SOData.operation_unit_name).all()]
+        raw_pic_options = [r[0] for r in option_q.with_entities(SOData.pic_name).filter(SOData.pic_name.isnot(None), SOData.pic_name != '').distinct().order_by(SOData.pic_name).all()]
+        pic_options = []
+        seen_pics = set()
+        for p in raw_pic_options:
+            label = canonical_pending_pic(p, '')
+            if label and label not in seen_pics:
+                seen_pics.add(label)
+                pic_options.append(label)
+        if any('YUPI' in str(c or '').upper() for c in client_options) and 'ANDRE' not in seen_pics:
+            pic_options.insert(0, 'ANDRE')
 
-        po_date_range = (None, None)
-        so_date_range = db.session.query(func.min(SOData.so_create_date), func.max(SOData.so_create_date)).first()
-
-        # Last updated: latest successful upload timestamp per source file.
+        last_upload = db.session.query(func.max(UploadLog.uploaded_at)).scalar()
+        last_so_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'SMRO').scalar()
+        last_item_reg_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'ItemRegistration').scalar()
         last_po_upload = None
-        last_so_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'SO').scalar()
-        last_item_reg_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'ITEM_REG').scalar()
-        if not last_so_upload:
-            last_so_upload = db.session.query(func.max(SOData.uploaded_at)).scalar()
-        candidates = [x for x in [last_so_upload] if x]
-        last_upload = max(candidates) if candidates else None
+        rfq_fetched_at = RFQ_CACHE.get('fetched_at')
+        so_date_range = db.session.query(func.min(SOData.so_create_date), func.max(SOData.so_create_date)).first()
+        po_date_range = (None, None)
 
-        # SO coverage: which year/months currently exist in the DB.
-        # Kept for API compatibility with any older frontend/client.
-        so_covered_months = {}
-        is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
         if is_sqlite:
-            month_rows = db.session.query(
+            covered_rows = db.session.query(
                 func.strftime('%Y', SOData.so_create_date).label('yr'),
                 func.strftime('%m', SOData.so_create_date).label('mo'),
             ).filter(SOData.so_create_date.isnot(None)).distinct().all()
         else:
-            month_rows = db.session.query(
+            covered_rows = db.session.query(
                 func.extract('year', SOData.so_create_date).label('yr'),
                 func.extract('month', SOData.so_create_date).label('mo'),
             ).filter(SOData.so_create_date.isnot(None)).distinct().all()
-            month_rows = [(str(int(yr)), f'{int(mo):02d}') for yr, mo in month_rows]
+        _MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December']
+        so_covered_months = {}
+        for yr, mo in covered_rows:
+            if yr is None or mo is None:
+                continue
+            yr_s = str(int(yr)) if not isinstance(yr, str) else yr
+            mo_i = int(mo)
+            so_covered_months.setdefault(yr_s, []).append((mo_i, _MONTH_NAMES[mo_i - 1]))
+        so_covered_months = {yr: [name for _, name in sorted(months)] for yr, months in sorted(so_covered_months.items())}
 
-        _MONTH_NAMES = ['January','February','March','April','May','June',
-                        'July','August','September','October','November','December']
-
-        for yr, mo in month_rows:
-            if yr and mo:
-                year_str = str(yr)
-                month_name = _MONTH_NAMES[int(mo) - 1]
-                so_covered_months.setdefault(year_str, []).append((int(mo), month_name))
-
-        so_covered_months = {
-            yr: [name for _, name in sorted(months)]
-            for yr, months in sorted(so_covered_months.items())
-        }
-
-        # Months whose SO rows were actually touched by an SO upload TODAY.
-        # uploaded_at is stored as naive UTC, while the business day follows WIB
-        # (UTC+7). Use explicit WIB day boundaries so uploads between 00:00 and
-        # 06:59 WIB are not incorrectly counted as the previous day.
         wib_today = (datetime.utcnow() + timedelta(hours=7)).date()
         today_start_utc = datetime.combine(wib_today, datetime.min.time()) - timedelta(hours=7)
         tomorrow_start_utc = today_start_utc + timedelta(days=1)
-
         updated_today_filters = (
             SOData.so_create_date.isnot(None),
             SOData.uploaded_at.isnot(None),
             SOData.uploaded_at >= today_start_utc,
             SOData.uploaded_at < tomorrow_start_utc,
         )
-
         if is_sqlite:
             updated_month_rows = db.session.query(
                 func.strftime('%Y', SOData.so_create_date).label('yr'),
@@ -3140,50 +3375,32 @@ def get_dashboard_stats():
                 func.extract('year', SOData.so_create_date).label('yr'),
                 func.extract('month', SOData.so_create_date).label('mo'),
             ).filter(*updated_today_filters).distinct().all()
-            updated_month_rows = [
-                (str(int(yr)), f'{int(mo):02d}')
-                for yr, mo in updated_month_rows
-                if yr is not None and mo is not None
-            ]
-
         so_updated_months_today = {}
         for yr, mo in updated_month_rows:
-            if yr and mo:
-                year_str = str(yr)
-                month_number = int(mo)
-                month_name = _MONTH_NAMES[month_number - 1]
-                so_updated_months_today.setdefault(year_str, []).append(
-                    (month_number, month_name)
-                )
-
-        so_updated_months_today = {
-            yr: [name for _, name in sorted(months)]
-            for yr, months in sorted(so_updated_months_today.items())
-        }
-
-        # RFQ last updated: from the in-process cache (Google Sheets last fetch)
-        rfq_fetched_at = RFQ_CACHE.get('fetched_at')
+            if yr is None or mo is None:
+                continue
+            yr_s = str(int(yr)) if not isinstance(yr, str) else yr
+            mo_i = int(mo)
+            so_updated_months_today.setdefault(yr_s, []).append((mo_i, _MONTH_NAMES[mo_i - 1]))
+        so_updated_months_today = {yr: [name for _, name in sorted(months)] for yr, months in sorted(so_updated_months_today.items())}
 
         payload = {
-            'po_without_so': po_without_so_count,
-            'so_without_po': so_without_po_count,
-            'total_po_count': total_po_count,
-            'total_po_line_count': po_count,
-            'total_po_amount': float(total_po_amount),
+            'po_without_so': 0,
+            'so_without_po': total_so_count,
+            'total_po_count': 0,
+            'total_po_line_count': 0,
+            'total_po_amount': 0.0,
             'total_so_count': total_so_count,
-            'total_open_so_amount': float(total_open_so_amount),
+            'total_open_so_amount': total_open_so_amount,
             'monthly_trend': monthly_trend,
             'top_vendors': top_vendors,
             'top_op_units': top_op_units,
             'so_status': so_status,
             'so_status_monthly': so_status_monthly,
-            'status_months': sorted_months,
+            'status_months': status_months,
             'item_registration_proc_status': item_registration_proc_status,
             'item_registration_clients': item_registration_clients,
-            'filters': {
-                'clients': client_options,
-                'pics': pic_options,
-            },
+            'filters': {'clients': client_options, 'pics': pic_options},
             'last_updated': utc_isoformat(last_upload),
             'last_updated_po': utc_isoformat(last_po_upload),
             'last_updated_smro': utc_isoformat(last_so_upload),
@@ -3192,16 +3409,13 @@ def get_dashboard_stats():
             'so_covered_months': so_covered_months,
             'so_updated_months_today': so_updated_months_today,
             'so_updated_months_today_date': wib_today.isoformat(),
-            'po_date_range': {
-                'min': po_date_range[0].isoformat() if po_date_range and po_date_range[0] else None,
-                'max': po_date_range[1].isoformat() if po_date_range and po_date_range[1] else None,
-            },
+            'po_date_range': {'min': None, 'max': None},
             'so_date_range': {
                 'min': so_date_range[0].isoformat() if so_date_range and so_date_range[0] else None,
                 'max': so_date_range[1].isoformat() if so_date_range and so_date_range[1] else None,
             },
         }
-        runtime_cache_set(cache_key, payload, ttl_seconds=180)
+        runtime_cache_set(cache_key, payload, ttl_seconds=300)
         return jsonify(payload)
     except Exception as e:
         db.session.rollback()
@@ -7024,11 +7238,14 @@ def update_import_cell():
         except (TypeError, json.JSONDecodeError):
             data = {}
         data[field] = value
+        data = apply_import_formula_columns(data)
         row.data_json = json.dumps(data, ensure_ascii=False)
         row.updated_at = datetime.utcnow()
         db.session.commit()
         clear_runtime_caches()
-        return jsonify({'success': True, 'row_key': row_key, 'field': field, 'value': value, 'sheet_sync': {'synced': False, 'local_only': True}})
+        columns = import_layout_columns()
+        updated_row = import_dashboard_row_to_dict(row, columns)
+        return jsonify({'success': True, 'row_key': row_key, 'field': field, 'value': value, 'row': updated_row, 'sheet_sync': {'synced': False, 'local_only': True}})
     except Exception as e:
         db.session.rollback()
         import traceback; traceback.print_exc()
@@ -7614,12 +7831,12 @@ def warm_dashboard_stats_cache_async():
 
     def _worker():
         try:
-            time.sleep(3)
+            # Do not compete with the real first visitor. Warm after the app is idle.
+            time.sleep(20)
             with app.app_context():
                 client = app.test_client()
                 client.get('/api/dashboard/stats')
                 client.get('/api/data/aging')
-                client.get('/api/dashboard/pending-total')
         except Exception as exc:
             print(f'Dashboard stats warmup skipped: {exc}')
 
@@ -7638,11 +7855,13 @@ def warm_completed_summary_cache_async():
             # Give the WSGI worker a few seconds to finish booting and answer
             # PythonAnywhere's post-reload check before we start hammering
             # the DB with this heavy analytics query.
-            time.sleep(8)
+            # The old warmup used the heavy detail summary and could block the first
+            # user request. Warm only the dashboard/light aggregate after startup.
+            time.sleep(30)
             current_year = datetime.utcnow().year
             urls = [
-                '/api/completed/summary',
-                f'/api/completed/summary?date_year={current_year}&yoy_base_year={current_year}',
+                '/api/completed/summary?mode=dashboard',
+                f'/api/completed/summary?date_year={current_year}&yoy_base_year={current_year}&mode=dashboard',
             ]
             with app.app_context():
                 client = app.test_client()
@@ -7676,22 +7895,19 @@ def warm_rfq_dashboard_cache_async():
 
 @app.route('/api/ping', methods=['GET'])
 def ping():
-    """Lightweight keepalive/warmup probe.
+    """DB-free keepalive/warmup probe.
 
-    The frontend calls this immediately on page load so the PythonAnywhere
-    worker wakes up *before* the heavy /api/dashboard/stats request fires.
-    On a cold worker this costs ~100-200 ms; without it, the full stats
-    request absorbs the entire cold-start penalty (~2-5 s) AND has to
-    compete with the module-import overhead at the same time.
-
-    Also returns a tiny DB health flag so the caller knows whether the
-    worker is truly ready to serve data.
+    The frontend calls this before dashboard requests. Counting SO rows here
+    made cold starts slower because the "light" ping still touched SQLite.
+    Pass ?db=1 only when you explicitly want a DB health check.
     """
+    if request.args.get('db') != '1':
+        return jsonify({'ok': True, 'db_checked': False, 'ts': datetime.utcnow().isoformat()})
     try:
         total_so = db.session.query(func.count(SOData.id)).scalar() or 0
-        return jsonify({'ok': True, 'total_so': total_so, 'ts': datetime.utcnow().isoformat()})
+        return jsonify({'ok': True, 'db_checked': True, 'total_so': total_so, 'ts': datetime.utcnow().isoformat()})
     except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 200
+        return jsonify({'ok': False, 'db_checked': True, 'error': str(e)}), 200
 
 
 FRONTEND_DIST_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'frontend', 'dist'))
