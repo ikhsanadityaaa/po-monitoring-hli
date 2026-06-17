@@ -1063,7 +1063,13 @@ const DataTableScroll = ({ children, className = '', darkMode }) => {
   const ref = useRef(null);
   return (
     <>
-      <div ref={ref} className={`data-table-scroll data-table-scroll-frame overflow-auto ${className}`}>{children}</div>
+      <div
+        ref={ref}
+        className={`data-table-scroll data-table-scroll-frame ${className}`}
+        style={{ overflowX: 'auto', overflowY: 'visible' }}
+      >
+        {children}
+      </div>
       <FloatingTableScrollbar targetRef={ref} darkMode={darkMode} />
     </>
   );
@@ -5408,22 +5414,16 @@ const App = () => {
           background-clip: padding-box;
         }
         .data-table-scroll thead {
-          position: sticky;
-          top: 0;
+          position: relative;
           z-index: 34;
         }
         .data-table-scroll-frame {
           border: 1px solid rgba(148, 163, 184, 0.32);
           border-radius: 10px;
           background: ${darkMode ? '#111827' : '#ffffff'};
-          max-height: calc(100vh - 320px);
           min-height: 220px;
-          overflow: auto;
-        }
-        @media (max-width: 768px) {
-          .data-table-scroll-frame {
-            max-height: calc(100vh - 260px);
-          }
+          overflow-x: auto !important;
+          overflow-y: visible !important;
         }
         .floating-table-scrollbar {
           position: fixed;
