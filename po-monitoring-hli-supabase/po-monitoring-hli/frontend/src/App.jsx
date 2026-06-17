@@ -323,7 +323,7 @@ const IMPORT_CHECKLIST_TRUE = new Set(['true', '1', 'yes', 'ya', 'y', 'checked',
 const IMPORT_CHECKLIST_FALSE = new Set(['false', '0', 'no', 'tidak', 'n', 'unchecked', '❌']);
 const IMPORT_CHECKLIST_VALUES = new Set([...IMPORT_CHECKLIST_TRUE, ...IMPORT_CHECKLIST_FALSE]);
 const IMPORT_CHECKLIST_FIELDS = new Set(['sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo']);
-const IMPORT_FORMULA_FIELDS = new Set(['days_left', 'site', 'yupi_po', 'vendor', 'req_dlv_date', 'eta', 'arrival_check', 'purchase_amount', 'lt_days']);
+const IMPORT_FORMULA_FIELDS = new Set(['days_left', 'site', 'vendor', 'arrival_check', 'purchase_amount', 'lt_days']);
 
 const isImportChecklistColumn = (col) => Boolean(col?.checkbox) || IMPORT_CHECKLIST_FIELDS.has(col?.field);
 const isImportFormulaColumn = (col) => Boolean(col?.formula) || IMPORT_FORMULA_FIELDS.has(col?.field);
@@ -333,11 +333,22 @@ const importCheckboxChecked = (value) => IMPORT_CHECKLIST_TRUE.has(String(value 
 
 const importStatusClass = (status, darkMode = false) => {
   const s = String(status || '').trim().toUpperCase();
+  if (s === 'NEW') return darkMode ? 'bg-blue-950/55 text-blue-100 border-blue-600' : 'bg-blue-50 text-blue-700 border-blue-200';
   if (s === 'DELIVERED') return darkMode ? 'bg-green-900/45 text-green-100 border-green-700' : 'bg-green-50 text-green-700 border-green-200';
   if (s === 'ON DELIVERY') return darkMode ? 'bg-blue-900/45 text-blue-100 border-blue-700' : 'bg-blue-50 text-blue-700 border-blue-200';
   if (s === 'ON PROCESS') return darkMode ? 'bg-amber-900/45 text-amber-100 border-amber-700' : 'bg-amber-50 text-amber-700 border-amber-200';
   if (s === 'CANCELED') return darkMode ? 'bg-red-900/45 text-red-100 border-red-700' : 'bg-red-50 text-red-700 border-red-200';
   return darkMode ? 'bg-gray-800 text-gray-100 border-gray-600' : 'bg-white text-gray-700 border-gray-200';
+};
+
+const importStatusOptionStyle = (status) => {
+  const s = String(status || '').trim().toUpperCase();
+  if (s === 'NEW') return { backgroundColor: '#DBEAFE', color: '#1D4ED8', fontWeight: '700' };
+  if (s === 'DELIVERED') return { backgroundColor: '#DCFCE7', color: '#166534' };
+  if (s === 'ON DELIVERY') return { backgroundColor: '#DBEAFE', color: '#1D4ED8' };
+  if (s === 'ON PROCESS') return { backgroundColor: '#FEF3C7', color: '#92400E' };
+  if (s === 'CANCELED') return { backgroundColor: '#FEE2E2', color: '#B91C1C' };
+  return {};
 };
 
 const importArrivalClass = (value, darkMode = false) => {
@@ -1338,6 +1349,7 @@ const App = () => {
   const [importEditValue, setImportEditValue] = useState('');
   const [showImportChecklist, setShowImportChecklist] = useState(false);
   const [importSelectedCell, setImportSelectedCell] = useState(null);
+  const [importFillRange, setImportFillRange] = useState(null);
   const [rfqEditedRowKeys, setRfqEditedRowKeys] = useState(new Set());
   const rfqDashboardOnlyFields = new Set(['private_remarks_1', 'private_remarks_2']);
 
@@ -1862,6 +1874,34 @@ const App = () => {
       const res = await api.put('/api/import/cell', { row_key: rowKey, field, value });
       if (res.data?.row) {
         setImportData(prev => prev.map(row => row._row_key === rowKey ? { ...row, ...res.data.row } : row));
+      }
+      return true;
+    } catch (e) {
+      setImportData(previousRows);
+      addToast(`Failed to update Import data: ${e.response?.data?.error || e.message}`, 'error');
+      return false;
+    }
+  };
+
+  const updateImportCellsBatch = async (updates) => {
+    const safeUpdates = Array.isArray(updates) ? updates.filter(u => u?.row_key && u?.field) : [];
+    if (!safeUpdates.length) return false;
+    const previousRows = importData;
+    setImportEditingCell(null);
+    setImportData(prev => {
+      const next = prev.map(row => ({ ...row }));
+      for (const update of safeUpdates) {
+        const idx = next.findIndex(row => row._row_key === update.row_key);
+        if (idx >= 0) next[idx][update.field] = update.value;
+      }
+      return next;
+    });
+    try {
+      const res = await api.put('/api/import/cells', { updates: safeUpdates });
+      const updatedRows = Array.isArray(res.data?.rows) ? res.data.rows : [];
+      if (updatedRows.length) {
+        const byKey = new Map(updatedRows.map(row => [row._row_key, row]));
+        setImportData(prev => prev.map(row => byKey.has(row._row_key) ? { ...row, ...byKey.get(row._row_key) } : row));
       }
       return true;
     } catch (e) {
@@ -4023,7 +4063,8 @@ const App = () => {
     const checklistCount = checklistFields.size;
     const visibleColumns = showImportChecklist ? columns : columns.filter(col => !checklistFields.has(col.field));
     const colWidth = (col) => {
-      if (Number(col.width)) return Math.max(70, Math.min(Number(col.width), 360));
+      if (col.field === 'days_left') return 64;
+      if (Number(col.width)) return Math.max(64, Math.min(Number(col.width), 360));
       const label = String(col.label || '').toLowerCase();
       if (isImportChecklistColumn(col)) return 82;
       if (label.includes('spec') || label.includes('remark')) return 320;
@@ -4051,7 +4092,6 @@ const App = () => {
       }
     };
     const startImportEdit = (row, col) => {
-      if (isImportFormulaColumn(col)) return;
       const key = `${row._row_key}:${col.field}`;
       setImportEditingCell(key);
       setImportEditValue(String(row[col.field] ?? ''));
@@ -4062,14 +4102,23 @@ const App = () => {
       const value = row[col.field] ?? '';
 
       if (col.field === 'status' || col.type === 'status') {
-        const current = String(value || 'ON PROCESS').toUpperCase();
+        const poSendDate = String(row.po_send_date || '').trim();
+        const isNewImport = !poSendDate;
+        const current = String(isNewImport ? 'NEW' : (value && String(value).toUpperCase() !== 'NEW' ? value : 'ON PROCESS')).toUpperCase();
+        if (isNewImport) {
+          return (
+            <span className={`inline-flex h-7 w-full items-center justify-center rounded-lg border px-2 text-[11px] font-extrabold tracking-wide ${importStatusClass('NEW', darkMode)}`}>
+              NEW
+            </span>
+          );
+        }
         return (
           <select
             value={current}
             onChange={(e) => updateImportCell(row._row_key, col.field, e.target.value)}
             className={`w-full h-7 rounded-lg border px-2 py-0 text-[11px] font-bold outline-none cursor-pointer ${importStatusClass(current, darkMode)}`}
           >
-            {(col.options || IMPORT_STATUS_OPTIONS).map(opt => <option key={opt} value={opt}>{opt}</option>)}
+            {(col.options || IMPORT_STATUS_OPTIONS).filter(opt => String(opt).toUpperCase() !== 'NEW').map(opt => <option key={opt} value={opt} style={importStatusOptionStyle(opt)}>{opt}</option>)}
           </select>
         );
       }
@@ -4077,14 +4126,20 @@ const App = () => {
       if (isImportChecklistColumn(col)) {
         const checked = importCheckboxChecked(value);
         return (
-          <label className="flex items-center justify-center w-full cursor-pointer py-1">
-            <input
-              type="checkbox"
-              checked={checked}
-              onChange={() => updateImportCell(row._row_key, col.field, checked ? 'FALSE' : 'TRUE')}
-              className="w-4 h-4 rounded accent-blue-600 cursor-pointer"
-            />
-          </label>
+          <button
+            type="button"
+            onClick={() => updateImportCell(row._row_key, col.field, checked ? 'FALSE' : 'TRUE')}
+            className="flex w-full items-center justify-center py-1"
+            title={checked ? 'Checked' : 'Unchecked'}
+          >
+            {checked ? (
+              <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#20B71F]">
+                <Check className="w-4 h-4 text-white stroke-[4]" />
+              </span>
+            ) : (
+              <span className={`inline-flex h-6 w-6 rounded-full border ${darkMode ? 'bg-gray-700 border-gray-500' : 'bg-white border-gray-300'}`} />
+            )}
+          </button>
         );
       }
 
@@ -4100,6 +4155,15 @@ const App = () => {
               value={importEditValue}
               onChange={e => setImportEditValue(e.target.value)}
               onBlur={() => updateImportCell(row._row_key, col.field, importEditValue)}
+              onPaste={e => {
+                const text = e.clipboardData.getData('text/plain');
+                if (text.includes('\t') || text.includes('\n')) {
+                  e.preventDefault();
+                  setImportEditingCell(null);
+                  const rowIndex = importData.findIndex(r => r._row_key === row._row_key);
+                  applyImportPaste(rowIndex, col.field, text);
+                }
+              }}
               onKeyDown={e => {
                 if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) updateImportCell(row._row_key, col.field, importEditValue);
                 if (e.key === 'Escape') setImportEditingCell(null);
@@ -4114,6 +4178,15 @@ const App = () => {
             value={importEditValue}
             onChange={e => setImportEditValue(e.target.value)}
             onBlur={() => updateImportCell(row._row_key, col.field, importEditValue)}
+            onPaste={e => {
+              const text = e.clipboardData.getData('text/plain');
+              if (text.includes('\t') || text.includes('\n')) {
+                e.preventDefault();
+                setImportEditingCell(null);
+                const rowIndex = importData.findIndex(r => r._row_key === row._row_key);
+                applyImportPaste(rowIndex, col.field, text);
+              }
+            }}
             onKeyDown={e => {
               if (e.key === 'Enter') updateImportCell(row._row_key, col.field, importEditValue);
               if (e.key === 'Escape') setImportEditingCell(null);
@@ -4131,17 +4204,27 @@ const App = () => {
             {driveUrl ? (
               <a href={driveUrl} target="_blank" rel="noopener noreferrer" title={driveUrl}
                  className={`flex min-w-0 max-w-full h-6 items-center gap-1 px-2 py-0 rounded-full text-[11px] font-medium truncate border ${darkMode ? 'bg-blue-900/40 text-blue-300 border-blue-800 hover:bg-blue-900/70' : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'}`}>
-                <FolderOpen className="w-3.5 h-3.5 flex-shrink-0" />
+                <LinkIcon className="w-3.5 h-3.5 flex-shrink-0" />
                 <span className="truncate">{label}</span>
               </a>
             ) : (
               <button type="button" onClick={() => startImportEdit(row, col)} className="block min-w-0 truncate text-left hover:underline" title={String(value || '-')}>{label}</button>
             )}
             <button type="button" title="Edit link" onClick={() => startImportEdit(row, col)} className={`flex-shrink-0 p-1 rounded ${darkMode ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-100 text-gray-400'}`}>
-              <Pencil className="w-3 h-3" />
+              <LinkIcon className="w-3 h-3" />
             </button>
           </div>
         );
+      }
+
+      if (col.field === 'days_left') {
+        const dayValue = String(value || '').trim();
+        if (dayValue === '✅') {
+          return <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#20B71F] mx-auto" title="Delivered"><Check className="w-4 h-4 text-white stroke-[4]" /></span>;
+        }
+        if (dayValue === '❌') {
+          return <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#EA0D0D] mx-auto" title="Canceled"><X className="w-4 h-4 text-white stroke-[4]" /></span>;
+        }
       }
 
       if (col.field === 'arrival_check') {
@@ -4150,13 +4233,93 @@ const App = () => {
       }
 
       const isFormula = isImportFormulaColumn(col);
-      const isNumeric = Boolean(col.number) || ['ord_qty', 'unit_price', 'amount', 'purchase_price', 'purchase_amount', 'lt_days', 'days_left'].includes(col.field);
+      const isCenter = ['days_left'].includes(col.field);
+      const isNumeric = !isCenter && (Boolean(col.number) || ['ord_qty', 'unit_price', 'amount', 'purchase_price', 'purchase_amount', 'lt_days'].includes(col.field));
       const display = importDisplayValue(value);
-      const cellInnerClass = `${isNumeric ? 'text-right tabular-nums font-semibold' : 'text-left'} ${isFormula ? (darkMode ? 'text-gray-200' : 'text-slate-700') : ''} block w-full truncate whitespace-nowrap leading-6`;
-      if (isFormula) {
-        return <div className={cellInnerClass} title={display}>{display}</div>;
+      const cellInnerClass = `${isCenter ? 'text-center tabular-nums font-bold' : isNumeric ? 'text-right tabular-nums font-semibold' : 'text-left'} ${isFormula ? (darkMode ? 'text-gray-200' : 'text-slate-700') : ''} block w-full truncate whitespace-nowrap leading-6`;
+      if (col.field === 'req_dlv_date' && String(row.reschedule || '').trim()) {
+        return (
+          <div className="group/req flex min-w-0 items-center gap-1">
+            <button type="button" className={`block min-w-0 flex-1 ${cellInnerClass} hover:underline decoration-dotted`} title={display} onClick={() => startImportEdit(row, col)}>{display}</button>
+            <button
+              type="button"
+              title={`Update Req Dlv Date to ${row.reschedule}`}
+              onClick={(e) => { e.stopPropagation(); updateImportCellsBatch([{ row_key: row._row_key, field: 'req_dlv_date', value: row.reschedule }, { row_key: row._row_key, field: 'reschedule', value: '' }]); }}
+              className="hidden group-hover/req:inline-flex flex-shrink-0 rounded-md bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold text-white hover:bg-amber-600"
+            >Update</button>
+          </div>
+        );
       }
       return <button type="button" className={`block w-full ${cellInnerClass} hover:underline decoration-dotted`} title={display} onClick={() => startImportEdit(row, col)}>{display}</button>;
+    };
+
+    const importEditableFields = visibleColumns.map(col => col.field);
+    const applyImportPaste = async (startRowIndex, startField, text) => {
+      const rows = String(text || '').replace(/\r/g, '').split('\n').filter((line, idx, arr) => line !== '' || idx < arr.length - 1);
+      if (!rows.length) return;
+      const startColIndex = importEditableFields.indexOf(startField);
+      if (startColIndex < 0) return;
+      const batchUpdates = [];
+      for (let r = 0; r < rows.length; r += 1) {
+        const targetRow = importData[startRowIndex + r];
+        if (!targetRow) break;
+        const values = rows[r].split('\t');
+        for (let c = 0; c < values.length; c += 1) {
+          const field = importEditableFields[startColIndex + c];
+          if (!field) break;
+          batchUpdates.push({ row_key: targetRow._row_key, field, value: values[c] });
+        }
+      }
+      if (batchUpdates.length && await updateImportCellsBatch(batchUpdates)) {
+        addToast(`Import paste: ${batchUpdates.length} cells updated`, 'success');
+      }
+    };
+    const fillImportRange = async (startRowIndex, field, endRowIndex) => {
+      if (endRowIndex === startRowIndex) return;
+      const source = importData[startRowIndex];
+      if (!source) return;
+      const value = source[field] ?? '';
+      const minRow = Math.max(0, Math.min(startRowIndex, endRowIndex));
+      const maxRow = Math.min(importData.length - 1, Math.max(startRowIndex, endRowIndex));
+      const batchUpdates = [];
+      for (let i = minRow; i <= maxRow; i += 1) {
+        if (i === startRowIndex || !importData[i]?._row_key) continue;
+        batchUpdates.push({ row_key: importData[i]._row_key, field, value });
+      }
+      if (batchUpdates.length && await updateImportCellsBatch(batchUpdates)) {
+        addToast(`Import drag-fill: ${batchUpdates.length} cells updated`, 'success');
+      }
+    };
+    const startImportFill = (event, rowIndex, field) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const getTargetCell = (evt) => document.elementFromPoint(evt.clientX, evt.clientY)?.closest('[data-import-cell="true"]');
+      const updateRange = (evt) => {
+        const target = getTargetCell(evt);
+        const endRowIndex = Number(target?.getAttribute('data-row-index'));
+        const targetField = target?.getAttribute('data-field');
+        if (Number.isFinite(endRowIndex) && targetField === field) {
+          setImportFillRange({ field, startRow: rowIndex, minRow: Math.min(rowIndex, endRowIndex), maxRow: Math.max(rowIndex, endRowIndex) });
+        }
+      };
+      const cleanup = () => {
+        document.body.classList.remove('rfq-fill-dragging');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        setImportFillRange(null);
+      };
+      const onMove = (moveEvent) => updateRange(moveEvent);
+      const onUp = (upEvent) => {
+        const target = getTargetCell(upEvent);
+        const endRowIndex = Number(target?.getAttribute('data-row-index'));
+        const targetField = target?.getAttribute('data-field');
+        cleanup();
+        if (Number.isFinite(endRowIndex) && targetField === field) fillImportRange(rowIndex, field, endRowIndex);
+      };
+      document.body.classList.add('rfq-fill-dragging');
+      setImportFillRange({ field, startRow: rowIndex, minRow: rowIndex, maxRow: rowIndex });
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
     };
 
     return (
@@ -4175,7 +4338,7 @@ const App = () => {
             {checklistCount > 0 && (
               <button onClick={() => setShowImportChecklist(v => !v)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
                 {showImportChecklist ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}
-                {showImportChecklist ? 'Hide DA-DH Checklist' : 'Show DA-DH Checklist'}
+                {showImportChecklist ? 'Hide Checklist' : 'Show Checklist'}
               </button>
             )}
           </div>
@@ -4193,26 +4356,35 @@ const App = () => {
           <table className="freeze-table-import table-fixed text-xs border-collapse border" style={{ width: `${tableWidth}px`, minWidth: `${tableWidth}px` }}>
             <colgroup>{visibleColumns.map(col => <col key={col.field} style={{ width: `${colWidth(col)}px` }} />)}</colgroup>
             <thead className={tblHd}>
-              <tr>{visibleColumns.map(col => (
-                <th key={col.field} className={`px-2 py-2 h-10 text-center align-middle font-bold border-r whitespace-pre-line leading-tight ${darkMode ? 'border-gray-700 text-gray-200' : 'border-gray-200 text-slate-700'}`} title={col.sheet_col ? `${col.sheet_col} - ${col.label}` : col.label}>{col.label}</th>
+              <tr>{visibleColumns.map((col, index) => (
+                <th key={col.field} className={`px-2 py-2 h-10 text-center align-middle font-bold border-r whitespace-pre-line leading-tight ${darkMode ? 'border-gray-700 text-gray-200' : 'border-gray-200 text-slate-700'}`} title={col.sheet_col ? `${col.sheet_col} - ${col.label}` : col.label}>{renderFreezeHeader('import', index + 1, col.label)}</th>
               ))}</tr>
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
               {importData.length === 0 ? (
                 <tr><td colSpan={Math.max(1, visibleColumns.length)} className={`px-4 py-12 text-center ${txt2}`}><Ship className="w-10 h-10 mx-auto mb-2 opacity-40"/>No import data</td></tr>
-              ) : importData.map(row => (
-                <tr key={row._row_key} className={trHov}>{visibleColumns.map(col => {
+              ) : importData.map((row, rowIndex) => {
+                const hasReschedule = String(row.reschedule || '').trim();
+                return <tr key={row._row_key} className={`${trHov} ${hasReschedule ? (darkMode ? 'bg-amber-900/25 hover:bg-amber-900/35' : 'bg-amber-50 hover:bg-amber-100/70') : ''}`}>{visibleColumns.map(col => {
                   const formula = isImportFormulaColumn(col);
                   const selected = importSelectedCell?.rowKey === row._row_key && importSelectedCell?.field === col.field;
+                  const fillHighlighted = importFillRange?.field === col.field && rowIndex >= importFillRange.minRow && rowIndex <= importFillRange.maxRow && rowIndex !== importFillRange.startRow;
                   return <td
                     key={col.field}
-                    tabIndex={formula ? undefined : 0}
-                    onFocus={() => !formula && setImportSelectedCell({ rowKey: row._row_key, field: col.field })}
-                    onClick={() => !formula && setImportSelectedCell({ rowKey: row._row_key, field: col.field })}
-                    className={`relative h-8 max-h-8 px-2 py-1 align-middle border-r ${formula ? (darkMode ? 'bg-gray-800/50' : 'bg-slate-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : !formula ? 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]' : ''} ${txt2}`}
-                  >{renderImportCell(row, col)}</td>;
-                })}</tr>
-              ))}
+                    data-import-cell="true"
+                    data-row-index={rowIndex}
+                    data-field={col.field}
+                    tabIndex={0}
+                    onFocus={() => setImportSelectedCell({ rowKey: row._row_key, field: col.field })}
+                    onClick={() => setImportSelectedCell({ rowKey: row._row_key, field: col.field })}
+                    onPaste={e => { e.preventDefault(); applyImportPaste(rowIndex, col.field, e.clipboardData.getData('text/plain')); }}
+                    className={`group relative h-8 max-h-8 px-2 py-1 align-middle border-r ${formula ? (darkMode ? 'bg-gray-800/50' : 'bg-slate-50/80') : ''} ${hasReschedule ? (darkMode ? 'bg-amber-900/20' : 'bg-amber-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${col.field === 'days_left' ? 'text-center' : ''} ${txt2}`}
+                  >
+                    {renderImportCell(row, col)}
+                    <button type="button" aria-label="Fill down" title="Drag to copy this value" onClick={e => e.stopPropagation()} onMouseDown={e => startImportFill(e, rowIndex, col.field)} className="rfq-fill-handle absolute bottom-0 right-0 h-3 w-3 translate-x-1/2 translate-y-1/2 border border-blue-600 bg-blue-600 opacity-0 group-hover:opacity-100 focus:opacity-100" />
+                  </td>;
+                })}</tr>;
+              })}
             </tbody>
           </table>
         </DataTableScroll>
