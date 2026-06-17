@@ -2008,7 +2008,15 @@ def rfq_dashboard_row_to_dict(row):
     return data
 
 def load_rfq_dashboard_rows():
-    db_rows = RFQDashboardRow.query.order_by(
+    db_rows = RFQDashboardRow.query.options(
+        load_only(
+            RFQDashboardRow.id,
+            RFQDashboardRow.row_key,
+            RFQDashboardRow.sheet_row,
+            RFQDashboardRow.data_json,
+            RFQDashboardRow.last_seen_at,
+        )
+    ).order_by(
         RFQDashboardRow.sheet_row.is_(None),
         RFQDashboardRow.sheet_row.asc(),
         RFQDashboardRow.id.asc(),
@@ -2139,18 +2147,23 @@ def rfq_rows_with_edits(force=False, prefer_stale_cache=False):
     if force:
         sync_rfq_sheet_to_dashboard()
         rows, fetched_at = load_rfq_dashboard_rows()
-    elif RFQDashboardRow.query.count() == 0:
-        sync_rfq_sheet_to_dashboard()
-        rows, fetched_at = load_rfq_dashboard_rows()
     elif prefer_stale_cache and RFQ_CACHE.get('rows'):
         rows, fetched_at = RFQ_CACHE['rows'], RFQ_CACHE['fetched_at']
     elif RFQ_CACHE.get('expires_at') and RFQ_CACHE['expires_at'] > now and RFQ_CACHE.get('rows'):
         rows, fetched_at = RFQ_CACHE['rows'], RFQ_CACHE['fetched_at']
     else:
+        # .count() is expensive on large SQLite/Postgres tables and was being
+        # executed on every RFQ page load. A single indexed primary-key probe is
+        # enough to decide whether we need the first Google Sheet sync.
+        has_dashboard_rows = RFQDashboardRow.query.with_entities(RFQDashboardRow.id).first() is not None
+        if not has_dashboard_rows:
+            sync_rfq_sheet_to_dashboard()
         rows, fetched_at = load_rfq_dashboard_rows()
         set_rfq_runtime_rows(rows, fetched_at)
 
-    edits = RFQCellEdit.query.filter(RFQCellEdit.field.in_(list(RFQ_DASHBOARD_ONLY_FIELDS))).all()
+    edits = RFQCellEdit.query.options(
+        load_only(RFQCellEdit.row_key, RFQCellEdit.field, RFQCellEdit.value)
+    ).filter(RFQCellEdit.field.in_(list(RFQ_DASHBOARD_ONLY_FIELDS))).all()
     edit_map = {}
     for edit in edits:
         edit_map.setdefault(edit.row_key, {})[edit.field] = edit.value
@@ -6818,10 +6831,26 @@ def get_rfq_data():
                 ]
             return result
 
+        # Memoize every filtered result inside this request. The previous code
+        # recalculated the same full-table filter 7+ times to build table rows,
+        # KPI cards, and interdependent dropdown options. On PythonAnywhere free
+        # this was one of the visible RFQ bottlenecks.
+        filtered_cache = {}
+        def filtered_for(exclude_field=None):
+            if isinstance(exclude_field, (set, list, tuple)):
+                key = tuple(sorted(str(x) for x in exclude_field))
+            elif exclude_field:
+                key = (str(exclude_field),)
+            else:
+                key = ()
+            if key not in filtered_cache:
+                filtered_cache[key] = rfq_filter_rows(search_rows, exclude_field)
+            return filtered_cache[key]
+
         # KPI PIC cards should stay visible when one PIC is selected. Build the
         # KPI source after all non-PIC filters, then apply PIC filters only to
         # the table data.
-        kpi_rows = rfq_filter_rows(search_rows, exclude_field={'purchase_pics', 'pic'})
+        kpi_rows = filtered_for({'purchase_pics', 'pic'})
         pending_by_pic = {}
         for row in kpi_rows:
             if clean(row.get('check')) != 'open':
@@ -6836,7 +6865,7 @@ def get_rfq_data():
             pending_by_pic[row_pic] = pending_by_pic.get(row_pic, 0) + 1
         pic_kpis = [{'pic': key, 'count': val} for key, val in sorted(pending_by_pic.items(), key=lambda item: (-item[1], item[0]))]
 
-        rows = rfq_filter_rows(search_rows)
+        rows = filtered_for()
         # Keep RFQ order identical to the sheet.
 
         total = len(rows)
@@ -6845,6 +6874,15 @@ def get_rfq_data():
         if include_similarity:
             page_rows = [apply_rfq_similarity(row) for row in page_rows]
             save_similarity_cache()
+
+        clients_rows = filtered_for('clients')
+        rfq_no_rows = filtered_for('rfq_numbers')
+        brand_rows = filtered_for('brands')
+        purchase_pic_rows = filtered_for('purchase_pics')
+        vendor_rows = filtered_for('vendors')
+        check_rows = filtered_for('checks')
+        available_checks = {clean(row.get('check')).lower() for row in check_rows if clean(row.get('check'))}
+
         payload = {
             'data': page_rows,
             'total': total,
@@ -6855,20 +6893,16 @@ def get_rfq_data():
             'editable_fields': sorted(RFQ_EDITABLE_FIELDS),
             'pic_kpis': pic_kpis,
             'filters': {
-                'clients': sorted({clean(row.get('client_name')) for row in rfq_filter_rows(search_rows, 'clients') if clean(row.get('client_name'))}),
-                'rfq_numbers': sorted({clean(row.get('rfq_code')) for row in rfq_filter_rows(search_rows, 'rfq_numbers') if clean(row.get('rfq_code'))}),
-                'brands': sorted({clean(row.get('brand_manufacturer')) for row in rfq_filter_rows(search_rows, 'brands') if clean(row.get('brand_manufacturer'))}),
-                'purchase_pics': sorted({clean(row.get('purchase_pic')) for row in rfq_filter_rows(search_rows, 'purchase_pics') if clean(row.get('purchase_pic')) and clean(row.get('purchase_pic')).lower() != 'unassigned'}),
-                'vendors': sorted({clean(row.get('vendor_name')) for row in rfq_filter_rows(search_rows, 'vendors') if clean(row.get('vendor_name'))}),
-                'checks': [
-                    rfq_check_label(key)
-                    for key in ['complete', 'reject', 'closed', 'open']
-                    if key in {clean(row.get('check')).lower() for row in rfq_filter_rows(search_rows, 'checks') if clean(row.get('check'))}
-                ],
+                'clients': sorted({clean(row.get('client_name')) for row in clients_rows if clean(row.get('client_name'))}),
+                'rfq_numbers': sorted({clean(row.get('rfq_code')) for row in rfq_no_rows if clean(row.get('rfq_code'))}),
+                'brands': sorted({clean(row.get('brand_manufacturer')) for row in brand_rows if clean(row.get('brand_manufacturer'))}),
+                'purchase_pics': sorted({clean(row.get('purchase_pic')) for row in purchase_pic_rows if clean(row.get('purchase_pic')) and clean(row.get('purchase_pic')).lower() != 'unassigned'}),
+                'vendors': sorted({clean(row.get('vendor_name')) for row in vendor_rows if clean(row.get('vendor_name'))}),
+                'checks': [rfq_check_label(key) for key in ['complete', 'reject', 'closed', 'open'] if key in available_checks],
             },
             'last_updated': utc_isoformat(fetched_at),
         }
-        runtime_cache_set(cache_key, payload, ttl_seconds=20)
+        runtime_cache_set(cache_key, payload, ttl_seconds=180)
         return jsonify(payload)
     except Exception as e:
         import traceback; traceback.print_exc()
