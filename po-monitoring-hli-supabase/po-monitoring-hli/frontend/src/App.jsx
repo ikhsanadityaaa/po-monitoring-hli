@@ -1350,6 +1350,8 @@ const App = () => {
   const [showImportChecklist, setShowImportChecklist] = useState(false);
   const [importSelectedCell, setImportSelectedCell] = useState(null);
   const [importFillRange, setImportFillRange] = useState(null);
+  const [importFilters, setImportFilters] = useState({ yupi_po: [], vendors: [] });
+  const [importOptions, setImportOptions] = useState({ yupi_po: [], vendors: [] });
   const [rfqEditedRowKeys, setRfqEditedRowKeys] = useState(new Set());
   const rfqDashboardOnlyFields = new Set(['private_remarks_1', 'private_remarks_2']);
 
@@ -1846,34 +1848,39 @@ const App = () => {
     } finally { setLoading(false); }
   }, [addToast, rfqPage, rfqPerPage, rfqAppliedSearch, rfqFilters, rfqPicFilter, rfqShowSimilarity]);
 
-  const fetchImportData = useCallback(async (page = importPage, perPage = importPerPage, search = importAppliedSearch, refresh = false) => {
+  const fetchImportData = useCallback(async (page = importPage, perPage = importPerPage, search = importAppliedSearch, refresh = false, filters = importFilters) => {
     setLoading(true);
     try {
       const params = new URLSearchParams({ page, per_page: perPage });
       if (search) params.append('search', search);
       if (refresh) params.append('refresh', '1');
+      resolveFilter(filters?.yupi_po).forEach(v => params.append('yupi_po', v));
+      resolveFilter(filters?.vendors).forEach(v => params.append('vendor_name', v));
       const res = await api.get(`/api/import/data?${params}`);
       setImportData(Array.isArray(res.data.data) ? res.data.data : []);
       setImportColumns(Array.isArray(res.data.columns) ? res.data.columns : []);
       setImportTotal(res.data.total || 0);
       setImportVendorCount(res.data.vendor_count || 0);
+      setImportOptions(res.data.filters || { yupi_po: [], vendors: [] });
       if (refresh && res.data.sync) {
         const added = Number(res.data.sync.added || 0);
         const seen = Number(res.data.sync.seen || 0);
         const sheetRows = Number(res.data.sync.sheet_rows || 0);
+        const trackerSeen = Number(res.data.sync.tracker?.seen || 0);
+        const trackerAdded = Number(res.data.sync.tracker?.added || 0);
         const vendorFilterCount = Number(res.data.sync.vendor_filter_count || 0);
         const vendorSource = res.data.sync.vendor_filter_source === 'existing_import_rows' ? 'current Import vendors' : 'Vendor Import';
-        const msg = added
-          ? `Copied ${added} new Import rows and refreshed ${seen} existing rows`
-          : sheetRows
-            ? `Refreshed ${seen} Import rows from source sheet (${vendorFilterCount} ${vendorSource})`
-            : 'No Import rows found in source sheet';
+        const msg = added || trackerAdded
+          ? `Copied ${added + trackerAdded} new Import rows and refreshed ${seen + trackerSeen} existing rows`
+          : sheetRows || trackerSeen
+            ? `Refreshed ${seen + trackerSeen} Import rows from source/tracker sheet (${vendorFilterCount} ${vendorSource})`
+            : 'No Import rows found in source/tracker sheet';
         addToast(msg, 'success');
       }
     } catch (e) {
       addToast(`Failed to load Import data: ${e.response?.data?.error || e.message}`, 'error');
     } finally { setLoading(false); }
-  }, [addToast, importPage, importPerPage, importAppliedSearch]);
+  }, [addToast, importPage, importPerPage, importAppliedSearch, importFilters]);
 
   const updateImportCell = async (rowKey, field, value) => {
     setImportEditingCell(null);
@@ -4095,7 +4102,7 @@ const App = () => {
         const res = await api.post('/api/import/vendors/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
         addToast(res.data?.message || 'Import vendors updated', 'success');
         setImportPage(1);
-        fetchImportData(1, importPerPage, importAppliedSearch, true);
+        fetchImportData(1, importPerPage, importAppliedSearch, true, importFilters);
       } catch (err) {
         addToast(`Failed to upload import vendors: ${err.response?.data?.error || err.message}`, 'error');
       }
@@ -4154,7 +4161,7 @@ const App = () => {
 
       if (editing) {
         const isLong = ['spec', 'remark_yupi', 'import_remarks', 'soft_copy_doc'].includes(col.field);
-        const inputCls = `w-full rounded border px-2 py-1 text-xs ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-blue-300 text-slate-800'}`;
+        const inputCls = `block w-full min-h-8 px-2 py-1 text-xs border-0 rounded-none outline outline-2 outline-blue-500 outline-offset-[-2px] ${darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`;
         if (isLong) {
           return (
             <textarea
@@ -4211,15 +4218,15 @@ const App = () => {
         return (
           <div className="flex items-center gap-1 w-full">
             {driveUrl ? (
-              <a href={driveUrl} target="_blank" rel="noopener noreferrer" title={driveUrl}
+              <a href={driveUrl} target="_blank" rel="noopener noreferrer" title={driveUrl} onClick={e => e.stopPropagation()}
                  className={`flex min-w-0 max-w-full h-6 items-center gap-1 px-2 py-0 rounded-full text-[11px] font-medium truncate border ${darkMode ? 'bg-blue-900/40 text-blue-300 border-blue-800 hover:bg-blue-900/70' : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'}`}>
                 <LinkIcon className="w-3.5 h-3.5 flex-shrink-0" />
                 <span className="truncate">{label}</span>
               </a>
             ) : (
-              <button type="button" onClick={() => startImportEdit(row, col)} className="block min-w-0 truncate text-left hover:underline" title={String(value || '-')}>{label}</button>
+              <button type="button" onClick={(e) => { e.stopPropagation(); startImportEdit(row, col); }} className="block min-w-0 truncate text-left hover:underline" title={String(value || '-')}>{label}</button>
             )}
-            <button type="button" title="Edit link" onClick={() => startImportEdit(row, col)} className={`flex-shrink-0 p-1 rounded ${darkMode ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-100 text-gray-400'}`}>
+            <button type="button" title="Edit link" onClick={(e) => { e.stopPropagation(); startImportEdit(row, col); }} className={`flex-shrink-0 p-1 rounded ${darkMode ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-100 text-gray-400'}`}>
               <LinkIcon className="w-3 h-3" />
             </button>
           </div>
@@ -4343,7 +4350,7 @@ const App = () => {
           <div className="flex flex-wrap items-center gap-2">
             <DownloadButton onClick={() => downloadBlob('/api/import/vendor-template', `Import_Vendor_Template_${new Date().toISOString().slice(0,10)}.xlsx`, 'Import Vendor Template')} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><Download className="w-4 h-4"/>Template Vendor</DownloadButton>
             <label className="flex items-center gap-2 px-3 py-2.5 bg-slate-600 hover:bg-slate-700 text-white rounded-xl text-sm font-semibold shadow-sm cursor-pointer"><FileSpreadsheet className="w-4 h-4"/>Upload Vendor Import<input type="file" accept=".xlsx,.xls,.csv" multiple onChange={handleVendorUpload} className="hidden"/></label>
-            <button onClick={() => fetchImportData(importPage, importPerPage, importAppliedSearch, true)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><RotateCcw className="w-4 h-4"/>Copy Sheet</button>
+            <button onClick={() => fetchImportData(importPage, importPerPage, importAppliedSearch, true, importFilters)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><RotateCcw className="w-4 h-4"/>Copy Sheet</button>
             {checklistCount > 0 && (
               <button onClick={() => setShowImportChecklist(v => !v)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
                 {showImportChecklist ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}
@@ -4354,10 +4361,18 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="grid grid-cols-1 gap-2 md:grid-cols-[minmax(240px,1fr)_100px_100px] items-end">
-            <div className="min-w-0"><label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Import</label><input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/></div>
-            <button onClick={()=>{ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">Search</button>
-            <button onClick={()=>{ setImportSearch(''); setImportAppliedSearch(''); setImportPage(1); fetchImportData(1, importPerPage, ''); }} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-[minmax(240px,1fr)_minmax(160px,220px)_minmax(180px,260px)_100px_100px] items-end">
+            <div className="min-w-0"><label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Import</label><input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/></div>
+            <div className="min-w-0">
+              <MultiSelect label="YUPI PO" options={importOptions.yupi_po || []} selected={importFilters.yupi_po}
+                onChange={v=>{ const next={...importFilters, yupi_po:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="min-w-0">
+              <MultiSelect label="Vendor Name" options={importOptions.vendors || []} selected={importFilters.vendors}
+                onChange={v=>{ const next={...importFilters, vendors:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <button onClick={()=>{ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">Search</button>
+            <button onClick={()=>{ const next={ yupi_po: [], vendors: [] }; setImportSearch(''); setImportAppliedSearch(''); setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, '', false, next); }} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
         </FilterPanel>
 
@@ -4378,6 +4393,8 @@ const App = () => {
                   const formula = isImportFormulaColumn(col);
                   const selected = importSelectedCell?.rowKey === row._row_key && importSelectedCell?.field === col.field;
                   const fillHighlighted = importFillRange?.field === col.field && rowIndex >= importFillRange.minRow && rowIndex <= importFillRange.maxRow && rowIndex !== importFillRange.startRow;
+                  const editingCellNow = importEditingCell === `${row._row_key}:${col.field}`;
+                  const directEdit = !(col.field === 'status' || col.type === 'status' || isImportChecklistColumn(col));
                   return <td
                     key={col.field}
                     data-import-cell="true"
@@ -4385,9 +4402,12 @@ const App = () => {
                     data-field={col.field}
                     tabIndex={0}
                     onFocus={() => setImportSelectedCell({ rowKey: row._row_key, field: col.field })}
-                    onClick={() => setImportSelectedCell({ rowKey: row._row_key, field: col.field })}
+                    onClick={(e) => {
+                      setImportSelectedCell({ rowKey: row._row_key, field: col.field });
+                      if (directEdit && !editingCellNow && !e.target.closest('a,input,textarea,select,button')) startImportEdit(row, col);
+                    }}
                     onPaste={e => { e.preventDefault(); applyImportPaste(rowIndex, col.field, e.clipboardData.getData('text/plain')); }}
-                    className={`group relative h-8 max-h-8 px-2 py-1 align-middle border-r ${formula ? (darkMode ? 'bg-gray-800/50' : 'bg-slate-50/80') : ''} ${hasReschedule ? (darkMode ? 'bg-amber-900/20' : 'bg-amber-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${col.field === 'days_left' ? 'text-center' : ''} ${txt2}`}
+                    className={`group relative h-8 max-h-8 ${editingCellNow ? 'p-0' : 'px-2 py-1'} align-middle border-r focus:outline-none cursor-pointer ${formula ? (darkMode ? 'bg-gray-800/50' : 'bg-slate-50/80') : ''} ${hasReschedule ? (darkMode ? 'bg-amber-900/20' : 'bg-amber-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${col.field === 'days_left' ? 'text-center' : ''} ${txt2}`}
                   >
                     {renderImportCell(row, col)}
                     <button type="button" aria-label="Fill down" title="Drag to copy this value" onClick={e => e.stopPropagation()} onMouseDown={e => startImportFill(e, rowIndex, col.field)} className="rfq-fill-handle absolute bottom-0 right-0 h-3 w-3 translate-x-1/2 translate-y-1/2 border border-blue-600 bg-blue-600 opacity-0 group-hover:opacity-100 focus:opacity-100" />
@@ -4398,7 +4418,7 @@ const App = () => {
           </table>
         </DataTableScroll>
 
-        <PagePagination darkMode={darkMode} txt2={txt2} page={importPage} totalPages={totalPages} total={importTotal} perPage={importPerPage} onPageChange={(p)=>{ setImportPage(p); fetchImportData(p, importPerPage, importAppliedSearch); }} onPerPageChange={(next)=>{ setImportPerPage(next); setImportPage(1); fetchImportData(1, next, importAppliedSearch); }} />
+        <PagePagination darkMode={darkMode} txt2={txt2} page={importPage} totalPages={totalPages} total={importTotal} perPage={importPerPage} onPageChange={(p)=>{ setImportPage(p); fetchImportData(p, importPerPage, importAppliedSearch, false, importFilters); }} onPerPageChange={(next)=>{ setImportPerPage(next); setImportPage(1); fetchImportData(1, next, importAppliedSearch, false, importFilters); }} />
       </div>
     );
   };
