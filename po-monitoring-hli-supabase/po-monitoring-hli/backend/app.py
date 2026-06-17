@@ -1686,6 +1686,40 @@ def merge_import_existing_payload(existing_payload, sheet_payload):
             merged[field] = existing_payload.get(field)
     return apply_import_formula_columns(merged)
 
+def import_dashboard_row_to_dict(row, columns):
+    """Return one ImportDashboardRow as the frontend table payload.
+
+    This function was accidentally dropped in the previous Import layout build,
+    while /api/import/data and /api/import/cell still call it. Without it, the
+    Import page returns HTTP 500 with: name 'import_dashboard_row_to_dict' is not
+    defined. Keep it close to the import helpers so both endpoints can reuse the
+    same serialization logic.
+    """
+    try:
+        data = json.loads(row.data_json or '{}')
+    except (TypeError, json.JSONDecodeError):
+        data = {}
+
+    data = apply_import_formula_columns(dict(data))
+    out = {}
+    for col in columns:
+        field = col.get('field')
+        out[field] = '' if data.get(field) is None else data.get(field, '')
+
+    out.update({
+        '_row_key': row.row_key,
+        '_source_key': row.source_key,
+        '_source_label': row.source_label,
+        '_source_uid': row.source_uid,
+        '_sheet_row': row.sheet_row,
+        '_vendor_name': row.vendor_name,
+        '_dashboard_id': row.id,
+        '_first_seen_at': row.first_seen_at.isoformat() if row.first_seen_at else '',
+        '_last_seen_at': row.last_seen_at.isoformat() if row.last_seen_at else '',
+        '_updated_at': row.updated_at.isoformat() if row.updated_at else '',
+    })
+    return out
+
 def sync_import_sheet_to_dashboard():
     columns, sheet_rows = import_sheet_rows(force_metadata=True)
     vendor_count = len(import_vendor_names(force_default=True))
