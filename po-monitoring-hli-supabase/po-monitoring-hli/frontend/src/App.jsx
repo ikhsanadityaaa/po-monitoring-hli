@@ -1321,6 +1321,7 @@ const App = () => {
   const [rfqFilters, setRfqFilters] = useState({ checks: [], clients: [], rfq_numbers: [], brands: [], purchase_pics: [], vendors: [] });
   const [rfqOptions, setRfqOptions] = useState({ checks: [], clients: [], rfq_numbers: [], brands: [], purchase_pics: [], vendors: [] });
   const [rfqSelectedCell, setRfqSelectedCell] = useState(null);
+  const [rfqFillRange, setRfqFillRange] = useState(null);
   const [rfqSimilarAction, setRfqSimilarAction] = useState(null);
   const [rfqLastUpdated, setRfqLastUpdated] = useState(null);
 
@@ -1336,6 +1337,7 @@ const App = () => {
   const [importEditingCell, setImportEditingCell] = useState(null);
   const [importEditValue, setImportEditValue] = useState('');
   const [showImportChecklist, setShowImportChecklist] = useState(false);
+  const [importSelectedCell, setImportSelectedCell] = useState(null);
   const [rfqEditedRowKeys, setRfqEditedRowKeys] = useState(new Set());
   const rfqDashboardOnlyFields = new Set(['private_remarks_1', 'private_remarks_2']);
 
@@ -3652,31 +3654,56 @@ const App = () => {
         addToast(`RFQ paste: ${batchUpdates.length} cells updated`, 'success');
       }
     };
-    const fillRFQDown = async (startRowIndex, field, endRowIndex) => {
-      if (endRowIndex <= startRowIndex) return;
+    const fillRFQRange = async (startRowIndex, field, endRowIndex) => {
+      if (endRowIndex === startRowIndex) return;
       const source = rfqData[startRowIndex];
       if (!source) return;
       const value = source[field] ?? '';
+      const minRow = Math.max(0, Math.min(startRowIndex, endRowIndex));
+      const maxRow = Math.min(rfqData.length - 1, Math.max(startRowIndex, endRowIndex));
       const batchUpdates = [];
-      for (let i = startRowIndex + 1; i <= endRowIndex && i < rfqData.length; i += 1) {
+      for (let i = minRow; i <= maxRow; i += 1) {
+        if (i === startRowIndex || !rfqData[i]?.row_key) continue;
         batchUpdates.push({ row_key: rfqData[i].row_key, field, value });
       }
       if (batchUpdates.length && await updateRFQCellsBatch(batchUpdates)) {
-        addToast(`RFQ fill down: ${batchUpdates.length} cells updated`, 'success');
+        addToast(`RFQ drag-fill: ${batchUpdates.length} cells updated`, 'success');
       }
     };
     const startRFQFill = (event, rowIndex, field) => {
       event.preventDefault();
       event.stopPropagation();
-      document.body.classList.add('rfq-fill-dragging');
-      const onUp = (upEvent) => {
-        document.body.classList.remove('rfq-fill-dragging');
-        document.removeEventListener('mouseup', onUp);
-        const target = document.elementFromPoint(upEvent.clientX, upEvent.clientY)?.closest('[data-rfq-cell="true"]');
+      const getTargetCell = (evt) => document.elementFromPoint(evt.clientX, evt.clientY)?.closest('[data-rfq-cell="true"]');
+      const updateRange = (evt) => {
+        const target = getTargetCell(evt);
         const endRowIndex = Number(target?.getAttribute('data-row-index'));
         const targetField = target?.getAttribute('data-field');
-        if (Number.isFinite(endRowIndex) && targetField === field) fillRFQDown(rowIndex, field, endRowIndex);
+        if (Number.isFinite(endRowIndex) && targetField === field) {
+          setRfqFillRange({
+            field,
+            startRow: rowIndex,
+            minRow: Math.min(rowIndex, endRowIndex),
+            maxRow: Math.max(rowIndex, endRowIndex),
+          });
+        }
       };
+      const cleanup = () => {
+        document.body.classList.remove('rfq-fill-dragging');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        setRfqFillRange(null);
+      };
+      const onMove = (moveEvent) => updateRange(moveEvent);
+      const onUp = (upEvent) => {
+        const target = getTargetCell(upEvent);
+        const endRowIndex = Number(target?.getAttribute('data-row-index'));
+        const targetField = target?.getAttribute('data-field');
+        cleanup();
+        if (Number.isFinite(endRowIndex) && targetField === field) fillRFQRange(rowIndex, field, endRowIndex);
+      };
+      document.body.classList.add('rfq-fill-dragging');
+      setRfqFillRange({ field, startRow: rowIndex, minRow: rowIndex, maxRow: rowIndex });
+      document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     };
 
@@ -3749,7 +3776,7 @@ const App = () => {
                 onSearch={(searchValue) => {
                   setRfqAppliedSearch(searchValue);
                   setRfqPage(1);
-                  fetchRFQData(1, rfqPerPage, searchValue, Boolean(searchValue), rfqFilters, rfqPicFilter, rfqShowSimilarity);
+                  fetchRFQData(1, rfqPerPage, searchValue, false, rfqFilters, rfqPicFilter, rfqShowSimilarity);
                 }}
                 darkMode={darkMode}
                 txt2={txt2}
@@ -3888,6 +3915,7 @@ const App = () => {
                       const hasValue = value === 0 || value;
                       const selected = rfqSelectedCell?.rowKey === row.row_key && rfqSelectedCell?.field === field;
                       const sourceStyle = rfqSourceStyleFields.has(field);
+                      const fillHighlighted = rfqFillRange?.field === field && rowIndex >= rfqFillRange.minRow && rowIndex <= rfqFillRange.maxRow && rowIndex !== rfqFillRange.startRow;
                       return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field}
                         tabIndex={0}
                         onFocus={() => setRfqSelectedCell({ rowKey: row.row_key, field })}
@@ -3901,7 +3929,7 @@ const App = () => {
                           }
                         }}
                         onPaste={e => { e.preventDefault(); applyRFQPaste(rowIndex, field, e.clipboardData.getData('text/plain')); }}
-                        className={`group relative px-2 py-1 align-top border-r cursor-pointer ${sourceStyle ? (darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200') : (darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200')} ${selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${['qty','unit_price_idr','moq','lead_time_days'].includes(field) ? 'text-right font-semibold' : ''}`}>
+                        className={`group relative px-2 py-1 align-top border-r cursor-pointer ${sourceStyle ? (darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200') : (darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200')} ${fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${['qty','unit_price_idr','moq','lead_time_days'].includes(field) ? 'text-right font-semibold' : ''}`}>
                         <div className={`min-h-7 min-w-0 truncate ${sourceStyle ? txt2 : 'text-blue-600'} ${field === 'photo_url' ? 'flex items-center gap-1 justify-center' : ''} ${field === 'purchase_pic' ? 'text-center' : ''}`}>
                           {field === 'photo_url' && <LinkIcon className={`w-3.5 h-3.5 flex-shrink-0 ${hasValue ? 'text-blue-600' : 'text-blue-400'}`} />}
                           {hasValue && field === 'purchase_pic' ? (() => {
@@ -3909,7 +3937,7 @@ const App = () => {
                             return <span className={`inline-flex max-w-full truncate px-2 py-0.5 rounded-full text-[11px] font-semibold ${c ? `${c.bg} ${c.text}` : 'bg-gray-100 text-gray-700'}`}>{value}</span>;
                           })() : hasValue ? renderValue(value, sourceStyle ? txt2 : 'text-blue-600') : <span>{field === 'photo_url' ? '' : '\u00a0'}</span>}
                         </div>
-                        <button type="button" aria-label="Fill down" title="Drag down to copy" onMouseDown={e => startRFQFill(e, rowIndex, field)} className="rfq-fill-handle absolute bottom-0 right-0 h-3 w-3 translate-x-1/2 translate-y-1/2 border border-blue-600 bg-blue-600 opacity-0 group-hover:opacity-100 focus:opacity-100" />
+                        <button type="button" aria-label="Fill down" title="Drag to copy this value" onClick={e => e.stopPropagation()} onMouseDown={e => startRFQFill(e, rowIndex, field)} className="rfq-fill-handle absolute bottom-0 right-0 h-3 w-3 translate-x-1/2 translate-y-1/2 border border-blue-600 bg-blue-600 opacity-0 group-hover:opacity-100 focus:opacity-100" />
                       </td>;
                     }
                     if (field === 'amt_idr') {
@@ -4039,7 +4067,7 @@ const App = () => {
           <select
             value={current}
             onChange={(e) => updateImportCell(row._row_key, col.field, e.target.value)}
-            className={`w-full rounded-lg border px-2 py-1.5 text-[11px] font-bold outline-none cursor-pointer ${importStatusClass(current, darkMode)}`}
+            className={`w-full h-7 rounded-lg border px-2 py-0 text-[11px] font-bold outline-none cursor-pointer ${importStatusClass(current, darkMode)}`}
           >
             {(col.options || IMPORT_STATUS_OPTIONS).map(opt => <option key={opt} value={opt}>{opt}</option>)}
           </select>
@@ -4102,7 +4130,7 @@ const App = () => {
           <div className="flex items-center gap-1 w-full">
             {driveUrl ? (
               <a href={driveUrl} target="_blank" rel="noopener noreferrer" title={driveUrl}
-                 className={`flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium truncate border ${darkMode ? 'bg-blue-900/40 text-blue-300 border-blue-800 hover:bg-blue-900/70' : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'}`}>
+                 className={`flex min-w-0 max-w-full h-6 items-center gap-1 px-2 py-0 rounded-full text-[11px] font-medium truncate border ${darkMode ? 'bg-blue-900/40 text-blue-300 border-blue-800 hover:bg-blue-900/70' : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'}`}>
                 <FolderOpen className="w-3.5 h-3.5 flex-shrink-0" />
                 <span className="truncate">{label}</span>
               </a>
@@ -4118,14 +4146,13 @@ const App = () => {
 
       if (col.field === 'arrival_check') {
         const text = importDisplayValue(value);
-        return <span className={`inline-flex max-w-full rounded-full border px-2 py-1 text-[11px] font-semibold ${importArrivalClass(value, darkMode)}`} title={text}>{text}</span>;
+        return <span className={`inline-flex max-w-full h-6 items-center rounded-full border px-2 py-0 text-[11px] font-semibold truncate ${importArrivalClass(value, darkMode)}`} title={text}>{text}</span>;
       }
 
       const isFormula = isImportFormulaColumn(col);
       const isNumeric = Boolean(col.number) || ['ord_qty', 'unit_price', 'amount', 'purchase_price', 'purchase_amount', 'lt_days', 'days_left'].includes(col.field);
-      const isLongText = ['spec', 'remark_yupi', 'import_remarks', 'item_name'].includes(col.field);
       const display = importDisplayValue(value);
-      const cellInnerClass = `${isNumeric ? 'text-right tabular-nums font-semibold' : 'text-left'} ${isFormula ? (darkMode ? 'text-gray-200' : 'text-slate-700') : ''} ${isLongText ? 'whitespace-normal break-words leading-snug' : 'truncate'}`;
+      const cellInnerClass = `${isNumeric ? 'text-right tabular-nums font-semibold' : 'text-left'} ${isFormula ? (darkMode ? 'text-gray-200' : 'text-slate-700') : ''} block w-full truncate whitespace-nowrap leading-6`;
       if (isFormula) {
         return <div className={cellInnerClass} title={display}>{display}</div>;
       }
@@ -4163,11 +4190,11 @@ const App = () => {
         </FilterPanel>
 
         <DataTableScroll darkMode={darkMode}>
-          <table className="table-fixed text-xs border-collapse" style={{ width: `${tableWidth}px`, minWidth: `${tableWidth}px` }}>
+          <table className="freeze-table-import table-fixed text-xs border-collapse border" style={{ width: `${tableWidth}px`, minWidth: `${tableWidth}px` }}>
             <colgroup>{visibleColumns.map(col => <col key={col.field} style={{ width: `${colWidth(col)}px` }} />)}</colgroup>
             <thead className={tblHd}>
               <tr>{visibleColumns.map(col => (
-                <th key={col.field} className={`px-2 py-2 h-12 text-center align-middle font-bold border-r whitespace-pre-line leading-tight ${darkMode ? 'border-gray-700 text-gray-200' : 'border-gray-200 text-slate-700'}`} title={col.sheet_col ? `${col.sheet_col} - ${col.label}` : col.label}>{col.label}</th>
+                <th key={col.field} className={`px-2 py-2 h-10 text-center align-middle font-bold border-r whitespace-pre-line leading-tight ${darkMode ? 'border-gray-700 text-gray-200' : 'border-gray-200 text-slate-700'}`} title={col.sheet_col ? `${col.sheet_col} - ${col.label}` : col.label}>{col.label}</th>
               ))}</tr>
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
@@ -4176,7 +4203,14 @@ const App = () => {
               ) : importData.map(row => (
                 <tr key={row._row_key} className={trHov}>{visibleColumns.map(col => {
                   const formula = isImportFormulaColumn(col);
-                  return <td key={col.field} className={`px-2 py-1.5 align-middle border-r ${formula ? (darkMode ? 'bg-gray-800/50' : 'bg-slate-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${txt2}`}>{renderImportCell(row, col)}</td>;
+                  const selected = importSelectedCell?.rowKey === row._row_key && importSelectedCell?.field === col.field;
+                  return <td
+                    key={col.field}
+                    tabIndex={formula ? undefined : 0}
+                    onFocus={() => !formula && setImportSelectedCell({ rowKey: row._row_key, field: col.field })}
+                    onClick={() => !formula && setImportSelectedCell({ rowKey: row._row_key, field: col.field })}
+                    className={`relative h-8 max-h-8 px-2 py-1 align-middle border-r ${formula ? (darkMode ? 'bg-gray-800/50' : 'bg-slate-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : !formula ? 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]' : ''} ${txt2}`}
+                  >{renderImportCell(row, col)}</td>;
                 })}</tr>
               ))}
             </tbody>
@@ -5094,6 +5128,9 @@ const App = () => {
         button:disabled { cursor: not-allowed !important; opacity: 0.5; }
         .rfq-fill-handle { cursor: crosshair !important; }
         body.rfq-fill-dragging, body.rfq-fill-dragging * { cursor: crosshair !important; }
+        .freeze-table-import td, .freeze-table-import th { box-shadow: inset 0 -1px 0 rgba(148, 163, 184, 0.22), inset -1px 0 0 rgba(148, 163, 184, 0.22); }
+        .freeze-table-import tbody tr { height: 32px; }
+        .freeze-table-import td > * { max-height: 28px; }
         .backdrop-blur-sm, .backdrop-blur-xl {
           backdrop-filter: none !important;
           -webkit-backdrop-filter: none !important;
