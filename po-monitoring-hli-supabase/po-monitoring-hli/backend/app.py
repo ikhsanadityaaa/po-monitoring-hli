@@ -1300,8 +1300,8 @@ IMPORT_SOURCE_ONLY_COLUMNS = [
     # Hidden raw source fields. In the RM source sheet these headers are on row 4:
     # F = PO YUPI and K = Req. Dlv Date. Keep explicit source_sheet_col fallbacks
     # so mapping still works if Google returns a trimmed/odd header range.
-    {'source_only': True, 'source_sheet_col': 'F', 'sheet_col': 'F', 'field': 'po_yupi',             'label': 'PO YUPI'},
-    {'source_only': True, 'source_sheet_col': 'K', 'sheet_col': 'K', 'field': 'source_req_dlv_date', 'label': 'Req. Dlv Date'},
+    {'source_only': True, 'source_sheet_col': 'F', 'sheet_col': 'R', 'field': 'po_yupi',             'label': 'PO YUPI'},
+    {'source_only': True, 'source_sheet_col': 'K', 'sheet_col': 'W', 'field': 'source_req_dlv_date', 'label': 'Req. Dlv Date'},
 ]
 
 IMPORT_SYNC_FIELD_ALIASES = {
@@ -2231,6 +2231,191 @@ def import_dashboard_row_to_dict(row, columns):
     })
     return out
 
+
+def import_layout_tracker_visible_rows(columns=None):
+    """Read existing values from the main Import tracker sheet.
+
+    Dashboard edits are synced to this tracker, but earlier builds did not read
+    the tracker back into the dashboard. That is why values that already existed
+    in the sheet, such as PO Send Date, STATUS, ETA, remarks, checklist ticks,
+    and Soft Copy Doc, could remain blank in /Import. This lightweight reader is
+    used on Copy Sheet only, so opening /Import stays fast.
+    """
+    columns = import_layout_columns() if columns is None else columns
+    sheet_title = import_layout_target_sheet_title()
+    # Reference tracker visible range is A:DI. Row 1 is the header.
+    resp = google_sheets_values_get(
+        IMPORT_LAYOUT_SHEET_ID,
+        f"'{sheet_title}'!A1:DI",
+        value_render_option='FORMATTED_VALUE',
+    )
+    values = resp.get('values') or []
+    if not values:
+        return []
+
+    header = values[0]
+    by_header = {}
+    for idx, raw in enumerate(header):
+        key = import_header_key(raw)
+        if key and key not in by_header:
+            by_header[key] = idx
+
+    mapping_columns = import_all_mapping_columns(columns)
+    rows = []
+    for row_no, row_values in enumerate(values[1:], start=2):
+        payload = {
+            '_source_key': 'import_tracker',
+            '_source_label': 'Import Tracker',
+            '_sheet_row': row_no,
+        }
+        for col in mapping_columns:
+            field = col.get('field')
+            if not field:
+                continue
+            idx = None
+            # Use sheet_col first because the reference tracker has formula/raw
+            # columns with similar labels. This keeps PO Send Date (C) separate
+            # from PO DATE (By Email) (O), and display YUPI PO (E) separate from
+            # raw PO YUPI (R).
+            sheet_col = col.get('sheet_col')
+            if sheet_col:
+                try:
+                    idx = column_index_from_letter(str(sheet_col)) - 1
+                except Exception:
+                    idx = None
+            if idx is None:
+                keys = []
+                keys.extend(IMPORT_COLUMN_ALIASES.get(field, []))
+                keys.extend([import_header_key(col.get('label')), import_header_key(field)])
+                idx = next((by_header[k] for k in keys if k and k in by_header), None)
+            payload[field] = row_values[idx] if idx is not None and idx < len(row_values) else ''
+
+        # Tracker column C is the user's PO Send Date. Mark it as manual so the
+        # legacy safety in apply_import_formula_columns() does not move it to
+        # PO DATE (By Email).
+        if not import_blankish(payload.get('po_send_date')):
+            payload['_po_send_date_manual'] = '1'
+
+        if any(import_nonblank(payload.get(f)) for f in ('po_send_date', 'status', 'po_yupi', 'yupi_po', 'po_sementara', 'item_yupi', 'item_name', 'vendor_name', 'vendor', 'so')):
+            rows.append(apply_import_formula_columns(payload))
+    return rows
+
+
+IMPORT_TRACKER_AUTHORITATIVE_FIELDS = {
+    # User-maintained fields in the Import tracker. If these exist in the
+    # tracker sheet, the dashboard should show them even if the local DB is blank.
+    'status', 'po_send_date', '_po_send_date_manual', 'etd', 'eta', 'import_remarks',
+    'incoterm', 'forwarder', 'bl_number', 'inv_no', 'non_ski',
+    'sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo',
+    'soft_copy_doc',
+}
+
+
+def merge_import_tracker_payload(existing_payload, tracker_payload):
+    """Merge values that already exist in the main Import tracker sheet.
+
+    Source RM/SP workbooks remain the source of truth for source-driven fields.
+    The tracker sheet is authoritative for dashboard/user-maintained fields.
+    For source-driven fields, use tracker values only to repair blanks/placeholders
+    in the dashboard DB.
+    """
+    merged = dict(existing_payload or {})
+    tracker_payload = tracker_payload or {}
+    for field, tracker_value in tracker_payload.items():
+        if field.startswith('_') and field != '_po_send_date_manual':
+            continue
+        if import_blankish(tracker_value):
+            continue
+        if field in IMPORT_TRACKER_AUTHORITATIVE_FIELDS:
+            merged[field] = tracker_value
+            continue
+        if import_blankish(merged.get(field)):
+            merged[field] = tracker_value
+
+    # Keep aliases paired.
+    if not import_blankish(merged.get('po_yupi')) and import_blankish(merged.get('yupi_po')):
+        merged['yupi_po'] = merged.get('po_yupi')
+    if not import_blankish(merged.get('yupi_po')) and import_blankish(merged.get('po_yupi')):
+        merged['po_yupi'] = merged.get('yupi_po')
+    if not import_blankish(merged.get('source_req_dlv_date')) and import_blankish(merged.get('req_dlv_date')):
+        merged['req_dlv_date'] = merged.get('source_req_dlv_date')
+    if not import_blankish(merged.get('req_dlv_date')) and import_blankish(merged.get('source_req_dlv_date')):
+        merged['source_req_dlv_date'] = merged.get('req_dlv_date')
+    return apply_import_formula_columns(merged)
+
+
+def sync_import_tracker_to_dashboard(columns=None):
+    """Pull existing rows/user inputs from the main Import tracker into DB.
+
+    Called during Copy Sheet. It updates matching DB rows and can also add rows
+    that exist only in the tracker, preventing the dashboard from looking blank
+    when the tracker sheet already has values.
+    """
+    columns = import_layout_columns() if columns is None else columns
+    tracker_rows = import_layout_tracker_visible_rows(columns)
+    if not tracker_rows:
+        return {'rows': 0, 'seen': 0, 'added': 0, 'skipped': 0}
+
+    existing_rows = ImportDashboardRow.query.all()
+    existing_by_key = {}
+    for row in existing_rows:
+        try:
+            data = json.loads(row.data_json or '{}')
+        except (TypeError, json.JSONDecodeError):
+            data = {}
+        data = apply_import_formula_columns(dict(data))
+        for key in import_layout_target_candidate_keys(data):
+            existing_by_key.setdefault(key, row)
+
+    now = datetime.utcnow()
+    seen = 0
+    added = 0
+    skipped = 0
+    duplicate_counts = {}
+
+    for tracker_payload in tracker_rows:
+        keys = import_layout_target_candidate_keys(tracker_payload)
+        if not keys:
+            skipped += 1
+            continue
+        current = next((existing_by_key[k] for k in keys if k in existing_by_key), None)
+        if current:
+            try:
+                existing_payload = json.loads(current.data_json or '{}')
+            except (TypeError, json.JSONDecodeError):
+                existing_payload = {}
+            current.data_json = json.dumps(merge_import_tracker_payload(existing_payload, tracker_payload), ensure_ascii=False)
+            current.updated_at = now
+            if current.source_key == 'import_tracker':
+                current.last_seen_at = now
+                current.sheet_row = tracker_payload.get('_sheet_row') or current.sheet_row
+            seen += 1
+            continue
+
+        source_uid_raw = '|'.join(keys)
+        source_uid = hashlib.sha1(source_uid_raw.encode('utf-8')).hexdigest()
+        duplicate_counts[source_uid] = duplicate_counts.get(source_uid, 0) + 1
+        row_key = f"import_tracker:{source_uid}:{duplicate_counts[source_uid]}"
+        data = apply_import_formula_columns(dict(tracker_payload))
+        row = ImportDashboardRow(
+            row_key=row_key,
+            source_key='import_tracker',
+            source_label='Import Tracker',
+            source_uid=source_uid,
+            sheet_row=tracker_payload.get('_sheet_row'),
+            vendor_name=import_nonblank(data.get('vendor_name')) or import_nonblank(data.get('vendor')),
+            data_json=json.dumps(data, ensure_ascii=False),
+            first_seen_at=now,
+            last_seen_at=now,
+            updated_at=now,
+        )
+        db.session.add(row)
+        added += 1
+        for key in keys:
+            existing_by_key.setdefault(key, row)
+
+    return {'rows': len(tracker_rows), 'seen': seen, 'added': added, 'skipped': skipped}
+
 def sync_import_sheet_to_dashboard():
     columns, sheet_rows = import_sheet_rows(force_metadata=True)
     filter_vendors, vendor_source = import_vendor_filter_names()
@@ -2278,9 +2463,23 @@ def sync_import_sheet_to_dashboard():
             updated_at=now,
         ))
         added += 1
+    tracker_info = {'rows': 0, 'seen': 0, 'added': 0, 'skipped': 0}
+    try:
+        tracker_info = sync_import_tracker_to_dashboard(columns)
+    except Exception as tracker_exc:
+        tracker_info = {'rows': 0, 'seen': 0, 'added': 0, 'skipped': 0, 'error': str(tracker_exc)}
     db.session.commit()
     clear_runtime_caches()
-    return {'added': added, 'seen': seen, 'sheet_rows': len(sheet_rows), 'vendor_count': vendor_count, 'vendor_filter_count': len(filter_vendors), 'vendor_filter_source': vendor_source, 'columns': columns}
+    return {
+        'added': added,
+        'seen': seen,
+        'sheet_rows': len(sheet_rows),
+        'vendor_count': vendor_count,
+        'vendor_filter_count': len(filter_vendors),
+        'vendor_filter_source': vendor_source,
+        'tracker': tracker_info,
+        'columns': columns,
+    }
 
 RFQ_DASHBOARD_ONLY_FIELDS = {'private_remarks_1', 'private_remarks_2'}
 
@@ -8120,12 +8319,17 @@ def get_import_data():
         page = max(int(request.args.get('page', 1)), 1)
         per_page = min(max(int(request.args.get('per_page', 25)), 1), 500)
         search = clean(request.args.get('search')) or ''
+        selected_yupi_po = [clean(v) for v in request.args.getlist('yupi_po') if clean(v)]
+        selected_vendors = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
+        none_yupi_po = any(v == '__NONE_PLACEHOLDER__' for v in selected_yupi_po)
+        none_vendor = any(v == '__NONE_PLACEHOLDER__' for v in selected_vendors)
+        selected_yupi_po = {v.strip().lower() for v in selected_yupi_po if v != '__NONE_PLACEHOLDER__'}
+        selected_vendors = {v.strip().lower() for v in selected_vendors if v != '__NONE_PLACEHOLDER__'}
         sync_info = None
 
         # Do not auto-sync when the table is empty. Opening /Import must not scan
-        # the huge source sheets. The source sheets are read only when the user
-        # explicitly clicks Copy Sheet or uploads a Vendor Import file that calls
-        # this endpoint with refresh=1.
+        # the huge source sheets. The source sheets and main Import tracker are
+        # read only when the user explicitly clicks Copy Sheet or uploads Vendor Import.
         if force:
             sync_info = sync_import_sheet_to_dashboard()
 
@@ -8144,12 +8348,42 @@ def get_import_data():
                     ImportDashboardRow.data_json.ilike(pattern),
                 ))
 
-        total = q.count()
-        db_rows = q.order_by(
+        # Import filters live inside data_json, so filter after the cheap DB
+        # search. Import rows are already vendor-scoped by Copy Sheet and much
+        # smaller than the source sheets, so this stays fast while giving exact
+        # dropdown behavior.
+        candidate_rows = q.order_by(
             ImportDashboardRow.first_seen_at.desc(),
             ImportDashboardRow.id.desc(),
-        ).offset((page - 1) * per_page).limit(per_page).all()
-        rows = [import_dashboard_row_to_dict(row, columns) for row in db_rows]
+        ).all()
+
+        parsed = []
+        for row in candidate_rows:
+            try:
+                data = json.loads(row.data_json or '{}')
+            except (TypeError, json.JSONDecodeError):
+                data = {}
+            data = apply_import_formula_columns(dict(data))
+            yupi = import_nonblank(data.get('yupi_po')) or import_nonblank(data.get('po_yupi'))
+            vendor = import_nonblank(data.get('vendor_name')) or import_nonblank(data.get('vendor')) or import_nonblank(row.vendor_name)
+            parsed.append({'row': row, 'data': data, 'yupi_po': yupi, 'vendor': vendor})
+
+        def passes(item, ignore=None):
+            if none_yupi_po or none_vendor:
+                return False
+            if ignore != 'yupi_po' and selected_yupi_po and item['yupi_po'].strip().lower() not in selected_yupi_po:
+                return False
+            if ignore != 'vendor' and selected_vendors and item['vendor'].strip().lower() not in selected_vendors:
+                return False
+            return True
+
+        filtered_items = [item for item in parsed if passes(item)]
+        yupi_options = sorted({item['yupi_po'] for item in parsed if item['yupi_po'] and passes(item, ignore='yupi_po')}, key=lambda s: s.lower())
+        vendor_options = sorted({item['vendor'] for item in parsed if item['vendor'] and passes(item, ignore='vendor')}, key=lambda s: s.lower())
+
+        total = len(filtered_items)
+        page_items = filtered_items[(page - 1) * per_page: page * per_page]
+        rows = [import_dashboard_row_to_dict(item['row'], columns) for item in page_items]
 
         return jsonify({
             'data': rows,
@@ -8158,6 +8392,10 @@ def get_import_data():
             'page': page,
             'per_page': per_page,
             'vendor_count': vendor_count,
+            'filters': {
+                'yupi_po': yupi_options,
+                'vendors': vendor_options,
+            },
             'sources': [{'key': s['key'], 'label': s['label']} for s in IMPORT_SOURCE_SHEETS],
             'sync': sync_info,
         })
