@@ -5560,7 +5560,23 @@ const App = () => {
         }
         .window-sticky-table-header thead th {
           box-shadow: inset 0 -1px 0 rgba(148, 163, 184, 0.28), inset -1px 0 0 rgba(148, 163, 184, 0.28) !important;
-          white-space: nowrap;
+          white-space: normal !important;
+          overflow-wrap: anywhere;
+          word-break: normal;
+          line-height: 1.15;
+          vertical-align: middle;
+        }
+        .window-sticky-table-header .freeze-header {
+          min-height: 2.5rem;
+          height: 100%;
+          padding-right: 1.25rem;
+          align-items: center;
+        }
+        .window-sticky-table-header .freeze-header-label {
+          white-space: normal !important;
+          overflow-wrap: anywhere;
+          word-break: normal;
+          line-height: 1.15;
         }
         .window-sticky-table-header button,
         .window-sticky-table-header select,
