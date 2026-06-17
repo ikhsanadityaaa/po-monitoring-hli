@@ -1496,6 +1496,7 @@ const App = () => {
   const [importFilters, setImportFilters] = useState({ yupi_po: [], vendors: [] });
   const [importOptions, setImportOptions] = useState({ yupi_po: [], vendors: [] });
   const [importReqDlvSort, setImportReqDlvSort] = useState('newest');
+  const [importYupiPoSort, setImportYupiPoSort] = useState('');
   const [rfqEditedRowKeys, setRfqEditedRowKeys] = useState(new Set());
   const rfqDashboardOnlyFields = new Set(['private_remarks_1', 'private_remarks_2']);
 
@@ -1992,13 +1993,14 @@ const App = () => {
     } finally { setLoading(false); }
   }, [addToast, rfqPage, rfqPerPage, rfqAppliedSearch, rfqFilters, rfqPicFilter, rfqShowSimilarity]);
 
-  const fetchImportData = useCallback(async (page = importPage, perPage = importPerPage, search = importAppliedSearch, refresh = false, filters = importFilters, reqDlvSort = importReqDlvSort) => {
+  const fetchImportData = useCallback(async (page = importPage, perPage = importPerPage, search = importAppliedSearch, refresh = false, filters = importFilters, reqDlvSort = importReqDlvSort, yupiPoSort = importYupiPoSort) => {
     setLoading(true);
     try {
       const params = new URLSearchParams({ page, per_page: perPage });
       if (search) params.append('search', search);
       if (refresh) params.append('refresh', '1');
       if (reqDlvSort) params.append('req_dlv_sort', reqDlvSort);
+      if (yupiPoSort) params.append('yupi_po_sort', yupiPoSort);
       resolveFilter(filters?.yupi_po).forEach(v => params.append('yupi_po', v));
       resolveFilter(filters?.vendors).forEach(v => params.append('vendor_name', v));
       const res = await api.get(`/api/import/data?${params}`);
@@ -2014,16 +2016,16 @@ const App = () => {
         const vendorFilterCount = Number(res.data.sync.vendor_filter_count || 0);
         const vendorSource = res.data.sync.vendor_filter_source === 'existing_import_rows' ? 'current Import vendors' : 'Vendor Import';
         const msg = added
-          ? `Copied ${added} new Import rows and refreshed ${seen} existing rows`
+          ? `Copied ${added} new Import rows and skipped ${seen} existing rows`
           : sheetRows
-            ? `Refreshed ${seen} Import rows from source sheets (${vendorFilterCount} ${vendorSource})`
+            ? `No new rows. ${seen} existing Import rows already in dashboard (${vendorFilterCount} ${vendorSource})`
             : 'No Import rows found in source sheets';
         addToast(msg, 'success');
       }
     } catch (e) {
       addToast(`Failed to load Import data: ${e.response?.data?.error || e.message}`, 'error');
     } finally { setLoading(false); }
-  }, [addToast, importPage, importPerPage, importAppliedSearch, importFilters, importReqDlvSort]);
+  }, [addToast, importPage, importPerPage, importAppliedSearch, importFilters, importReqDlvSort, importYupiPoSort]);
 
   const updateImportCell = async (rowKey, field, value) => {
     setImportEditingCell(null);
@@ -4245,7 +4247,7 @@ const App = () => {
         const res = await api.post('/api/import/vendors/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
         addToast(res.data?.message || 'Import vendors updated', 'success');
         setImportPage(1);
-        fetchImportData(1, importPerPage, importAppliedSearch, true, importFilters);
+        fetchImportData(1, importPerPage, importAppliedSearch, true, importFilters, importReqDlvSort, importYupiPoSort);
       } catch (err) {
         addToast(`Failed to upload import vendors: ${err.response?.data?.error || err.message}`, 'error');
       }
@@ -4522,7 +4524,7 @@ const App = () => {
           <div className="flex flex-wrap items-center gap-2">
             <DownloadButton onClick={() => downloadBlob('/api/import/vendor-template', `Import_Vendor_Template_${new Date().toISOString().slice(0,10)}.xlsx`, 'Import Vendor Template')} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><Download className="w-4 h-4"/>Template Vendor</DownloadButton>
             <label className="flex items-center gap-2 px-3 py-2.5 bg-slate-600 hover:bg-slate-700 text-white rounded-xl text-sm font-semibold shadow-sm cursor-pointer"><FileSpreadsheet className="w-4 h-4"/>Upload Vendor Import<input type="file" accept=".xlsx,.xls,.csv" multiple onChange={handleVendorUpload} className="hidden"/></label>
-            <button onClick={() => fetchImportData(importPage, importPerPage, importAppliedSearch, true, importFilters)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><RotateCcw className="w-4 h-4"/>Copy Sheet</button>
+            <button onClick={() => fetchImportData(importPage, importPerPage, importAppliedSearch, true, importFilters, importReqDlvSort, importYupiPoSort)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><RotateCcw className="w-4 h-4"/>Copy Sheet</button>
             {checklistCount > 0 && (
               <button onClick={() => setShowImportChecklist(v => !v)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
                 {showImportChecklist ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}
@@ -4533,30 +4535,43 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="grid grid-cols-1 gap-2 md:grid-cols-[120px_minmax(220px,1fr)_minmax(150px,220px)_minmax(180px,260px)_100px_100px] items-end">
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-[120px_120px_minmax(220px,1fr)_minmax(150px,220px)_minmax(180px,260px)_100px_100px] items-end">
             <div className="min-w-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ Req Dlv Date</label>
               <select
                 className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                 value={importReqDlvSort}
-                onChange={e=>{ const nextSort=e.target.value; setImportReqDlvSort(nextSort); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, importFilters, nextSort); }}
+                onChange={e=>{ const nextSort=e.target.value; setImportReqDlvSort(nextSort); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, importFilters, nextSort, importYupiPoSort); }}
                 title="Sort Req Dlv Date"
               >
                 <option value="oldest">Oldest ↑</option>
                 <option value="newest">Newest ↓</option>
               </select>
             </div>
-            <div className="min-w-0"><label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Import</label><input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/></div>
+            <div className="min-w-0">
+              <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ YUPI PO</label>
+              <select
+                className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                value={importYupiPoSort}
+                onChange={e=>{ const nextSort=e.target.value; setImportYupiPoSort(nextSort); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, importFilters, importReqDlvSort, nextSort); }}
+                title="Sort YUPI PO"
+              >
+                <option value="">Default</option>
+                <option value="asc">A-Z ↑</option>
+                <option value="desc">Z-A ↓</option>
+              </select>
+            </div>
+            <div className="min-w-0"><label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Import</label><input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/></div>
             <div className="min-w-0">
               <MultiSelect label="YUPI PO" options={importOptions.yupi_po || []} selected={importFilters.yupi_po}
-                onChange={v=>{ const next={...importFilters, yupi_po:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next); }} darkMode={darkMode} txt2={txt2}/>
+                onChange={v=>{ const next={...importFilters, yupi_po:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }} darkMode={darkMode} txt2={txt2}/>
             </div>
             <div className="min-w-0">
               <MultiSelect label="Vendor Name" options={importOptions.vendors || []} selected={importFilters.vendors}
-                onChange={v=>{ const next={...importFilters, vendors:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next); }} darkMode={darkMode} txt2={txt2}/>
+                onChange={v=>{ const next={...importFilters, vendors:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <button onClick={()=>{ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">Search</button>
-            <button onClick={()=>{ const next={ yupi_po: [], vendors: [] }; const nextSort='newest'; setImportSearch(''); setImportAppliedSearch(''); setImportFilters(next); setImportReqDlvSort(nextSort); setImportPage(1); fetchImportData(1, importPerPage, '', false, next, nextSort); }} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
+            <button onClick={()=>{ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">Search</button>
+            <button onClick={()=>{ const next={ yupi_po: [], vendors: [] }; const nextSort='newest'; const nextYupiSort=''; setImportSearch(''); setImportAppliedSearch(''); setImportFilters(next); setImportReqDlvSort(nextSort); setImportYupiPoSort(nextYupiSort); setImportPage(1); fetchImportData(1, importPerPage, '', false, next, nextSort, nextYupiSort); }} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
         </FilterPanel>
 
@@ -4602,7 +4617,7 @@ const App = () => {
           </table>
         </DataTableScroll>
 
-        <PagePagination darkMode={darkMode} txt2={txt2} page={importPage} totalPages={totalPages} total={importTotal} perPage={importPerPage} onPageChange={(p)=>{ setImportPage(p); fetchImportData(p, importPerPage, importAppliedSearch, false, importFilters); }} onPerPageChange={(next)=>{ setImportPerPage(next); setImportPage(1); fetchImportData(1, next, importAppliedSearch, false, importFilters); }} />
+        <PagePagination darkMode={darkMode} txt2={txt2} page={importPage} totalPages={totalPages} total={importTotal} perPage={importPerPage} onPageChange={(p)=>{ setImportPage(p); fetchImportData(p, importPerPage, importAppliedSearch, false, importFilters, importReqDlvSort, importYupiPoSort); }} onPerPageChange={(next)=>{ setImportPerPage(next); setImportPage(1); fetchImportData(1, next, importAppliedSearch, false, importFilters, importReqDlvSort, importYupiPoSort); }} />
       </div>
     );
   };
