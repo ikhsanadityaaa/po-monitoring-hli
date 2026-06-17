@@ -3255,18 +3255,31 @@ def sync_vendor_control_cell(sheet_row, field, value):
     return {'synced': True, 'range': range_name}
 
 def parse_date(val):
-    if val is None: return None
+    if val is None:
+        return None
     try:
-        if pd.isna(val): return None
-    except (TypeError, ValueError): pass
+        if pd.isna(val):
+            return None
+    except (TypeError, ValueError):
+        pass
+
     raw = str(val).strip()
+    if not raw or raw.lower() in ('nan', 'none', 'nat', '-', '#n/a', 'n/a'):
+        return None
+
     if re.match(r'^\d{8}(\.0)?$', raw):
         try:
             return datetime.strptime(raw[:8], '%Y%m%d').date()
         except ValueError:
             pass
-    try: return pd.to_datetime(val).date()
-    except: return None
+
+    try:
+        parsed = pd.to_datetime(val, errors='coerce')
+        if pd.isna(parsed):
+            return None
+        return parsed.date()
+    except Exception:
+        return None
 
 def safe_float(val, default=0.0):
     try:
@@ -8376,9 +8389,12 @@ def get_import_data():
         def _import_req_date_key(item):
             data = item.get('data') or {}
             d = parse_date(import_nonblank(data.get('req_dlv_date')) or import_nonblank(data.get('source_req_dlv_date')))
-            if not d:
+            try:
+                if d is None or pd.isna(d):
+                    return (1, 0)
+                ordinal = d.toordinal()
+            except Exception:
                 return (1, 0)
-            ordinal = d.toordinal()
             return (0, ordinal if req_dlv_sort == 'oldest' else -ordinal)
 
         filtered_items.sort(key=_import_req_date_key)
