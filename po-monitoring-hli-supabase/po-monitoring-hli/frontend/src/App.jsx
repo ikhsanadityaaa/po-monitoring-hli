@@ -1061,6 +1061,54 @@ const FloatingTableScrollbar = ({ targetRef, darkMode }) => {
 
 const DataTableScroll = ({ children, className = '', darkMode }) => {
   const ref = useRef(null);
+
+  useEffect(() => {
+    const frame = ref.current;
+    if (!frame) return undefined;
+
+    const stickyTop = 0;
+    let raf = null;
+
+    const applyHeaderLock = () => {
+      raf = null;
+      const table = frame.querySelector('table');
+      const thead = frame.querySelector('thead');
+      if (!table || !thead) return;
+
+      const frameRect = frame.getBoundingClientRect();
+      const tableRect = table.getBoundingClientRect();
+      const headerHeight = thead.getBoundingClientRect().height || 0;
+      const maxTranslate = Math.max(0, tableRect.height - headerHeight);
+      const shouldStick = frameRect.top < stickyTop && frameRect.bottom > stickyTop + headerHeight;
+      const translateY = shouldStick
+        ? Math.min(Math.max(stickyTop - frameRect.top, 0), maxTranslate)
+        : 0;
+
+      frame.style.setProperty('--table-header-translate-y', `${Math.round(translateY)}px`);
+      frame.classList.toggle('table-header-window-locked', translateY > 0);
+    };
+
+    const schedule = () => {
+      if (raf != null) return;
+      raf = window.requestAnimationFrame(applyHeaderLock);
+    };
+
+    schedule();
+    window.addEventListener('scroll', schedule, { passive: true });
+    window.addEventListener('resize', schedule);
+    frame.addEventListener('scroll', schedule, { passive: true });
+    const resizeObserver = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(schedule) : null;
+    resizeObserver?.observe(frame);
+
+    return () => {
+      if (raf != null) window.cancelAnimationFrame(raf);
+      window.removeEventListener('scroll', schedule);
+      window.removeEventListener('resize', schedule);
+      frame.removeEventListener('scroll', schedule);
+      resizeObserver?.disconnect();
+    };
+  }, [children]);
+
   return (
     <>
       <div
@@ -5406,16 +5454,21 @@ const App = () => {
         .data-table-page table td {
           border-right: 1px solid rgba(148, 163, 184, 0.28);
         }
-        .data-table-scroll thead th {
-          position: sticky !important;
-          top: 0 !important;
-          z-index: 35;
-          box-shadow: 0 1px 0 rgba(148, 163, 184, 0.28);
-          background-clip: padding-box;
-        }
         .data-table-scroll thead {
           position: relative;
-          z-index: 34;
+          z-index: 55;
+          transform: translateY(var(--table-header-translate-y, 0px));
+          transition: transform 0.02s linear;
+          will-change: transform;
+        }
+        .data-table-scroll.table-header-window-locked thead {
+          filter: drop-shadow(0 6px 10px rgba(15, 23, 42, 0.10));
+        }
+        .data-table-scroll thead th {
+          position: relative !important;
+          z-index: 56;
+          box-shadow: 0 1px 0 rgba(148, 163, 184, 0.28);
+          background-clip: padding-box;
         }
         .data-table-scroll-frame {
           border: 1px solid rgba(148, 163, 184, 0.32);
