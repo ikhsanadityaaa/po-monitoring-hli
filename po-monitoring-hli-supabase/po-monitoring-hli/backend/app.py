@@ -1270,6 +1270,17 @@ IMPORT_HYPERLINK_FIELDS = {'soft_copy_doc'}
 # dashboard database and preserved on Copy Sheet, but they are not read from or
 # written back to the vendor source sheets.
 IMPORT_DASHBOARD_LOCAL_FIELDS = {'po_send_date'}
+IMPORT_SOURCE_MANAGED_FIELDS = {
+    # These values come from the two vendor source sheets. During Copy Sheet,
+    # fresh non-empty source values must replace stale dashboard placeholders.
+    'po_date_by_email', 'site', 'yupi_po', 'po_yupi', 'vendor',
+    'req_dlv_date', 'source_req_dlv_date', 'so', 'group', 'po_sementara',
+    'item_yupi', 'item_name', 'spec', 'remark_yupi', 'reschedule',
+    'ord_qty', 'unit', 'unit_price', 'amount', 'vendor_name',
+    'purchase_price', 'currency', 'incoterm', 'forwarder', 'bl_number',
+    'inv_no', 'non_ski',
+}
+
 IMPORT_LOCAL_EDIT_FIELDS = {
     # Every visible Import column can be edited from the dashboard and should
     # survive refreshes. Some fields are calculated by default but still map
@@ -1286,8 +1297,8 @@ IMPORT_LOCAL_EDIT_FIELDS = {
 
 # Fields needed for formulas/sync but hidden from the dashboard table.
 IMPORT_SOURCE_ONLY_COLUMNS = [
-    {'field': 'po_yupi',             'label': 'PO YUPI'},
-    {'field': 'source_req_dlv_date', 'label': 'Req. Dlv Date'},
+    {'sheet_col': 'R', 'field': 'po_yupi',             'label': 'PO YUPI'},
+    {'sheet_col': 'W', 'field': 'source_req_dlv_date', 'label': 'Req. Dlv Date'},
 ]
 
 IMPORT_SYNC_FIELD_ALIASES = {
@@ -1299,7 +1310,7 @@ IMPORT_SYNC_FIELD_ALIASES = {
 IMPORT_REFERENCE_VISIBLE_COLUMNS = [
     {'sheet_col': 'A',  'field': 'status',              'label': 'STATUS',                 'width': 132, 'type': 'status'},
     {'sheet_col': 'B',  'field': 'days_left',           'label': 'Days Left',              'width': 64,  'formula': True},
-    {'field': 'po_send_date',                'label': 'PO Send Date',          'width': 124, 'local': True},
+    {'sheet_col': 'C',  'field': 'po_send_date',         'label': 'PO Send Date',          'width': 124, 'local': True},
     {'sheet_col': 'D',  'field': 'site',                'label': 'Site',                   'width': 78,  'formula': True},
     {'sheet_col': 'E',  'field': 'yupi_po',             'label': 'YUPI PO',                'width': 118},
     {'sheet_col': 'F',  'field': 'vendor',              'label': 'Vendor',                 'width': 190, 'formula': True},
@@ -1310,7 +1321,7 @@ IMPORT_REFERENCE_VISIBLE_COLUMNS = [
     {'sheet_col': 'K',  'field': 'import_remarks',      'label': 'Import Remarks',         'width': 220},
     {'sheet_col': 'L',  'field': 'so',                  'label': 'SO',                     'width': 140},
     {'sheet_col': 'M',  'field': 'group',               'label': 'GROUP',                  'width': 116},
-    {'sheet_col': 'C',  'field': 'po_date_by_email',    'label': 'PO DATE\n(By Email)',    'width': 132},
+    {'sheet_col': 'O',  'source_sheet_col': 'C', 'field': 'po_date_by_email',    'label': 'PO DATE\n(By Email)',    'width': 132},
     {'sheet_col': 'Q',  'field': 'po_sementara',        'label': 'PO SEMENTARA',           'width': 160},
     {'sheet_col': 'S',  'field': 'item_yupi',           'label': 'Item Yupi',              'width': 130},
     {'sheet_col': 'T',  'field': 'item_name',           'label': 'Item name',              'width': 260},
@@ -1422,6 +1433,24 @@ def import_clean_header(value, fallback):
 def import_header_key(value):
     return re.sub(r'[^a-z0-9]+', '', (clean(value) or '').lower())
 
+
+def import_blankish(value):
+    """True for empty/placeholder values from sheets.
+
+    Google Sheet trackers often use '-' as a visual placeholder. Treating it as
+    real data caused old cached Import rows to keep '-' in YUPI PO / Req Dlv Date
+    and block fresh values from the source sheets during Copy Sheet.
+    """
+    raw = clean(value)
+    if raw is None:
+        return True
+    s = str(raw).strip()
+    return not s or s.lower() in ('nan', 'none', 'null', 'n/a', '#n/a') or s in ('-', '–', '—')
+
+
+def import_nonblank(value):
+    return '' if import_blankish(value) else str(clean(value)).strip()
+
 def import_layout_columns(force=False):
     """Return the fixed Import table layout from the reference sheet.
 
@@ -1508,10 +1537,46 @@ def import_detect_data_start(df):
     return 3
 
 def import_detect_header_row(df):
-    for idx in range(min(len(df), 12)):
+    """Find the real header row by matching source header names, not positions.
+
+    The two vendor source sheets have slightly different column locations. The
+    correct row is the one that contains the highest number of known Import
+    headers such as PO YUPI, Req. Dlv Date, Item name, Vendor Name, etc. This is
+    more reliable than assuming a fixed row or requiring one specific column.
+    """
+    if df is None or getattr(df, 'empty', True):
+        return 0
+
+    alias_keys = set()
+    for values in IMPORT_COLUMN_ALIASES.values():
+        alias_keys.update(import_header_key(v) for v in values if v)
+    alias_keys.update(import_header_key(c.get('label')) for c in import_all_mapping_columns(import_layout_columns()))
+    alias_keys.update(import_header_key(c.get('field')) for c in import_all_mapping_columns(import_layout_columns()))
+    alias_keys.discard('')
+
+    best_idx = None
+    best_score = -1
+    max_scan = min(len(df), 60)
+    for idx in range(max_scan):
         labels = [import_header_key(v) for v in df.iloc[idx].tolist()]
-        if 'itemname' in labels and ('vendorname' in labels or 'posementara' in labels):
-            return idx
+        score = sum(1 for label in labels if label in alias_keys)
+        # Strong bonus for the columns that are currently critical for Import.
+        if 'poyupi' in labels:
+            score += 4
+        if 'reqdlvdate' in labels:
+            score += 4
+        if 'itemname' in labels:
+            score += 3
+        if 'vendorname' in labels or 'vendor' in labels:
+            score += 3
+        if 'posementara' in labels:
+            score += 2
+        if score > best_score:
+            best_idx = idx
+            best_score = score
+
+    if best_idx is not None and best_score >= 4:
+        return best_idx
     return max(import_detect_data_start(df) - 1, 0)
 
 def import_source_column_map(df, columns):
@@ -1526,8 +1591,14 @@ def import_source_column_map(df, columns):
     source_map = {}
     for col in columns:
         field = col.get('field')
-        # Prefer explicit aliases over dashboard labels. Example: dashboard
-        # column "YUPI PO" must read/write the source header "PO YUPI".
+        # Dashboard-local fields, such as PO Send Date, must never be read
+        # from the vendor source sheets. They are user inputs stored locally
+        # and synced only to the Import tracker sheet.
+        if field in IMPORT_DASHBOARD_LOCAL_FIELDS:
+            continue
+
+        # Prefer semantic header names first. Source 1 and Source 2 do not have
+        # identical column letters, but the headers are the same.
         keys = []
         keys.extend(IMPORT_COLUMN_ALIASES.get(field, []))
         keys.extend([import_header_key(col.get('label')), import_header_key(field)])
@@ -1536,18 +1607,29 @@ def import_source_column_map(df, columns):
             if key and key not in seen_keys:
                 seen_keys.append(key)
         source_idx = next((by_key[key] for key in seen_keys if key in by_key), None)
-        # Source sheets can move columns as long as headers are stable. If a
-        # header is missing/misread, only then fall back to an explicit sheet_col
-        # mapping. This is needed for PO DATE (By Email), which the user confirmed
-        # comes from source column C even though PO Send Date is a separate local
-        # dashboard input.
-        if source_idx is None and col.get('sheet_col'):
+
+        # Only use fixed letter fallback if the header cannot be found. This
+        # keeps old/local sheets usable, but the normal path remains header-based.
+        fallback_sheet_col = col.get('source_sheet_col') or col.get('sheet_col')
+        if source_idx is None and fallback_sheet_col:
             try:
-                source_idx = column_index_from_letter(str(col.get('sheet_col'))) - 1
+                source_idx = column_index_from_letter(str(fallback_sheet_col)) - 1
             except Exception:
                 source_idx = None
         if source_idx is not None:
             source_map[field] = source_idx
+
+    # Hard aliases for the columns reported in the screenshot. If one of the
+    # duplicate fields is detected, mirror it to the other field so formulas can
+    # use whichever dashboard column asks for it.
+    if 'po_yupi' in source_map and 'yupi_po' not in source_map:
+        source_map['yupi_po'] = source_map['po_yupi']
+    if 'yupi_po' in source_map and 'po_yupi' not in source_map:
+        source_map['po_yupi'] = source_map['yupi_po']
+    if 'source_req_dlv_date' in source_map and 'req_dlv_date' not in source_map:
+        source_map['req_dlv_date'] = source_map['source_req_dlv_date']
+    if 'req_dlv_date' in source_map and 'source_req_dlv_date' not in source_map:
+        source_map['source_req_dlv_date'] = source_map['req_dlv_date']
     return source_map
 
 def import_row_vendor_candidates(values, source_map, columns):
@@ -1578,7 +1660,7 @@ def import_source_rows_fast(source, columns, vendor_set):
 
     try:
         sheet_title = import_source_sheet_title(source)
-        header_range = f"'{sheet_title}'!A1:DI20"
+        header_range = f"'{sheet_title}'!A1:ZZ60"
         header_values = google_sheets_values_get(
             source['spreadsheet_id'],
             header_range,
@@ -1796,14 +1878,14 @@ def apply_import_formula_columns(row):
         row['status'] = status
 
     # Formula/matching columns from the reference sheet.
-    row['site'] = clean(row.get('site')) or ''
-    po_yupi = clean(row.get('po_yupi')) or clean(row.get('yupi_po')) or ''
+    row['site'] = import_nonblank(row.get('site'))
+    po_yupi = import_nonblank(row.get('po_yupi')) or import_nonblank(row.get('yupi_po'))
     row['po_yupi'] = po_yupi
     row['yupi_po'] = po_yupi
-    row['vendor'] = clean(row.get('vendor')) or clean(row.get('vendor_name')) or ''
-    req_raw = clean(row.get('source_req_dlv_date')) or clean(row.get('req_dlv_date'))
-    row['source_req_dlv_date'] = req_raw or ''
-    row['req_dlv_date'] = req_raw or ''
+    row['vendor'] = import_nonblank(row.get('vendor')) or import_nonblank(row.get('vendor_name'))
+    req_raw = import_nonblank(row.get('source_req_dlv_date')) or import_nonblank(row.get('req_dlv_date'))
+    row['source_req_dlv_date'] = req_raw
+    row['req_dlv_date'] = req_raw
 
     etd_date = import_date_from_value(row.get('etd'))
     eta_date = import_date_from_value(row.get('eta'))
@@ -1859,20 +1941,45 @@ def import_row_source_uid(row, columns):
     payload = {
         'source': clean(row.get('_source_key')) or '',
         'sheet_row': row.get('_sheet_row') or '',
-        'po_yupi': clean(row.get('po_yupi')) or clean(row.get('yupi_po')) or '',
-        'po_sementara': clean(row.get('po_sementara')) or '',
-        'item_yupi': clean(row.get('item_yupi')) or '',
-        'so': clean(row.get('so')) or '',
+        'po_yupi': import_nonblank(row.get('po_yupi')) or import_nonblank(row.get('yupi_po')),
+        'po_sementara': import_nonblank(row.get('po_sementara')),
+        'item_yupi': import_nonblank(row.get('item_yupi')),
+        'so': import_nonblank(row.get('so')),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
     return hashlib.sha1(raw.encode('utf-8')).hexdigest()
 
 def merge_import_existing_payload(existing_payload, sheet_payload):
+    """Merge fresh source rows with existing dashboard edits.
+
+    Previous builds preserved every old Import value if it was non-empty. That
+    kept stale '-' placeholders in source-driven columns like YUPI PO and Req Dlv
+    Date, so Copy Sheet could not repair the data even when the source sheets had
+    correct values. Source-managed fields now prefer fresh source values when
+    present. Dashboard-local fields still preserve the user's own input.
+    """
     merged = dict(sheet_payload or {})
     existing_payload = existing_payload or {}
+
     for field in IMPORT_LOCAL_EDIT_FIELDS:
-        if clean(existing_payload.get(field)):
-            merged[field] = existing_payload.get(field)
+        old_value = existing_payload.get(field)
+        new_value = merged.get(field)
+
+        if field in IMPORT_SOURCE_MANAGED_FIELDS:
+            # Fresh non-placeholder source value wins. Preserve existing only if
+            # the source is blank/missing and the existing dashboard value is a
+            # real user value, not '-'.
+            if not import_blankish(new_value):
+                continue
+            if not import_blankish(old_value):
+                merged[field] = old_value
+            continue
+
+        # For dashboard-local/status/checklist/link fields, preserve the value
+        # typed in the dashboard as long as it is not blank/placeholder.
+        if not import_blankish(old_value):
+            merged[field] = old_value
+
     return apply_import_formula_columns(merged)
 
 def import_dashboard_row_to_dict(row, columns):
@@ -7500,7 +7607,7 @@ def set_import_payload_field_aliases(data, field, value):
         data['req_dlv_date'] = value
     return data
 
-def sync_import_cells_to_google_sheet(items):
+def sync_import_cells_to_source_sheets(items):
     """Sync dashboard edits back to the two source Google Sheets.
 
     Each item: {'row': ImportDashboardRow, 'field': field, 'value': value}
@@ -7552,6 +7659,228 @@ def sync_import_cells_to_google_sheet(items):
         google_sheets_values_batch_update(spreadsheet_id, ranges)
         total_ranges += len(ranges)
     return {'synced': True, 'ranges': total_ranges, 'spreadsheets': len(grouped), 'skipped': skipped}
+
+
+# Target Import tracker sync -------------------------------------------------
+# The dashboard reads new Import items from the two vendor/source sheets, but
+# user-maintained fields must also be written to the main Import tracker sheet:
+# https://docs.google.com/spreadsheets/d/1i0N4VdF_vMHjr_0gjrUdS7nCKUpxPYvDWW-HOWSanEM
+# In that tracker, column C is PO Send Date (dashboard user input), while source
+# column C is PO DATE (By Email). Keep these two fields separate.
+IMPORT_LAYOUT_TARGET_FORMULA_FIELDS = {
+    'days_left', 'site', 'yupi_po', 'vendor', 'req_dlv_date',
+    'arrival_check', 'purchase_amount', 'lt_days',
+}
+
+
+def import_layout_target_sheet_title():
+    cache_key = ('import_layout_target_sheet_title', IMPORT_LAYOUT_SHEET_ID, IMPORT_LAYOUT_GID)
+    cached = runtime_cache_get(cache_key)
+    if cached:
+        return cached
+    title = import_sheet_title_for_gid(IMPORT_LAYOUT_SHEET_ID, IMPORT_LAYOUT_GID)
+    runtime_cache_set(cache_key, title, ttl_seconds=3600)
+    return title
+
+
+def import_layout_target_field_columns():
+    mapping = {}
+    for col in import_all_mapping_columns(import_layout_columns()):
+        field = col.get('field')
+        sheet_col = col.get('sheet_col')
+        if field and sheet_col:
+            mapping[field] = str(sheet_col).upper()
+    return mapping
+
+
+def import_layout_target_field_for_dashboard_field(field):
+    # Dashboard formula/display columns map to their raw tracker input columns.
+    if field == 'yupi_po':
+        return 'po_yupi'
+    if field == 'req_dlv_date':
+        return 'source_req_dlv_date'
+    return field
+
+
+def import_layout_target_candidate_keys(data):
+    data = data or {}
+    po_sementara = clean(data.get('po_sementara'))
+    so = clean(data.get('so'))
+    item_yupi = clean(data.get('item_yupi'))
+    po_yupi = clean(data.get('po_yupi')) or clean(data.get('yupi_po'))
+    keys = []
+    def add(prefix, *parts):
+        parts = [clean(p) for p in parts]
+        if all(parts):
+            keys.append(prefix + ':' + '|'.join(p.strip().lower() for p in parts))
+    add('po_sem_item_so', po_sementara, item_yupi, so)
+    add('po_sem_item', po_sementara, item_yupi)
+    add('po_yupi_item_so', po_yupi, item_yupi, so)
+    add('po_yupi_item', po_yupi, item_yupi)
+    add('so_item', so, item_yupi)
+    add('po_sem', po_sementara)
+    # preserve order, remove duplicates
+    out = []
+    for key in keys:
+        if key not in out:
+            out.append(key)
+    return out
+
+
+def import_layout_target_lookup(sheet_title):
+    # Read only the identity area A:S. This avoids pulling the full DI-width sheet
+    # just to find the target row.
+    resp = google_sheets_values_get(
+        IMPORT_LAYOUT_SHEET_ID,
+        f"'{sheet_title}'!A2:S",
+        value_render_option='FORMATTED_VALUE',
+    )
+    values = resp.get('values') or []
+    by_key = {}
+    max_row = 1
+    def cell(row, one_based_idx):
+        idx = one_based_idx - 1
+        return row[idx] if idx < len(row) else ''
+    for row_no, row_values in enumerate(values, start=2):
+        if any(clean(v) for v in row_values):
+            max_row = row_no
+        row_data = {
+            'yupi_po': cell(row_values, 5),
+            'so': cell(row_values, 12),
+            'po_sementara': cell(row_values, 17),
+            'po_yupi': cell(row_values, 18),
+            'item_yupi': cell(row_values, 19),
+        }
+        for key in import_layout_target_candidate_keys(row_data):
+            by_key.setdefault(key, row_no)
+    return {'by_key': by_key, 'max_row': max_row}
+
+
+def sync_import_cells_to_layout_sheet(items):
+    """Sync dashboard edits to the main Import tracker sheet.
+
+    This is separate from the source-sheet sync. Source sheets remain the data
+    source; the Import tracker receives user inputs such as PO Send Date, status,
+    ETD/ETA, remarks, checklist ticks, and Soft Copy Doc links.
+    """
+    if not items:
+        return {'synced': False, 'reason': 'No Import cells to sync'}
+
+    field_columns = import_layout_target_field_columns()
+    if not field_columns:
+        return {'synced': False, 'reason': 'No Import tracker columns are mapped'}
+
+    sheet_title = import_layout_target_sheet_title()
+    lookup = import_layout_target_lookup(sheet_title)
+    by_key = lookup['by_key']
+    next_row = lookup['max_row'] + 1
+
+    grouped = {}
+    for item in items:
+        row = item.get('row')
+        field = clean(item.get('field'))
+        if not row or not field:
+            continue
+        grouped.setdefault(row.row_key, {'row': row, 'fields': set()})['fields'].add(field)
+
+    ranges = []
+    skipped = 0
+    appended = 0
+    updated_rows = set()
+
+    for group in grouped.values():
+        row = group['row']
+        try:
+            data = json.loads(row.data_json or '{}')
+        except (TypeError, json.JSONDecodeError):
+            data = {}
+        data = apply_import_formula_columns(dict(data))
+
+        target_row = None
+        is_new_target_row = False
+        for key in import_layout_target_candidate_keys(data):
+            if key in by_key:
+                target_row = by_key[key]
+                break
+        if not target_row:
+            target_row = next_row
+            next_row += 1
+            appended += 1
+            is_new_target_row = True
+            for key in import_layout_target_candidate_keys(data):
+                by_key.setdefault(key, target_row)
+
+        # Existing rows: sync only fields the user edited, plus their raw alias
+        # columns. New rows: write all non-formula mapped fields so the tracker
+        # has enough identity data for future syncs. Formula columns are left for
+        # the spreadsheet formulas/array formulas.
+        candidate_fields = set(data.keys()) if is_new_target_row else set(group['fields'])
+
+        expanded_fields = set()
+        for field in candidate_fields:
+            mapped = import_layout_target_field_for_dashboard_field(field)
+            expanded_fields.add(mapped)
+            # Keep raw/display aliases in sync for the tracker identity columns.
+            if field in ('yupi_po', 'po_yupi'):
+                expanded_fields.add('po_yupi')
+            if field in ('req_dlv_date', 'source_req_dlv_date'):
+                expanded_fields.add('source_req_dlv_date')
+            if field == 'po_send_date':
+                expanded_fields.add('status')
+
+        for field in sorted(expanded_fields):
+            if field in IMPORT_LAYOUT_TARGET_FORMULA_FIELDS:
+                continue
+            col_letter = field_columns.get(field)
+            if not col_letter:
+                skipped += 1
+                continue
+            value = data.get(field, '')
+            if field == 'po_yupi':
+                value = clean(data.get('po_yupi')) or clean(data.get('yupi_po'))
+            elif field == 'source_req_dlv_date':
+                value = clean(data.get('source_req_dlv_date')) or clean(data.get('req_dlv_date'))
+            ranges.append({
+                'range': f"'{sheet_title}'!{col_letter}{target_row}",
+                'values': [['' if value is None else str(value)]],
+            })
+            updated_rows.add(target_row)
+
+    if not ranges:
+        return {'synced': False, 'reason': 'No mapped Import tracker cells to sync', 'skipped': skipped}
+
+    google_sheets_values_batch_update(IMPORT_LAYOUT_SHEET_ID, ranges)
+    return {
+        'synced': True,
+        'ranges': len(ranges),
+        'rows': len(updated_rows),
+        'appended_rows': appended,
+        'skipped': skipped,
+        'spreadsheet_id': IMPORT_LAYOUT_SHEET_ID,
+    }
+
+
+def sync_import_cells_to_google_sheet(items):
+    """Sync Import edits to both places:
+    1. source/vendor sheets when the edited field belongs there, and
+    2. the main Import tracker sheet for dashboard user inputs.
+    """
+    source_result = {'synced': False, 'reason': 'Not attempted'}
+    layout_result = {'synced': False, 'reason': 'Not attempted'}
+    try:
+        source_result = sync_import_cells_to_source_sheets(items)
+    except Exception as exc:
+        source_result = {'synced': False, 'reason': str(exc)}
+    try:
+        layout_result = sync_import_cells_to_layout_sheet(items)
+    except Exception as exc:
+        layout_result = {'synced': False, 'reason': str(exc)}
+    return {
+        'synced': bool(source_result.get('synced') or layout_result.get('synced')),
+        'source': source_result,
+        'import_tracker': layout_result,
+    }
+
 
 def sync_import_cell_to_google_sheet(row, field, value):
     result = sync_import_cells_to_google_sheet([{'row': row, 'field': field, 'value': value}])
