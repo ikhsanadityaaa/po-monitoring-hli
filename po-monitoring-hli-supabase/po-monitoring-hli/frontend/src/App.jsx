@@ -300,12 +300,13 @@ const workingDaysUntilToday = (dateValue) => {
   return days;
 };
 
-// ─── Import table: Google Drive link chips & checklist columns ────────────
+// ─── Import table: Google Drive link chips, status dropdown & checklist columns ────────────
 const GDRIVE_URL_RE = /https?:\/\/(?:drive|docs)\.google\.com\/\S+/i;
 
 const extractGDriveUrl = (value) => {
-  const m = String(value || '').match(GDRIVE_URL_RE);
-  return m ? m[0].replace(/[),.]+$/, '') : '';
+  const text = String(value || '');
+  const m = text.match(GDRIVE_URL_RE);
+  return m ? m[0].replace(/[),.;]+$/, '') : '';
 };
 
 const gDriveChipLabel = (url) => {
@@ -317,32 +318,38 @@ const gDriveChipLabel = (url) => {
   return 'Buka Drive';
 };
 
-const IMPORT_CHECKLIST_TRUE = new Set(['true', '1', 'yes', 'ya', 'y']);
-const IMPORT_CHECKLIST_FALSE = new Set(['false', '0', 'no', 'tidak', 'n']);
+const IMPORT_STATUS_OPTIONS = ['ON PROCESS', 'ON DELIVERY', 'DELIVERED', 'CANCELED'];
+const IMPORT_CHECKLIST_TRUE = new Set(['true', '1', 'yes', 'ya', 'y', 'checked', 'done', 'ok', '✓', '✅']);
+const IMPORT_CHECKLIST_FALSE = new Set(['false', '0', 'no', 'tidak', 'n', 'unchecked', '❌']);
 const IMPORT_CHECKLIST_VALUES = new Set([...IMPORT_CHECKLIST_TRUE, ...IMPORT_CHECKLIST_FALSE]);
+const IMPORT_CHECKLIST_FIELDS = new Set(['sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo']);
+const IMPORT_FORMULA_FIELDS = new Set(['days_left', 'site', 'yupi_po', 'vendor', 'req_dlv_date', 'eta', 'arrival_check', 'purchase_amount', 'lt_days']);
 
-// Columns from the "YUPI RM & IMPORT MONITORING" sheet that act as
-// process/status checklist flags. These are grouped together and can be
-// shown/hidden as one block via the "Show/Hide Checklist" toggle.
-const IMPORT_CHECKLIST_FIELD_HINTS = new Set([
-  'arrival_check', 'import_check', 'check_if_new',
-  'settlement_pur_process', 'settlement_sales_process', 'invoice_process',
-  'happy_call', 'notice_of_yupi', 'vendor_f_b', 'yupi_confirm', 'yupi_comment',
-]);
+const isImportChecklistColumn = (col) => Boolean(col?.checkbox) || IMPORT_CHECKLIST_FIELDS.has(col?.field);
+const isImportFormulaColumn = (col) => Boolean(col?.formula) || IMPORT_FORMULA_FIELDS.has(col?.field);
+const isImportHyperlinkColumn = (col) => Boolean(col?.hyperlink) || col?.field === 'soft_copy_doc';
 
-// A column counts as a checklist column if it's one of the known flag
-// columns above, or if (from the rows currently loaded) every non-empty
-// value in it looks like a TRUE/FALSE-style flag.
-const isImportChecklistColumn = (col, rows) => {
-  if (IMPORT_CHECKLIST_FIELD_HINTS.has(col.field)) return true;
-  let sawBoolean = false;
-  for (const row of rows) {
-    const v = String(row?.[col.field] ?? '').trim().toLowerCase();
-    if (!v) continue;
-    if (IMPORT_CHECKLIST_VALUES.has(v)) sawBoolean = true;
-    else return false;
-  }
-  return sawBoolean;
+const importCheckboxChecked = (value) => IMPORT_CHECKLIST_TRUE.has(String(value ?? '').trim().toLowerCase());
+
+const importStatusClass = (status, darkMode = false) => {
+  const s = String(status || '').trim().toUpperCase();
+  if (s === 'DELIVERED') return darkMode ? 'bg-green-900/45 text-green-100 border-green-700' : 'bg-green-50 text-green-700 border-green-200';
+  if (s === 'ON DELIVERY') return darkMode ? 'bg-blue-900/45 text-blue-100 border-blue-700' : 'bg-blue-50 text-blue-700 border-blue-200';
+  if (s === 'ON PROCESS') return darkMode ? 'bg-amber-900/45 text-amber-100 border-amber-700' : 'bg-amber-50 text-amber-700 border-amber-200';
+  if (s === 'CANCELED') return darkMode ? 'bg-red-900/45 text-red-100 border-red-700' : 'bg-red-50 text-red-700 border-red-200';
+  return darkMode ? 'bg-gray-800 text-gray-100 border-gray-600' : 'bg-white text-gray-700 border-gray-200';
+};
+
+const importArrivalClass = (value, darkMode = false) => {
+  const s = String(value || '').toLowerCase();
+  if (s.includes('delay')) return darkMode ? 'bg-red-900/40 text-red-100 border-red-700' : 'bg-red-50 text-red-700 border-red-200';
+  if (s.includes('on schedule')) return darkMode ? 'bg-green-900/40 text-green-100 border-green-700' : 'bg-green-50 text-green-700 border-green-200';
+  return darkMode ? 'bg-gray-800 text-gray-200 border-gray-700' : 'bg-slate-50 text-slate-700 border-slate-200';
+};
+
+const importDisplayValue = (value) => {
+  if (value === null || value === undefined || value === '') return '-';
+  return String(value);
 };
 
 
@@ -1358,7 +1365,8 @@ const App = () => {
   const [vendorControlLastUpdated, setVendorControlLastUpdated] = useState(null);
   const [vendorPasswordVisible, setVendorPasswordVisible] = useState({});
 
-  const [pageLoading, setPageLoading] = useState(false);
+  const [pageLoading, setPageLoading] = useState(() => activePage === 'dashboard' && stats === null);
+  const [initialPageLoading, setInitialPageLoading] = useState(() => activePage === 'dashboard' && stats === null);
   const setLoading = setPageLoading;
   const [uploadProgress, setUploadProgress] = useState(null);
   const [toasts, setToasts] = useState([]);
@@ -1514,38 +1522,17 @@ const App = () => {
 
     const completedParams = new URLSearchParams();
     params.forEach((value, key) => completedParams.append(key, value));
-    // Dashboard uses a lightweight summary payload. Detail-heavy lists are loaded only by drilldown endpoints.
+    // Dashboard uses a lightweight SQL-aggregated payload. Drilldown details stay lazy.
     completedParams.set('mode', 'dashboard');
-    const currentYear = String(new Date().getFullYear());
-    const marginDateParams = (!f || f.mode === 'all')
-      ? { date_year: currentYear, yoy_base_year: currentYear }
-      : dateFilterParams(f);
-    const marginParams = new URLSearchParams();
-    Object.entries(marginDateParams).forEach(([key, value]) => { if (value) marginParams.append(key, value); });
-    const marginBaseYear = marginDateParams.date_year || marginDateParams.date_from?.slice(0, 4) || currentYear;
-    if (marginBaseYear) marginParams.set('yoy_base_year', marginBaseYear);
-    appendMultiParam(marginParams, 'client', globalClientFilter);
-    appendMultiParam(marginParams, 'pic', globalPicFilter);
-    marginParams.set('mode', 'dashboard');
 
     const summaryUrl = (summaryParams) => {
       const summaryQs = summaryParams.toString();
       return summaryQs ? `/api/completed/summary?${summaryQs}` : '/api/completed/summary';
     };
     const completedUrl = summaryUrl(completedParams);
-    // One completed-summary request is enough. The all-data response already contains
-    // monthly keys, so the chart can pick the current/filter window without firing
-    // a second heavy request in parallel.
-    const marginUrl = completedUrl;
     const cachedCompleted = readDashboardSummaryCache(completedUrl);
-    const cachedMargin = completedUrl === marginUrl ? cachedCompleted : readDashboardSummaryCache(marginUrl);
-    const hasSummaryCache = Boolean(cachedCompleted && cachedMargin);
+    const hasSummaryCache = Boolean(cachedCompleted);
 
-    // ── Persistent Dashboard cache ─────────────────────────────────────────
-    // If the same filter has been opened before, render directly from localStorage
-    // and do not refetch until the TTL expires. This is the key difference from
-    // the previous version, which showed cache briefly but still recalculated on
-    // every reload. Upload/update actions still clear these keys explicitly.
     const statsCacheKey = dashboardStatsCacheKey(qs);
     const agingCacheKey = dashboardAgingCacheKey(qs);
     const pendingCacheKey = dashboardPendingCacheKey(qs);
@@ -1553,47 +1540,49 @@ const App = () => {
     const cachedAging = readStatsCache(agingCacheKey);
     const cachedPending = readStatsCache(pendingCacheKey);
     const pendingNumber = Number(cachedPending?.total ?? cachedStats?.total_so_count);
-    const hasLightCache = Boolean(cachedStats && Array.isArray(cachedAging) && Number.isFinite(pendingNumber));
+    const hasStatsCache = Boolean(cachedStats && Number.isFinite(pendingNumber));
+    const hasAgingCache = Array.isArray(cachedAging);
 
-    if (hasLightCache && isCurrent()) {
+    if (hasStatsCache && isCurrent()) {
       setStats(cachedStats);
       setSummaryPendingTotal(pendingNumber);
       setDashboardFilterOptions(cachedStats?.filters || { clients: [], pics: [] });
+      setLoading(false);
+      setInitialPageLoading(false);
+    }
+    if (hasAgingCache && isCurrent()) {
       setAgingData(cachedAging);
     }
 
-    setLoading(!hasLightCache);
     setCompletedLoading(!hasSummaryCache);
     setCompletedLoaded(hasSummaryCache);
     setCompletedData(hasSummaryCache ? cachedCompleted : null);
-    setDashboardMarginData(hasSummaryCache ? cachedMargin : null);
+    setDashboardMarginData(hasSummaryCache ? cachedCompleted : null);
 
-    // When everything is already cached, skip the backend entirely.
-    if (hasLightCache && hasSummaryCache) {
+    // If the light Dashboard and completed chart are already cached, do not touch PythonAnywhere.
+    if (hasStatsCache && hasAgingCache && hasSummaryCache) {
       setLoading(false);
+      setInitialPageLoading(false);
       setCompletedLoading(false);
       return;
     }
 
-    // Pre-ping only when the backend is actually needed.
+    // Ping is intentionally DB-free in the backend now, so it only wakes the worker.
     api.get('/api/ping').catch(() => {});
 
-    if (!hasLightCache) {
+    if (!hasStatsCache) {
+      setLoading(true);
+      setInitialPageLoading(true);
       try {
-        const [sRes, aRes, pendingRes] = await Promise.all([
-          api.get(`/api/dashboard/stats${qs}`),
-          api.get(`/api/data/aging${qs}`),
-          api.get(`/api/dashboard/pending-total${qs}`)
-        ]);
+        // First paint waits only for the KPI/status payload. Aging is fetched below in the background.
+        const sRes = await api.get(`/api/dashboard/stats${qs}`);
         if (!isCurrent()) return;
-        const nextAging = Array.isArray(aRes.data) ? aRes.data : [];
-        const nextPending = { total: Number(pendingRes.data?.total) || 0 };
-        setStats(sRes.data);
+        const nextStats = sRes.data || {};
+        const nextPending = { total: Number(nextStats.total_so_count) || 0 };
+        setStats(nextStats);
         setSummaryPendingTotal(nextPending.total);
-        setDashboardFilterOptions(sRes.data?.filters || { clients: [], pics: [] });
-        setAgingData(nextAging);
-        writeStatsCache(statsCacheKey, sRes.data);
-        writeStatsCache(agingCacheKey, nextAging);
+        setDashboardFilterOptions(nextStats?.filters || { clients: [], pics: [] });
+        writeStatsCache(statsCacheKey, nextStats);
         writeStatsCache(pendingCacheKey, nextPending);
       } catch (e) {
         if (isCurrent()) {
@@ -1602,10 +1591,27 @@ const App = () => {
         }
         return;
       } finally {
-        if (isCurrent()) setLoading(false);
+        if (isCurrent()) {
+          setLoading(false);
+          setInitialPageLoading(false);
+        }
       }
     } else {
       setLoading(false);
+      setInitialPageLoading(false);
+    }
+
+    if (!hasAgingCache) {
+      api.get(`/api/data/aging${qs}`)
+        .then((aRes) => {
+          if (!isCurrent()) return;
+          const nextAging = Array.isArray(aRes.data) ? aRes.data : [];
+          setAgingData(nextAging);
+          writeStatsCache(agingCacheKey, nextAging);
+        })
+        .catch((e) => {
+          if (isCurrent()) addToast(`Error memuat aging: ${e.response?.data?.error || e.message}`, 'error');
+        });
     }
 
     if (hasSummaryCache) {
@@ -1613,38 +1619,33 @@ const App = () => {
       return;
     }
 
-    // Do not immediately occupy the backend with the heavier completed-summary query.
-    // This gives users time to switch pages and prevents a Dashboard request from
-    // making Pending Delivery / RFQ feel stuck behind summary processing.
-    await new Promise(resolve => setTimeout(resolve, 350));
+    // Delay the heavier completed chart until the Dashboard has painted.
+    // requestIdleCallback keeps page switches/table loads from being blocked by summary processing.
+    await new Promise((resolve) => {
+      if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+        const timeout = window.setTimeout(resolve, 1800);
+        window.requestIdleCallback(() => {
+          window.clearTimeout(timeout);
+          resolve();
+        }, { timeout: 1800 });
+      } else {
+        window.setTimeout(resolve, 1200);
+      }
+    });
     if (!isCurrent() || activePage !== 'dashboard') {
       setCompletedLoading(false);
       return;
     }
 
     try {
-      if (completedUrl === marginUrl) {
-        const res = await api.get(completedUrl);
-        if (!isCurrent()) return;
-        writeDashboardSummaryCache(completedUrl, res.data);
-        setCompletedData(res.data);
-        setDashboardMarginData(res.data);
-      } else {
-        const [cRes, marginRes] = await Promise.all([
-          api.get(completedUrl),
-          api.get(marginUrl)
-        ]);
-        if (!isCurrent()) return;
-        writeDashboardSummaryCache(completedUrl, cRes.data);
-        writeDashboardSummaryCache(marginUrl, marginRes.data);
-        setCompletedData(cRes.data);
-        setDashboardMarginData(marginRes.data);
-      }
+      const res = await api.get(completedUrl);
+      if (!isCurrent()) return;
+      writeDashboardSummaryCache(completedUrl, res.data);
+      setCompletedData(res.data);
+      setDashboardMarginData(res.data);
       setCompletedLoaded(true);
     } catch (e) {
       if (isCurrent()) {
-        // Mark as loaded even on error so KPI cards stop showing '...' indefinitely.
-        // completedData stays null — the empty-state UI will render instead.
         setCompletedLoaded(true);
         addToast(`Error memuat summary: ${e.response?.data?.error || e.message}`, 'error');
       }
@@ -1856,7 +1857,10 @@ const App = () => {
     const previousRows = importData;
     setImportData(prev => prev.map(row => row._row_key === rowKey ? { ...row, [field]: value } : row));
     try {
-      await api.put('/api/import/cell', { row_key: rowKey, field, value });
+      const res = await api.put('/api/import/cell', { row_key: rowKey, field, value });
+      if (res.data?.row) {
+        setImportData(prev => prev.map(row => row._row_key === rowKey ? { ...row, ...res.data.row } : row));
+      }
       return true;
     } catch (e) {
       setImportData(previousRows);
@@ -1913,6 +1917,7 @@ const App = () => {
     dashboardRequestSeq.current += 1;
     setCompletedLoading(false);
     setLoading(false);
+    setInitialPageLoading(false);
   }, [activePage, globalDateFilter, globalClientFilter, globalPicFilter, fetchDashboard]);
   useEffect(() => {
     if (activePage === 'all-so') {
@@ -3986,21 +3991,22 @@ const App = () => {
   const renderImport = () => {
     const totalPages = Math.max(1, Math.ceil(importTotal / importPerPage));
     const columns = importColumns || [];
-    const checklistFields = new Set(columns.filter(col => isImportChecklistColumn(col, importData)).map(col => col.field));
+    const checklistFields = new Set(columns.filter(col => isImportChecklistColumn(col)).map(col => col.field));
     const checklistCount = checklistFields.size;
     const visibleColumns = showImportChecklist ? columns : columns.filter(col => !checklistFields.has(col.field));
     const colWidth = (col) => {
+      if (Number(col.width)) return Math.max(70, Math.min(Number(col.width), 360));
       const label = String(col.label || '').toLowerCase();
-      if (checklistFields.has(col.field)) return 90;
-      if (label.includes('spec') || label.includes('remark')) return 280;
-      if (label.includes('vendor address')) return 260;
-      if (label.includes('item name')) return 220;
+      if (isImportChecklistColumn(col)) return 82;
+      if (label.includes('spec') || label.includes('remark')) return 320;
+      if (label.includes('item name')) return 260;
       if (label.includes('vendor')) return 190;
-      if (label.includes('status')) return 120;
-      if (label.includes('date') || label.includes('actual')) return 120;
-      return 130;
+      if (label.includes('status')) return 132;
+      if (label.includes('date') || label.includes('actual') || ['etd', 'eta'].includes(col.field)) return 120;
+      if (isImportHyperlinkColumn(col)) return 190;
+      return 126;
     };
-    const tableWidth = visibleColumns.reduce((sum, col) => sum + colWidth(col), 0);
+    const tableWidth = Math.max(1100, visibleColumns.reduce((sum, col) => sum + colWidth(col), 0));
     const handleVendorUpload = async (e) => {
       const files = Array.from(e.target.files || []);
       e.target.value = '';
@@ -4016,16 +4022,32 @@ const App = () => {
         addToast(`Failed to upload import vendors: ${err.response?.data?.error || err.message}`, 'error');
       }
     };
+    const startImportEdit = (row, col) => {
+      if (isImportFormulaColumn(col)) return;
+      const key = `${row._row_key}:${col.field}`;
+      setImportEditingCell(key);
+      setImportEditValue(String(row[col.field] ?? ''));
+    };
     const renderImportCell = (row, col) => {
       const key = `${row._row_key}:${col.field}`;
       const editing = importEditingCell === key;
       const value = row[col.field] ?? '';
-      if (editing) {
-        return <input autoFocus className={`w-full rounded border px-2 py-1 text-xs ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-blue-300 text-slate-800'}`} value={importEditValue} onChange={e=>setImportEditValue(e.target.value)} onBlur={()=>updateImportCell(row._row_key, col.field, importEditValue)} onKeyDown={e=>{ if(e.key==='Enter') updateImportCell(row._row_key, col.field, importEditValue); if(e.key==='Escape') setImportEditingCell(null); }} />;
+
+      if (col.field === 'status' || col.type === 'status') {
+        const current = String(value || 'ON PROCESS').toUpperCase();
+        return (
+          <select
+            value={current}
+            onChange={(e) => updateImportCell(row._row_key, col.field, e.target.value)}
+            className={`w-full rounded-lg border px-2 py-1.5 text-[11px] font-bold outline-none cursor-pointer ${importStatusClass(current, darkMode)}`}
+          >
+            {(col.options || IMPORT_STATUS_OPTIONS).map(opt => <option key={opt} value={opt}>{opt}</option>)}
+          </select>
+        );
       }
-      const valueKey = String(value).trim().toLowerCase();
-      if (checklistFields.has(col.field) && (value === '' || IMPORT_CHECKLIST_VALUES.has(valueKey))) {
-        const checked = IMPORT_CHECKLIST_TRUE.has(valueKey);
+
+      if (isImportChecklistColumn(col)) {
+        const checked = importCheckboxChecked(value);
         return (
           <label className="flex items-center justify-center w-full cursor-pointer py-1">
             <input
@@ -4037,27 +4059,82 @@ const App = () => {
           </label>
         );
       }
-      const driveUrl = extractGDriveUrl(value);
-      if (driveUrl) {
+
+      if (editing) {
+        const isLong = ['spec', 'remark_yupi', 'import_remarks', 'soft_copy_doc'].includes(col.field);
+        const inputCls = `w-full rounded border px-2 py-1 text-xs ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-blue-300 text-slate-800'}`;
+        if (isLong) {
+          return (
+            <textarea
+              autoFocus
+              rows={3}
+              className={`${inputCls} resize-y min-h-[74px]`}
+              value={importEditValue}
+              onChange={e => setImportEditValue(e.target.value)}
+              onBlur={() => updateImportCell(row._row_key, col.field, importEditValue)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) updateImportCell(row._row_key, col.field, importEditValue);
+                if (e.key === 'Escape') setImportEditingCell(null);
+              }}
+            />
+          );
+        }
+        return (
+          <input
+            autoFocus
+            className={inputCls}
+            value={importEditValue}
+            onChange={e => setImportEditValue(e.target.value)}
+            onBlur={() => updateImportCell(row._row_key, col.field, importEditValue)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') updateImportCell(row._row_key, col.field, importEditValue);
+              if (e.key === 'Escape') setImportEditingCell(null);
+            }}
+          />
+        );
+      }
+
+      if (isImportHyperlinkColumn(col)) {
+        const directUrl = row[`${col.field}__url`] || row[`${col.field}_url`] || '';
+        const driveUrl = extractGDriveUrl(directUrl || value);
+        const label = String(value || '').replace(driveUrl, '').replace(/[|\n]+$/g, '').trim() || (driveUrl ? gDriveChipLabel(driveUrl) : '-');
         return (
           <div className="flex items-center gap-1 w-full">
-            <a href={driveUrl} target="_blank" rel="noopener noreferrer" title={driveUrl}
-               className={`flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium truncate border ${darkMode?'bg-blue-900/40 text-blue-300 border-blue-800 hover:bg-blue-900/70':'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'}`}>
-              <FolderOpen className="w-3.5 h-3.5 flex-shrink-0" />
-              <span className="truncate">{gDriveChipLabel(driveUrl)}</span>
-            </a>
-            <button type="button" title="Edit link" onClick={()=>{ setImportEditingCell(key); setImportEditValue(String(value || '')); }} className={`flex-shrink-0 p-1 rounded ${darkMode?'hover:bg-gray-700 text-gray-400':'hover:bg-gray-100 text-gray-400'}`}>
+            {driveUrl ? (
+              <a href={driveUrl} target="_blank" rel="noopener noreferrer" title={driveUrl}
+                 className={`flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium truncate border ${darkMode ? 'bg-blue-900/40 text-blue-300 border-blue-800 hover:bg-blue-900/70' : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'}`}>
+                <FolderOpen className="w-3.5 h-3.5 flex-shrink-0" />
+                <span className="truncate">{label}</span>
+              </a>
+            ) : (
+              <button type="button" onClick={() => startImportEdit(row, col)} className="block min-w-0 truncate text-left hover:underline" title={String(value || '-')}>{label}</button>
+            )}
+            <button type="button" title="Edit link" onClick={() => startImportEdit(row, col)} className={`flex-shrink-0 p-1 rounded ${darkMode ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-100 text-gray-400'}`}>
               <Pencil className="w-3 h-3" />
             </button>
           </div>
         );
       }
-      return <button type="button" className="block w-full truncate text-left" title={String(value || '-')} onClick={()=>{ setImportEditingCell(key); setImportEditValue(String(value || '')); }}>{value || '-'}</button>;
+
+      if (col.field === 'arrival_check') {
+        const text = importDisplayValue(value);
+        return <span className={`inline-flex max-w-full rounded-full border px-2 py-1 text-[11px] font-semibold ${importArrivalClass(value, darkMode)}`} title={text}>{text}</span>;
+      }
+
+      const isFormula = isImportFormulaColumn(col);
+      const isNumeric = Boolean(col.number) || ['ord_qty', 'unit_price', 'amount', 'purchase_price', 'purchase_amount', 'lt_days', 'days_left'].includes(col.field);
+      const isLongText = ['spec', 'remark_yupi', 'import_remarks', 'item_name'].includes(col.field);
+      const display = importDisplayValue(value);
+      const cellInnerClass = `${isNumeric ? 'text-right tabular-nums font-semibold' : 'text-left'} ${isFormula ? (darkMode ? 'text-gray-200' : 'text-slate-700') : ''} ${isLongText ? 'whitespace-normal break-words leading-snug' : 'truncate'}`;
+      if (isFormula) {
+        return <div className={cellInnerClass} title={display}>{display}</div>;
+      }
+      return <button type="button" className={`block w-full ${cellInnerClass} hover:underline decoration-dotted`} title={display} onClick={() => startImportEdit(row, col)}>{display}</button>;
     };
 
     return (
       <div className={`rounded-2xl overflow-hidden ${card}`}>
-        <div className={`px-5 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+        <div className={`px-5 py-4 border-b ${darkMode ? 'border-gray-700' : 'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
           <div className="flex items-center gap-2 min-w-0">
             <Ship className="w-5 h-5 text-blue-500 flex-shrink-0" />
             <h2 className={`text-lg font-bold ${txt}`}>Import</h2>
@@ -4065,13 +4142,13 @@ const App = () => {
             <span className={`text-xs ${txt2}`}>Vendor Import: {fmtNum(importVendorCount)}</span>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <DownloadButton onClick={() => downloadBlob('/api/import/vendor-template', `Import_Vendor_Template_${new Date().toISOString().slice(0,10)}.xlsx`, 'Import Vendor Template')} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><Download className="w-4 h-4"/>Template Vendor</DownloadButton>
+            <DownloadButton onClick={() => downloadBlob('/api/import/vendor-template', `Import_Vendor_Template_${new Date().toISOString().slice(0,10)}.xlsx`, 'Import Vendor Template')} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><Download className="w-4 h-4"/>Template Vendor</DownloadButton>
             <label className="flex items-center gap-2 px-3 py-2.5 bg-slate-600 hover:bg-slate-700 text-white rounded-xl text-sm font-semibold shadow-sm cursor-pointer"><FileSpreadsheet className="w-4 h-4"/>Upload Vendor Import<input type="file" accept=".xlsx,.xls,.csv" multiple onChange={handleVendorUpload} className="hidden"/></label>
-            <button onClick={() => fetchImportData(importPage, importPerPage, importAppliedSearch, true)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><RotateCcw className="w-4 h-4"/>Copy Sheet</button>
+            <button onClick={() => fetchImportData(importPage, importPerPage, importAppliedSearch, true)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><RotateCcw className="w-4 h-4"/>Copy Sheet</button>
             {checklistCount > 0 && (
-              <button onClick={() => setShowImportChecklist(v => !v)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
+              <button onClick={() => setShowImportChecklist(v => !v)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
                 {showImportChecklist ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}
-                {showImportChecklist ? 'Hide Checklist' : 'Show Checklist'}
+                {showImportChecklist ? 'Hide DA-DH Checklist' : 'Show DA-DH Checklist'}
               </button>
             )}
           </div>
@@ -4079,17 +4156,30 @@ const App = () => {
 
         <FilterPanel darkMode={darkMode}>
           <div className="grid grid-cols-1 gap-2 md:grid-cols-[minmax(240px,1fr)_100px_100px] items-end">
-            <div className="min-w-0"><label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Import</label><input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode?'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400':'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/></div>
+            <div className="min-w-0"><label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Import</label><input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/></div>
             <button onClick={()=>{ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">Search</button>
-            <button onClick={()=>{ setImportSearch(''); setImportAppliedSearch(''); setImportPage(1); fetchImportData(1, importPerPage, ''); }} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
+            <button onClick={()=>{ setImportSearch(''); setImportAppliedSearch(''); setImportPage(1); fetchImportData(1, importPerPage, ''); }} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
         </FilterPanel>
 
         <DataTableScroll darkMode={darkMode}>
           <table className="table-fixed text-xs border-collapse" style={{ width: `${tableWidth}px`, minWidth: `${tableWidth}px` }}>
             <colgroup>{visibleColumns.map(col => <col key={col.field} style={{ width: `${colWidth(col)}px` }} />)}</colgroup>
-            <thead className={tblHd}><tr>{visibleColumns.map(col => <th key={col.field} className={`px-2 py-2 text-center font-bold border-r ${darkMode?'border-gray-700 text-gray-200':'border-gray-200 text-slate-700'}`}>{col.label}</th>)}</tr></thead>
-            <tbody className={`divide-y ${tblDv}`}>{importData.length === 0 ? <tr><td colSpan={Math.max(1, visibleColumns.length)} className={`px-4 py-12 text-center ${txt2}`}><Ship className="w-10 h-10 mx-auto mb-2 opacity-40"/>No import data</td></tr> : importData.map(row => <tr key={row._row_key} className={trHov}>{visibleColumns.map(col => <td key={col.field} className={`px-2 py-2 align-top border-r ${darkMode?'border-gray-700':'border-gray-200'} ${txt2}`}>{renderImportCell(row, col)}</td>)}</tr>)}</tbody>
+            <thead className={tblHd}>
+              <tr>{visibleColumns.map(col => (
+                <th key={col.field} className={`px-2 py-2 h-12 text-center align-middle font-bold border-r whitespace-pre-line leading-tight ${darkMode ? 'border-gray-700 text-gray-200' : 'border-gray-200 text-slate-700'}`} title={col.sheet_col ? `${col.sheet_col} - ${col.label}` : col.label}>{col.label}</th>
+              ))}</tr>
+            </thead>
+            <tbody className={`divide-y ${tblDv}`}>
+              {importData.length === 0 ? (
+                <tr><td colSpan={Math.max(1, visibleColumns.length)} className={`px-4 py-12 text-center ${txt2}`}><Ship className="w-10 h-10 mx-auto mb-2 opacity-40"/>No import data</td></tr>
+              ) : importData.map(row => (
+                <tr key={row._row_key} className={trHov}>{visibleColumns.map(col => {
+                  const formula = isImportFormulaColumn(col);
+                  return <td key={col.field} className={`px-2 py-1.5 align-middle border-r ${formula ? (darkMode ? 'bg-gray-800/50' : 'bg-slate-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${txt2}`}>{renderImportCell(row, col)}</td>;
+                })}</tr>
+              ))}
+            </tbody>
           </table>
         </DataTableScroll>
 
@@ -4097,7 +4187,6 @@ const App = () => {
       </div>
     );
   };
-
   const renderItemRegistration = () => {
     const fmtDateShort = (d) => {
       if (!d) return '-';
@@ -5357,7 +5446,7 @@ const App = () => {
         // Dashboard: unblock the page as soon as the lightweight KPI stats are ready.
         // Completed summary keeps its own section-level loader, so the whole page
         // no longer stays covered while the heavier margin analytics are loading.
-        const isDashboardLoading = activePage === 'dashboard' && stats === null;
+        const isDashboardLoading = activePage === 'dashboard' && (initialPageLoading || pageLoading || stats === null);
 
         // Other pages: only show when the page has never loaded data yet
         // (data array is still empty) AND a fetch is actively in-flight.
