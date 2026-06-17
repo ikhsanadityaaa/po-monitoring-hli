@@ -1602,6 +1602,39 @@ def import_uploaded_vendor_names():
     rows = ImportVendor.query.order_by(ImportVendor.vendor_name.asc()).all()
     return [r.vendor_name for r in rows if clean(r.vendor_name)]
 
+def import_existing_dashboard_vendor_names():
+    """Vendor names already present in the Import dashboard DB.
+
+    If Vendor Import has been cleared/empty, Copy Sheet can still repair the
+    currently displayed Import rows by scanning source sheets only for these
+    vendors, instead of scanning all source data.
+    """
+    vendors = set()
+    for row in ImportDashboardRow.query.all():
+        v = clean(row.vendor_name)
+        if v:
+            vendors.add(v)
+        try:
+            data = json.loads(row.data_json or '{}')
+        except (TypeError, json.JSONDecodeError):
+            data = {}
+        for field in ('vendor_name', 'vendor'):
+            v = clean(data.get(field))
+            if v:
+                vendors.add(v)
+    return sorted(vendors, key=lambda s: s.lower())
+
+
+def import_vendor_filter_names():
+    uploaded = import_uploaded_vendor_names()
+    if uploaded:
+        return uploaded, 'vendor_import'
+    existing = import_existing_dashboard_vendor_names()
+    if existing:
+        return existing, 'existing_import_rows'
+    return [], 'none'
+
+
 def import_vendor_names(force_default=False):
     # Keep old callers/templates useful, but sync/import code should call
     # import_uploaded_vendor_names() so it only imports the user's vendor list.
@@ -1659,6 +1692,96 @@ def import_detect_header_row(df):
     if best_idx is not None and best_score >= 4:
         return best_idx
     return max(import_detect_data_start(df) - 1, 0)
+
+
+def import_source_header_score(df):
+    """Score whether a small sheet preview looks like a Yupi source order list.
+
+    This protects Copy Sheet from reading a helper/chart tab when gid=0 does
+    not point to the actual RM/Consumable order-list tab. The real source tabs
+    contain PO YUPI, Req. Dlv Date, Item name, Vendor Name, Ord. Q'ty, etc.
+    """
+    if df is None or getattr(df, 'empty', True):
+        return -1
+    idx = import_detect_header_row(df)
+    try:
+        labels = [import_header_key(v) for v in df.iloc[idx].tolist()]
+    except Exception:
+        labels = []
+    weights = {
+        'poyupi': 10,
+        'reqdlvdate': 10,
+        'itemyupi': 6,
+        'itemname': 6,
+        'vendorname': 6,
+        'posementara': 4,
+        'ordqty': 4,
+        'unitprice': 4,
+        'purchaseprice': 4,
+        'purchaseamount': 4,
+        'noso': 4,
+        'podatebyemail': 3,
+    }
+    return sum(weights.get(label, 0) for label in labels)
+
+
+def import_source_candidate_titles(source):
+    """Return possible tab titles, with the configured gid first."""
+    titles = []
+    try:
+        preferred = import_sheet_title_for_gid(source['spreadsheet_id'], source.get('gid') or '0')
+        if preferred:
+            titles.append(preferred)
+    except Exception:
+        pass
+    try:
+        metadata = google_sheets_metadata(source['spreadsheet_id'])
+        for sheet in metadata.get('sheets', []):
+            props = sheet.get('properties', {})
+            title = props.get('title')
+            if title and title not in titles:
+                titles.append(title)
+    except Exception:
+        pass
+    return titles
+
+
+def import_source_header_preview(source, force=False):
+    """Find the real source order-list tab and return (title, preview_df)."""
+    cache_key = ('import_source_header_preview_v2', source.get('spreadsheet_id'), source.get('gid'))
+    if not force:
+        cached = runtime_cache_get(cache_key)
+        if cached is not None:
+            title, values = cached
+            return title, pd.DataFrame(values).fillna('') if values else pd.DataFrame()
+
+    best_title = None
+    best_values = []
+    best_score = -1
+    for title in import_source_candidate_titles(source):
+        try:
+            values = google_sheets_values_get(
+                source['spreadsheet_id'],
+                f"'{title}'!A1:ZZ60",
+                value_render_option='FORMATTED_VALUE',
+            ).get('values', [])
+            df = pd.DataFrame(values).fillna('') if values else pd.DataFrame()
+            score = import_source_header_score(df)
+            if score > best_score:
+                best_title = title
+                best_values = values
+                best_score = score
+            if score >= 35:
+                break
+        except Exception:
+            continue
+
+    if best_title:
+        runtime_cache_set(cache_key, (best_title, best_values), ttl_seconds=3600)
+        return best_title, pd.DataFrame(best_values).fillna('') if best_values else pd.DataFrame()
+
+    title = import_sheet_title_for_gid(source['spreadsheet_id'], source.get('gid') or '0')
+    return title, pd.DataFrame()
 
 def import_source_column_map(df, columns):
     header_idx = import_detect_header_row(df)
@@ -1748,19 +1871,20 @@ def import_source_rows_fast(source, columns, vendor_set):
     mapping_columns = import_all_mapping_columns(columns)
 
     try:
-        sheet_title = import_source_sheet_title(source)
-        header_range = f"'{sheet_title}'!A1:ZZ60"
-        header_values = google_sheets_values_get(
-            source['spreadsheet_id'],
-            header_range,
-            value_render_option='FORMATTED_VALUE',
-        ).get('values', [])
-        header_df = pd.DataFrame(header_values).fillna('') if header_values else pd.DataFrame()
+        sheet_title, header_df = import_source_header_preview(source, force=True)
         if header_df.empty:
             return []
         source_map = import_source_column_map(header_df, mapping_columns)
         header_idx = import_detect_header_row(header_df)
         data_start_row = header_idx + 2  # 1-based row number after the header
+
+        # Safety net for the uploaded RM/SP source formats. If header parsing
+        # returns a weak map because the tab/header is unusual, force the known
+        # source letters so core columns do not come back blank.
+        source_fallbacks = import_source_fallback_columns(header_df, header_idx)
+        for field in ('po_yupi', 'yupi_po', 'source_req_dlv_date', 'req_dlv_date', 'po_date_by_email', 'site', 'po_sementara', 'item_yupi', 'item_name', 'spec', 'remark_yupi', 'reschedule', 'ord_qty', 'unit', 'unit_price', 'amount', 'vendor_name', 'vendor', 'purchase_price', 'currency', 'purchase_amount', 'so'):
+            if field not in source_map and source_fallbacks.get(field):
+                source_map[field] = column_index_from_letter(source_fallbacks[field]) - 1
 
         needed_col_indexes = set(source_map.values()) | set(IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS)
         if not needed_col_indexes:
@@ -1852,18 +1976,20 @@ def import_source_rows_fast(source, columns, vendor_set):
 
 def import_sheet_rows(force_metadata=False):
     columns = import_layout_columns(force=force_metadata)
-    uploaded_vendors = import_uploaded_vendor_names()
-    vendor_set = {v.strip().lower() for v in uploaded_vendors if v.strip()}
+    filter_vendors, vendor_source = import_vendor_filter_names()
+    vendor_set = {v.strip().lower() for v in filter_vendors if v and v.strip()}
 
-    # Critical performance guard: never scan huge source sheets without the
-    # user's Vendor Import list. The Import page should open from DB instantly;
-    # Copy Sheet only imports rows for uploaded vendors.
+    # Critical performance guard: never scan huge source sheets without a vendor
+    # filter. Prefer uploaded Vendor Import. If that list is empty but dashboard
+    # rows already exist, use those displayed vendors only, so Copy Sheet can
+    # repair stale blank/placeholder fields without reading every source row.
     if not vendor_set:
         return columns, []
 
     rows = []
     for source in IMPORT_SOURCE_SHEETS:
         rows.extend(import_source_rows_fast(source, columns, vendor_set))
+    import_meta_set('last_import_vendor_filter', {'source': vendor_source, 'count': len(vendor_set)})
     return columns, rows
 
 def import_truthy_checkbox_value(value):
@@ -2107,6 +2233,7 @@ def import_dashboard_row_to_dict(row, columns):
 
 def sync_import_sheet_to_dashboard():
     columns, sheet_rows = import_sheet_rows(force_metadata=True)
+    filter_vendors, vendor_source = import_vendor_filter_names()
     vendor_count = len(import_uploaded_vendor_names())
     existing_rows = ImportDashboardRow.query.all()
     existing = {r.row_key: r for r in existing_rows}
@@ -2153,7 +2280,7 @@ def sync_import_sheet_to_dashboard():
         added += 1
     db.session.commit()
     clear_runtime_caches()
-    return {'added': added, 'seen': seen, 'sheet_rows': len(sheet_rows), 'vendor_count': vendor_count, 'columns': columns}
+    return {'added': added, 'seen': seen, 'sheet_rows': len(sheet_rows), 'vendor_count': vendor_count, 'vendor_filter_count': len(filter_vendors), 'vendor_filter_source': vendor_source, 'columns': columns}
 
 RFQ_DASHBOARD_ONLY_FIELDS = {'private_remarks_1', 'private_remarks_2'}
 
@@ -7660,22 +7787,33 @@ def import_source_config(source_key):
     return next((s for s in IMPORT_SOURCE_SHEETS if s.get('key') == source_key), None)
 
 def import_source_sheet_title(source):
-    cache_key = ('import_source_sheet_title', source.get('spreadsheet_id'), source.get('gid'))
+    cache_key = ('import_source_sheet_title_v2', source.get('spreadsheet_id'), source.get('gid'))
     cached = runtime_cache_get(cache_key)
     if cached:
         return cached
-    title = import_sheet_title_for_gid(source['spreadsheet_id'], source.get('gid') or '0')
+    try:
+        title, _preview_df = import_source_header_preview(source)
+    except Exception:
+        title = import_sheet_title_for_gid(source['spreadsheet_id'], source.get('gid') or '0')
     runtime_cache_set(cache_key, title, ttl_seconds=3600)
     return title
 
 def import_source_map_for_sync(source):
-    cache_key = ('import_source_map_for_sync', source.get('spreadsheet_id'), source.get('gid'))
+    cache_key = ('import_source_map_for_sync_v2', source.get('spreadsheet_id'), source.get('gid'))
     cached = runtime_cache_get(cache_key)
     if cached is not None:
         return cached
     columns = import_all_mapping_columns(import_layout_columns())
-    df = read_public_sheet_csv(source['spreadsheet_id'], source.get('gid') or '0', nrows=20)
+    try:
+        _sheet_title, df = import_source_header_preview(source)
+    except Exception:
+        df = read_public_sheet_csv(source['spreadsheet_id'], source.get('gid') or '0', nrows=60)
     source_map = import_source_column_map(df, columns)
+    header_idx = import_detect_header_row(df)
+    source_fallbacks = import_source_fallback_columns(df, header_idx)
+    for field in ('po_yupi', 'yupi_po', 'source_req_dlv_date', 'req_dlv_date', 'po_date_by_email', 'site', 'po_sementara', 'item_yupi', 'item_name', 'spec', 'remark_yupi', 'reschedule', 'ord_qty', 'unit', 'unit_price', 'amount', 'vendor_name', 'vendor', 'purchase_price', 'currency', 'purchase_amount', 'so'):
+        if field not in source_map and source_fallbacks.get(field):
+            source_map[field] = column_index_from_letter(source_fallbacks[field]) - 1
     runtime_cache_set(cache_key, source_map, ttl_seconds=300)
     return source_map
 
