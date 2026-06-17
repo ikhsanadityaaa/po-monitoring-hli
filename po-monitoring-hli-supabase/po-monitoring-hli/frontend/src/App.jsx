@@ -1859,7 +1859,16 @@ const App = () => {
       setImportVendorCount(res.data.vendor_count || 0);
       if (refresh && res.data.sync) {
         const added = Number(res.data.sync.added || 0);
-        addToast(added ? `Copied ${added} new Import rows from sheet` : 'No new Import rows found in sheet', 'success');
+        const seen = Number(res.data.sync.seen || 0);
+        const sheetRows = Number(res.data.sync.sheet_rows || 0);
+        const vendorFilterCount = Number(res.data.sync.vendor_filter_count || 0);
+        const vendorSource = res.data.sync.vendor_filter_source === 'existing_import_rows' ? 'current Import vendors' : 'Vendor Import';
+        const msg = added
+          ? `Copied ${added} new Import rows and refreshed ${seen} existing rows`
+          : sheetRows
+            ? `Refreshed ${seen} Import rows from source sheet (${vendorFilterCount} ${vendorSource})`
+            : 'No Import rows found in source sheet';
+        addToast(msg, 'success');
       }
     } catch (e) {
       addToast(`Failed to load Import data: ${e.response?.data?.error || e.message}`, 'error');
