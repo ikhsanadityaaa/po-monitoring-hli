@@ -8389,10 +8389,10 @@ def get_import_data():
         search = clean(request.args.get('search')) or ''
         selected_yupi_po = [clean(v) for v in request.args.getlist('yupi_po') if clean(v)]
         selected_vendors = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
-        req_dlv_sort = clean(request.args.get('req_dlv_sort')).lower() or 'newest'
+        req_dlv_sort = str(clean(request.args.get('req_dlv_sort')) or '').lower() or 'newest'
         if req_dlv_sort not in ('oldest', 'newest'):
             req_dlv_sort = 'newest'
-        yupi_po_sort = clean(request.args.get('yupi_po_sort')).lower()
+        yupi_po_sort = str(clean(request.args.get('yupi_po_sort')) or '').lower()
         if yupi_po_sort not in ('asc', 'desc'):
             yupi_po_sort = ''
         none_yupi_po = any(v == '__NONE_PLACEHOLDER__' for v in selected_yupi_po)
@@ -8445,15 +8445,15 @@ def get_import_data():
         def passes(item, ignore=None):
             if none_yupi_po or none_vendor:
                 return False
-            if ignore != 'yupi_po' and selected_yupi_po and item['yupi_po'].strip().lower() not in selected_yupi_po:
+            if ignore != 'yupi_po' and selected_yupi_po and str(item.get('yupi_po') or '').strip().lower() not in selected_yupi_po:
                 return False
-            if ignore != 'vendor' and selected_vendors and item['vendor'].strip().lower() not in selected_vendors:
+            if ignore != 'vendor' and selected_vendors and str(item.get('vendor') or '').strip().lower() not in selected_vendors:
                 return False
             return True
 
         filtered_items = [item for item in parsed if passes(item)]
-        yupi_options = sorted({item['yupi_po'] for item in parsed if item['yupi_po'] and passes(item, ignore='yupi_po')}, key=lambda s: s.lower())
-        vendor_options = sorted({item['vendor'] for item in parsed if item['vendor'] and passes(item, ignore='vendor')}, key=lambda s: s.lower())
+        yupi_options = sorted({str(item.get('yupi_po') or '').strip() for item in parsed if str(item.get('yupi_po') or '').strip() and passes(item, ignore='yupi_po')}, key=lambda s: s.lower())
+        vendor_options = sorted({str(item.get('vendor') or '').strip() for item in parsed if str(item.get('vendor') or '').strip() and passes(item, ignore='vendor')}, key=lambda s: s.lower())
 
         def _import_req_date_key(item):
             data = item.get('data') or {}
