@@ -1297,8 +1297,11 @@ IMPORT_LOCAL_EDIT_FIELDS = {
 
 # Fields needed for formulas/sync but hidden from the dashboard table.
 IMPORT_SOURCE_ONLY_COLUMNS = [
-    {'sheet_col': 'R', 'field': 'po_yupi',             'label': 'PO YUPI'},
-    {'sheet_col': 'W', 'field': 'source_req_dlv_date', 'label': 'Req. Dlv Date'},
+    # Hidden raw source fields. In the RM source sheet these headers are on row 4:
+    # F = PO YUPI and K = Req. Dlv Date. Keep explicit source_sheet_col fallbacks
+    # so mapping still works if Google returns a trimmed/odd header range.
+    {'source_only': True, 'source_sheet_col': 'F', 'sheet_col': 'F', 'field': 'po_yupi',             'label': 'PO YUPI'},
+    {'source_only': True, 'source_sheet_col': 'K', 'sheet_col': 'K', 'field': 'source_req_dlv_date', 'label': 'Req. Dlv Date'},
 ]
 
 IMPORT_SYNC_FIELD_ALIASES = {
@@ -1311,31 +1314,31 @@ IMPORT_REFERENCE_VISIBLE_COLUMNS = [
     {'sheet_col': 'A',  'field': 'status',              'label': 'STATUS',                 'width': 132, 'type': 'status'},
     {'sheet_col': 'B',  'field': 'days_left',           'label': 'Days Left',              'width': 64,  'formula': True},
     {'sheet_col': 'C',  'field': 'po_send_date',         'label': 'PO Send Date',          'width': 124, 'local': True},
-    {'sheet_col': 'D',  'field': 'site',                'label': 'Site',                   'width': 78,  'formula': True},
-    {'sheet_col': 'E',  'field': 'yupi_po',             'label': 'YUPI PO',                'width': 118},
-    {'sheet_col': 'F',  'field': 'vendor',              'label': 'Vendor',                 'width': 190, 'formula': True},
-    {'sheet_col': 'G',  'field': 'req_dlv_date',        'label': 'Req Dlv Date',           'width': 122},
+    {'sheet_col': 'D',  'source_sheet_col': 'B',  'field': 'site',                'label': 'Site',                   'width': 78,  'formula': True},
+    {'sheet_col': 'E',  'source_sheet_col': 'F',  'field': 'yupi_po',             'label': 'YUPI PO',                'width': 118},
+    {'sheet_col': 'F',  'source_sheet_col': 'Q',  'field': 'vendor',              'label': 'Vendor',                 'width': 190, 'formula': True},
+    {'sheet_col': 'G',  'source_sheet_col': 'K',  'field': 'req_dlv_date',        'label': 'Req Dlv Date',           'width': 122},
     {'sheet_col': 'H',  'field': 'etd',                 'label': 'ETD',                    'width': 116},
     {'sheet_col': 'I',  'field': 'eta',                 'label': 'ETA',                    'width': 116},
     {'sheet_col': 'J',  'field': 'arrival_check',       'label': 'Arrival Check',          'width': 154, 'formula': True},
     {'sheet_col': 'K',  'field': 'import_remarks',      'label': 'Import Remarks',         'width': 220},
-    {'sheet_col': 'L',  'field': 'so',                  'label': 'SO',                     'width': 140},
-    {'sheet_col': 'M',  'field': 'group',               'label': 'GROUP',                  'width': 116},
+    {'sheet_col': 'L',  'source_sheet_col': 'AK', 'field': 'so',                  'label': 'SO',                     'width': 140},
+    {'sheet_col': 'M',  'source_sheet_col': 'A',  'field': 'group',               'label': 'GROUP',                  'width': 116},
     {'sheet_col': 'O',  'source_sheet_col': 'C', 'field': 'po_date_by_email',    'label': 'PO DATE\n(By Email)',    'width': 132},
-    {'sheet_col': 'Q',  'field': 'po_sementara',        'label': 'PO SEMENTARA',           'width': 160},
-    {'sheet_col': 'S',  'field': 'item_yupi',           'label': 'Item Yupi',              'width': 130},
-    {'sheet_col': 'T',  'field': 'item_name',           'label': 'Item name',              'width': 260},
-    {'sheet_col': 'U',  'field': 'spec',                'label': 'Spec',                   'width': 340},
-    {'sheet_col': 'V',  'field': 'remark_yupi',         'label': 'REMARK YUPI',            'width': 340},
-    {'sheet_col': 'X',  'field': 'reschedule',          'label': 'RESCHEDULE',             'width': 120},
-    {'sheet_col': 'Y',  'field': 'ord_qty',             'label': "Ord. Q'ty",             'width': 100, 'number': True},
-    {'sheet_col': 'Z',  'field': 'unit',                'label': 'Unit',                   'width': 76},
-    {'sheet_col': 'AA', 'field': 'unit_price',          'label': 'Unit Price',             'width': 120, 'number': True},
-    {'sheet_col': 'AB', 'field': 'amount',              'label': 'AMOUNT',                 'width': 130, 'number': True},
-    {'sheet_col': 'AC', 'field': 'vendor_name',         'label': 'Vendor Name',            'width': 190},
-    {'sheet_col': 'AG', 'field': 'purchase_price',      'label': 'PURCHASE PRICE',         'width': 128, 'number': True},
-    {'sheet_col': 'AH', 'field': 'currency',            'label': 'CURRENCY',               'width': 92},
-    {'sheet_col': 'AJ', 'field': 'purchase_amount',     'label': 'PURCHASE\nAMOUNT',       'width': 132, 'formula': True, 'number': True},
+    {'sheet_col': 'Q',  'source_sheet_col': 'E',  'field': 'po_sementara',        'label': 'PO SEMENTARA',           'width': 160},
+    {'sheet_col': 'S',  'source_sheet_col': 'G',  'field': 'item_yupi',           'label': 'Item Yupi',              'width': 130},
+    {'sheet_col': 'T',  'source_sheet_col': 'H',  'field': 'item_name',           'label': 'Item name',              'width': 260},
+    {'sheet_col': 'U',  'source_sheet_col': 'I',  'field': 'spec',                'label': 'Spec',                   'width': 340},
+    {'sheet_col': 'V',  'source_sheet_col': 'J',  'field': 'remark_yupi',         'label': 'REMARK YUPI',            'width': 340},
+    {'sheet_col': 'X',  'source_sheet_col': 'L',  'field': 'reschedule',          'label': 'RESCHEDULE',             'width': 120},
+    {'sheet_col': 'Y',  'source_sheet_col': 'M',  'field': 'ord_qty',             'label': "Ord. Q'ty",             'width': 100, 'number': True},
+    {'sheet_col': 'Z',  'source_sheet_col': 'N',  'field': 'unit',                'label': 'Unit',                   'width': 76},
+    {'sheet_col': 'AA', 'source_sheet_col': 'O',  'field': 'unit_price',          'label': 'Unit Price',             'width': 120, 'number': True},
+    {'sheet_col': 'AB', 'source_sheet_col': 'P',  'field': 'amount',              'label': 'AMOUNT',                 'width': 130, 'number': True},
+    {'sheet_col': 'AC', 'source_sheet_col': 'Q',  'field': 'vendor_name',         'label': 'Vendor Name',            'width': 190},
+    {'sheet_col': 'AG', 'source_sheet_col': 'U',  'field': 'purchase_price',      'label': 'PURCHASE PRICE',         'width': 128, 'number': True},
+    {'sheet_col': 'AH', 'source_sheet_col': 'V',  'field': 'currency',            'label': 'CURRENCY',               'width': 92},
+    {'sheet_col': 'AJ', 'source_sheet_col': 'X',  'field': 'purchase_amount',     'label': 'PURCHASE\nAMOUNT',       'width': 132, 'formula': True, 'number': True},
     {'sheet_col': 'CU', 'field': 'lt_days',             'label': 'LT (Days)',              'width': 94,  'formula': True, 'number': True},
     {'sheet_col': 'CV', 'field': 'incoterm',            'label': 'Incoterm',               'width': 98},
     {'sheet_col': 'CW', 'field': 'forwarder',           'label': 'Forwarder',              'width': 150},
@@ -1401,6 +1404,84 @@ IMPORT_COLUMN_ALIASES = {
     'coo': ['coo'],
     'soft_copy_doc': ['softcopydoc', 'softcopy', 'gdrive', 'googledrive', 'documentlink'],
 }
+
+
+# Source-sheet fallback columns for the two Yupi Order Management workbooks.
+# Normal mapping still uses header names first. These fallbacks are only used
+# when Google returns a trimmed/odd header range or a header cell is blank.
+# RM workbook: header row 4, Purchase Amount = X, NO.SO = AK.
+# SP/Consumable workbook: header row 3, Purchase Amount = Y, NO.SO = AM.
+IMPORT_COMMON_SOURCE_FALLBACK_COLUMNS = {
+    'group': 'A',
+    'site': 'B',
+    'po_date_by_email': 'C',
+    'po_sementara': 'E',
+    'po_yupi': 'F',
+    'yupi_po': 'F',
+    'item_yupi': 'G',
+    'item_name': 'H',
+    'spec': 'I',
+    'remark_yupi': 'J',
+    'req_dlv_date': 'K',
+    'source_req_dlv_date': 'K',
+    'reschedule': 'L',
+    'ord_qty': 'M',
+    'unit': 'N',
+    'unit_price': 'O',
+    'amount': 'P',
+    'vendor': 'Q',
+    'vendor_name': 'Q',
+    'purchase_price': 'U',
+    'currency': 'V',
+}
+IMPORT_RM_SOURCE_FALLBACK_COLUMNS = {
+    **IMPORT_COMMON_SOURCE_FALLBACK_COLUMNS,
+    'purchase_amount': 'X',
+    'so': 'AK',
+}
+IMPORT_SP_SOURCE_FALLBACK_COLUMNS = {
+    **IMPORT_COMMON_SOURCE_FALLBACK_COLUMNS,
+    'purchase_amount': 'Y',
+    'so': 'AM',
+}
+
+def import_source_kind_from_header(df, header_idx):
+    """Return 'rm' or 'sp' from the detected source header row."""
+    try:
+        headers = [import_header_key(v) for v in df.iloc[header_idx].tolist()]
+    except Exception:
+        headers = []
+
+    def key_at(letter):
+        try:
+            idx = column_index_from_letter(letter) - 1
+            return headers[idx] if idx < len(headers) else ''
+        except Exception:
+            return ''
+
+    # Strong structural checks from the uploaded Excel examples:
+    # - RM: header row 4, PURCHASE AMOUNT in X, NO.SO in AK.
+    # - SP/Consumable: header row 3, PURCHASE AMOUNT in Y, NO.SO in AM.
+    if key_at('Y') == 'purchaseamount' or key_at('AM') == 'noso':
+        return 'sp'
+    if key_at('X') == 'purchaseamount' or key_at('AK') == 'noso':
+        return 'rm'
+
+    # Header row is also different in the two workbooks.
+    if header_idx == 2:
+        return 'sp'
+    if header_idx == 3:
+        return 'rm'
+    return ''
+
+def import_source_fallback_columns(df, header_idx):
+    kind = import_source_kind_from_header(df, header_idx)
+    if kind == 'sp':
+        return IMPORT_SP_SOURCE_FALLBACK_COLUMNS
+    if kind == 'rm':
+        return IMPORT_RM_SOURCE_FALLBACK_COLUMNS
+    return IMPORT_COMMON_SOURCE_FALLBACK_COLUMNS
+
 
 def import_meta_get(key):
     row = ImportDashboardMeta.query.filter_by(meta_key=key).first()
@@ -1582,6 +1663,7 @@ def import_detect_header_row(df):
 def import_source_column_map(df, columns):
     header_idx = import_detect_header_row(df)
     header_values = list(df.iloc[header_idx]) if len(df) else []
+    source_fallbacks = import_source_fallback_columns(df, header_idx)
     by_key = {}
     for idx, raw in enumerate(header_values):
         key = import_header_key(raw)
@@ -1610,7 +1692,14 @@ def import_source_column_map(df, columns):
 
         # Only use fixed letter fallback if the header cannot be found. This
         # keeps old/local sheets usable, but the normal path remains header-based.
-        fallback_sheet_col = col.get('source_sheet_col') or col.get('sheet_col')
+        # Fallback must use the SOURCE sheet column, not the Import dashboard
+        # layout column. The dashboard layout places YUPI PO in E and Req Dlv Date
+        # in G, while the RM source sheet has PO YUPI in F and Req. Dlv Date in K.
+        # Using layout letters here is what kept these fields blank/wrong when
+        # header detection could not be used.
+        fallback_sheet_col = source_fallbacks.get(field) or col.get('source_sheet_col')
+        if not fallback_sheet_col and col.get('source_only'):
+            fallback_sheet_col = source_fallbacks.get(field) or col.get('sheet_col')
         if source_idx is None and fallback_sheet_col:
             try:
                 source_idx = column_index_from_letter(str(fallback_sheet_col)) - 1
