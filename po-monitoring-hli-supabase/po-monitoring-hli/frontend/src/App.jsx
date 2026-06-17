@@ -1352,6 +1352,7 @@ const App = () => {
   const [importFillRange, setImportFillRange] = useState(null);
   const [importFilters, setImportFilters] = useState({ yupi_po: [], vendors: [] });
   const [importOptions, setImportOptions] = useState({ yupi_po: [], vendors: [] });
+  const [importReqDlvSort, setImportReqDlvSort] = useState('newest');
   const [rfqEditedRowKeys, setRfqEditedRowKeys] = useState(new Set());
   const rfqDashboardOnlyFields = new Set(['private_remarks_1', 'private_remarks_2']);
 
@@ -1848,12 +1849,13 @@ const App = () => {
     } finally { setLoading(false); }
   }, [addToast, rfqPage, rfqPerPage, rfqAppliedSearch, rfqFilters, rfqPicFilter, rfqShowSimilarity]);
 
-  const fetchImportData = useCallback(async (page = importPage, perPage = importPerPage, search = importAppliedSearch, refresh = false, filters = importFilters) => {
+  const fetchImportData = useCallback(async (page = importPage, perPage = importPerPage, search = importAppliedSearch, refresh = false, filters = importFilters, reqDlvSort = importReqDlvSort) => {
     setLoading(true);
     try {
       const params = new URLSearchParams({ page, per_page: perPage });
       if (search) params.append('search', search);
       if (refresh) params.append('refresh', '1');
+      if (reqDlvSort) params.append('req_dlv_sort', reqDlvSort);
       resolveFilter(filters?.yupi_po).forEach(v => params.append('yupi_po', v));
       resolveFilter(filters?.vendors).forEach(v => params.append('vendor_name', v));
       const res = await api.get(`/api/import/data?${params}`);
@@ -1866,21 +1868,19 @@ const App = () => {
         const added = Number(res.data.sync.added || 0);
         const seen = Number(res.data.sync.seen || 0);
         const sheetRows = Number(res.data.sync.sheet_rows || 0);
-        const trackerSeen = Number(res.data.sync.tracker?.seen || 0);
-        const trackerAdded = Number(res.data.sync.tracker?.added || 0);
         const vendorFilterCount = Number(res.data.sync.vendor_filter_count || 0);
         const vendorSource = res.data.sync.vendor_filter_source === 'existing_import_rows' ? 'current Import vendors' : 'Vendor Import';
-        const msg = added || trackerAdded
-          ? `Copied ${added + trackerAdded} new Import rows and refreshed ${seen + trackerSeen} existing rows`
-          : sheetRows || trackerSeen
-            ? `Refreshed ${seen + trackerSeen} Import rows from source/tracker sheet (${vendorFilterCount} ${vendorSource})`
-            : 'No Import rows found in source/tracker sheet';
+        const msg = added
+          ? `Copied ${added} new Import rows and refreshed ${seen} existing rows`
+          : sheetRows
+            ? `Refreshed ${seen} Import rows from source sheets (${vendorFilterCount} ${vendorSource})`
+            : 'No Import rows found in source sheets';
         addToast(msg, 'success');
       }
     } catch (e) {
       addToast(`Failed to load Import data: ${e.response?.data?.error || e.message}`, 'error');
     } finally { setLoading(false); }
-  }, [addToast, importPage, importPerPage, importAppliedSearch, importFilters]);
+  }, [addToast, importPage, importPerPage, importAppliedSearch, importFilters, importReqDlvSort]);
 
   const updateImportCell = async (rowKey, field, value) => {
     setImportEditingCell(null);
@@ -4161,7 +4161,36 @@ const App = () => {
 
       if (editing) {
         const isLong = ['spec', 'remark_yupi', 'import_remarks', 'soft_copy_doc'].includes(col.field);
-        const inputCls = `block w-full min-h-8 px-2 py-1 text-xs border-0 rounded-none outline outline-2 outline-blue-500 outline-offset-[-2px] ${darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`;
+        const isDateField = ['po_send_date', 'po_date_by_email', 'req_dlv_date', 'source_req_dlv_date', 'reschedule', 'etd', 'eta'].includes(col.field) || String(col.label || '').toLowerCase().includes('date');
+        const inputCls = `block w-full min-h-8 px-2 py-1 text-xs border-0 rounded-none ring-2 ring-inset ring-blue-500 outline-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus-visible:outline-none shadow-none ${darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`;
+        if (isDateField) {
+          return (
+            <input
+              type="date"
+              autoFocus
+              className={`${inputCls} appearance-none`}
+              style={{ outline: 'none', boxShadow: 'none', WebkitAppearance: 'none', appearance: 'none' }}
+              value={toDateInputValue(importEditValue)}
+              onFocus={e => { try { e.currentTarget.showPicker?.(); } catch {} }}
+              onClick={e => { try { e.currentTarget.showPicker?.(); } catch {} }}
+              onChange={e => setImportEditValue(e.target.value)}
+              onBlur={e => updateImportCell(row._row_key, col.field, e.target.value)}
+              onPaste={e => {
+                const text = e.clipboardData.getData('text/plain');
+                if (text.includes('\t') || text.includes('\n')) {
+                  e.preventDefault();
+                  setImportEditingCell(null);
+                  const rowIndex = importData.findIndex(r => r._row_key === row._row_key);
+                  applyImportPaste(rowIndex, col.field, text);
+                }
+              }}
+              onKeyDown={e => {
+                if (e.key === 'Enter') updateImportCell(row._row_key, col.field, e.currentTarget.value);
+                if (e.key === 'Escape') setImportEditingCell(null);
+              }}
+            />
+          );
+        }
         if (isLong) {
           return (
             <textarea
@@ -4361,7 +4390,19 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="grid grid-cols-1 gap-2 md:grid-cols-[minmax(240px,1fr)_minmax(160px,220px)_minmax(180px,260px)_100px_100px] items-end">
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-[120px_minmax(220px,1fr)_minmax(150px,220px)_minmax(180px,260px)_100px_100px] items-end">
+            <div className="min-w-0">
+              <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ Req Dlv Date</label>
+              <select
+                className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                value={importReqDlvSort}
+                onChange={e=>{ const nextSort=e.target.value; setImportReqDlvSort(nextSort); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, importFilters, nextSort); }}
+                title="Sort Req Dlv Date"
+              >
+                <option value="oldest">Oldest ↑</option>
+                <option value="newest">Newest ↓</option>
+              </select>
+            </div>
             <div className="min-w-0"><label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Import</label><input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/></div>
             <div className="min-w-0">
               <MultiSelect label="YUPI PO" options={importOptions.yupi_po || []} selected={importFilters.yupi_po}
@@ -4372,7 +4413,7 @@ const App = () => {
                 onChange={v=>{ const next={...importFilters, vendors:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
             <button onClick={()=>{ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">Search</button>
-            <button onClick={()=>{ const next={ yupi_po: [], vendors: [] }; setImportSearch(''); setImportAppliedSearch(''); setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, '', false, next); }} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
+            <button onClick={()=>{ const next={ yupi_po: [], vendors: [] }; const nextSort='newest'; setImportSearch(''); setImportAppliedSearch(''); setImportFilters(next); setImportReqDlvSort(nextSort); setImportPage(1); fetchImportData(1, importPerPage, '', false, next, nextSort); }} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
         </FilterPanel>
 
@@ -5332,6 +5373,18 @@ const App = () => {
         .freeze-table-import td, .freeze-table-import th { box-shadow: inset 0 -1px 0 rgba(148, 163, 184, 0.22), inset -1px 0 0 rgba(148, 163, 184, 0.22); }
         .freeze-table-import tbody tr { height: 32px; }
         .freeze-table-import td > * { max-height: 28px; }
+        .freeze-table-import input, .freeze-table-import textarea, .freeze-table-import select {
+          outline: none !important;
+          box-shadow: none !important;
+        }
+        .freeze-table-import input:focus, .freeze-table-import textarea:focus, .freeze-table-import select:focus {
+          outline: none !important;
+          box-shadow: inset 0 0 0 2px #3b82f6 !important;
+        }
+        .freeze-table-import input[type="date"] {
+          -webkit-appearance: none !important;
+          appearance: none !important;
+        }
         .backdrop-blur-sm, .backdrop-blur-xl {
           backdrop-filter: none !important;
           -webkit-backdrop-filter: none !important;
