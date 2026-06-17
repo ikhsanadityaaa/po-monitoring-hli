@@ -1064,28 +1064,116 @@ const DataTableScroll = ({ children, className = '', darkMode }) => {
 
   useEffect(() => {
     const frame = ref.current;
-    if (!frame) return undefined;
+    if (!frame || typeof document === 'undefined') return undefined;
 
-    const stickyTop = 0;
     let raf = null;
+    let mirror = null;
+    let mirrorTable = null;
+    let lastHtml = '';
+
+    const removeMirror = () => {
+      if (mirror) {
+        mirror.remove();
+        mirror = null;
+        mirrorTable = null;
+        lastHtml = '';
+      }
+    };
+
+    const ensureMirror = () => {
+      if (mirror) return;
+      mirror = document.createElement('div');
+      mirror.className = `window-sticky-table-header ${darkMode ? 'window-sticky-table-header-dark' : ''}`;
+      mirror.style.display = 'none';
+      mirror.style.position = 'fixed';
+      mirror.style.top = '0px';
+      mirror.style.overflow = 'hidden';
+      mirror.style.pointerEvents = 'none';
+      mirror.style.zIndex = '130';
+      mirror.style.boxSizing = 'border-box';
+
+      mirrorTable = document.createElement('table');
+      mirrorTable.className = 'window-sticky-table-header-table';
+      mirrorTable.style.borderCollapse = 'collapse';
+      mirrorTable.style.tableLayout = 'fixed';
+      mirrorTable.style.margin = '0';
+      mirrorTable.style.transformOrigin = 'top left';
+      mirror.appendChild(mirrorTable);
+      document.body.appendChild(mirror);
+    };
+
+    const syncMirrorHeader = (table, thead) => {
+      ensureMirror();
+      if (!mirrorTable) return;
+
+      const html = thead.outerHTML;
+      if (html !== lastHtml) {
+        mirrorTable.innerHTML = html;
+        lastHtml = html;
+      }
+
+      const originalThs = Array.from(thead.querySelectorAll('th'));
+      const mirrorThs = Array.from(mirrorTable.querySelectorAll('th'));
+      originalThs.forEach((th, idx) => {
+        const clone = mirrorThs[idx];
+        if (!clone) return;
+        const rect = th.getBoundingClientRect();
+        const width = Math.max(1, rect.width);
+        clone.style.width = `${width}px`;
+        clone.style.minWidth = `${width}px`;
+        clone.style.maxWidth = `${width}px`;
+        clone.style.height = `${Math.max(1, rect.height)}px`;
+        clone.style.boxSizing = 'border-box';
+        clone.style.position = 'relative';
+        clone.style.left = 'auto';
+        clone.style.zIndex = '1';
+        clone.style.backgroundClip = 'padding-box';
+      });
+
+      const tableRect = table.getBoundingClientRect();
+      mirrorTable.style.width = `${Math.max(frame.scrollWidth, tableRect.width)}px`;
+      mirrorTable.style.transform = `translateX(${-frame.scrollLeft}px)`;
+    };
 
     const applyHeaderLock = () => {
       raf = null;
       const table = frame.querySelector('table');
       const thead = frame.querySelector('thead');
-      if (!table || !thead) return;
+      if (!table || !thead) {
+        removeMirror();
+        return;
+      }
 
       const frameRect = frame.getBoundingClientRect();
       const tableRect = table.getBoundingClientRect();
       const headerHeight = thead.getBoundingClientRect().height || 0;
-      const maxTranslate = Math.max(0, tableRect.height - headerHeight);
-      const shouldStick = frameRect.top < stickyTop && frameRect.bottom > stickyTop + headerHeight;
-      const translateY = shouldStick
-        ? Math.min(Math.max(stickyTop - frameRect.top, 0), maxTranslate)
-        : 0;
+      const topOffset = 0;
 
-      frame.style.setProperty('--table-header-translate-y', `${Math.round(translateY)}px`);
-      frame.classList.toggle('table-header-window-locked', translateY > 0);
+      const shouldStick = (
+        frameRect.top < topOffset &&
+        tableRect.bottom > topOffset + headerHeight &&
+        frameRect.right > 0 &&
+        frameRect.left < window.innerWidth
+      );
+
+      if (!shouldStick) {
+        if (mirror) mirror.style.display = 'none';
+        return;
+      }
+
+      syncMirrorHeader(table, thead);
+      if (!mirror || !mirrorTable) return;
+
+      const left = Math.max(frameRect.left, 0);
+      const right = Math.min(frameRect.right, window.innerWidth);
+      const width = Math.max(0, right - left);
+
+      mirror.style.display = 'block';
+      mirror.style.left = `${left}px`;
+      mirror.style.width = `${width}px`;
+      mirror.style.height = `${headerHeight}px`;
+      mirror.style.background = darkMode ? '#111827' : '#ffffff';
+      mirror.classList.toggle('window-sticky-table-header-dark', !!darkMode);
     };
 
     const schedule = () => {
@@ -1106,8 +1194,9 @@ const DataTableScroll = ({ children, className = '', darkMode }) => {
       window.removeEventListener('resize', schedule);
       frame.removeEventListener('scroll', schedule);
       resizeObserver?.disconnect();
+      removeMirror();
     };
-  }, [children]);
+  }, [children, darkMode]);
 
   return (
     <>
@@ -5454,21 +5543,29 @@ const App = () => {
         .data-table-page table td {
           border-right: 1px solid rgba(148, 163, 184, 0.28);
         }
-        .data-table-scroll thead {
-          position: relative;
-          z-index: 55;
-          transform: translateY(var(--table-header-translate-y, 0px));
-          transition: transform 0.02s linear;
-          will-change: transform;
-        }
-        .data-table-scroll.table-header-window-locked thead {
-          filter: drop-shadow(0 6px 10px rgba(15, 23, 42, 0.10));
-        }
         .data-table-scroll thead th {
           position: relative !important;
           z-index: 56;
           box-shadow: 0 1px 0 rgba(148, 163, 184, 0.28);
           background-clip: padding-box;
+        }
+        .window-sticky-table-header {
+          border-top: 1px solid rgba(148, 163, 184, 0.32);
+          border-left: 1px solid rgba(148, 163, 184, 0.32);
+          border-right: 1px solid rgba(148, 163, 184, 0.32);
+          box-shadow: 0 8px 18px rgba(15, 23, 42, 0.16);
+        }
+        .window-sticky-table-header table {
+          border-collapse: collapse !important;
+        }
+        .window-sticky-table-header thead th {
+          box-shadow: inset 0 -1px 0 rgba(148, 163, 184, 0.28), inset -1px 0 0 rgba(148, 163, 184, 0.28) !important;
+          white-space: nowrap;
+        }
+        .window-sticky-table-header button,
+        .window-sticky-table-header select,
+        .window-sticky-table-header input {
+          pointer-events: none !important;
         }
         .data-table-scroll-frame {
           border: 1px solid rgba(148, 163, 184, 0.32);
