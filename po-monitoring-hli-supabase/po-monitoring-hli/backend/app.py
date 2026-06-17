@@ -2149,18 +2149,45 @@ def import_row_payload(row, columns):
     }
     return apply_import_formula_columns(payload)
 
-def import_row_source_uid(row, columns):
-    # Keep Import row identity stable across layout/formula changes. Formula
-    # values like Days Left are intentionally excluded because they change over
-    # time and should not create duplicate dashboard rows after a refresh.
-    payload = {
+def import_row_identity_payload(row):
+    """Stable Import identity for Copy Sheet.
+
+    The dashboard no longer syncs user edits back to source sheets. Copy Sheet
+    should only add source rows that do not already exist in the dashboard.
+    `YUPI PO` is the business key, but one YUPI PO can contain several item
+    lines, so the line identity is YUPI PO + Item Yupi when available, with a
+    fallback to item detail fields. Sheet row is used only as a last resort.
+    """
+    po_yupi = import_nonblank(row.get('po_yupi')) or import_nonblank(row.get('yupi_po'))
+    item_yupi = import_nonblank(row.get('item_yupi'))
+    if po_yupi:
+        line_key = item_yupi or '|'.join([
+            import_nonblank(row.get('item_name')),
+            import_nonblank(row.get('spec')),
+            import_nonblank(row.get('ord_qty')),
+            import_nonblank(row.get('unit_price')),
+            import_nonblank(row.get('so')),
+        ]).strip('|')
+        if not line_key:
+            line_key = f"row:{row.get('_source_key') or ''}:{row.get('_sheet_row') or ''}"
+        return {
+            'po_yupi': po_yupi.strip().upper(),
+            'line': line_key.strip().upper(),
+        }
+
+    # Rows that do not yet have YUPI PO still need a stable key, but this is a
+    # fallback only. It prevents blank-PO rows from collapsing into one record.
+    return {
         'source': clean(row.get('_source_key')) or '',
-        'sheet_row': row.get('_sheet_row') or '',
-        'po_yupi': import_nonblank(row.get('po_yupi')) or import_nonblank(row.get('yupi_po')),
-        'po_sementara': import_nonblank(row.get('po_sementara')),
-        'item_yupi': import_nonblank(row.get('item_yupi')),
-        'so': import_nonblank(row.get('so')),
+        'sheet_row': str(row.get('_sheet_row') or ''),
+        'po_sementara': import_nonblank(row.get('po_sementara')).strip().upper(),
+        'item_yupi': import_nonblank(row.get('item_yupi')).strip().upper(),
+        'item_name': import_nonblank(row.get('item_name')).strip().upper(),
     }
+
+
+def import_row_source_uid(row, columns):
+    payload = import_row_identity_payload(row)
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
     return hashlib.sha1(raw.encode('utf-8')).hexdigest()
 
@@ -2417,39 +2444,50 @@ def sync_import_tracker_to_dashboard(columns=None):
     return {'rows': len(tracker_rows), 'seen': seen, 'added': added, 'skipped': skipped}
 
 def sync_import_sheet_to_dashboard():
+    """Copy new Import rows from source sheets into the dashboard only.
+
+    Dashboard user inputs are local to the dashboard DB. Copy Sheet does not
+    update existing rows and does not push user edits back to source sheets.
+    Existing detection is based on YUPI PO + item line identity so a PO with 5
+    items still creates 5 dashboard rows, while repeated Copy Sheet clicks do
+    not duplicate them.
+    """
     columns, sheet_rows = import_sheet_rows(force_metadata=True)
     filter_vendors, vendor_source = import_vendor_filter_names()
     vendor_count = len(import_uploaded_vendor_names())
+
     existing_rows = ImportDashboardRow.query.filter(ImportDashboardRow.source_key != 'import_tracker').all()
-    existing = {r.row_key: r for r in existing_rows}
-    existing_by_sheet = {(r.source_key, r.sheet_row): r for r in existing_rows if r.source_key and r.sheet_row}
-    duplicate_counts = {}
+    existing_uids = set()
+    existing_row_keys = set()
+    for existing_row in existing_rows:
+        existing_row_keys.add(existing_row.row_key)
+        if existing_row.source_uid:
+            existing_uids.add(existing_row.source_uid)
+        try:
+            existing_payload = json.loads(existing_row.data_json or '{}')
+        except (TypeError, json.JSONDecodeError):
+            existing_payload = {}
+        if existing_payload:
+            existing_uids.add(import_row_source_uid(existing_payload, columns))
+
     now = datetime.utcnow()
     added = 0
     seen = 0
+    duplicate_counts = {}
+
     for sheet_row in sheet_rows:
-        source_uid = import_row_source_uid(sheet_row, columns)
-        duplicate_base = f"{sheet_row.get('_source_key')}:{source_uid}"
-        duplicate_counts[duplicate_base] = duplicate_counts.get(duplicate_base, 0) + 1
-        row_key = f"{duplicate_base}:{duplicate_counts[duplicate_base]}"
-        current = existing.get(row_key)
-        if not current:
-            current = existing_by_sheet.get((sheet_row.get('_source_key') or '', sheet_row.get('_sheet_row')))
         sheet_payload = import_row_payload(sheet_row, columns)
-        if current:
-            try:
-                existing_payload = json.loads(current.data_json or '{}')
-            except (TypeError, json.JSONDecodeError):
-                existing_payload = {}
-            current.sheet_row = sheet_row.get('_sheet_row')
-            current.source_label = sheet_row.get('_source_label')
-            current.vendor_name = sheet_row.get('_vendor_name') or current.vendor_name
-            current.source_uid = source_uid
-            current.data_json = json.dumps(merge_import_existing_payload(existing_payload, sheet_payload), ensure_ascii=False)
-            current.last_seen_at = now
-            current.updated_at = now
+        source_uid = import_row_source_uid(sheet_payload, columns)
+        duplicate_counts[source_uid] = duplicate_counts.get(source_uid, 0) + 1
+        suffix = duplicate_counts[source_uid]
+        row_key = f"import:{source_uid}" if suffix == 1 else f"import:{source_uid}:{suffix}"
+
+        # If a matching row already exists, do not update it. User edits in the
+        # dashboard must not be overwritten by fresh source values.
+        if source_uid in existing_uids or row_key in existing_row_keys:
             seen += 1
             continue
+
         db.session.add(ImportDashboardRow(
             row_key=row_key,
             source_key=sheet_row.get('_source_key') or '',
@@ -2463,6 +2501,9 @@ def sync_import_sheet_to_dashboard():
             updated_at=now,
         ))
         added += 1
+        existing_uids.add(source_uid)
+        existing_row_keys.add(row_key)
+
     db.session.commit()
     clear_runtime_caches()
     return {
@@ -2472,6 +2513,7 @@ def sync_import_sheet_to_dashboard():
         'vendor_count': vendor_count,
         'vendor_filter_count': len(filter_vendors),
         'vendor_filter_source': vendor_source,
+        'copy_only': True,
         'columns': columns,
     }
 
@@ -8294,25 +8336,49 @@ def sync_import_cells_to_layout_sheet(items):
 
 
 def sync_import_cells_to_google_sheet(items):
-    """Sync Import edits only to the original source/vendor sheets.
+    """Dashboard edits stay local in the dashboard database.
 
-    The separate Import tracker/reference workbook is no longer used as a sync
-    target. Dashboard-local fields that do not exist in the source sheets stay in
-    the database only.
+    Import page now acts as a one-way Copy Sheet tool: source sheets are read
+    only when the user clicks Copy Sheet, and user edits in the dashboard are
+    not pushed back to any Google Sheet.
     """
-    try:
-        source_result = sync_import_cells_to_source_sheets(items)
-    except Exception as exc:
-        source_result = {'synced': False, 'reason': str(exc)}
     return {
-        'synced': bool(source_result.get('synced')),
-        'source': source_result,
-        'import_tracker': {'synced': False, 'reason': 'Disabled by request'},
+        'synced': False,
+        'source': {'synced': False, 'reason': 'Dashboard Import edits are local only'},
+        'import_tracker': {'synced': False, 'reason': 'Dashboard Import edits are local only'},
     }
 
 def sync_import_cell_to_google_sheet(row, field, value):
     result = sync_import_cells_to_google_sheet([{'row': row, 'field': field, 'value': value}])
     return result
+
+
+def import_sort_date_value(value):
+    """Parse Import display/source dates for sorting.
+
+    Source sheets often display Req Dlv Date as `2 Jul` or `20-Apr` without a
+    year. Python's generic parser can return None for that format, so sort looked
+    broken. Use the current year for month/day-only values.
+    """
+    raw = import_nonblank(value)
+    if not raw:
+        return None
+    d = import_date_from_value(raw)
+    if d:
+        return d
+    s = str(raw).strip().replace('.', '')
+    for fmt in ('%d %b %Y', '%d-%b-%Y', '%d %B %Y', '%d-%B-%Y', '%Y/%m/%d', '%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y'):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            pass
+    for fmt in ('%d %b', '%d-%b', '%d %B', '%d-%B'):
+        try:
+            parsed = datetime.strptime(s, fmt)
+            return date(date.today().year, parsed.month, parsed.day)
+        except ValueError:
+            pass
+    return None
 
 @app.route('/api/import/data', methods=['GET'])
 def get_import_data():
@@ -8326,6 +8392,9 @@ def get_import_data():
         req_dlv_sort = clean(request.args.get('req_dlv_sort')).lower() or 'newest'
         if req_dlv_sort not in ('oldest', 'newest'):
             req_dlv_sort = 'newest'
+        yupi_po_sort = clean(request.args.get('yupi_po_sort')).lower()
+        if yupi_po_sort not in ('asc', 'desc'):
+            yupi_po_sort = ''
         none_yupi_po = any(v == '__NONE_PLACEHOLDER__' for v in selected_yupi_po)
         none_vendor = any(v == '__NONE_PLACEHOLDER__' for v in selected_vendors)
         selected_yupi_po = {v.strip().lower() for v in selected_yupi_po if v != '__NONE_PLACEHOLDER__'}
@@ -8388,7 +8457,7 @@ def get_import_data():
 
         def _import_req_date_key(item):
             data = item.get('data') or {}
-            d = parse_date(import_nonblank(data.get('req_dlv_date')) or import_nonblank(data.get('source_req_dlv_date')))
+            d = import_sort_date_value(import_nonblank(data.get('req_dlv_date')) or import_nonblank(data.get('source_req_dlv_date')))
             try:
                 if d is None or pd.isna(d):
                     return (1, 0)
@@ -8397,7 +8466,17 @@ def get_import_data():
                 return (1, 0)
             return (0, ordinal if req_dlv_sort == 'oldest' else -ordinal)
 
-        filtered_items.sort(key=_import_req_date_key)
+        if yupi_po_sort:
+            # First sort by Req Dlv Date so it remains the secondary order inside
+            # each YUPI PO group, then sort non-blank YUPI PO values. Blank YUPI
+            # PO rows are kept at the bottom for both ascending and descending.
+            filtered_items.sort(key=_import_req_date_key)
+            with_yupi = [item for item in filtered_items if str(item.get('yupi_po') or '').strip()]
+            without_yupi = [item for item in filtered_items if not str(item.get('yupi_po') or '').strip()]
+            with_yupi.sort(key=lambda item: str(item.get('yupi_po') or '').strip().lower(), reverse=(yupi_po_sort == 'desc'))
+            filtered_items = with_yupi + without_yupi
+        else:
+            filtered_items.sort(key=_import_req_date_key)
 
         total = len(filtered_items)
         page_items = filtered_items[(page - 1) * per_page: page * per_page]
@@ -8415,6 +8494,7 @@ def get_import_data():
                 'vendors': vendor_options,
             },
             'req_dlv_sort': req_dlv_sort,
+            'yupi_po_sort': yupi_po_sort,
             'sources': [{'key': s['key'], 'label': s['label']} for s in IMPORT_SOURCE_SHEETS],
             'sync': sync_info,
         })
