@@ -1610,7 +1610,7 @@ def import_existing_dashboard_vendor_names():
     vendors, instead of scanning all source data.
     """
     vendors = set()
-    for row in ImportDashboardRow.query.all():
+    for row in ImportDashboardRow.query.filter(ImportDashboardRow.source_key != 'import_tracker').all():
         v = clean(row.vendor_name)
         if v:
             vendors.add(v)
@@ -2356,7 +2356,7 @@ def sync_import_tracker_to_dashboard(columns=None):
     if not tracker_rows:
         return {'rows': 0, 'seen': 0, 'added': 0, 'skipped': 0}
 
-    existing_rows = ImportDashboardRow.query.all()
+    existing_rows = ImportDashboardRow.query.filter(ImportDashboardRow.source_key != 'import_tracker').all()
     existing_by_key = {}
     for row in existing_rows:
         try:
@@ -2420,7 +2420,7 @@ def sync_import_sheet_to_dashboard():
     columns, sheet_rows = import_sheet_rows(force_metadata=True)
     filter_vendors, vendor_source = import_vendor_filter_names()
     vendor_count = len(import_uploaded_vendor_names())
-    existing_rows = ImportDashboardRow.query.all()
+    existing_rows = ImportDashboardRow.query.filter(ImportDashboardRow.source_key != 'import_tracker').all()
     existing = {r.row_key: r for r in existing_rows}
     existing_by_sheet = {(r.source_key, r.sheet_row): r for r in existing_rows if r.source_key and r.sheet_row}
     duplicate_counts = {}
@@ -2463,11 +2463,6 @@ def sync_import_sheet_to_dashboard():
             updated_at=now,
         ))
         added += 1
-    tracker_info = {'rows': 0, 'seen': 0, 'added': 0, 'skipped': 0}
-    try:
-        tracker_info = sync_import_tracker_to_dashboard(columns)
-    except Exception as tracker_exc:
-        tracker_info = {'rows': 0, 'seen': 0, 'added': 0, 'skipped': 0, 'error': str(tracker_exc)}
     db.session.commit()
     clear_runtime_caches()
     return {
@@ -2477,7 +2472,6 @@ def sync_import_sheet_to_dashboard():
         'vendor_count': vendor_count,
         'vendor_filter_count': len(filter_vendors),
         'vendor_filter_source': vendor_source,
-        'tracker': tracker_info,
         'columns': columns,
     }
 
@@ -8287,26 +8281,21 @@ def sync_import_cells_to_layout_sheet(items):
 
 
 def sync_import_cells_to_google_sheet(items):
-    """Sync Import edits to both places:
-    1. source/vendor sheets when the edited field belongs there, and
-    2. the main Import tracker sheet for dashboard user inputs.
+    """Sync Import edits only to the original source/vendor sheets.
+
+    The separate Import tracker/reference workbook is no longer used as a sync
+    target. Dashboard-local fields that do not exist in the source sheets stay in
+    the database only.
     """
-    source_result = {'synced': False, 'reason': 'Not attempted'}
-    layout_result = {'synced': False, 'reason': 'Not attempted'}
     try:
         source_result = sync_import_cells_to_source_sheets(items)
     except Exception as exc:
         source_result = {'synced': False, 'reason': str(exc)}
-    try:
-        layout_result = sync_import_cells_to_layout_sheet(items)
-    except Exception as exc:
-        layout_result = {'synced': False, 'reason': str(exc)}
     return {
-        'synced': bool(source_result.get('synced') or layout_result.get('synced')),
+        'synced': bool(source_result.get('synced')),
         'source': source_result,
-        'import_tracker': layout_result,
+        'import_tracker': {'synced': False, 'reason': 'Disabled by request'},
     }
-
 
 def sync_import_cell_to_google_sheet(row, field, value):
     result = sync_import_cells_to_google_sheet([{'row': row, 'field': field, 'value': value}])
@@ -8321,6 +8310,9 @@ def get_import_data():
         search = clean(request.args.get('search')) or ''
         selected_yupi_po = [clean(v) for v in request.args.getlist('yupi_po') if clean(v)]
         selected_vendors = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
+        req_dlv_sort = clean(request.args.get('req_dlv_sort')).lower() or 'newest'
+        if req_dlv_sort not in ('oldest', 'newest'):
+            req_dlv_sort = 'newest'
         none_yupi_po = any(v == '__NONE_PLACEHOLDER__' for v in selected_yupi_po)
         none_vendor = any(v == '__NONE_PLACEHOLDER__' for v in selected_vendors)
         selected_yupi_po = {v.strip().lower() for v in selected_yupi_po if v != '__NONE_PLACEHOLDER__'}
@@ -8336,7 +8328,7 @@ def get_import_data():
         columns = sync_info['columns'] if sync_info else import_layout_columns()
         vendor_count = sync_info.get('vendor_count') if sync_info else len(import_uploaded_vendor_names())
 
-        q = ImportDashboardRow.query
+        q = ImportDashboardRow.query.filter(ImportDashboardRow.source_key != 'import_tracker')
         if search:
             terms = [t.strip().lower() for t in re.split(r'[\n,]+', search) if t.strip()]
             for term in terms:
@@ -8381,6 +8373,16 @@ def get_import_data():
         yupi_options = sorted({item['yupi_po'] for item in parsed if item['yupi_po'] and passes(item, ignore='yupi_po')}, key=lambda s: s.lower())
         vendor_options = sorted({item['vendor'] for item in parsed if item['vendor'] and passes(item, ignore='vendor')}, key=lambda s: s.lower())
 
+        def _import_req_date_key(item):
+            data = item.get('data') or {}
+            d = parse_date(import_nonblank(data.get('req_dlv_date')) or import_nonblank(data.get('source_req_dlv_date')))
+            if not d:
+                return (1, 0)
+            ordinal = d.toordinal()
+            return (0, ordinal if req_dlv_sort == 'oldest' else -ordinal)
+
+        filtered_items.sort(key=_import_req_date_key)
+
         total = len(filtered_items)
         page_items = filtered_items[(page - 1) * per_page: page * per_page]
         rows = [import_dashboard_row_to_dict(item['row'], columns) for item in page_items]
@@ -8396,6 +8398,7 @@ def get_import_data():
                 'yupi_po': yupi_options,
                 'vendors': vendor_options,
             },
+            'req_dlv_sort': req_dlv_sort,
             'sources': [{'key': s['key'], 'label': s['label']} for s in IMPORT_SOURCE_SHEETS],
             'sync': sync_info,
         })
