@@ -1262,39 +1262,60 @@ IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS = (16,)
 # can still be shown/hidden from the UI. Formula columns are calculated in Python
 # so the web table behaves like the spreadsheet without exposing hidden helper
 # columns.
-IMPORT_STATUS_OPTIONS = ['ON PROCESS', 'ON DELIVERY', 'DELIVERED', 'CANCELED']
+IMPORT_STATUS_OPTIONS = ['NEW', 'ON PROCESS', 'ON DELIVERY', 'DELIVERED', 'CANCELED']
 IMPORT_CHECKBOX_FIELDS = {'sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo'}
-IMPORT_FORMULA_FIELDS = {'days_left', 'site', 'yupi_po', 'vendor', 'req_dlv_date', 'eta', 'arrival_check', 'purchase_amount', 'lt_days'}
+IMPORT_FORMULA_FIELDS = {'days_left', 'site', 'vendor', 'arrival_check', 'purchase_amount', 'lt_days'}
 IMPORT_HYPERLINK_FIELDS = {'soft_copy_doc'}
+# Dashboard-only fields have no source-sheet column. They are stored in the
+# dashboard database and preserved on Copy Sheet, but they are not read from or
+# written back to the vendor source sheets.
+IMPORT_DASHBOARD_LOCAL_FIELDS = {'po_send_date'}
 IMPORT_LOCAL_EDIT_FIELDS = {
-    'status', 'po_send_date', 'etd', 'eta', 'import_remarks',
-    'incoterm', 'forwarder', 'bl_number', 'inv_no', 'non_ski',
+    # Every visible Import column can be edited from the dashboard and should
+    # survive refreshes. Some fields are calculated by default but still map
+    # back to the source sheet when the user edits them manually.
+    'status', 'days_left', 'po_send_date', '_po_send_date_manual', 'po_date_by_email', 'site', 'yupi_po', 'po_yupi', 'vendor',
+    'req_dlv_date', 'source_req_dlv_date', 'etd', 'eta', 'arrival_check', 'import_remarks',
+    'so', 'group', 'po_sementara', 'item_yupi', 'item_name', 'spec', 'remark_yupi',
+    'reschedule', 'ord_qty', 'unit', 'unit_price', 'amount', 'vendor_name',
+    'purchase_price', 'currency', 'purchase_amount', 'lt_days', 'incoterm',
+    'forwarder', 'bl_number', 'inv_no', 'non_ski',
     'sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo',
     'soft_copy_doc',
 }
 
+# Fields needed for formulas/sync but hidden from the dashboard table.
+IMPORT_SOURCE_ONLY_COLUMNS = [
+    {'field': 'po_yupi',             'label': 'PO YUPI'},
+    {'field': 'source_req_dlv_date', 'label': 'Req. Dlv Date'},
+]
+
+IMPORT_SYNC_FIELD_ALIASES = {
+    # Dashboard column -> actual source-sheet column.
+    'yupi_po': 'po_yupi',
+    'req_dlv_date': 'source_req_dlv_date',
+}
+
 IMPORT_REFERENCE_VISIBLE_COLUMNS = [
     {'sheet_col': 'A',  'field': 'status',              'label': 'STATUS',                 'width': 132, 'type': 'status'},
-    {'sheet_col': 'B',  'field': 'days_left',           'label': 'Days Left',              'width': 96,  'formula': True},
-    {'sheet_col': 'C',  'field': 'po_send_date',        'label': 'PO Send Date',           'width': 120},
+    {'sheet_col': 'B',  'field': 'days_left',           'label': 'Days Left',              'width': 64,  'formula': True},
+    {'field': 'po_send_date',                'label': 'PO Send Date',          'width': 124, 'local': True},
     {'sheet_col': 'D',  'field': 'site',                'label': 'Site',                   'width': 78,  'formula': True},
-    {'sheet_col': 'E',  'field': 'yupi_po',             'label': 'YUPI PO',                'width': 118, 'formula': True},
+    {'sheet_col': 'E',  'field': 'yupi_po',             'label': 'YUPI PO',                'width': 118},
     {'sheet_col': 'F',  'field': 'vendor',              'label': 'Vendor',                 'width': 190, 'formula': True},
-    {'sheet_col': 'G',  'field': 'req_dlv_date',        'label': 'Req Dlv Date',           'width': 122, 'formula': True},
+    {'sheet_col': 'G',  'field': 'req_dlv_date',        'label': 'Req Dlv Date',           'width': 122},
     {'sheet_col': 'H',  'field': 'etd',                 'label': 'ETD',                    'width': 116},
-    {'sheet_col': 'I',  'field': 'eta',                 'label': 'ETA',                    'width': 116, 'formula': True},
+    {'sheet_col': 'I',  'field': 'eta',                 'label': 'ETA',                    'width': 116},
     {'sheet_col': 'J',  'field': 'arrival_check',       'label': 'Arrival Check',          'width': 154, 'formula': True},
     {'sheet_col': 'K',  'field': 'import_remarks',      'label': 'Import Remarks',         'width': 220},
     {'sheet_col': 'L',  'field': 'so',                  'label': 'SO',                     'width': 140},
     {'sheet_col': 'M',  'field': 'group',               'label': 'GROUP',                  'width': 116},
-    {'sheet_col': 'O',  'field': 'po_date_by_email',    'label': 'PO DATE\n(By Email)',    'width': 132},
+    {'sheet_col': 'C',  'field': 'po_date_by_email',    'label': 'PO DATE\n(By Email)',    'width': 132},
     {'sheet_col': 'Q',  'field': 'po_sementara',        'label': 'PO SEMENTARA',           'width': 160},
-    {'sheet_col': 'R',  'field': 'po_yupi',             'label': 'PO YUPI',                'width': 120},
     {'sheet_col': 'S',  'field': 'item_yupi',           'label': 'Item Yupi',              'width': 130},
     {'sheet_col': 'T',  'field': 'item_name',           'label': 'Item name',              'width': 260},
     {'sheet_col': 'U',  'field': 'spec',                'label': 'Spec',                   'width': 340},
     {'sheet_col': 'V',  'field': 'remark_yupi',         'label': 'REMARK YUPI',            'width': 340},
-    {'sheet_col': 'W',  'field': 'source_req_dlv_date', 'label': 'Req. Dlv Date',          'width': 122},
     {'sheet_col': 'X',  'field': 'reschedule',          'label': 'RESCHEDULE',             'width': 120},
     {'sheet_col': 'Y',  'field': 'ord_qty',             'label': "Ord. Q'ty",             'width': 100, 'number': True},
     {'sheet_col': 'Z',  'field': 'unit',                'label': 'Unit',                   'width': 76},
@@ -1323,26 +1344,30 @@ IMPORT_REFERENCE_VISIBLE_COLUMNS = [
 
 IMPORT_COLUMN_ALIASES = {
     'status': ['status'],
-    'po_send_date': ['posenddate', 'pokirimdate', 'sovopokirimdate', 'podatebyemail'],
+    # PO Send Date is a dashboard-local user input. Do not map it from source sheets.
+    'po_send_date': [],
+    # Source column C / header PO DATE (By Email) fills this separate field.
+    # Some source copies may still label the same source value as PO Send Date,
+    # so posenddate is deliberately mapped here, not to po_send_date.
+    'po_date_by_email': ['podatebyemail', 'podateemail', 'poemaildate', 'pokirimdate', 'posenddate'],
     'site': ['siteidnkrg', 'site'],
-    'yupi_po': ['yupipo', 'poyupi'],
+    'yupi_po': ['poyupi'],
+    'po_yupi': ['poyupi'],
     'vendor': ['vendor', 'vendorname'],
-    'req_dlv_date': ['reqdlvdate', 'reschedule'],
+    'req_dlv_date': ['reqdlvdate'],
+    'source_req_dlv_date': ['reqdlvdate'],
     'etd': ['etd'],
     'eta': ['eta'],
     'import_remarks': ['importremarks', 'remarksvo', 'remark'],
     'so': ['so', 'noso'],
     'group': ['group'],
-    'po_date_by_email': ['podatebyemail'],
     'po_sementara': ['posementara'],
-    'po_yupi': ['poyupi', 'yupipo'],
     'item_yupi': ['itemyupi'],
     'item_name': ['itemname'],
     'spec': ['spec', 'specification'],
     'remark_yupi': ['remarkyupi'],
-    'source_req_dlv_date': ['reqdlvdate'],
     'reschedule': ['reschedule'],
-    'ord_qty': ['ordqty', 'orderqty'],
+    'ord_qty': ['ordqty', 'orderqty', 'orderedqty'],
     'unit': ['unit'],
     'unit_price': ['unitprice'],
     'amount': ['amount'],
@@ -1356,7 +1381,7 @@ IMPORT_COLUMN_ALIASES = {
     'inv_no': ['invno', 'invoiceno', 'invoicenumber'],
     'non_ski': ['nonski'],
     'sap_input': ['sapinput'],
-    'bl_awb': ['blawb', 'blawb_1'],
+    'bl_awb': ['blawb'],
     'invoice': ['invoice'],
     'pl': ['pl'],
     'hc': ['hc'],
@@ -1413,10 +1438,22 @@ def import_layout_columns(force=False):
         item['checkbox'] = bool(item.get('checkbox') or item.get('field') in IMPORT_CHECKBOX_FIELDS)
         item['formula'] = bool(item.get('formula') or item.get('field') in IMPORT_FORMULA_FIELDS)
         item['hyperlink'] = bool(item.get('hyperlink') or item.get('field') in IMPORT_HYPERLINK_FIELDS)
+        item['local'] = bool(item.get('local') or item.get('field') in IMPORT_DASHBOARD_LOCAL_FIELDS)
         if item.get('field') == 'status':
             item['options'] = IMPORT_STATUS_OPTIONS
         columns.append(item)
     return columns
+
+
+def import_all_mapping_columns(columns=None):
+    """Visible columns plus hidden source-only fields used for formulas/sync."""
+    base = list(columns or import_layout_columns())
+    seen = {c.get('field') for c in base}
+    for col in IMPORT_SOURCE_ONLY_COLUMNS:
+        if col.get('field') not in seen:
+            base.append(dict(col))
+            seen.add(col.get('field'))
+    return base
 
 def import_default_vendors_from_layout(force=False):
     cache_key = ('import_default_vendors_from_layout',)
@@ -1445,9 +1482,20 @@ def import_default_vendors_from_layout(force=False):
     runtime_cache_set(cache_key, vendors, ttl_seconds=900)
     return vendors
 
-def import_vendor_names(force_default=False):
+def import_uploaded_vendor_names():
+    """Vendors explicitly uploaded from the Vendor Import template.
+
+    Do not fall back to the reference layout here. The Import source sheets are
+    very large, and using the reference/default vendor list makes Copy Sheet scan
+    too many rows.
+    """
     rows = ImportVendor.query.order_by(ImportVendor.vendor_name.asc()).all()
-    uploaded = [r.vendor_name for r in rows if clean(r.vendor_name)]
+    return [r.vendor_name for r in rows if clean(r.vendor_name)]
+
+def import_vendor_names(force_default=False):
+    # Keep old callers/templates useful, but sync/import code should call
+    # import_uploaded_vendor_names() so it only imports the user's vendor list.
+    uploaded = import_uploaded_vendor_names()
     return uploaded or import_default_vendors_from_layout(force=force_default)
 
 def import_detect_data_start(df):
@@ -1478,9 +1526,26 @@ def import_source_column_map(df, columns):
     source_map = {}
     for col in columns:
         field = col.get('field')
-        keys = [import_header_key(col.get('label')), import_header_key(field)]
+        # Prefer explicit aliases over dashboard labels. Example: dashboard
+        # column "YUPI PO" must read/write the source header "PO YUPI".
+        keys = []
         keys.extend(IMPORT_COLUMN_ALIASES.get(field, []))
-        source_idx = next((by_key[key] for key in keys if key in by_key), None)
+        keys.extend([import_header_key(col.get('label')), import_header_key(field)])
+        seen_keys = []
+        for key in keys:
+            if key and key not in seen_keys:
+                seen_keys.append(key)
+        source_idx = next((by_key[key] for key in seen_keys if key in by_key), None)
+        # Source sheets can move columns as long as headers are stable. If a
+        # header is missing/misread, only then fall back to an explicit sheet_col
+        # mapping. This is needed for PO DATE (By Email), which the user confirmed
+        # comes from source column C even though PO Send Date is a separate local
+        # dashboard input.
+        if source_idx is None and col.get('sheet_col'):
+            try:
+                source_idx = column_index_from_letter(str(col.get('sheet_col'))) - 1
+            except Exception:
+                source_idx = None
         if source_idx is not None:
             source_map[field] = source_idx
     return source_map
@@ -1496,14 +1561,100 @@ def import_row_vendor_candidates(values, source_map, columns):
             candidates.append(values[col_idx])
     return [clean(v) for v in candidates if clean(v)]
 
-def import_sheet_rows(force_metadata=False):
-    columns = import_layout_columns(force=force_metadata)
-    vendor_set = {v.strip().lower() for v in import_vendor_names(force_default=force_metadata) if v.strip()}
-    rows = []
-    for source in IMPORT_SOURCE_SHEETS:
+def import_source_rows_fast(source, columns, vendor_set):
+    """Read only needed Import columns from one source sheet.
+
+    The old code used pd.read_csv() on the whole Google Sheet, then filtered by
+    vendor in Python. The source sheets are large, so that made the Import page
+    and Copy Sheet feel stuck. This version uses Google Sheets batchGet to fetch
+    only the columns that the dashboard actually displays/syncs plus the vendor
+    columns, then filters locally.
+
+    If the service account is not configured, we fall back to the public CSV
+    reader so the feature still works, but the fast path should be used in
+    production because sync-back already requires the service account anyway.
+    """
+    mapping_columns = import_all_mapping_columns(columns)
+
+    try:
+        sheet_title = import_source_sheet_title(source)
+        header_range = f"'{sheet_title}'!A1:DI20"
+        header_values = google_sheets_values_get(
+            source['spreadsheet_id'],
+            header_range,
+            value_render_option='FORMATTED_VALUE',
+        ).get('values', [])
+        header_df = pd.DataFrame(header_values).fillna('') if header_values else pd.DataFrame()
+        if header_df.empty:
+            return []
+        source_map = import_source_column_map(header_df, mapping_columns)
+        header_idx = import_detect_header_row(header_df)
+        data_start_row = header_idx + 2  # 1-based row number after the header
+
+        needed_col_indexes = set(source_map.values()) | set(IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS)
+        if not needed_col_indexes:
+            return []
+        needed_col_indexes = sorted(i for i in needed_col_indexes if i is not None and i >= 0)
+
+        ranges = []
+        for col_idx in needed_col_indexes:
+            letter = column_letter_from_index(col_idx + 1)
+            ranges.append(f"'{sheet_title}'!{letter}{data_start_row}:{letter}")
+
+        batch = google_sheets_values_batch_get(
+            source['spreadsheet_id'],
+            ranges,
+            value_render_option='FORMATTED_VALUE',
+            major_dimension='COLUMNS',
+        )
+        value_ranges = batch.get('valueRanges', [])
+        columns_by_idx = {}
+        max_len = 0
+        for col_idx, value_range in zip(needed_col_indexes, value_ranges):
+            values = value_range.get('values') or []
+            col_values = values[0] if values and isinstance(values[0], list) else []
+            col_values = [clean(v) or '' for v in col_values]
+            columns_by_idx[col_idx] = col_values
+            max_len = max(max_len, len(col_values))
+
+        rows = []
+        for offset in range(max_len):
+            values_by_idx = {col_idx: (vals[offset] if offset < len(vals) else '') for col_idx, vals in columns_by_idx.items()}
+            vendor_candidates = []
+            for field in ('vendor_name', 'vendor'):
+                col_idx = source_map.get(field)
+                if col_idx is not None:
+                    vendor_candidates.append(values_by_idx.get(col_idx, ''))
+            for col_idx in IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS:
+                vendor_candidates.append(values_by_idx.get(col_idx, ''))
+            vendor_candidates = [clean(v) for v in vendor_candidates if clean(v)]
+            row_vendor = next((v for v in vendor_candidates if v), '')
+            if vendor_set and not any(v.strip().lower() in vendor_set for v in vendor_candidates if v):
+                continue
+
+            row = {
+                '_row_key': f"{source['key']}:{data_start_row + offset}",
+                '_source_key': source['key'],
+                '_source_label': source['label'],
+                '_spreadsheet_id': source['spreadsheet_id'],
+                '_gid': source['gid'],
+                '_sheet_row': data_start_row + offset,
+                '_vendor_name': row_vendor,
+            }
+            for col in mapping_columns:
+                col_idx = source_map.get(col['field'])
+                row[col['field']] = values_by_idx.get(col_idx, '') if col_idx is not None else ''
+            if not any(row.get(col['field']) for col in mapping_columns):
+                continue
+            rows.append(row)
+        return rows
+    except Exception:
+        # Fallback for local/dev environments without Google service account.
         df = read_public_sheet_csv(source['spreadsheet_id'], source['gid'])
-        source_map = import_source_column_map(df, columns)
-        start_idx = import_detect_data_start(df)
+        mapping_columns = import_all_mapping_columns(columns)
+        source_map = import_source_column_map(df, mapping_columns)
+        start_idx = import_detect_header_row(df) + 1
+        rows = []
         for idx in range(start_idx, len(df)):
             values = [clean(v) or '' for v in df.iloc[idx].tolist()]
             vendor_candidates = import_row_vendor_candidates(values, source_map, columns)
@@ -1519,12 +1670,29 @@ def import_sheet_rows(force_metadata=False):
                 '_sheet_row': idx + 1,
                 '_vendor_name': row_vendor,
             }
-            for col in columns:
+            for col in mapping_columns:
                 col_idx = source_map.get(col['field'])
                 row[col['field']] = values[col_idx] if col_idx is not None and col_idx < len(values) else ''
-            if not any(row.get(col['field']) for col in columns):
+            if not any(row.get(col['field']) for col in mapping_columns):
                 continue
             rows.append(row)
+        return rows
+
+
+def import_sheet_rows(force_metadata=False):
+    columns = import_layout_columns(force=force_metadata)
+    uploaded_vendors = import_uploaded_vendor_names()
+    vendor_set = {v.strip().lower() for v in uploaded_vendors if v.strip()}
+
+    # Critical performance guard: never scan huge source sheets without the
+    # user's Vendor Import list. The Import page should open from DB instantly;
+    # Copy Sheet only imports rows for uploaded vendors.
+    if not vendor_set:
+        return columns, []
+
+    rows = []
+    for source in IMPORT_SOURCE_SHEETS:
+        rows.extend(import_source_rows_fast(source, columns, vendor_set))
     return columns, rows
 
 def import_truthy_checkbox_value(value):
@@ -1597,28 +1765,48 @@ def apply_import_formula_columns(row):
         if field in row:
             row[field] = import_normalize_checkbox(row.get(field))
 
-    # Status is an editable dropdown. Use ON PROCESS as the default only when
-    # the row contains import data but no explicit status yet.
+    # Status rule:
+    # - New import item with no dashboard PO Send Date stays NEW.
+    # - Once dashboard PO Send Date is filled, the same cell becomes the normal dropdown.
+    #   If status was still blank/NEW, default it to ON PROCESS.
     has_business_data = any(clean(row.get(f)) for f in ('po_yupi', 'yupi_po', 'po_sementara', 'item_name', 'vendor_name', 'vendor', 'so'))
+
+    # PO Send Date is a separate dashboard-local field filled by the user.
+    # A previous build accidentally imported source column C into po_send_date.
+    # Treat that legacy value as PO DATE (By Email), not as user input, unless
+    # the user has explicitly edited PO Send Date in the dashboard.
+    po_send_date_raw = clean(row.get('po_send_date'))
+    po_date_email = clean(row.get('po_date_by_email'))
+    po_send_manual = clean(row.get('_po_send_date_manual')) == '1'
+    if po_send_date_raw and not po_send_manual:
+        if not po_date_email:
+            row['po_date_by_email'] = po_send_date_raw
+            po_date_email = po_send_date_raw
+        if clean(row.get('po_date_by_email')) == po_send_date_raw:
+            row['po_send_date'] = ''
+            po_send_date_raw = ''
+    po_send_date = po_send_date_raw
     status = (clean(row.get('status')) or '').upper()
-    if not status and has_business_data:
+    if has_business_data and not po_send_date:
+        status = 'NEW'
+    elif has_business_data and (not status or status == 'NEW'):
         status = 'ON PROCESS'
     if status:
         status = next((opt for opt in IMPORT_STATUS_OPTIONS if opt == status), status)
         row['status'] = status
 
-    # Formula D/E/F/G in the reference sheet.
+    # Formula/matching columns from the reference sheet.
     row['site'] = clean(row.get('site')) or ''
-    row['yupi_po'] = clean(row.get('yupi_po')) or clean(row.get('po_yupi')) or ''
+    po_yupi = clean(row.get('po_yupi')) or clean(row.get('yupi_po')) or ''
+    row['po_yupi'] = po_yupi
+    row['yupi_po'] = po_yupi
     row['vendor'] = clean(row.get('vendor')) or clean(row.get('vendor_name')) or ''
-    req_raw = clean(row.get('reschedule')) or clean(row.get('source_req_dlv_date')) or clean(row.get('req_dlv_date'))
+    req_raw = clean(row.get('source_req_dlv_date')) or clean(row.get('req_dlv_date'))
+    row['source_req_dlv_date'] = req_raw or ''
     row['req_dlv_date'] = req_raw or ''
 
     etd_date = import_date_from_value(row.get('etd'))
     eta_date = import_date_from_value(row.get('eta'))
-    if not clean(row.get('eta')) and etd_date:
-        eta_date = etd_date + timedelta(days=44)
-        row['eta'] = eta_date.isoformat()
 
     req_date = import_date_from_value(row.get('req_dlv_date'))
     status_upper = (clean(row.get('status')) or '').upper()
@@ -1643,13 +1831,11 @@ def apply_import_formula_columns(row):
     else:
         row['arrival_check'] = f'🔴 Delay ({(eta_date - req_date).days}D)'
 
-    # Formula AJ: purchase amount = purchase price x order quantity when blank.
-    purchase_amount = import_float_value(row.get('purchase_amount'))
-    if purchase_amount is None:
-        price = import_float_value(row.get('purchase_price'))
-        qty = import_float_value(row.get('ord_qty'))
-        if price is not None and qty is not None:
-            row['purchase_amount'] = import_format_number(price * qty)
+    # Formula AJ: purchase amount = purchase price x order quantity.
+    price = import_float_value(row.get('purchase_price'))
+    qty = import_float_value(row.get('ord_qty'))
+    if price is not None and qty is not None:
+        row['purchase_amount'] = import_format_number(price * qty)
 
     # Formula CU: lead time days = ETA - ETD.
     if etd_date and eta_date:
@@ -1660,7 +1846,10 @@ def apply_import_formula_columns(row):
     return row
 
 def import_row_payload(row, columns):
-    payload = {col['field']: '' if row.get(col['field']) is None else str(row.get(col['field'])) for col in columns}
+    payload = {
+        col['field']: '' if row.get(col['field']) is None else str(row.get(col['field']))
+        for col in import_all_mapping_columns(columns)
+    }
     return apply_import_formula_columns(payload)
 
 def import_row_source_uid(row, columns):
@@ -1722,7 +1911,7 @@ def import_dashboard_row_to_dict(row, columns):
 
 def sync_import_sheet_to_dashboard():
     columns, sheet_rows = import_sheet_rows(force_metadata=True)
-    vendor_count = len(import_vendor_names(force_default=True))
+    vendor_count = len(import_uploaded_vendor_names())
     existing_rows = ImportDashboardRow.query.all()
     existing = {r.row_key: r for r in existing_rows}
     existing_by_sheet = {(r.source_key, r.sheet_row): r for r in existing_rows if r.source_key and r.sheet_row}
@@ -2356,6 +2545,22 @@ def google_sheets_metadata(spreadsheet_id):
 def google_sheets_values_get(spreadsheet_id, range_name, value_render_option='UNFORMATTED_VALUE'):
     return google_sheets_request('GET', spreadsheet_id, ['values', range_name], params={'valueRenderOption': value_render_option})
 
+def google_sheets_values_batch_get(spreadsheet_id, ranges, value_render_option='FORMATTED_VALUE', major_dimension='COLUMNS'):
+    """Read several Google Sheet ranges in one request.
+
+    Import source sheets are large, so /api/import/data and Copy Sheet must not
+    download the whole workbook as CSV. This helper lets Import fetch only the
+    visible/sync columns plus vendor columns.
+    """
+    return google_sheets_request(
+        'GET', spreadsheet_id, ['values:batchGet'],
+        params={
+            'ranges': list(ranges or []),
+            'valueRenderOption': value_render_option,
+            'majorDimension': major_dimension,
+        }
+    )
+
 def google_sheets_values_update(spreadsheet_id, range_name, values):
     return google_sheets_request(
         'PUT', spreadsheet_id, ['values', range_name],
@@ -2415,6 +2620,14 @@ def column_letter_from_index(index):
     while index > 0:
         index, rem = divmod(index - 1, 26)
         result = chr(65 + rem) + result
+    return result
+
+def column_index_from_letter(letter):
+    result = 0
+    for ch in str(letter or '').strip().upper():
+        if not ('A' <= ch <= 'Z'):
+            continue
+        result = result * 26 + (ord(ch) - 64)
     return result
 
 def vendor_control_sheet_name():
@@ -7246,6 +7459,104 @@ def import_sheet_title_for_gid(spreadsheet_id, gid):
             return props.get('title')
     raise RuntimeError(f'Sheet gid {gid} not found')
 
+
+def import_source_config(source_key):
+    return next((s for s in IMPORT_SOURCE_SHEETS if s.get('key') == source_key), None)
+
+def import_source_sheet_title(source):
+    cache_key = ('import_source_sheet_title', source.get('spreadsheet_id'), source.get('gid'))
+    cached = runtime_cache_get(cache_key)
+    if cached:
+        return cached
+    title = import_sheet_title_for_gid(source['spreadsheet_id'], source.get('gid') or '0')
+    runtime_cache_set(cache_key, title, ttl_seconds=3600)
+    return title
+
+def import_source_map_for_sync(source):
+    cache_key = ('import_source_map_for_sync', source.get('spreadsheet_id'), source.get('gid'))
+    cached = runtime_cache_get(cache_key)
+    if cached is not None:
+        return cached
+    columns = import_all_mapping_columns(import_layout_columns())
+    df = read_public_sheet_csv(source['spreadsheet_id'], source.get('gid') or '0', nrows=20)
+    source_map = import_source_column_map(df, columns)
+    runtime_cache_set(cache_key, source_map, ttl_seconds=300)
+    return source_map
+
+def import_sheet_field_for_dashboard_field(field):
+    return IMPORT_SYNC_FIELD_ALIASES.get(field, field)
+
+def set_import_payload_field_aliases(data, field, value):
+    data[field] = value
+    if field == 'po_send_date':
+        data['_po_send_date_manual'] = '1' if clean(value) else ''
+    if field == 'yupi_po':
+        data['po_yupi'] = value
+    elif field == 'po_yupi':
+        data['yupi_po'] = value
+    elif field == 'req_dlv_date':
+        data['source_req_dlv_date'] = value
+    elif field == 'source_req_dlv_date':
+        data['req_dlv_date'] = value
+    return data
+
+def sync_import_cells_to_google_sheet(items):
+    """Sync dashboard edits back to the two source Google Sheets.
+
+    Each item: {'row': ImportDashboardRow, 'field': field, 'value': value}
+    """
+    grouped = {}
+    skipped = 0
+    for item in items:
+        row = item.get('row')
+        field = clean(item.get('field'))
+        value = '' if item.get('value') is None else str(item.get('value'))
+        if not row or not field:
+            skipped += 1
+            continue
+        if field in IMPORT_DASHBOARD_LOCAL_FIELDS:
+            skipped += 1
+            continue
+        source = import_source_config(row.source_key)
+        if not source:
+            skipped += 1
+            continue
+        sheet_field = import_sheet_field_for_dashboard_field(field)
+        try:
+            source_map = import_source_map_for_sync(source)
+        except Exception:
+            source_map = {}
+        col_idx = source_map.get(sheet_field)
+        if col_idx is None:
+            skipped += 1
+            continue
+        try:
+            sheet_title = import_source_sheet_title(source)
+        except Exception:
+            skipped += 1
+            continue
+        sheet_row = row.sheet_row
+        if not sheet_row:
+            skipped += 1
+            continue
+        col_letter = column_letter_from_index(col_idx + 1)
+        spreadsheet_id = source['spreadsheet_id']
+        grouped.setdefault(spreadsheet_id, []).append({
+            'range': f"'{sheet_title}'!{col_letter}{sheet_row}",
+            'values': [[value or '']],
+        })
+    if not grouped:
+        return {'synced': False, 'reason': 'No mapped Import sheet cells to sync', 'skipped': skipped}
+    total_ranges = 0
+    for spreadsheet_id, ranges in grouped.items():
+        google_sheets_values_batch_update(spreadsheet_id, ranges)
+        total_ranges += len(ranges)
+    return {'synced': True, 'ranges': total_ranges, 'spreadsheets': len(grouped), 'skipped': skipped}
+
+def sync_import_cell_to_google_sheet(row, field, value):
+    result = sync_import_cells_to_google_sheet([{'row': row, 'field': field, 'value': value}])
+    return result
+
 @app.route('/api/import/data', methods=['GET'])
 def get_import_data():
     try:
@@ -7254,24 +7565,38 @@ def get_import_data():
         per_page = min(max(int(request.args.get('per_page', 25)), 1), 500)
         search = clean(request.args.get('search')) or ''
         sync_info = None
-        if force or ImportDashboardRow.query.count() == 0:
+
+        # Do not auto-sync when the table is empty. Opening /Import must not scan
+        # the huge source sheets. The source sheets are read only when the user
+        # explicitly clicks Copy Sheet or uploads a Vendor Import file that calls
+        # this endpoint with refresh=1.
+        if force:
             sync_info = sync_import_sheet_to_dashboard()
+
         columns = sync_info['columns'] if sync_info else import_layout_columns()
-        vendor_count = sync_info.get('vendor_count') if sync_info else len(import_vendor_names())
-        db_rows = ImportDashboardRow.query.order_by(
-            ImportDashboardRow.first_seen_at.desc(),
-            ImportDashboardRow.id.desc(),
-        ).all()
-        rows = [import_dashboard_row_to_dict(row, columns) for row in db_rows]
+        vendor_count = sync_info.get('vendor_count') if sync_info else len(import_uploaded_vendor_names())
+
+        q = ImportDashboardRow.query
         if search:
             terms = [t.strip().lower() for t in re.split(r'[\n,]+', search) if t.strip()]
-            if terms:
-                rows = [row for row in rows if any(term in ' '.join(str(v or '').lower() for v in row.values()) for term in terms)]
-        total = len(rows)
-        start = (page - 1) * per_page
-        paged = rows[start:start + per_page]
+            for term in terms:
+                pattern = f'%{term}%'
+                q = q.filter(db.or_(
+                    ImportDashboardRow.row_key.ilike(pattern),
+                    ImportDashboardRow.source_label.ilike(pattern),
+                    ImportDashboardRow.vendor_name.ilike(pattern),
+                    ImportDashboardRow.data_json.ilike(pattern),
+                ))
+
+        total = q.count()
+        db_rows = q.order_by(
+            ImportDashboardRow.first_seen_at.desc(),
+            ImportDashboardRow.id.desc(),
+        ).offset((page - 1) * per_page).limit(per_page).all()
+        rows = [import_dashboard_row_to_dict(row, columns) for row in db_rows]
+
         return jsonify({
-            'data': paged,
+            'data': rows,
             'columns': columns,
             'total': total,
             'page': page,
@@ -7305,15 +7630,74 @@ def update_import_cell():
             data = json.loads(row.data_json or '{}')
         except (TypeError, json.JSONDecodeError):
             data = {}
-        data[field] = value
+        data = set_import_payload_field_aliases(data, field, value)
         data = apply_import_formula_columns(data)
         row.data_json = json.dumps(data, ensure_ascii=False)
         row.updated_at = datetime.utcnow()
+        sheet_sync = {'synced': False, 'reason': 'Not attempted'}
+        try:
+            sync_items = [{'row': row, 'field': field, 'value': value}]
+            if field in ('purchase_price', 'ord_qty') and clean(data.get('purchase_amount')):
+                sync_items.append({'row': row, 'field': 'purchase_amount', 'value': data.get('purchase_amount')})
+            sheet_sync = sync_import_cells_to_google_sheet(sync_items)
+        except Exception as sync_exc:
+            sheet_sync = {'synced': False, 'reason': str(sync_exc)}
         db.session.commit()
         clear_runtime_caches()
         columns = import_layout_columns()
         updated_row = import_dashboard_row_to_dict(row, columns)
-        return jsonify({'success': True, 'row_key': row_key, 'field': field, 'value': value, 'row': updated_row, 'sheet_sync': {'synced': False, 'local_only': True}})
+        return jsonify({'success': True, 'row_key': row_key, 'field': field, 'value': value, 'row': updated_row, 'sheet_sync': sheet_sync})
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e), 'sheet_sync': {'synced': False, 'reason': str(e)}}), 500
+
+
+@app.route('/api/import/cells', methods=['PUT'])
+def update_import_cells_batch():
+    try:
+        payload = request.get_json(silent=True) or {}
+        updates = payload.get('updates') or []
+        if not isinstance(updates, list) or not updates:
+            return jsonify({'error': 'updates must be a non-empty list'}), 400
+        columns = import_layout_columns()
+        valid_fields = {col['field'] for col in import_all_mapping_columns(columns)}
+        row_keys = [clean(item.get('row_key')) for item in updates if clean(item.get('row_key'))]
+        rows = ImportDashboardRow.query.filter(ImportDashboardRow.row_key.in_(row_keys)).all() if row_keys else []
+        row_by_key = {r.row_key: r for r in rows}
+        sheet_items = []
+        updated_keys = set()
+        for item in updates:
+            row_key = clean(item.get('row_key'))
+            field = clean(item.get('field'))
+            value = '' if item.get('value') is None else str(item.get('value'))
+            if not row_key or not field or field not in valid_fields:
+                continue
+            row = row_by_key.get(row_key)
+            if not row:
+                continue
+            try:
+                data = json.loads(row.data_json or '{}')
+            except (TypeError, json.JSONDecodeError):
+                data = {}
+            data = set_import_payload_field_aliases(data, field, value)
+            data = apply_import_formula_columns(data)
+            row.data_json = json.dumps(data, ensure_ascii=False)
+            row.updated_at = datetime.utcnow()
+            sheet_items.append({'row': row, 'field': field, 'value': value})
+            if field in ('purchase_price', 'ord_qty') and clean(data.get('purchase_amount')):
+                sheet_items.append({'row': row, 'field': 'purchase_amount', 'value': data.get('purchase_amount')})
+            updated_keys.add(row_key)
+        sheet_sync = {'synced': False, 'reason': 'No mapped Import sheet cells to sync'}
+        if sheet_items:
+            try:
+                sheet_sync = sync_import_cells_to_google_sheet(sheet_items)
+            except Exception as sync_exc:
+                sheet_sync = {'synced': False, 'reason': str(sync_exc)}
+        db.session.commit()
+        clear_runtime_caches()
+        updated_rows = [import_dashboard_row_to_dict(row_by_key[k], columns) for k in updated_keys if k in row_by_key]
+        return jsonify({'success': True, 'updated': len(sheet_items), 'rows': updated_rows, 'sheet_sync': sheet_sync})
     except Exception as e:
         db.session.rollback()
         import traceback; traceback.print_exc()
