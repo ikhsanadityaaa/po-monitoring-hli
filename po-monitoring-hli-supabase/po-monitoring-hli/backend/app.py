@@ -2220,20 +2220,34 @@ def apply_import_formula_columns(row):
     # prefill when the user clicks the cell to edit). Same treatment for
     # ``po_date_by_email``, ``etd``, ``eta``, ``reschedule`` — every date
     # column that may have come from the sheet as a year-less text string.
-    req_raw = import_nonblank(row.get('source_req_dlv_date')) or import_nonblank(row.get('req_dlv_date'))
-    row['source_req_dlv_date'] = req_raw
-    req_parsed = import_date_from_value(req_raw) if req_raw else None
-    row['req_dlv_date'] = req_parsed.isoformat() if req_parsed else req_raw
+    #
+    # CRITICAL: this whole block is wrapped in try/except because
+    # ``apply_import_formula_columns`` is called for EVERY row on EVERY page
+    # load. If any date value trips the parser, the whole /api/import/data
+    # endpoint would 500 and the table would appear empty. We never want a
+    # date formatting bug to take the whole page down — fall back to the raw
+    # text and let the user see what's in the cell.
+    try:
+        req_raw = import_nonblank(row.get('source_req_dlv_date')) or import_nonblank(row.get('req_dlv_date'))
+        row['source_req_dlv_date'] = req_raw
+        if req_raw:
+            req_parsed = import_date_from_value(req_raw)
+            if req_parsed:
+                row['req_dlv_date'] = req_parsed.isoformat()
 
-    for _date_field in ('po_date_by_email', 'etd', 'eta', 'reschedule'):
-        _raw = import_nonblank(row.get(_date_field))
-        if not _raw:
-            continue
-        _parsed = import_date_from_value(_raw)
-        if _parsed:
-            row[_date_field] = _parsed.isoformat()
-        # If parsing failed, leave the original text in place so the user can
-        # still see what was in the sheet and correct it manually if needed.
+        for _date_field in ('po_date_by_email', 'etd', 'eta', 'reschedule'):
+            _raw = import_nonblank(row.get(_date_field))
+            if not _raw:
+                continue
+            _parsed = import_date_from_value(_raw)
+            if _parsed:
+                row[_date_field] = _parsed.isoformat()
+            # If parsing failed, leave the original text in place so the user
+            # can still see what was in the sheet and correct it manually.
+    except Exception:
+        # Never let date normalization crash the whole row render. The raw
+        # values are already in `row` from the sheet/DB; just keep them.
+        pass
 
     etd_date = import_date_from_value(row.get('etd'))
     eta_date = import_date_from_value(row.get('eta'))
@@ -2497,30 +2511,37 @@ def import_layout_tracker_visible_rows(columns=None):
     # row 4 would break if the user adds/removes banner rows. Instead we scan
     # the first 12 rows and pick the one whose labels best match the known
     # Import column aliases — same approach the source-sheet reader uses.
-    alias_keys = set()
-    for vs in IMPORT_COLUMN_ALIASES.values():
-        alias_keys.update(import_header_key(v) for v in vs if v)
-    alias_keys.update(import_header_key(c.get('label')) for c in import_all_mapping_columns(columns))
-    alias_keys.update(import_header_key(c.get('field')) for c in import_all_mapping_columns(columns))
-    alias_keys.discard('')
+    #
+    # Defensive: wrap in try/except so a malformed sheet (e.g. all-empty rows,
+    # a row with non-string cells) never crashes Copy Sheet. Fall back to row 0
+    # (the first row) if detection fails.
+    try:
+        alias_keys = set()
+        for vs in IMPORT_COLUMN_ALIASES.values():
+            alias_keys.update(import_header_key(v) for v in vs if v)
+        alias_keys.update(import_header_key(c.get('label')) for c in import_all_mapping_columns(columns))
+        alias_keys.update(import_header_key(c.get('field')) for c in import_all_mapping_columns(columns))
+        alias_keys.discard('')
 
-    critical_labels = ('poyupi', 'reqdlvdate', 'posementara', 'itemname', 'itemyupi')
+        critical_labels = ('poyupi', 'reqdlvdate', 'posementara', 'itemname', 'itemyupi')
 
-    best_idx = 0
-    best_score = -1
-    max_scan = min(len(values), 12)
-    for idx in range(max_scan):
-        labels = [import_header_key(v) for v in values[idx]]
-        score = sum(1 for label in labels if label in alias_keys)
-        # Strong bonus for the columns that are currently critical for Import.
-        for crit in critical_labels:
-            if crit in labels:
-                score += 5
-        if score > best_score:
-            best_idx = idx
-            best_score = score
+        best_idx = 0
+        best_score = -1
+        max_scan = min(len(values), 12)
+        for idx in range(max_scan):
+            labels = [import_header_key(v) for v in values[idx]]
+            score = sum(1 for label in labels if label in alias_keys)
+            # Strong bonus for the columns that are currently critical for Import.
+            for crit in critical_labels:
+                if crit in labels:
+                    score += 5
+            if score > best_score:
+                best_idx = idx
+                best_score = score
 
-    header_idx = best_idx if best_score >= 4 else 0
+        header_idx = best_idx if best_score >= 4 else 0
+    except Exception:
+        header_idx = 0
     header = values[header_idx]
 
     # ── Step 2: build a header-text → column-index map. ────────────────────
@@ -2794,12 +2815,21 @@ def sync_import_sheet_to_dashboard():
     dashboard-local user input (STATUS, PO Send Date, checklist ticks, remarks
     the user typed, etc.) is preserved as-is. For a row whose identity does not
     exist yet, a new dashboard row is inserted.
+
+    CRITICAL: this function must NEVER raise. It is called from the
+    ``/api/import/data`` endpoint (when the user clicks Copy Sheet) and from
+    the daily 07:00 WIB scheduler. If it raises, the API returns HTTP 500 and
+    the dashboard table appears blank. Every external call (Google Sheets API,
+    DB writes) is wrapped in try/except so a transient failure is reported in
+    the return dict instead of crashing the caller.
     """
-    # ── Step 1: purge all rows left over from the retired source sheets. ──
-    # This is the root-cause fix for "data lama tidak dipakai" — every Copy
-    # Sheet run starts from a clean slate for legacy-tagged rows so the
-    # dashboard only ever shows data from the live sheet.
     purged_legacy = 0
+    sheet_rows = []
+    columns = import_layout_columns(force=True)
+    filter_vendors, vendor_source = [], 'none'
+    vendor_count = len(import_uploaded_vendor_names())
+
+    # ── Step 1: purge all rows left over from the retired source sheets. ──
     try:
         stale = ImportDashboardRow.query.filter(
             ImportDashboardRow.source_key.in_({'source_1', 'source_2'})
@@ -2821,10 +2851,29 @@ def sync_import_sheet_to_dashboard():
     # It also forward-fills PO YUPI for merged cells and extracts PO YUPI from
     # PO Sementara as a fallback, which is the root-cause fix for
     # "PO sementara SVOK410100326-04 seharusnya YUPI PO nya 410100326".
-    columns = import_layout_columns(force=True)
-    sheet_rows = import_layout_tracker_visible_rows(columns)
-    filter_vendors, vendor_source = import_vendor_filter_names()
-    vendor_count = len(import_uploaded_vendor_names())
+    try:
+        sheet_rows = import_layout_tracker_visible_rows(columns)
+        filter_vendors, vendor_source = import_vendor_filter_names()
+    except Exception:
+        # Sheet read failed (Google API down, service account not configured,
+        # sheet moved, etc.). Don't crash the API — return what we have so
+        # the dashboard still shows the existing DB rows. The user can see
+        # the error in the returned dict and retry.
+        import traceback; traceback.print_exc()
+        return {
+            'added': 0,
+            'updated': 0,
+            'seen': 0,
+            'sheet_rows': 0,
+            'vendor_count': vendor_count,
+            'vendor_filter_count': 0,
+            'vendor_filter_source': 'none',
+            'purged_legacy': purged_legacy,
+            'copy_only': True,
+            'columns': columns,
+            'error': 'Failed to read the live Import tracker sheet. See server logs.',
+            'source_sheet_url': f'https://docs.google.com/spreadsheets/d/{IMPORT_LAYOUT_SHEET_ID}/edit#gid={IMPORT_LAYOUT_GID}',
+        }
 
     # ── Step 3: load every existing dashboard row EXCEPT rows tagged
     # 'import_tracker' (those are old virtual rows from a previous tracker
@@ -2964,7 +3013,11 @@ def sync_import_sheet_to_dashboard():
         existing_by_uid.setdefault(source_uid, []).append(new_row)
         consumed_per_uid[source_uid] = consumed_per_uid.get(source_uid, 0) + 1
 
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
     # ── persist timestamp so UI can show "Last Copy: date time" ──────────
     try:
         wib_now = datetime.utcnow() + timedelta(hours=7)
