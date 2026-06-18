@@ -2070,6 +2070,26 @@ def import_normalize_checkbox(value):
     return 'TRUE' if import_truthy_checkbox_value(raw) else 'FALSE'
 
 def import_date_from_value(value):
+    """Parse a value into a ``date`` object, accepting the formats the live
+    Import tracker sheet actually uses.
+
+    The sheet at IMPORT_LAYOUT_SHEET_ID stores dates in several human-friendly
+    formats that don't include a year, e.g.:
+
+      - ``2 Jun``  (``%d %b``)
+      - ``21 Sep`` (``%d %b``)
+      - ``25-May`` (``%d-%b``)
+      - ``2 June`` (``%d %B``)
+      - ``25-May`` (``%d-%B`` if the locale expands ``B`` to long month names)
+
+    These show up as plain text in the dashboard because the previous parser
+    only tried ``%d/%m/%Y``, ``%d-%m-%Y``, ``%Y-%m-%d``, ``%Y/%m/%d``,
+    ``%m/%d/%Y``, and Google Sheets serial numbers. ``pd.to_datetime`` also
+    refuses strings without a year. We now try the year-less formats
+    explicitly and assume the current year — or next year, if the resulting
+    date has already passed (so a sheet edited in December that says ``2 Jun``
+    is read as next June, not last June).
+    """
     raw = clean(value)
     if not raw:
         return None
@@ -2083,11 +2103,36 @@ def import_date_from_value(value):
                 return (datetime(1899, 12, 30) + timedelta(days=serial)).date()
         except (TypeError, ValueError, OverflowError):
             pass
-    for fmt in ('%d/%m/%Y', '%d-%m-%Y', '%Y-%m-%d', '%Y/%m/%d', '%m/%d/%Y'):
+    # Full date formats that include the year.
+    for fmt in ('%d/%m/%Y', '%d-%m-%Y', '%Y-%m-%d', '%Y/%m/%d', '%m/%d/%Y', '%d/%m/%y', '%d-%b-%Y', '%d-%b-%y', '%d %b %Y', '%d %b %y'):
         try:
             return datetime.strptime(s, fmt).date()
         except ValueError:
             pass
+    # Year-less formats like "2 Jun", "21 Sep", "25-May", "2 June".
+    # Assume current year; if that date has already passed, use next year
+    # (so a December-edited sheet saying "2 Jun" still means a future June).
+    yearless_formats = ('%d %b', '%d-%b', '%d %B', '%d-%B', '%b %d', '%b-%d', '%B %d', '%B-%d')
+    today = date.today()
+    for fmt in yearless_formats:
+        try:
+            d = datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+        # strptime without %Y defaults to 1900 — replace with current year.
+        try:
+            d = d.replace(year=today.year)
+        except ValueError:
+            # Feb 29 in a non-leap year — skip to next year.
+            d = d.replace(year=today.year + 1)
+        if d < today:
+            # Date already passed this year → assume next year.
+            try:
+                d = d.replace(year=today.year + 1)
+            except ValueError:
+                # Same Feb 29 edge case.
+                d = d.replace(year=today.year + 2)
+        return d
     return parse_date(raw)
 
 def import_date_output(value, fallback=None):
@@ -2165,14 +2210,35 @@ def apply_import_formula_columns(row):
     row['po_yupi'] = po_yupi
     row['yupi_po'] = po_yupi
     row['vendor'] = import_nonblank(row.get('vendor')) or import_nonblank(row.get('vendor_name'))
+
+    # ── Date normalization ────────────────────────────────────────────────
+    # The source sheet stores dates in human-friendly formats like "2 Jun",
+    # "21 Sep", "25-May" (without year). Keep the raw sheet text in
+    # ``source_req_dlv_date`` for traceability, but normalize the displayed
+    # ``req_dlv_date`` to ISO ``YYYY-MM-DD`` so the dashboard treats it as a
+    # real date (correct sorting, correct days_left, correct date input
+    # prefill when the user clicks the cell to edit). Same treatment for
+    # ``po_date_by_email``, ``etd``, ``eta``, ``reschedule`` — every date
+    # column that may have come from the sheet as a year-less text string.
     req_raw = import_nonblank(row.get('source_req_dlv_date')) or import_nonblank(row.get('req_dlv_date'))
     row['source_req_dlv_date'] = req_raw
-    row['req_dlv_date'] = req_raw
+    req_parsed = import_date_from_value(req_raw) if req_raw else None
+    row['req_dlv_date'] = req_parsed.isoformat() if req_parsed else req_raw
+
+    for _date_field in ('po_date_by_email', 'etd', 'eta', 'reschedule'):
+        _raw = import_nonblank(row.get(_date_field))
+        if not _raw:
+            continue
+        _parsed = import_date_from_value(_raw)
+        if _parsed:
+            row[_date_field] = _parsed.isoformat()
+        # If parsing failed, leave the original text in place so the user can
+        # still see what was in the sheet and correct it manually if needed.
 
     etd_date = import_date_from_value(row.get('etd'))
     eta_date = import_date_from_value(row.get('eta'))
 
-    req_date = import_date_from_value(row.get('req_dlv_date'))
+    req_date = req_parsed
     status_upper = (clean(row.get('status')) or '').upper()
     if not has_business_data:
         row['days_left'] = ''
@@ -2386,17 +2452,36 @@ def import_dashboard_row_to_dict(row, columns):
 
 
 def import_layout_tracker_visible_rows(columns=None):
-    """Read existing values from the main Import tracker sheet.
+    """Read all data rows from the live Import tracker sheet (IMPORT_LAYOUT_SHEET_ID).
 
-    Dashboard edits are synced to this tracker, but earlier builds did not read
-    the tracker back into the dashboard. That is why values that already existed
-    in the sheet, such as PO Send Date, STATUS, ETA, remarks, checklist ticks,
-    and Soft Copy Doc, could remain blank in /Import. This lightweight reader is
-    used on Copy Sheet only, so opening /Import stays fast.
+    This is now the SINGLE source of truth for Import dashboard rows. The sheet
+    at the URL provided by the user has an RM-style layout (PO YUPI at column E,
+    PO SEMENTARA at column D, Item Yupi at column F, etc.) — NOT the old tracker
+    layout that the previous sheet_col letters assumed. To stay robust against
+    future column reordering, we detect the actual header row by scanning for
+    `poyupi` + `reqdlvdate` + `posementara` labels (same logic used for source
+    sheets), then map every column by header text instead of hard-coded letters.
+
+    Behavioural notes:
+    - The header row may be on row 1, 3, or 4 depending on the sheet's banner
+      rows. We scan the first 12 rows for the strongest header match.
+    - PO YUPI is frequently a merged cell in these sheets — only the first row
+      of a PO has the value, the other item lines under the same PO have empty
+      PO YUPI cells. We forward-fill blank PO YUPI values from the most recent
+      non-blank value above (within the same sheet, top-to-bottom), AND we also
+      try to extract PO YUPI from PO SEMENTARA via the SVO[KI]?<num>-<line>
+      pattern as a secondary fallback. This is the root-cause fix for
+      "PO sementara SVOK410100326-04 seharusnya YUPI PO nya 410100326".
+    - Local/dashboard-only columns (status, days_left, po_send_date, etd, eta,
+      checklist ticks, import_remarks, soft_copy_doc, incoterm, forwarder, …)
+      are not present in the source sheet, so they stay blank in the payload —
+      the dashboard's user-local DB values for those fields are preserved by
+      the upsert merge logic in sync_import_sheet_to_dashboard().
     """
     columns = import_layout_columns() if columns is None else columns
     sheet_title = import_layout_target_sheet_title()
-    # Reference tracker visible range is A:DI. Row 1 is the header.
+    # Read a generous range — A:DI covers every column the old tracker layout
+    # ever used, so even if the user adds columns later we still capture them.
     resp = google_sheets_values_get(
         IMPORT_LAYOUT_SHEET_ID,
         f"'{sheet_title}'!A1:DI",
@@ -2406,7 +2491,43 @@ def import_layout_tracker_visible_rows(columns=None):
     if not values:
         return []
 
-    header = values[0]
+    # ── Step 1: detect the real header row. ────────────────────────────────
+    # The user's sheet has banner rows on top (row 1 has numbers, row 2 has a
+    # note, row 3 has a section title, row 4 has the real headers). Hard-coding
+    # row 4 would break if the user adds/removes banner rows. Instead we scan
+    # the first 12 rows and pick the one whose labels best match the known
+    # Import column aliases — same approach the source-sheet reader uses.
+    alias_keys = set()
+    for vs in IMPORT_COLUMN_ALIASES.values():
+        alias_keys.update(import_header_key(v) for v in vs if v)
+    alias_keys.update(import_header_key(c.get('label')) for c in import_all_mapping_columns(columns))
+    alias_keys.update(import_header_key(c.get('field')) for c in import_all_mapping_columns(columns))
+    alias_keys.discard('')
+
+    critical_labels = ('poyupi', 'reqdlvdate', 'posementara', 'itemname', 'itemyupi')
+
+    best_idx = 0
+    best_score = -1
+    max_scan = min(len(values), 12)
+    for idx in range(max_scan):
+        labels = [import_header_key(v) for v in values[idx]]
+        score = sum(1 for label in labels if label in alias_keys)
+        # Strong bonus for the columns that are currently critical for Import.
+        for crit in critical_labels:
+            if crit in labels:
+                score += 5
+        if score > best_score:
+            best_idx = idx
+            best_score = score
+
+    header_idx = best_idx if best_score >= 4 else 0
+    header = values[header_idx]
+
+    # ── Step 2: build a header-text → column-index map. ────────────────────
+    # We do NOT use the sheet_col letters from IMPORT_REFERENCE_VISIBLE_COLUMNS
+    # because those letters describe the OLD tracker layout, not the current
+    # sheet the user provided. Header-based mapping is robust to column
+    # reordering and is the only correct way to read this sheet.
     by_header = {}
     for idx, raw in enumerate(header):
         key = import_header_key(raw)
@@ -2414,44 +2535,126 @@ def import_layout_tracker_visible_rows(columns=None):
             by_header[key] = idx
 
     mapping_columns = import_all_mapping_columns(columns)
+
+    # Pre-compute the column index for each field once (not per row).
+    field_to_idx = {}
+    for col in mapping_columns:
+        field = col.get('field')
+        if not field:
+            continue
+        # Try every alias we know for this field, then the label, then the
+        # field name itself. First match wins.
+        keys = []
+        keys.extend(IMPORT_COLUMN_ALIASES.get(field, []))
+        keys.extend([import_header_key(col.get('label')), import_header_key(field)])
+        idx = next((by_header[k] for k in keys if k and k in by_header), None)
+        field_to_idx[field] = idx
+
+    # ── Step 3: read data rows. Skip blank rows and the header row. ────────
     rows = []
-    for row_no, row_values in enumerate(values[1:], start=2):
+    last_po_yupi = ''  # for forward-fill of merged PO YUPI cells
+    last_po_sementara_prefix = ''  # track which PO the forward-fill came from
+
+    for row_offset, row_values in enumerate(values[header_idx + 1:], start=header_idx + 2):
         payload = {
             '_source_key': 'import_tracker',
             '_source_label': 'Import Tracker',
-            '_sheet_row': row_no,
+            '_sheet_row': row_offset,
         }
-        for col in mapping_columns:
-            field = col.get('field')
-            if not field:
-                continue
-            idx = None
-            # Use sheet_col first because the reference tracker has formula/raw
-            # columns with similar labels. This keeps PO Send Date (C) separate
-            # from PO DATE (By Email) (O), and display YUPI PO (E) separate from
-            # raw PO YUPI (R).
-            sheet_col = col.get('sheet_col')
-            if sheet_col:
-                try:
-                    idx = column_index_from_letter(str(sheet_col)) - 1
-                except Exception:
-                    idx = None
-            if idx is None:
-                keys = []
-                keys.extend(IMPORT_COLUMN_ALIASES.get(field, []))
-                keys.extend([import_header_key(col.get('label')), import_header_key(field)])
-                idx = next((by_header[k] for k in keys if k and k in by_header), None)
-            payload[field] = row_values[idx] if idx is not None and idx < len(row_values) else ''
+        any_value = False
+        for field, idx in field_to_idx.items():
+            val = row_values[idx] if idx is not None and idx < len(row_values) else ''
+            payload[field] = val
+            if import_nonblank(val):
+                any_value = True
+
+        if not any_value:
+            # completely blank row — skip
+            continue
+
+        # ── Step 4: forward-fill PO YUPI for merged cells. ─────────────────
+        # The source sheet commonly merges the PO YUPI cell across all item
+        # lines of the same PO. Google Sheets API returns the value only for
+        # the top-left of the merge and empty strings for the other rows, so
+        # multi-item POs end up with blank PO YUPI in the dashboard. We fix
+        # this in two layers:
+        #   (a) If PO YUPI is blank but PO SEMENTARA starts with the same
+        #       SVO[KI]?<numprefix> as the row that gave us last_po_yupi,
+        #       carry last_po_yupi down. This is the merged-cell case.
+        #   (b) Otherwise, try to extract PO YUPI from PO SEMENTARA via the
+        #       SVO[KI]?<num>-<line> pattern. This handles cases where the
+        #       merge doesn't apply but PO YUPI was left blank in the sheet
+        #       while PO Sementara clearly contains the PO number.
+        po_yupi_now = import_nonblank(payload.get('po_yupi')) or import_nonblank(payload.get('yupi_po'))
+        po_sementara_now = import_nonblank(payload.get('po_sementara'))
+
+        if po_yupi_now:
+            last_po_yupi = po_yupi_now
+            # Remember the numeric prefix of the PO Sementara that this YUPI
+            # came from, so we only forward-fill into rows of the SAME PO.
+            last_po_sementara_prefix = _extract_po_yupi_from_po_sementara(po_sementara_now) or ''
+        else:
+            extracted = _extract_po_yupi_from_po_sementara(po_sementara_now)
+            if extracted:
+                # PO Sementara contains the PO YUPI — use it directly. This is
+                # the most reliable source because PO Sementara is always
+                # filled per line.
+                payload['po_yupi'] = extracted
+                payload['yupi_po'] = extracted
+                last_po_yupi = extracted
+                last_po_sementara_prefix = extracted
+            elif last_po_yupi:
+                # Same PO as the previous row (PO Sementara prefix matches) —
+                # carry the PO YUPI down to fill the merged-cell gap.
+                cur_prefix = _extract_po_yupi_from_po_sementara(po_sementara_now) or ''
+                if cur_prefix and cur_prefix == last_po_sementara_prefix:
+                    payload['po_yupi'] = last_po_yupi
+                    payload['yupi_po'] = last_po_yupi
+
+        # Keep po_yupi and yupi_po in sync (some callers check one, some the other)
+        py = import_nonblank(payload.get('po_yupi')) or import_nonblank(payload.get('yupi_po'))
+        if py:
+            payload['po_yupi'] = py
+            payload['yupi_po'] = py
 
         # Tracker column C is the user's PO Send Date. Mark it as manual so the
         # legacy safety in apply_import_formula_columns() does not move it to
-        # PO DATE (By Email).
+        # PO DATE (By Email). In the user's current sheet there is no separate
+        # PO Send Date column (column C is PO DATE By Email), so this rarely
+        # fires — but it's safe to keep for forward compatibility.
         if not import_blankish(payload.get('po_send_date')):
             payload['_po_send_date_manual'] = '1'
 
         if any(import_nonblank(payload.get(f)) for f in ('po_send_date', 'status', 'po_yupi', 'yupi_po', 'po_sementara', 'item_yupi', 'item_name', 'vendor_name', 'vendor', 'so')):
             rows.append(apply_import_formula_columns(payload))
     return rows
+
+
+def _extract_po_yupi_from_po_sementara(po_sementara):
+    """Extract the PO YUPI number from a PO Sementara string.
+
+    PO Sementara format: ``SVO`` + optional site code (``K`` or ``I``) +
+    PO YUPI number + ``-`` + line number. Examples:
+      - ``SVOK410100326-04`` → ``410100326``
+      - ``SVOI4100301-05``   → ``4100301``
+      - ``SVOK410100279-01`` → ``410100279``
+
+    Returns the extracted PO YUPI as a string, or ``''`` if the input doesn't
+    match the expected pattern.
+    """
+    raw = clean(po_sementara)
+    if not raw:
+        return ''
+    s = str(raw).strip().upper()
+    # Match SVO + optional K/I + digits + dash + line number
+    m = re.match(r'^SVO[KI]?(\d+)-\d+$', s)
+    if m:
+        return m.group(1)
+    # Looser fallback: any digits between an alphabetic prefix and -<line>
+    m = re.match(r'^[A-Z]+(\d{5,})-\d+$', s)
+    if m:
+        return m.group(1)
+    return ''
 
 
 IMPORT_TRACKER_AUTHORITATIVE_FIELDS = {
@@ -2570,23 +2773,63 @@ def sync_import_tracker_to_dashboard(columns=None):
     return {'rows': len(tracker_rows), 'seen': seen, 'added': added, 'skipped': skipped}
 
 def sync_import_sheet_to_dashboard():
-    """Upsert Import rows from source sheets into the dashboard.
+    """Upsert Import rows from the single live tracker sheet into the dashboard.
 
-    Identity is YUPI PO + item line (see import_row_identity_payload), so a PO
-    with 5 items still creates 5 dashboard rows, and repeated Copy Sheet clicks
-    never create duplicates for the same identity.
+    Source of truth: ``IMPORT_LAYOUT_SHEET_ID`` at gid ``IMPORT_LAYOUT_GID``
+    (the URL the user provided: 
+    https://docs.google.com/spreadsheets/d/1i0N4VdF_vMHjr_0gjrUdS7nCKUpxPYvDWW-HOWSanEM/edit#gid=73188127).
+    We no longer read the legacy ``IMPORT_SOURCE_SHEETS`` (source_1/source_2)
+    because the user has consolidated everything into the single sheet above.
+    Any DB rows still tagged with ``source_1`` / ``source_2`` are leftovers
+    from the previous sync logic and are purged at the start of every run so
+    the dashboard only ever shows data that exists on the live sheet.
+
+    Identity is YUPI PO + item line (see ``import_row_identity_payload``), so a
+    PO with 5 items still creates 5 dashboard rows, and repeated Copy Sheet
+    clicks never create duplicates for the same identity.
 
     For a row whose identity already exists in the dashboard, fresh
     source-managed values (YUPI PO, dates, qty/price, vendor, etc.) replace
-    stale/blank placeholders via merge_import_existing_payload(), while
+    stale/blank placeholders via ``merge_import_existing_payload()``, while
     dashboard-local user input (STATUS, PO Send Date, checklist ticks, remarks
     the user typed, etc.) is preserved as-is. For a row whose identity does not
     exist yet, a new dashboard row is inserted.
     """
-    columns, sheet_rows = import_sheet_rows(force_metadata=True)
+    # ── Step 1: purge all rows left over from the retired source sheets. ──
+    # This is the root-cause fix for "data lama tidak dipakai" — every Copy
+    # Sheet run starts from a clean slate for legacy-tagged rows so the
+    # dashboard only ever shows data from the live sheet.
+    purged_legacy = 0
+    try:
+        stale = ImportDashboardRow.query.filter(
+            ImportDashboardRow.source_key.in_({'source_1', 'source_2'})
+        ).all()
+        purged_legacy = len(stale)
+        for row in stale:
+            db.session.delete(row)
+        if purged_legacy:
+            db.session.commit()
+    except Exception:
+        db.session.rollback()
+        purged_legacy = 0
+
+    # ── Step 2: read the live tracker sheet (the URL provided by the user). ──
+    # import_layout_tracker_visible_rows() reads IMPORT_LAYOUT_SHEET_ID at the
+    # configured gid (73188127) and returns one payload per non-blank row with
+    # all visible + source-only columns mapped by HEADER TEXT (not by
+    # hard-coded sheet_col letters, which were wrong for this sheet layout).
+    # It also forward-fills PO YUPI for merged cells and extracts PO YUPI from
+    # PO Sementara as a fallback, which is the root-cause fix for
+    # "PO sementara SVOK410100326-04 seharusnya YUPI PO nya 410100326".
+    columns = import_layout_columns(force=True)
+    sheet_rows = import_layout_tracker_visible_rows(columns)
     filter_vendors, vendor_source = import_vendor_filter_names()
     vendor_count = len(import_uploaded_vendor_names())
 
+    # ── Step 3: load every existing dashboard row EXCEPT rows tagged
+    # 'import_tracker' (those are old virtual rows from a previous tracker
+    # sync that no longer applies). We upsert the fresh sheet_rows into the
+    # remaining 'source_1'/'source_2'/'import_layout' rows.
     existing_rows = ImportDashboardRow.query.filter(
         ImportDashboardRow.source_key != 'import_tracker'
     ).order_by(ImportDashboardRow.id.asc()).all()
@@ -2737,8 +2980,10 @@ def sync_import_sheet_to_dashboard():
         'vendor_count': vendor_count,
         'vendor_filter_count': len(filter_vendors),
         'vendor_filter_source': vendor_source,
+        'purged_legacy': purged_legacy,
         'copy_only': True,
         'columns': columns,
+        'source_sheet_url': f'https://docs.google.com/spreadsheets/d/{IMPORT_LAYOUT_SHEET_ID}/edit#gid={IMPORT_LAYOUT_GID}',
     }
 
 RFQ_DASHBOARD_ONLY_FIELDS = {'private_remarks_1', 'private_remarks_2'}
