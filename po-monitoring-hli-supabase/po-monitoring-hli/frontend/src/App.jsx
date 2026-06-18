@@ -1106,6 +1106,12 @@ const DataTableScroll = ({ children, className = '', darkMode }) => {
       ensureMirror();
       if (!mirrorTable) return;
 
+      const tableStyles = window.getComputedStyle(table);
+      mirrorTable.className = `${table.className || ''} window-sticky-table-header-table`;
+      mirrorTable.style.fontSize = tableStyles.fontSize;
+      mirrorTable.style.lineHeight = tableStyles.lineHeight;
+      mirrorTable.style.letterSpacing = tableStyles.letterSpacing;
+
       const html = thead.outerHTML;
       if (html !== lastHtml) {
         mirrorTable.innerHTML = html;
@@ -1128,6 +1134,17 @@ const DataTableScroll = ({ children, className = '', darkMode }) => {
         clone.style.left = 'auto';
         clone.style.zIndex = '1';
         clone.style.backgroundClip = 'padding-box';
+        const thStyles = window.getComputedStyle(th);
+        clone.style.fontSize = thStyles.fontSize;
+        clone.style.fontWeight = thStyles.fontWeight;
+        clone.style.lineHeight = thStyles.lineHeight;
+        clone.style.paddingTop = thStyles.paddingTop;
+        clone.style.paddingRight = thStyles.paddingRight;
+        clone.style.paddingBottom = thStyles.paddingBottom;
+        clone.style.paddingLeft = thStyles.paddingLeft;
+        clone.style.textAlign = thStyles.textAlign;
+        clone.style.verticalAlign = thStyles.verticalAlign;
+        clone.style.overflow = 'hidden';
       });
 
       const tableRect = table.getBoundingClientRect();
@@ -5572,6 +5589,8 @@ const App = () => {
         }
         .window-sticky-table-header table {
           border-collapse: collapse !important;
+          font-size: 0.75rem !important;
+          line-height: 1rem !important;
         }
         .window-sticky-table-header thead th {
           box-shadow: inset 0 -1px 0 rgba(148, 163, 184, 0.28), inset -1px 0 0 rgba(148, 163, 184, 0.28) !important;
@@ -5582,8 +5601,8 @@ const App = () => {
           vertical-align: middle;
         }
         .window-sticky-table-header .freeze-header {
-          min-height: 2.5rem;
-          height: 100%;
+          min-height: 2rem;
+          height: auto;
           padding-right: 1.25rem;
           align-items: center;
         }
