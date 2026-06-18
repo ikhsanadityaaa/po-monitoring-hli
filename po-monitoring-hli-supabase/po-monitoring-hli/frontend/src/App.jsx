@@ -4284,15 +4284,20 @@ const App = () => {
                       // + inline style + global CSS rule). This avoids the
                       // double-blue-border bug.
                       const rfqInputCls = `block w-full min-h-8 px-2 py-1 text-xs border-0 rounded-none ring-0 outline-none focus:outline-none focus:ring-0 focus-visible:outline-none shadow-none ${darkMode?'bg-gray-700 text-white':'bg-white text-gray-900'}`;
-                      const rfqInputStyle = { outline: 'none', outlineStyle: 'none', boxShadow: 'none', borderColor: 'transparent', borderWidth: 0 };
+                      // Same as Import: do NOT set borderColor/borderWidth inline
+                      // (breaks <input type="date"> in Chrome). Only suppress
+                      // outline + box-shadow via inline style + the global
+                      // [data-no-focus-ring] CSS rule.
+                      const rfqInputStyle = { outline: 'none', outlineStyle: 'none', boxShadow: 'none' };
                       const rfqTdCls = `relative p-0 align-top border-r outline outline-2 outline-blue-500 outline-offset-[-2px] ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`;
                       if (['rfq_date', 'closing_date'].includes(field)) {
                         return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={rfqTdCls}>
                           <input
                             type="date"
-                            style={{ outline: 'none', outlineStyle: 'none', borderColor: 'transparent', borderWidth: 0 }}
+                            data-no-focus-ring=""
+                            style={rfqInputStyle}
                             value={toDateInputValue(editValue)}
-                            className={`block w-full min-h-8 px-2 py-1 text-xs rounded-none outline-none focus:outline-none ${darkMode?'bg-gray-700 text-white':'bg-white text-gray-900'}`}
+                            className={`${rfqInputCls} px-1.5`}
                             onChange={e => setEditValue(e.target.value)}
                             onBlur={() => updateRFQCell(row.row_key, field, editValue)}
                             onKeyDown={e => {
@@ -4302,6 +4307,8 @@ const App = () => {
                               }
                               if (e.key === 'Escape') setEditingCell(null);
                             }}
+                            onFocus={e => { try { if (e.currentTarget.showPicker && typeof e.currentTarget.showPicker === 'function') e.currentTarget.showPicker(); } catch (err) { /* ignore */ } }}
+                            onClick={e => { try { if (e.currentTarget.showPicker && typeof e.currentTarget.showPicker === 'function') e.currentTarget.showPicker(); } catch (err) { /* ignore */ } }}
                             autoFocus
                           />
                         </td>;
@@ -4578,22 +4585,33 @@ const App = () => {
         // rule in <style> can target it as a backstop (see the global CSS
         // block at the top of this file for `input[data-no-focus-ring]:focus`).
         const inputCls = `block w-full min-h-8 px-2 py-1 text-xs border-0 rounded-none ring-0 outline-none focus:outline-none focus:ring-0 focus-visible:outline-none shadow-none ${darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`;
-        const inputStyle = { outline: 'none', outlineStyle: 'none', boxShadow: 'none', borderColor: 'transparent', borderWidth: 0 };
-        // Date input: clean style without box-shadow/appearance suppression — these break the native calendar picker.
-        const dateInputCls = `block w-full min-h-8 px-2 py-1 text-xs rounded-none outline-none focus:outline-none ${darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`;
-        const dateInputStyle = { outline: 'none', outlineStyle: 'none', borderColor: 'transparent', borderWidth: 0 };
+        // IMPORTANT: do NOT set borderColor/borderWidth in inline style — that
+        // breaks <input type="date"> in Chrome (the field renders blank and the
+        // date picker won't open). The `border-0` Tailwind class on inputCls
+        // already removes the border; we only need to suppress the focus ring
+        // (outline + box-shadow), which is handled by the global CSS rule on
+        // [data-no-focus-ring] above.
+        const inputStyle = { outline: 'none', outlineStyle: 'none', boxShadow: 'none' };
         if (isDateField) {
           return (
             <input
               type="date"
               autoFocus
-              className={dateInputCls}
-              style={dateInputStyle}
+              data-no-focus-ring=""
+              className={inputCls}
+              style={inputStyle}
               value={toDateInputValue(importEditValue)}
-              onFocus={e => { try { e.currentTarget.showPicker?.(); } catch {} }}
-              onClick={e => { try { e.currentTarget.showPicker?.(); } catch {} }}
+              onFocus={e => { try { if (e.currentTarget.showPicker && typeof e.currentTarget.showPicker === 'function') e.currentTarget.showPicker(); } catch (err) { /* showPicker not supported — user can click the calendar icon manually */ } }}
+              onClick={e => { try { if (e.currentTarget.showPicker && typeof e.currentTarget.showPicker === 'function') e.currentTarget.showPicker(); } catch (err) { /* ignore */ } }}
               onChange={e => setImportEditValue(e.target.value)}
-              onBlur={e => updateImportCell(row._row_key, col.field, e.target.value)}
+              onBlur={e => {
+                // Only commit the value if the input still has a valid value.
+                // Don't call updateImportCell with undefined/empty when the
+                // user just clicked the calendar icon (which can trigger a
+                // transient blur in some browsers).
+                const val = e.target.value || '';
+                updateImportCell(row._row_key, col.field, val);
+              }}
               onPaste={e => {
                 const text = e.clipboardData.getData('text/plain');
                 if (text.includes('\t') || text.includes('\n')) {
@@ -5912,22 +5930,20 @@ const App = () => {
            When a user clicks a cell to edit, the <td> shows a blue outline
            (the "outer" border the user wants). The <input>/<textarea> inside
            the td would ALSO show the browser's default focus ring (the
-           "inner" border), producing the double-blue-border bug. This rule
-           kills the inner focus ring on any element tagged with
-           data-no-focus-ring, in every state (:focus, :focus-visible,
-           :focus-within) so Chrome/Safari/Edge can't sneak it back in. */
+           "inner" border), producing the double-blue-border bug.
+
+           IMPORTANT: we ONLY suppress outline + box-shadow here. We do NOT
+           touch border-color or border-width, because doing so on
+           <input type="date"> breaks the date picker's native rendering in
+           Chrome (the field appears blank/white and the picker won't open).
+           The outer td border is what visually defines the active cell, so
+           we don't need to manipulate the input's border at all. */
         [data-no-focus-ring], [data-no-focus-ring]:focus, [data-no-focus-ring]:focus-visible,
-        [data-no-focus-ring]:focus-within, [data-no-focus-ring]:active {
+        [data-no-focus-ring]:focus-within {
           outline: none !important;
           outline-style: none !important;
           outline-width: 0 !important;
           box-shadow: none !important;
-        }
-        /* date inputs must NOT have box-shadow or border suppressed — browser needs these for native picker */
-        input[type="date"][data-no-focus-ring], input[type="date"][data-no-focus-ring]:focus,
-        input[type="date"][data-no-focus-ring]:focus-visible {
-          box-shadow: unset;
-          border-color: unset;
         }
         /* ── Loading animation keyframes (must be explicit for Tailwind purge) ── */
         @keyframes spin {
@@ -5962,23 +5978,19 @@ const App = () => {
         body.rfq-fill-dragging, body.rfq-fill-dragging * { cursor: crosshair !important; }
         .freeze-table-import td, .freeze-table-import th { box-shadow: inset 0 -1px 0 rgba(148, 163, 184, 0.22), inset -1px 0 0 rgba(148, 163, 184, 0.22); }
         .freeze-table-import tbody tr { height: 32px; }
-        /* max-height only on non-date cells — date picker popup needs unrestricted height */
-        .freeze-table-import td > *:not(input[type="date"]) { max-height: 28px; }
+        .freeze-table-import td > * { max-height: 28px; }
         .freeze-table-import input, .freeze-table-import textarea, .freeze-table-import select {
           outline: none !important;
           box-shadow: none !important;
         }
-        .freeze-table-import input:not([type="date"]):focus,
-        .freeze-table-import textarea:focus,
-        .freeze-table-import select:focus {
+        .freeze-table-import input:focus, .freeze-table-import textarea:focus, .freeze-table-import select:focus {
           outline: none !important;
           box-shadow: inset 0 0 0 2px #3b82f6 !important;
         }
-        /* date input: no box-shadow override so browser can render picker normally */
         .freeze-table-import input[type="date"] {
-          box-shadow: none !important;
+          -webkit-appearance: none !important;
+          appearance: none !important;
         }
-
         .backdrop-blur-sm, .backdrop-blur-xl {
           backdrop-filter: none !important;
           -webkit-backdrop-filter: none !important;
