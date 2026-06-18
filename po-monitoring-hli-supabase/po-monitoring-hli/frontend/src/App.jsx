@@ -3811,13 +3811,75 @@ const App = () => {
       ))}</div>;
     };
     const toDateInputValue = (value) => {
+      // Convert any date string the backend might send into the YYYY-MM-DD
+      // format that <input type="date"> requires. If conversion fails, return
+      // '' so the date picker opens blank (the user can then pick a fresh
+      // date). Returning the raw string (e.g. "2 Jun") used to make the date
+      // input render blank with no way to recover — the picker couldn't parse
+      // it AND couldn't be opened. Now we either normalize or empty out.
       const raw = String(value || '').trim();
       if (!raw) return '';
-      const dmy = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-      if (dmy) return `${dmy[3]}-${String(dmy[2]).padStart(2, '0')}-${String(dmy[1]).padStart(2, '0')}`;
+      // Already ISO YYYY-MM-DD or YYYY/MM/DD
       const ymd = raw.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
       if (ymd) return `${ymd[1]}-${String(ymd[2]).padStart(2, '0')}-${String(ymd[3]).padStart(2, '0')}`;
-      return raw;
+      // DD/MM/YYYY (day first — only valid if the middle field is a month ≤ 12)
+      const dmy = raw.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+      if (dmy && Number(dmy[2]) <= 12) {
+        return `${dmy[3]}-${String(dmy[2]).padStart(2, '0')}-${String(dmy[1]).padStart(2, '0')}`;
+      }
+      // MM/DD/YYYY (US format — day field > 12 means it must be US format)
+      if (dmy && Number(dmy[1]) <= 12) {
+        return `${dmy[3]}-${String(dmy[1]).padStart(2, '0')}-${String(dmy[2]).padStart(2, '0')}`;
+      }
+      // Year-less formats from the source sheet: "2 Jun", "21 Sep", "25-May",
+      // "2 June", "Jun 2", "25-May". Assume current year; if that date has
+      // already passed, use next year. This mirrors the backend logic in
+      // import_date_from_value() so the picker shows the same date the
+      // backend would have normalized to.
+      const monthMap = {
+        jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+        jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+        january: 1, february: 2, march: 3, april: 4, june: 6,
+        july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
+      };
+      const yearlessPatterns = [
+        /^(\d{1,2})\s+([A-Za-z]+)$/,   // "2 Jun"
+        /^(\d{1,2})-([A-Za-z]+)$/,      // "25-May"
+        /^([A-Za-z]+)\s+(\d{1,2})$/,   // "Jun 2"
+        /^([A-Za-z]+)-(\d{1,2})$/,      // "Jun-2"
+      ];
+      for (const pat of yearlessPatterns) {
+        const m = raw.match(pat);
+        if (!m) continue;
+        let dayStr, monStr;
+        if (Number.isFinite(Number(m[1]))) {
+          dayStr = m[1]; monStr = m[2];
+        } else {
+          dayStr = m[2]; monStr = m[1];
+        }
+        const mon = monthMap[monStr.toLowerCase()];
+        if (!mon) continue;
+        const day = Number(dayStr);
+        if (!day || day > 31) continue;
+        const today = new Date();
+        let year = today.getFullYear();
+        let candidate = new Date(year, mon - 1, day);
+        const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+        if (candidate < todayMidnight) year += 1;
+        return `${year}-${String(mon).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      }
+      // Also handle "2 Jun 2026" and similar full-text formats via Date.parse.
+      // Only trust it if the result is a valid date — Date.parse is loose.
+      const parsed = Date.parse(raw);
+      if (!Number.isNaN(parsed)) {
+        const d = new Date(parsed);
+        if (!Number.isNaN(d.getTime())) {
+          return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        }
+      }
+      // Can't parse — return empty so the picker opens blank and the user
+      // can pick a fresh date, rather than showing a broken raw string.
+      return '';
     };
     const isRFQClosingPast = (value) => {
       const raw = String(value || '').trim();
@@ -4308,7 +4370,13 @@ const App = () => {
     const startImportEdit = (row, col) => {
       const key = `${row._row_key}:${col.field}`;
       setImportEditingCell(key);
-      setImportEditValue(String(row[col.field] ?? ''));
+      // For date fields, normalize the value to YYYY-MM-DD up front so the
+      // <input type="date"> picker can parse it and show the calendar with
+      // the correct day pre-selected. Without this, a value like "2 Jun"
+      // would make the picker open blank (the input can't parse it).
+      const isDateField = ['po_send_date', 'po_date_by_email', 'req_dlv_date', 'source_req_dlv_date', 'reschedule', 'etd', 'eta'].includes(col.field) || String(col.label || '').toLowerCase().includes('date');
+      const rawValue = String(row[col.field] ?? '');
+      setImportEditValue(isDateField ? toDateInputValue(rawValue) : rawValue);
     };
     const renderImportCell = (row, col) => {
       const key = `${row._row_key}:${col.field}`;
