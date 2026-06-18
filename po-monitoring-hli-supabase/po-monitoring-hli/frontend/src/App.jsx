@@ -4360,7 +4360,11 @@ const App = () => {
       if (editing) {
         const isLong = ['spec', 'remark_yupi', 'import_remarks', 'soft_copy_doc'].includes(col.field);
         const isDateField = ['po_send_date', 'po_date_by_email', 'req_dlv_date', 'source_req_dlv_date', 'reschedule', 'etd', 'eta'].includes(col.field) || String(col.label || '').toLowerCase().includes('date');
-        const inputCls = `block w-full min-h-8 px-2 py-1 text-xs border-0 rounded-none ring-2 ring-inset ring-blue-500 outline-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus-visible:outline-none shadow-none ${darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`;
+        // Input fills the td edge-to-edge with NO inner ring/outline — the td
+        // itself already shows the blue outer outline when editingCellNow is
+        // true (see the td className above). A second inner ring here would
+        // produce the double blue border the user reported.
+        const inputCls = `block w-full min-h-8 px-2 py-1 text-xs border-0 rounded-none ring-0 outline-none focus:outline-none focus:ring-0 focus-visible:outline-none shadow-none ${darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`;
         if (isDateField) {
           return (
             <input
@@ -4665,7 +4669,7 @@ const App = () => {
                       if (directEdit && !editingCellNow && !e.target.closest('a,input,textarea,select,button')) startImportEdit(row, col);
                     }}
                     onPaste={e => { e.preventDefault(); applyImportPaste(rowIndex, col.field, e.clipboardData.getData('text/plain')); }}
-                    className={`group relative h-8 max-h-8 ${editingCellNow ? 'p-0' : 'px-2 py-1'} align-middle border-r focus:outline-none cursor-pointer ${formula ? (darkMode ? 'bg-gray-800/50' : 'bg-slate-50/80') : ''} ${hasReschedule ? (darkMode ? 'bg-amber-900/20' : 'bg-amber-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${col.field === 'days_left' ? 'text-center' : ''} ${txt2}`}
+                    className={`group relative h-8 max-h-8 ${editingCellNow ? 'p-0' : 'px-2 py-1'} align-middle border-r focus:outline-none cursor-pointer ${formula ? (darkMode ? 'bg-gray-800/50' : 'bg-slate-50/80') : ''} ${hasReschedule ? (darkMode ? 'bg-amber-900/20' : 'bg-amber-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${editingCellNow ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${col.field === 'days_left' ? 'text-center' : ''} ${txt2}`}
                   >
                     {renderImportCell(row, col)}
                     <button type="button" aria-label="Fill down" title="Drag to copy this value" onClick={e => e.stopPropagation()} onMouseDown={e => startImportFill(e, rowIndex, col.field)} className="rfq-fill-handle absolute bottom-0 right-0 h-3 w-3 translate-x-1/2 translate-y-1/2 border border-blue-600 bg-blue-600 opacity-0 group-hover:opacity-100 focus:opacity-100" />
