@@ -2216,6 +2216,28 @@ def import_row_payload(row, columns):
     }
     return apply_import_formula_columns(payload)
 
+def import_row_identity_detail_fingerprint(row):
+    """Stable fingerprint of an item line, independent of read order.
+
+    Used only when Item Yupi is blank (PO multi-item tanpa kode item per baris).
+    Built from fields that describe the specific item line — item name, spec,
+    quantity, unit price — so two different item lines under the same PO keep
+    different identities even if the source sheet returns rows in a different
+    order on a later Copy Sheet run. Falling back to processing order (instead
+    of this fingerprint) is what previously caused rows to swap data between
+    runs when the source sheet's row order shifted.
+    """
+    parts = [
+        import_nonblank(row.get('item_name')),
+        import_nonblank(row.get('spec')),
+        import_nonblank(row.get('ord_qty')),
+        import_nonblank(row.get('unit_price')),
+        import_nonblank(row.get('unit')),
+    ]
+    fingerprint = '|'.join((p or '').strip().upper() for p in parts)
+    return fingerprint if any(parts) else None
+
+
 def import_row_identity_payload(row):
     """Stable Import identity for Copy Sheet.
 
@@ -2225,20 +2247,26 @@ def import_row_identity_payload(row):
 
     Kedua uid disimpan supaya saat PO Sementara digantikan PO YUPI, row yang sama
     bisa ditemukan dan di-update alih-alih membuat row duplikat baru.
+
+    Saat Item Yupi kosong (PO multi-item tanpa kode item), pakai fingerprint detail
+    item (nama, spec, qty, harga) sebagai pembeda antar baris dalam PO yang sama,
+    bukan urutan baca baris. Ini mencegah baris dashboard "tertukar" data antar
+    Copy Sheet run ketika source sheet mengembalikan urutan baris yang berbeda.
     """
     po_yupi = (import_nonblank(row.get('po_yupi')) or
                import_nonblank(row.get('yupi_po')) or '').strip().upper()
     item_yupi = (import_nonblank(row.get('item_yupi')) or '').strip().upper()
     po_sementara = (import_nonblank(row.get('po_sementara')) or '').strip().upper()
+    detail_fp = import_row_identity_detail_fingerprint(row)
 
     if po_yupi and item_yupi:
         return {'po_yupi': po_yupi, 'item_yupi': item_yupi}
     if po_yupi:
-        return {'po_yupi': po_yupi, 'item_yupi': item_yupi or '(none)'}
+        return {'po_yupi': po_yupi, 'item_yupi': '(none)', 'detail': detail_fp or '(blank)'}
     if po_sementara and item_yupi:
         return {'po_sementara': po_sementara, 'item_yupi': item_yupi}
     if po_sementara:
-        return {'po_sementara': po_sementara, 'item_yupi': item_yupi or '(none)'}
+        return {'po_sementara': po_sementara, 'item_yupi': '(none)', 'detail': detail_fp or '(blank)'}
     # Last resort: source + sheet row (tidak ideal tapi mencegah collision antar row kosong)
     return {
         'source': clean(row.get('_source_key')) or '',
@@ -9006,6 +9034,14 @@ def import_cleanup_duplicates():
             po_yupi = import_nonblank(data.get('po_yupi')) or import_nonblank(data.get('yupi_po'))
             item_yupi = import_nonblank(data.get('item_yupi'))
             po_sementara = import_nonblank(data.get('po_sementara'))
+            # CRITICAL: when Item Yupi is blank, multiple genuinely different item
+            # lines can share the same PO YUPI / PO Sementara. Without a detail
+            # fingerprint here, every item line in that PO collapses into one
+            # cleanup group and all-but-one get deleted as "duplicates" — even
+            # though they are different items with different qty/price/name.
+            # Append the same fingerprint used by import_row_identity_payload so
+            # cleanup only merges rows that are truly the same business row.
+            detail_fp = import_row_identity_detail_fingerprint(data) or '(blank)'
 
             # Use same hierarchy as import_row_identity_payload:
             # Primary = PO YUPI + Item Yupi, Secondary = PO Sementara + Item Yupi
@@ -9015,13 +9051,13 @@ def import_cleanup_duplicates():
             if po_yupi and item_yupi:
                 biz_key = f"poyupi:{po_yupi.strip().upper()}|item:{item_yupi.strip().upper()}"
             elif po_yupi:
-                biz_key = f"poyupi:{po_yupi.strip().upper()}|item:(none)"
+                biz_key = f"poyupi:{po_yupi.strip().upper()}|item:(none)|detail:{detail_fp}"
             elif po_sementara and item_yupi:
                 # Rows that share PO Sementara + Item Yupi should be grouped —
                 # they are the same order line before PO YUPI was assigned
                 biz_key = f"posem:{po_sementara.strip().upper()}|item:{item_yupi.strip().upper()}"
             elif po_sementara:
-                biz_key = f"posem:{po_sementara.strip().upper()}|item:(none)"
+                biz_key = f"posem:{po_sementara.strip().upper()}|item:(none)|detail:{detail_fp}"
             else:
                 continue  # no key = skip
 
