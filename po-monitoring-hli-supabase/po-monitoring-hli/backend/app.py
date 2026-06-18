@@ -2501,51 +2501,94 @@ def sync_import_tracker_to_dashboard(columns=None):
     return {'rows': len(tracker_rows), 'seen': seen, 'added': added, 'skipped': skipped}
 
 def sync_import_sheet_to_dashboard():
-    """Copy new Import rows from source sheets into the dashboard only.
+    """Upsert Import rows from source sheets into the dashboard.
 
-    Dashboard user inputs are local to the dashboard DB. Copy Sheet does not
-    update existing rows and does not push user edits back to source sheets.
-    Existing detection is based on YUPI PO + item line identity so a PO with 5
-    items still creates 5 dashboard rows, while repeated Copy Sheet clicks do
-    not duplicate them.
+    Identity is YUPI PO + item line (see import_row_identity_payload), so a PO
+    with 5 items still creates 5 dashboard rows, and repeated Copy Sheet clicks
+    never create duplicates for the same identity.
+
+    For a row whose identity already exists in the dashboard, fresh
+    source-managed values (YUPI PO, dates, qty/price, vendor, etc.) replace
+    stale/blank placeholders via merge_import_existing_payload(), while
+    dashboard-local user input (STATUS, PO Send Date, checklist ticks, remarks
+    the user typed, etc.) is preserved as-is. For a row whose identity does not
+    exist yet, a new dashboard row is inserted.
     """
     columns, sheet_rows = import_sheet_rows(force_metadata=True)
     filter_vendors, vendor_source = import_vendor_filter_names()
     vendor_count = len(import_uploaded_vendor_names())
 
-    existing_rows = ImportDashboardRow.query.filter(ImportDashboardRow.source_key != 'import_tracker').all()
-    existing_uids = set()
+    existing_rows = ImportDashboardRow.query.filter(
+        ImportDashboardRow.source_key != 'import_tracker'
+    ).order_by(ImportDashboardRow.id.asc()).all()
+
+    # Map source_uid -> ordered list of existing rows sharing that identity.
+    # Ordered + matched by position so repeated duplicate identities (rare,
+    # e.g. two lines with no Item Yupi and identical item details) stay paired
+    # with the same dashboard row across runs instead of drifting.
+    existing_by_uid = {}
     existing_row_keys = set()
     for existing_row in existing_rows:
         existing_row_keys.add(existing_row.row_key)
-        if existing_row.source_uid:
-            existing_uids.add(existing_row.source_uid)
-        try:
-            existing_payload = json.loads(existing_row.data_json or '{}')
-        except (TypeError, json.JSONDecodeError):
-            existing_payload = {}
-        if existing_payload:
-            existing_uids.add(import_row_source_uid(existing_payload, columns))
+        uid = existing_row.source_uid
+        if not uid:
+            try:
+                existing_payload = json.loads(existing_row.data_json or '{}')
+            except (TypeError, json.JSONDecodeError):
+                existing_payload = {}
+            uid = import_row_source_uid(existing_payload, columns) if existing_payload else None
+        if uid:
+            existing_by_uid.setdefault(uid, []).append(existing_row)
 
     now = datetime.utcnow()
     added = 0
+    updated = 0
     seen = 0
     duplicate_counts = {}
+    consumed_per_uid = {}
 
     for sheet_row in sheet_rows:
         sheet_payload = import_row_payload(sheet_row, columns)
         source_uid = import_row_source_uid(sheet_payload, columns)
         duplicate_counts[source_uid] = duplicate_counts.get(source_uid, 0) + 1
         suffix = duplicate_counts[source_uid]
-        row_key = f"import:{source_uid}" if suffix == 1 else f"import:{source_uid}:{suffix}"
 
-        # If a matching row already exists, do not update it. User edits in the
-        # dashboard must not be overwritten by fresh source values.
-        if source_uid in existing_uids or row_key in existing_row_keys:
-            seen += 1
+        candidates = existing_by_uid.get(source_uid) or []
+        used = consumed_per_uid.get(source_uid, 0)
+        target_row = candidates[used] if used < len(candidates) else None
+
+        if target_row is not None:
+            consumed_per_uid[source_uid] = used + 1
+            try:
+                existing_payload = json.loads(target_row.data_json or '{}')
+            except (TypeError, json.JSONDecodeError):
+                existing_payload = {}
+
+            merged_payload = merge_import_existing_payload(existing_payload, sheet_payload)
+            old_json = json.dumps(existing_payload, ensure_ascii=False, sort_keys=True)
+            new_json = json.dumps(merged_payload, ensure_ascii=False, sort_keys=True)
+            if new_json != old_json:
+                target_row.data_json = new_json
+                target_row.updated_at = now
+                updated += 1
+            else:
+                seen += 1
+            target_row.last_seen_at = now
+            target_row.sheet_row = sheet_row.get('_sheet_row') or target_row.sheet_row
+            target_row.vendor_name = sheet_row.get('_vendor_name') or target_row.vendor_name
+            target_row.source_key = sheet_row.get('_source_key') or target_row.source_key
+            target_row.source_label = sheet_row.get('_source_label') or target_row.source_label
+            if not target_row.source_uid:
+                target_row.source_uid = source_uid
             continue
 
-        db.session.add(ImportDashboardRow(
+        # No existing dashboard row for this YUPI PO + item line yet: insert.
+        row_key = f"import:{source_uid}" if suffix == 1 else f"import:{source_uid}:{suffix}"
+        while row_key in existing_row_keys:
+            suffix += 1
+            row_key = f"import:{source_uid}:{suffix}"
+
+        new_row = ImportDashboardRow(
             row_key=row_key,
             source_key=sheet_row.get('_source_key') or '',
             source_label=sheet_row.get('_source_label') or '',
@@ -2556,15 +2599,18 @@ def sync_import_sheet_to_dashboard():
             first_seen_at=now,
             last_seen_at=now,
             updated_at=now,
-        ))
+        )
+        db.session.add(new_row)
         added += 1
-        existing_uids.add(source_uid)
         existing_row_keys.add(row_key)
+        existing_by_uid.setdefault(source_uid, []).append(new_row)
+        consumed_per_uid[source_uid] = consumed_per_uid.get(source_uid, 0) + 1
 
     db.session.commit()
     clear_runtime_caches()
     return {
         'added': added,
+        'updated': updated,
         'seen': seen,
         'sheet_rows': len(sheet_rows),
         'vendor_count': vendor_count,
