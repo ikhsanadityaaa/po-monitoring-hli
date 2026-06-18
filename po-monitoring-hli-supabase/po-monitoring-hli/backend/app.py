@@ -9067,27 +9067,46 @@ def import_cleanup_duplicates():
 
         deleted = 0
         merged = 0
+        # Status progression order, used to pick the most "advanced" status across
+        # duplicates instead of blindly keeping whichever row has the latest
+        # updated_at. Without this, a row stuck at the default 'NEW' status could
+        # be chosen as winner over a duplicate the user had already manually
+        # advanced to 'DELIVERED', silently reverting that manual update.
+        status_rank = {s: i for i, s in enumerate(IMPORT_STATUS_OPTIONS)}
+
+        def _status_progress(data):
+            return status_rank.get(str(data.get('status') or '').strip().upper(), -1)
+
         for biz_key, rows in groups.items():
             if len(rows) <= 1:
                 continue
-            # Keep the one with the most recent updated_at or highest id; merge local edits
-            winner = rows[0]  # already sorted desc by updated_at, id
-            # Collect best values across all duplicates (preserve non-blank local edits)
-            winner_data = {}
-            try:
-                winner_data = json.loads(winner.data_json or '{}')
-            except Exception:
-                pass
 
-            for dup in rows[1:]:
+            # Pick the winner as the row with the most advanced STATUS first
+            # (so a manually-updated DELIVERED/ON DELIVERY row is never discarded
+            # in favor of a stale NEW duplicate), then fall back to the most
+            # recent updated_at/id for ties.
+            def _row_data(r):
                 try:
-                    dup_data = json.loads(dup.data_json or '{}')
+                    return json.loads(r.data_json or '{}')
                 except Exception:
-                    dup_data = {}
+                    return {}
+
+            rows_with_data = [(r, _row_data(r)) for r in rows]
+            rows_with_data.sort(
+                key=lambda rd: (_status_progress(rd[1]), rd[0].updated_at or datetime.min, rd[0].id),
+                reverse=True,
+            )
+            winner, winner_data = rows_with_data[0]
+            duplicates = [rd[0] for rd in rows_with_data[1:]]
+
+            for dup in duplicates:
+                dup_data = _row_data(dup)
                 # Preserve non-blank user-local fields from older duplicates
                 for field in IMPORT_LOCAL_EDIT_FIELDS:
                     if field in IMPORT_SOURCE_MANAGED_FIELDS:
                         continue
+                    if field == 'status':
+                        continue  # status already chosen via _status_progress above
                     if import_blankish(winner_data.get(field)) and not import_blankish(dup_data.get(field)):
                         winner_data[field] = dup_data[field]
 
@@ -9095,7 +9114,7 @@ def import_cleanup_duplicates():
             winner.updated_at = datetime.utcnow()
             merged += 1
 
-            for dup in rows[1:]:
+            for dup in duplicates:
                 db.session.delete(dup)
                 deleted += 1
 
