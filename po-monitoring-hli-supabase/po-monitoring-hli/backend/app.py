@@ -1446,7 +1446,18 @@ IMPORT_SP_SOURCE_FALLBACK_COLUMNS = {
 }
 
 def import_source_kind_from_header(df, header_idx):
-    """Return 'rm' or 'sp' from the detected source header row."""
+    """Return 'rm' or 'sp' from the detected source header row.
+
+    Priority 1: structural column-content check (most reliable).
+      RM  — PURCHASE AMOUNT in col X (index 23), NO.SO in col AK (index 36).
+      SP  — PURCHASE AMOUNT in col Y (index 24), NO.SO in col AM (index 38).
+    Priority 2: SP-only column label ('PO KIRIM DATE') present in header.
+    Priority 3: header row index (RM = row 4 = index 3, SP = row 3 = index 2).
+
+    The old code jumped straight from priority 1 to priority 3 (index),
+    which could mis-classify a sheet when header detection returned an
+    off-by-one index (e.g. section-label row counted as header).
+    """
     try:
         headers = [import_header_key(v) for v in df.iloc[header_idx].tolist()]
     except Exception:
@@ -1459,15 +1470,17 @@ def import_source_kind_from_header(df, header_idx):
         except Exception:
             return ''
 
-    # Strong structural checks from the uploaded Excel examples:
-    # - RM: header row 4, PURCHASE AMOUNT in X, NO.SO in AK.
-    # - SP/Consumable: header row 3, PURCHASE AMOUNT in Y, NO.SO in AM.
+    # Priority 1: structural column position
     if key_at('Y') == 'purchaseamount' or key_at('AM') == 'noso':
         return 'sp'
     if key_at('X') == 'purchaseamount' or key_at('AK') == 'noso':
         return 'rm'
 
-    # Header row is also different in the two workbooks.
+    # Priority 2: SP-only column labels that never appear in RM
+    if 'pokiriminput' in headers or 'pokirimdate' in headers:
+        return 'sp'
+
+    # Priority 3: header row index
     if header_idx == 2:
         return 'sp'
     if header_idx == 3:
@@ -1655,12 +1668,34 @@ def import_detect_header_row(df):
 
     The two vendor source sheets have slightly different column locations. The
     correct row is the one that contains the highest number of known Import
-    headers such as PO YUPI, Req. Dlv Date, Item name, Vendor Name, etc. This is
-    more reliable than assuming a fixed row or requiring one specific column.
+    headers such as PO YUPI, Req. Dlv Date, Item name, Vendor Name, etc.
+
+    Priority 1 (new): hard-check for poyupi + reqdlvdate on the same row.
+    These two tokens are unique to the real header row and are never present
+    together on the section-label rows (e.g. 'ORDER INFO FELIX',
+    'PO&DELIVERY & PURCHASE PRICE') that appear in rows 1-3 of the RM sheet.
+    Without this check the score-based loop could return row index 2 (section
+    label) for the RM sheet, causing all column-letter fallbacks to point one
+    row too early and leaving YUPI PO / Req Dlv Date blank.
+
+    Priority 2: original score-based scan (kept as fallback).
     """
     if df is None or getattr(df, 'empty', True):
         return 0
 
+    # Priority 1: find the first row that has BOTH poyupi AND reqdlvdate.
+    for idx in range(min(len(df), 12)):
+        try:
+            labels = [import_header_key(v) for v in df.iloc[idx].tolist()]
+        except Exception:
+            continue
+        if 'poyupi' in labels and 'reqdlvdate' in labels:
+            return idx
+        # Secondary hard-check: itemname + ordqty + vendorname together
+        if 'itemname' in labels and 'ordqty' in labels and 'vendorname' in labels:
+            return idx
+
+    # Priority 2: score-based fallback
     alias_keys = set()
     for values in IMPORT_COLUMN_ALIASES.values():
         alias_keys.update(import_header_key(v) for v in values if v)
@@ -1867,6 +1902,12 @@ def import_source_rows_fast(source, columns, vendor_set):
     If the service account is not configured, we fall back to the public CSV
     reader so the feature still works, but the fast path should be used in
     production because sync-back already requires the service account anyway.
+
+    CRITICAL FIX: Google Sheets API may return fewer valueRanges than requested
+    when a column is entirely empty or hidden. The old zip(needed_col_indexes,
+    value_ranges) silently misaligned columns in that case — e.g. PO YUPI data
+    ended up in the wrong field. We now validate the count before zipping and
+    raise so the reliable CSV fallback is used instead.
     """
     mapping_columns = import_all_mapping_columns(columns)
 
@@ -1903,6 +1944,18 @@ def import_source_rows_fast(source, columns, vendor_set):
             major_dimension='COLUMNS',
         )
         value_ranges = batch.get('valueRanges', [])
+
+        # CRITICAL FIX: validate count before zip. Google Sheets batchGet
+        # omits valueRanges for fully-empty or hidden columns, which causes
+        # zip(needed_col_indexes, value_ranges) to silently map the wrong
+        # data to each column index. Raise here to trigger the CSV fallback.
+        if len(value_ranges) != len(needed_col_indexes):
+            raise ValueError(
+                f"batchGet returned {len(value_ranges)} valueRanges but "
+                f"{len(needed_col_indexes)} were requested for '{sheet_title}'. "
+                f"Falling back to CSV reader to avoid column misalignment."
+            )
+
         columns_by_idx = {}
         max_len = 0
         for col_idx, value_range in zip(needed_col_indexes, value_ranges):
@@ -1943,8 +1996,12 @@ def import_source_rows_fast(source, columns, vendor_set):
                 continue
             rows.append(row)
         return rows
-    except Exception:
-        # Fallback for local/dev environments without Google service account.
+    except Exception as exc:
+        # Log the reason so it is visible in PythonAnywhere error log.
+        print(f"[import_source_rows_fast] fast path failed for "
+              f"{source.get('key')}: {exc} — falling back to CSV reader")
+        # Fallback for local/dev environments without Google service account,
+        # and for production when batchGet returns unexpected column counts.
         df = read_public_sheet_csv(source['spreadsheet_id'], source['gid'])
         mapping_columns = import_all_mapping_columns(columns)
         source_map = import_source_column_map(df, mapping_columns)
