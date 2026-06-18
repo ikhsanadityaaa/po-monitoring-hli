@@ -1259,6 +1259,27 @@ RFQ_SHEET_COLUMN_BY_FIELD = {
 
 IMPORT_LAYOUT_SHEET_ID = '1i0N4VdF_vMHjr_0gjrUdS7nCKUpxPYvDWW-HOWSanEM'
 IMPORT_LAYOUT_GID = '73188127'
+
+# Canonical source_key for every Import dashboard row that comes from the live
+# tracker sheet. All other source_keys ('source_1', 'source_2', 'import_tracker')
+# are legacy and get purged on every Copy Sheet run.
+IMPORT_LAYOUT_SOURCE_KEY = 'import_layout'
+
+# Legacy source_keys that are no longer used as the data source. Any DB row
+# tagged with one of these is stale and must be purged during Copy Sheet so
+# the dashboard never shows data that doesn't match the live sheet.
+_LEGACY_IMPORT_SOURCE_KEYS = {'source_1', 'source_2', 'import_tracker'}
+
+# Transitional: the previous build tagged rows as 'import_tracker'. We still
+# SHOW those rows (alongside 'import_layout') so the table isn't blank after
+# deploying this fix — the user's previous Copy Sheet run created 62 rows
+# tagged 'import_tracker', and without this transitional include the API
+# filter would hide all of them until the user clicks Copy Sheet again.
+# The next Copy Sheet run purges 'import_tracker' rows and replaces them
+# with 'import_layout' rows, so this tuple eventually collapses to just
+# ('import_layout',).
+_IMPORT_VISIBLE_SOURCE_KEYS = (IMPORT_LAYOUT_SOURCE_KEY, 'import_tracker')
+
 IMPORT_SOURCE_SHEETS = [
     {'key': 'source_1', 'spreadsheet_id': '1OSISIb3-D_-oxj2LXH4Q3jcG2IZWnjFGWAmTmdcPBJg', 'gid': '0', 'label': 'Source 1'},
     {'key': 'source_2', 'spreadsheet_id': '17P7_JsUGF5mqlz-j2fdvFZ9-gX8l-WGPqZABjng5Hnc', 'gid': '0', 'label': 'Source 2'},
@@ -1633,7 +1654,9 @@ def import_existing_dashboard_vendor_names():
     vendors, instead of scanning all source data.
     """
     vendors = set()
-    for row in ImportDashboardRow.query.filter(ImportDashboardRow.source_key != 'import_tracker').all():
+    for row in ImportDashboardRow.query.filter(
+        ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
+    ).all():
         v = clean(row.vendor_name)
         if v:
             vendors.add(v)
@@ -2578,7 +2601,7 @@ def import_layout_tracker_visible_rows(columns=None):
 
     for row_offset, row_values in enumerate(values[header_idx + 1:], start=header_idx + 2):
         payload = {
-            '_source_key': 'import_tracker',
+            '_source_key': IMPORT_LAYOUT_SOURCE_KEY,
             '_source_label': 'Import Tracker',
             '_sheet_row': row_offset,
         }
@@ -2830,9 +2853,13 @@ def sync_import_sheet_to_dashboard():
     vendor_count = len(import_uploaded_vendor_names())
 
     # ── Step 1: purge all rows left over from the retired source sheets. ──
+    # This is the root-cause fix for "data lama tidak dipakai" — every Copy
+    # Sheet run starts from a clean slate for legacy-tagged rows so the
+    # dashboard only ever shows data from the live sheet.
+    purged_legacy = 0
     try:
         stale = ImportDashboardRow.query.filter(
-            ImportDashboardRow.source_key.in_({'source_1', 'source_2'})
+            ImportDashboardRow.source_key.in_(_LEGACY_IMPORT_SOURCE_KEYS)
         ).all()
         purged_legacy = len(stale)
         for row in stale:
@@ -2875,12 +2902,12 @@ def sync_import_sheet_to_dashboard():
             'source_sheet_url': f'https://docs.google.com/spreadsheets/d/{IMPORT_LAYOUT_SHEET_ID}/edit#gid={IMPORT_LAYOUT_GID}',
         }
 
-    # ── Step 3: load every existing dashboard row EXCEPT rows tagged
-    # 'import_tracker' (those are old virtual rows from a previous tracker
-    # sync that no longer applies). We upsert the fresh sheet_rows into the
-    # remaining 'source_1'/'source_2'/'import_layout' rows.
+    # ── Step 3: load every existing dashboard row tagged with the canonical
+    # source_key. Legacy-tagged rows have already been purged in Step 1, so
+    # existing_rows only contains rows from previous successful Copy Sheet
+    # runs that we want to upsert (not duplicate).
     existing_rows = ImportDashboardRow.query.filter(
-        ImportDashboardRow.source_key != 'import_tracker'
+        ImportDashboardRow.source_key == IMPORT_LAYOUT_SOURCE_KEY
     ).order_by(ImportDashboardRow.id.asc()).all()
 
     # Map source_uid -> ordered list of existing rows sharing that identity.
@@ -2980,8 +3007,11 @@ def sync_import_sheet_to_dashboard():
             target_row.last_seen_at = now
             target_row.sheet_row = sheet_row.get('_sheet_row') or target_row.sheet_row
             target_row.vendor_name = sheet_row.get('_vendor_name') or target_row.vendor_name
-            target_row.source_key = sheet_row.get('_source_key') or target_row.source_key
-            target_row.source_label = sheet_row.get('_source_label') or target_row.source_label
+            # Always re-tag with the canonical source_key so legacy rows
+            # (source_1/source_2/import_tracker) get upgraded to 'import_layout'
+            # when they're matched and updated.
+            target_row.source_key = IMPORT_LAYOUT_SOURCE_KEY
+            target_row.source_label = sheet_row.get('_source_label') or 'Import Tracker'
             # Upgrade source_uid to primary (PO YUPI-based) so next run uses primary index directly.
             # This is the key step that prevents duplicates when PO Sementara → PO YUPI transition happens.
             target_row.source_uid = source_uid
@@ -2997,7 +3027,7 @@ def sync_import_sheet_to_dashboard():
 
         new_row = ImportDashboardRow(
             row_key=row_key,
-            source_key=sheet_row.get('_source_key') or '',
+            source_key=IMPORT_LAYOUT_SOURCE_KEY,
             source_label=sheet_row.get('_source_label') or '',
             source_uid=source_uid,
             sheet_row=sheet_row.get('_sheet_row'),
@@ -8932,7 +8962,13 @@ def get_import_data():
         columns = sync_info['columns'] if sync_info else import_layout_columns()
         vendor_count = sync_info.get('vendor_count') if sync_info else len(import_uploaded_vendor_names())
 
-        q = ImportDashboardRow.query.filter(ImportDashboardRow.source_key != 'import_tracker')
+        # Show rows from the canonical source_key AND transitional
+        # 'import_tracker' rows (created by the previous build before this
+        # fix was deployed). The next Copy Sheet run purges 'import_tracker'
+        # rows and replaces them with 'import_layout' rows.
+        q = ImportDashboardRow.query.filter(
+            ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
+        )
         if search:
             terms = [t.strip().lower() for t in re.split(r'[\n,]+', search) if t.strip()]
             for term in terms:
@@ -9173,7 +9209,9 @@ def export_import_data():
         selected_vendors = {v.strip().lower() for v in selected_vendors_raw if v != '__NONE_PLACEHOLDER__'}
 
         columns = import_layout_columns()
-        q = ImportDashboardRow.query.filter(ImportDashboardRow.source_key != 'import_tracker')
+        q = ImportDashboardRow.query.filter(
+            ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
+        )
         if search:
             terms = [t.strip().lower() for t in re.split(r'[\n,]+', search) if t.strip()]
             for term in terms:
@@ -9319,7 +9357,7 @@ def import_cleanup_duplicates():
     try:
         columns = import_layout_columns()
         all_rows = ImportDashboardRow.query.filter(
-            ImportDashboardRow.source_key != 'import_tracker'
+            ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
         ).order_by(ImportDashboardRow.updated_at.desc(), ImportDashboardRow.id.desc()).all()
 
         # Group by canonical business key: prefer YUPI PO + item, else po_sementara
