@@ -3828,6 +3828,59 @@ const App = () => {
     );
   };
 
+  // Utility: convert any date string to YYYY-MM-DD for <input type="date">.
+  // Defined at component scope so both renderRFQ and renderImport can use it.
+  const toDateInputValue = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const ymd = raw.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+    if (ymd) return `${ymd[1]}-${String(ymd[2]).padStart(2, '0')}-${String(ymd[3]).padStart(2, '0')}`;
+    const dmy = raw.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+    if (dmy && Number(dmy[2]) <= 12) {
+      return `${dmy[3]}-${String(dmy[2]).padStart(2, '0')}-${String(dmy[1]).padStart(2, '0')}`;
+    }
+    if (dmy && Number(dmy[1]) <= 12) {
+      return `${dmy[3]}-${String(dmy[1]).padStart(2, '0')}-${String(dmy[2]).padStart(2, '0')}`;
+    }
+    const monthMap = {
+      jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+      jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+      january: 1, february: 2, march: 3, april: 4, june: 6,
+      july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
+    };
+    const yearlessPatterns = [
+      /^(\d{1,2})\s+([A-Za-z]+)$/,
+      /^(\d{1,2})-([A-Za-z]+)$/,
+      /^([A-Za-z]+)\s+(\d{1,2})$/,
+      /^([A-Za-z]+)-(\d{1,2})$/,
+    ];
+    for (const pat of yearlessPatterns) {
+      const m = raw.match(pat);
+      if (!m) continue;
+      let dayStr, monStr;
+      if (Number.isFinite(Number(m[1]))) { dayStr = m[1]; monStr = m[2]; }
+      else { dayStr = m[2]; monStr = m[1]; }
+      const mon = monthMap[monStr.toLowerCase()];
+      if (!mon) continue;
+      const day = Number(dayStr);
+      if (!day || day > 31) continue;
+      const today = new Date();
+      let year = today.getFullYear();
+      const candidate = new Date(year, mon - 1, day);
+      const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      if (candidate < todayMidnight) year += 1;
+      return `${year}-${String(mon).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+    const parsed = Date.parse(raw);
+    if (!Number.isNaN(parsed)) {
+      const d = new Date(parsed);
+      if (!Number.isNaN(d.getTime())) {
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      }
+    }
+    return '';
+  };
+
   const renderRFQ = () => {
     const totalPages = Math.max(1, Math.ceil(rfqTotal / rfqPerPage));
     const editableSet = new Set(rfqEditableFields || []);
@@ -3922,77 +3975,6 @@ const App = () => {
       return <div className="flex flex-col gap-1">{lines.map((line, index) => (
         <div key={`${line}-${index}`} className={`min-h-[22px] min-w-0 truncate ${className}`} title={line}>{line}</div>
       ))}</div>;
-    };
-    const toDateInputValue = (value) => {
-      // Convert any date string the backend might send into the YYYY-MM-DD
-      // format that <input type="date"> requires. If conversion fails, return
-      // '' so the date picker opens blank (the user can then pick a fresh
-      // date). Returning the raw string (e.g. "2 Jun") used to make the date
-      // input render blank with no way to recover — the picker couldn't parse
-      // it AND couldn't be opened. Now we either normalize or empty out.
-      const raw = String(value || '').trim();
-      if (!raw) return '';
-      // Already ISO YYYY-MM-DD or YYYY/MM/DD
-      const ymd = raw.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
-      if (ymd) return `${ymd[1]}-${String(ymd[2]).padStart(2, '0')}-${String(ymd[3]).padStart(2, '0')}`;
-      // DD/MM/YYYY (day first — only valid if the middle field is a month ≤ 12)
-      const dmy = raw.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
-      if (dmy && Number(dmy[2]) <= 12) {
-        return `${dmy[3]}-${String(dmy[2]).padStart(2, '0')}-${String(dmy[1]).padStart(2, '0')}`;
-      }
-      // MM/DD/YYYY (US format — day field > 12 means it must be US format)
-      if (dmy && Number(dmy[1]) <= 12) {
-        return `${dmy[3]}-${String(dmy[1]).padStart(2, '0')}-${String(dmy[2]).padStart(2, '0')}`;
-      }
-      // Year-less formats from the source sheet: "2 Jun", "21 Sep", "25-May",
-      // "2 June", "Jun 2", "25-May". Assume current year; if that date has
-      // already passed, use next year. This mirrors the backend logic in
-      // import_date_from_value() so the picker shows the same date the
-      // backend would have normalized to.
-      const monthMap = {
-        jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
-        jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
-        january: 1, february: 2, march: 3, april: 4, june: 6,
-        july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
-      };
-      const yearlessPatterns = [
-        /^(\d{1,2})\s+([A-Za-z]+)$/,   // "2 Jun"
-        /^(\d{1,2})-([A-Za-z]+)$/,      // "25-May"
-        /^([A-Za-z]+)\s+(\d{1,2})$/,   // "Jun 2"
-        /^([A-Za-z]+)-(\d{1,2})$/,      // "Jun-2"
-      ];
-      for (const pat of yearlessPatterns) {
-        const m = raw.match(pat);
-        if (!m) continue;
-        let dayStr, monStr;
-        if (Number.isFinite(Number(m[1]))) {
-          dayStr = m[1]; monStr = m[2];
-        } else {
-          dayStr = m[2]; monStr = m[1];
-        }
-        const mon = monthMap[monStr.toLowerCase()];
-        if (!mon) continue;
-        const day = Number(dayStr);
-        if (!day || day > 31) continue;
-        const today = new Date();
-        let year = today.getFullYear();
-        let candidate = new Date(year, mon - 1, day);
-        const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-        if (candidate < todayMidnight) year += 1;
-        return `${year}-${String(mon).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-      }
-      // Also handle "2 Jun 2026" and similar full-text formats via Date.parse.
-      // Only trust it if the result is a valid date — Date.parse is loose.
-      const parsed = Date.parse(raw);
-      if (!Number.isNaN(parsed)) {
-        const d = new Date(parsed);
-        if (!Number.isNaN(d.getTime())) {
-          return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-        }
-      }
-      // Can't parse — return empty so the picker opens blank and the user
-      // can pick a fresh date, rather than showing a broken raw string.
-      return '';
     };
     const isRFQClosingPast = (value) => {
       const raw = String(value || '').trim();
@@ -4284,20 +4266,15 @@ const App = () => {
                       // + inline style + global CSS rule). This avoids the
                       // double-blue-border bug.
                       const rfqInputCls = `block w-full min-h-8 px-2 py-1 text-xs border-0 rounded-none ring-0 outline-none focus:outline-none focus:ring-0 focus-visible:outline-none shadow-none ${darkMode?'bg-gray-700 text-white':'bg-white text-gray-900'}`;
-                      // Same as Import: do NOT set borderColor/borderWidth inline
-                      // (breaks <input type="date"> in Chrome). Only suppress
-                      // outline + box-shadow via inline style + the global
-                      // [data-no-focus-ring] CSS rule.
-                      const rfqInputStyle = { outline: 'none', outlineStyle: 'none', boxShadow: 'none' };
+                      const rfqInputStyle = { outline: 'none', outlineStyle: 'none', boxShadow: 'none', borderColor: 'transparent', borderWidth: 0 };
                       const rfqTdCls = `relative p-0 align-top border-r outline outline-2 outline-blue-500 outline-offset-[-2px] ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`;
                       if (['rfq_date', 'closing_date'].includes(field)) {
                         return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={rfqTdCls}>
                           <input
                             type="date"
-                            data-no-focus-ring=""
-                            style={rfqInputStyle}
+                            style={{ outline: 'none', outlineStyle: 'none', borderColor: 'transparent', borderWidth: 0 }}
                             value={toDateInputValue(editValue)}
-                            className={`${rfqInputCls} px-1.5`}
+                            className={`block w-full min-h-8 px-2 py-1 text-xs rounded-none outline-none focus:outline-none ${darkMode?'bg-gray-700 text-white':'bg-white text-gray-900'}`}
                             onChange={e => setEditValue(e.target.value)}
                             onBlur={() => updateRFQCell(row.row_key, field, editValue)}
                             onKeyDown={e => {
@@ -4307,8 +4284,6 @@ const App = () => {
                               }
                               if (e.key === 'Escape') setEditingCell(null);
                             }}
-                            onFocus={e => { try { if (e.currentTarget.showPicker && typeof e.currentTarget.showPicker === 'function') e.currentTarget.showPicker(); } catch (err) { /* ignore */ } }}
-                            onClick={e => { try { if (e.currentTarget.showPicker && typeof e.currentTarget.showPicker === 'function') e.currentTarget.showPicker(); } catch (err) { /* ignore */ } }}
                             autoFocus
                           />
                         </td>;
@@ -4585,33 +4560,22 @@ const App = () => {
         // rule in <style> can target it as a backstop (see the global CSS
         // block at the top of this file for `input[data-no-focus-ring]:focus`).
         const inputCls = `block w-full min-h-8 px-2 py-1 text-xs border-0 rounded-none ring-0 outline-none focus:outline-none focus:ring-0 focus-visible:outline-none shadow-none ${darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`;
-        // IMPORTANT: do NOT set borderColor/borderWidth in inline style — that
-        // breaks <input type="date"> in Chrome (the field renders blank and the
-        // date picker won't open). The `border-0` Tailwind class on inputCls
-        // already removes the border; we only need to suppress the focus ring
-        // (outline + box-shadow), which is handled by the global CSS rule on
-        // [data-no-focus-ring] above.
-        const inputStyle = { outline: 'none', outlineStyle: 'none', boxShadow: 'none' };
+        const inputStyle = { outline: 'none', outlineStyle: 'none', boxShadow: 'none', borderColor: 'transparent', borderWidth: 0 };
+        // Date input: clean style without box-shadow/appearance suppression — these break the native calendar picker.
+        const dateInputCls = `block w-full min-h-8 px-2 py-1 text-xs rounded-none outline-none focus:outline-none ${darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`;
+        const dateInputStyle = { outline: 'none', outlineStyle: 'none', borderColor: 'transparent', borderWidth: 0 };
         if (isDateField) {
           return (
             <input
               type="date"
               autoFocus
-              data-no-focus-ring=""
-              className={inputCls}
-              style={inputStyle}
+              className={dateInputCls}
+              style={dateInputStyle}
               value={toDateInputValue(importEditValue)}
-              onFocus={e => { try { if (e.currentTarget.showPicker && typeof e.currentTarget.showPicker === 'function') e.currentTarget.showPicker(); } catch (err) { /* showPicker not supported — user can click the calendar icon manually */ } }}
-              onClick={e => { try { if (e.currentTarget.showPicker && typeof e.currentTarget.showPicker === 'function') e.currentTarget.showPicker(); } catch (err) { /* ignore */ } }}
+              onFocus={e => { try { e.currentTarget.showPicker?.(); } catch {} }}
+              onClick={e => { try { e.currentTarget.showPicker?.(); } catch {} }}
               onChange={e => setImportEditValue(e.target.value)}
-              onBlur={e => {
-                // Only commit the value if the input still has a valid value.
-                // Don't call updateImportCell with undefined/empty when the
-                // user just clicked the calendar icon (which can trigger a
-                // transient blur in some browsers).
-                const val = e.target.value || '';
-                updateImportCell(row._row_key, col.field, val);
-              }}
+              onBlur={e => updateImportCell(row._row_key, col.field, e.target.value)}
               onPaste={e => {
                 const text = e.clipboardData.getData('text/plain');
                 if (text.includes('\t') || text.includes('\n')) {
@@ -5930,20 +5894,22 @@ const App = () => {
            When a user clicks a cell to edit, the <td> shows a blue outline
            (the "outer" border the user wants). The <input>/<textarea> inside
            the td would ALSO show the browser's default focus ring (the
-           "inner" border), producing the double-blue-border bug.
-
-           IMPORTANT: we ONLY suppress outline + box-shadow here. We do NOT
-           touch border-color or border-width, because doing so on
-           <input type="date"> breaks the date picker's native rendering in
-           Chrome (the field appears blank/white and the picker won't open).
-           The outer td border is what visually defines the active cell, so
-           we don't need to manipulate the input's border at all. */
+           "inner" border), producing the double-blue-border bug. This rule
+           kills the inner focus ring on any element tagged with
+           data-no-focus-ring, in every state (:focus, :focus-visible,
+           :focus-within) so Chrome/Safari/Edge can't sneak it back in. */
         [data-no-focus-ring], [data-no-focus-ring]:focus, [data-no-focus-ring]:focus-visible,
-        [data-no-focus-ring]:focus-within {
+        [data-no-focus-ring]:focus-within, [data-no-focus-ring]:active {
           outline: none !important;
           outline-style: none !important;
           outline-width: 0 !important;
           box-shadow: none !important;
+        }
+        /* date inputs must NOT have box-shadow or border suppressed — browser needs these for native picker */
+        input[type="date"][data-no-focus-ring], input[type="date"][data-no-focus-ring]:focus,
+        input[type="date"][data-no-focus-ring]:focus-visible {
+          box-shadow: unset;
+          border-color: unset;
         }
         /* ── Loading animation keyframes (must be explicit for Tailwind purge) ── */
         @keyframes spin {
@@ -5978,19 +5944,23 @@ const App = () => {
         body.rfq-fill-dragging, body.rfq-fill-dragging * { cursor: crosshair !important; }
         .freeze-table-import td, .freeze-table-import th { box-shadow: inset 0 -1px 0 rgba(148, 163, 184, 0.22), inset -1px 0 0 rgba(148, 163, 184, 0.22); }
         .freeze-table-import tbody tr { height: 32px; }
-        .freeze-table-import td > * { max-height: 28px; }
+        /* max-height only on non-date cells — date picker popup needs unrestricted height */
+        .freeze-table-import td > *:not(input[type="date"]) { max-height: 28px; }
         .freeze-table-import input, .freeze-table-import textarea, .freeze-table-import select {
           outline: none !important;
           box-shadow: none !important;
         }
-        .freeze-table-import input:focus, .freeze-table-import textarea:focus, .freeze-table-import select:focus {
+        .freeze-table-import input:not([type="date"]):focus,
+        .freeze-table-import textarea:focus,
+        .freeze-table-import select:focus {
           outline: none !important;
           box-shadow: inset 0 0 0 2px #3b82f6 !important;
         }
+        /* date input: no box-shadow override so browser can render picker normally */
         .freeze-table-import input[type="date"] {
-          -webkit-appearance: none !important;
-          appearance: none !important;
+          box-shadow: none !important;
         }
+
         .backdrop-blur-sm, .backdrop-blur-xl {
           backdrop-filter: none !important;
           -webkit-backdrop-filter: none !important;
