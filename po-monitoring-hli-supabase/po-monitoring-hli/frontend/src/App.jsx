@@ -197,6 +197,20 @@ const fmtDateTime = (d) => {
     return d || '-';
   }
 };
+// Backend stores last_copy_at as a plain 'YYYY-MM-DD HH:MM' string already in
+// WIB (Asia/Jakarta) local time. Do NOT pass it through new Date(...) — browsers
+// would interpret a timezone-less string as the browser's own local time, which
+// silently shifts the displayed hour for any user outside WIB. Format it as text
+// directly so "Last Copy" always shows the real WIB timestamp the backend wrote.
+const fmtWibDateTime = (raw) => {
+  if (!raw) return '-';
+  const m = String(raw).trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+  if (!m) return String(raw);
+  const [, y, mo, d, h, mi] = m;
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const monthLabel = months[parseInt(mo, 10) - 1] || mo;
+  return `${d} ${monthLabel} ${y} ${h}:${mi} WIB`;
+};
 const sanitizeFilename = (name) => String(name || 'Export')
   .replace(/[\\/:*?"<>|]+/g, '_')
   .replace(/\s+/g, '_')
@@ -1505,6 +1519,7 @@ const App = () => {
   const [importSearch, setImportSearch] = useState('');
   const [importAppliedSearch, setImportAppliedSearch] = useState('');
   const [importVendorCount, setImportVendorCount] = useState(0);
+  const [importLastCopyAt, setImportLastCopyAt] = useState('');
   const [importEditingCell, setImportEditingCell] = useState(null);
   const [importEditValue, setImportEditValue] = useState('');
   const [showImportChecklist, setShowImportChecklist] = useState(false);
@@ -2025,6 +2040,7 @@ const App = () => {
       setImportColumns(Array.isArray(res.data.columns) ? res.data.columns : []);
       setImportTotal(res.data.total || 0);
       setImportVendorCount(res.data.vendor_count || 0);
+      setImportLastCopyAt(res.data.last_copy_at || '');
       setImportOptions(res.data.filters || { yupi_po: [], vendors: [] });
       if (refresh && res.data.sync) {
         const added = Number(res.data.sync.added || 0);
@@ -2413,6 +2429,14 @@ const App = () => {
     resolveFilter(itemRegFilters.mfr_names).forEach(v => p.append('mfr_name', v));
     if (itemRegPicHighlight) p.append('kpi_pic', itemRegPicHighlight);
     downloadBlob(`/api/item-registration/template?${p}`, `Template_ItemRegistration_BatchUpload_${new Date().toISOString().slice(0,10)}.xlsx`, 'Item Registration Batch Upload Template');
+  };
+
+  const downloadImportExcel = () => {
+    const p = new URLSearchParams();
+    if (importAppliedSearch) p.append('search', importAppliedSearch);
+    resolveFilter(importFilters?.yupi_po).forEach(v => p.append('yupi_po', v));
+    resolveFilter(importFilters?.vendors).forEach(v => p.append('vendor_name', v));
+    downloadBlob(`/api/import/export?${p}`, `Import_Dashboard_${new Date().toISOString().slice(0,10)}.xlsx`, 'Import Dashboard Excel');
   };
 
   const downloadItemRegistrationExcel = () => {
@@ -4536,12 +4560,15 @@ const App = () => {
             <Ship className="w-5 h-5 text-blue-500 flex-shrink-0" />
             <h2 className={`text-lg font-bold ${txt}`}>Import</h2>
             <span className={`text-sm ${txt2}`}>({fmtNum(importTotal)} records)</span>
-            <span className={`text-xs ${txt2}`}>Vendor Import: {fmtNum(importVendorCount)}</span>
+            <span className={`text-xs ${txt2}`} title={`Vendor Import: ${fmtNum(importVendorCount)}`}>Last Copy: {fmtWibDateTime(importLastCopyAt)}</span>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <DownloadButton onClick={() => downloadBlob('/api/import/vendor-template', `Import_Vendor_Template_${new Date().toISOString().slice(0,10)}.xlsx`, 'Import Vendor Template')} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><Download className="w-4 h-4"/>Template Vendor</DownloadButton>
             <label className="flex items-center gap-2 px-3 py-2.5 bg-slate-600 hover:bg-slate-700 text-white rounded-xl text-sm font-semibold shadow-sm cursor-pointer"><FileSpreadsheet className="w-4 h-4"/>Upload Vendor Import<input type="file" accept=".xlsx,.xls,.csv" multiple onChange={handleVendorUpload} className="hidden"/></label>
             <button onClick={() => fetchImportData(importPage, importPerPage, importAppliedSearch, true, importFilters, importReqDlvSort, importYupiPoSort)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><RotateCcw className="w-4 h-4"/>Copy Sheet</button>
+            <DownloadButton onClick={downloadImportExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
+              <Download className="w-4 h-4"/>Download Excel
+            </DownloadButton>
             {checklistCount > 0 && (
               <button onClick={() => setShowImportChecklist(v => !v)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
                 {showImportChecklist ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}
