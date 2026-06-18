@@ -4514,6 +4514,9 @@ const App = () => {
         const directUrl = row[`${col.field}__url`] || row[`${col.field}_url`] || '';
         const driveUrl = extractGDriveUrl(directUrl || value);
         const label = String(value || '').replace(driveUrl, '').replace(/[|\n]+$/g, '').trim() || (driveUrl ? gDriveChipLabel(driveUrl) : '-');
+        // Single link element only — no separate gray edit button. The cell
+        // itself is clickable (td onClick → startImportEdit) so the user can
+        // still edit by clicking the cell area outside the link chip.
         return (
           <div className="flex items-center gap-1 w-full">
             {driveUrl ? (
@@ -4523,11 +4526,8 @@ const App = () => {
                 <span className="truncate">{label}</span>
               </a>
             ) : (
-              <button type="button" onClick={(e) => { e.stopPropagation(); startImportEdit(row, col); }} className="block min-w-0 truncate text-left hover:underline" title={String(value || '-')}>{label}</button>
+              <button type="button" onClick={(e) => { e.stopPropagation(); startImportEdit(row, col); }} className="block min-w-0 truncate text-left hover:underline text-blue-600" title={String(value || '-')}>{label}</button>
             )}
-            <button type="button" title="Edit link" onClick={(e) => { e.stopPropagation(); startImportEdit(row, col); }} className={`flex-shrink-0 p-1 rounded ${darkMode ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-100 text-gray-400'}`}>
-              <LinkIcon className="w-3 h-3" />
-            </button>
           </div>
         );
       }
@@ -4589,17 +4589,42 @@ const App = () => {
         addToast(`Import paste: ${batchUpdates.length} cells updated`, 'success');
       }
     };
-    const fillImportRange = async (startRowIndex, field, endRowIndex) => {
-      if (endRowIndex === startRowIndex) return;
+    const fillImportRange = async (startRowIndex, startField, endRowIndex, endField) => {
+      // Determine drag direction: vertical (same column, different row) or
+      // horizontal (same row, different column). If the user dragged both,
+      // pick the dominant axis so the fill is predictable.
+      const startColIndex = importEditableFields.indexOf(startField);
+      const endColIndex = importEditableFields.indexOf(endField);
+      if (startColIndex < 0 || endColIndex < 0) return;
+      const rowDelta = Math.abs(endRowIndex - startRowIndex);
+      const colDelta = Math.abs(endColIndex - startColIndex);
       const source = importData[startRowIndex];
       if (!source) return;
-      const value = source[field] ?? '';
-      const minRow = Math.max(0, Math.min(startRowIndex, endRowIndex));
-      const maxRow = Math.min(importData.length - 1, Math.max(startRowIndex, endRowIndex));
       const batchUpdates = [];
-      for (let i = minRow; i <= maxRow; i += 1) {
-        if (i === startRowIndex || !importData[i]?._row_key) continue;
-        batchUpdates.push({ row_key: importData[i]._row_key, field, value });
+      if (rowDelta >= colDelta) {
+        // Vertical fill (same as before): copy startField's value down/up
+        // across all rows from minRow to maxRow.
+        const value = source[startField] ?? '';
+        const minRow = Math.max(0, Math.min(startRowIndex, endRowIndex));
+        const maxRow = Math.min(importData.length - 1, Math.max(startRowIndex, endRowIndex));
+        for (let i = minRow; i <= maxRow; i += 1) {
+          if (i === startRowIndex || !importData[i]?._row_key) continue;
+          batchUpdates.push({ row_key: importData[i]._row_key, field: startField, value });
+        }
+      } else {
+        // Horizontal fill: copy startField's value left/right across all
+        // columns from minCol to maxCol on the SAME row. This includes
+        // checklist columns — the user can drag a check across SAP INPUT,
+        // BL/AWB, INVOICE, PL, HC, MSDS, COA, COO in one motion.
+        const value = source[startField] ?? '';
+        const minCol = Math.min(startColIndex, endColIndex);
+        const maxCol = Math.max(startColIndex, endColIndex);
+        for (let c = minCol; c <= maxCol; c += 1) {
+          if (c === startColIndex) continue;
+          const field = importEditableFields[c];
+          if (!field) continue;
+          batchUpdates.push({ row_key: source._row_key, field, value });
+        }
       }
       if (batchUpdates.length && await updateImportCellsBatch(batchUpdates)) {
         addToast(`Import drag-fill: ${batchUpdates.length} cells updated`, 'success');
@@ -4611,10 +4636,27 @@ const App = () => {
       const getTargetCell = (evt) => document.elementFromPoint(evt.clientX, evt.clientY)?.closest('[data-import-cell="true"]');
       const updateRange = (evt) => {
         const target = getTargetCell(evt);
-        const endRowIndex = Number(target?.getAttribute('data-row-index'));
-        const targetField = target?.getAttribute('data-field');
-        if (Number.isFinite(endRowIndex) && targetField === field) {
-          setImportFillRange({ field, startRow: rowIndex, minRow: Math.min(rowIndex, endRowIndex), maxRow: Math.max(rowIndex, endRowIndex) });
+        if (!target) return;
+        const endRowIndex = Number(target.getAttribute('data-row-index'));
+        const endField = target.getAttribute('data-field');
+        if (!Number.isFinite(endRowIndex) || !endField) return;
+        // Determine direction based on which axis moved more — this gives
+        // the user intuitive "drag down to fill down, drag right to fill
+        // right" behavior without needing a separate handle.
+        const startColIndex = importEditableFields.indexOf(field);
+        const endColIndex = importEditableFields.indexOf(endField);
+        const rowDelta = Math.abs(endRowIndex - rowIndex);
+        const colDelta = Math.abs(endColIndex - startColIndex);
+        if (rowDelta >= colDelta) {
+          // Vertical: highlight same column, rows between start and end
+          if (endField === field) {
+            setImportFillRange({ startField: field, startRow: rowIndex, minRow: Math.min(rowIndex, endRowIndex), maxRow: Math.max(rowIndex, endRowIndex), direction: 'vertical' });
+          }
+        } else {
+          // Horizontal: highlight same row, columns between start and end
+          if (endRowIndex === rowIndex) {
+            setImportFillRange({ startField: field, startRow: rowIndex, minCol: Math.min(startColIndex, endColIndex), maxCol: Math.max(startColIndex, endColIndex), direction: 'horizontal' });
+          }
         }
       };
       const cleanup = () => {
@@ -4626,13 +4668,16 @@ const App = () => {
       const onMove = (moveEvent) => updateRange(moveEvent);
       const onUp = (upEvent) => {
         const target = getTargetCell(upEvent);
-        const endRowIndex = Number(target?.getAttribute('data-row-index'));
-        const targetField = target?.getAttribute('data-field');
+        if (!target) { cleanup(); return; }
+        const endRowIndex = Number(target.getAttribute('data-row-index'));
+        const endField = target.getAttribute('data-field');
         cleanup();
-        if (Number.isFinite(endRowIndex) && targetField === field) fillImportRange(rowIndex, field, endRowIndex);
+        if (!Number.isFinite(endRowIndex) || !endField) return;
+        if (endField === field && endRowIndex === rowIndex) return; // no drag
+        fillImportRange(rowIndex, field, endRowIndex, endField);
       };
       document.body.classList.add('rfq-fill-dragging');
-      setImportFillRange({ field, startRow: rowIndex, minRow: rowIndex, maxRow: rowIndex });
+      setImportFillRange({ startField: field, startRow: rowIndex, minRow: rowIndex, maxRow: rowIndex, direction: 'vertical' });
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     };
@@ -4722,7 +4767,15 @@ const App = () => {
                 return <tr key={row._row_key} className={`${trHov} ${hasReschedule ? (darkMode ? 'bg-amber-900/25 hover:bg-amber-900/35' : 'bg-amber-50 hover:bg-amber-100/70') : ''}`}>{visibleColumns.map(col => {
                   const formula = isImportFormulaColumn(col);
                   const selected = importSelectedCell?.rowKey === row._row_key && importSelectedCell?.field === col.field;
-                  const fillHighlighted = importFillRange?.field === col.field && rowIndex >= importFillRange.minRow && rowIndex <= importFillRange.maxRow && rowIndex !== importFillRange.startRow;
+                  // Fill highlight: support both vertical (down/up, same
+                  // column) and horizontal (left/right, same row) drag-fill.
+                  const colIdx = visibleColumns.findIndex(c => c.field === col.field);
+                  let fillHighlighted = false;
+                  if (importFillRange?.direction === 'vertical') {
+                    fillHighlighted = importFillRange.startField === col.field && rowIndex >= importFillRange.minRow && rowIndex <= importFillRange.maxRow && rowIndex !== importFillRange.startRow;
+                  } else if (importFillRange?.direction === 'horizontal') {
+                    fillHighlighted = importFillRange.startRow === rowIndex && colIdx >= importFillRange.minCol && colIdx <= importFillRange.maxCol && col.field !== importFillRange.startField;
+                  }
                   const editingCellNow = importEditingCell === `${row._row_key}:${col.field}`;
                   const directEdit = !(col.field === 'status' || col.type === 'status' || isImportChecklistColumn(col));
                   return <td
@@ -4740,7 +4793,10 @@ const App = () => {
                     className={`group relative h-8 max-h-8 ${editingCellNow ? 'p-0' : 'px-2 py-1'} align-middle border-r focus:outline-none cursor-pointer ${formula ? (darkMode ? 'bg-gray-800/50' : 'bg-slate-50/80') : ''} ${hasReschedule ? (darkMode ? 'bg-amber-900/20' : 'bg-amber-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${editingCellNow ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${col.field === 'days_left' ? 'text-center' : ''} ${txt2}`}
                   >
                     {renderImportCell(row, col)}
-                    <button type="button" aria-label="Fill down" title="Drag to copy this value" onClick={e => e.stopPropagation()} onMouseDown={e => startImportFill(e, rowIndex, col.field)} className="rfq-fill-handle absolute bottom-0 right-0 h-3 w-3 translate-x-1/2 translate-y-1/2 border border-blue-600 bg-blue-600 opacity-0 group-hover:opacity-100 focus:opacity-100" />
+                    {/* Fill handle — bottom-right corner. Drag in any direction:
+                        down to fill the same column, right to fill the same row.
+                        The drag logic auto-detects the dominant axis. */}
+                    <button type="button" aria-label="Fill handle" title="Drag to copy value (down or right)" onClick={e => e.stopPropagation()} onMouseDown={e => startImportFill(e, rowIndex, col.field)} className="rfq-fill-handle absolute bottom-0 right-0 h-3 w-3 translate-x-1/2 translate-y-1/2 border border-blue-600 bg-blue-600 opacity-0 group-hover:opacity-100 focus:opacity-100" />
                   </td>;
                 })}</tr>;
               })}
