@@ -2431,6 +2431,18 @@ const App = () => {
     downloadBlob(`/api/item-registration/template?${p}`, `Template_ItemRegistration_BatchUpload_${new Date().toISOString().slice(0,10)}.xlsx`, 'Item Registration Batch Upload Template');
   };
 
+  const cleanupImportDuplicates = async () => {
+    if (!window.confirm('Bersihkan baris duplikat di Import? Baris dengan identitas bisnis yang sama (PO YUPI + Item Yupi, atau PO Sementara + Item Yupi) akan digabung menjadi satu, baris berlebih akan dihapus. Aksi ini tidak bisa dibatalkan.')) return;
+    try {
+      const res = await api.post('/api/import/cleanup', {});
+      addToast(res.data?.message || `${res.data?.deleted || 0} baris duplikat dihapus`, 'success');
+      fetchImportData(1, importPerPage, importAppliedSearch, false, importFilters, importReqDlvSort, importYupiPoSort);
+      setImportPage(1);
+    } catch (e) {
+      addToast(`Gagal membersihkan duplikat: ${e.response?.data?.error || e.message}`, 'error');
+    }
+  };
+
   const downloadImportExcel = () => {
     const p = new URLSearchParams();
     if (importAppliedSearch) p.append('search', importAppliedSearch);
@@ -4569,6 +4581,9 @@ const App = () => {
             <DownloadButton onClick={downloadImportExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
               <Download className="w-4 h-4"/>Download Excel
             </DownloadButton>
+            <button onClick={cleanupImportDuplicates} title="Gabungkan baris yang punya PO YUPI/PO Sementara + Item Yupi sama, hapus sisanya" className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-amber-300 hover:bg-gray-600' : 'bg-white text-amber-700 hover:bg-amber-50 border border-gray-200'}`}>
+              <Trash2 className="w-4 h-4"/>Bersihkan Duplikat
+            </button>
             {checklistCount > 0 && (
               <button onClick={() => setShowImportChecklist(v => !v)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
                 {showImportChecklist ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}
