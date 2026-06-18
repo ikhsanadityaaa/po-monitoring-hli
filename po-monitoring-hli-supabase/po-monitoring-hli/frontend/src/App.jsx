@@ -4290,10 +4290,9 @@ const App = () => {
                         return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={rfqTdCls}>
                           <input
                             type="date"
-                            data-no-focus-ring=""
-                            style={rfqInputStyle}
+                            style={{ outline: 'none', outlineStyle: 'none', borderColor: 'transparent', borderWidth: 0 }}
                             value={toDateInputValue(editValue)}
-                            className={`${rfqInputCls} px-1.5`}
+                            className={`block w-full min-h-8 px-2 py-1 text-xs rounded-none outline-none focus:outline-none ${darkMode?'bg-gray-700 text-white':'bg-white text-gray-900'}`}
                             onChange={e => setEditValue(e.target.value)}
                             onBlur={() => updateRFQCell(row.row_key, field, editValue)}
                             onKeyDown={e => {
@@ -4580,14 +4579,16 @@ const App = () => {
         // block at the top of this file for `input[data-no-focus-ring]:focus`).
         const inputCls = `block w-full min-h-8 px-2 py-1 text-xs border-0 rounded-none ring-0 outline-none focus:outline-none focus:ring-0 focus-visible:outline-none shadow-none ${darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`;
         const inputStyle = { outline: 'none', outlineStyle: 'none', boxShadow: 'none', borderColor: 'transparent', borderWidth: 0 };
+        // Date input: clean style without box-shadow/appearance suppression — these break the native calendar picker.
+        const dateInputCls = `block w-full min-h-8 px-2 py-1 text-xs rounded-none outline-none focus:outline-none ${darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`;
+        const dateInputStyle = { outline: 'none', outlineStyle: 'none', borderColor: 'transparent', borderWidth: 0 };
         if (isDateField) {
           return (
             <input
               type="date"
               autoFocus
-              data-no-focus-ring=""
-              className={inputCls}
-              style={inputStyle}
+              className={dateInputCls}
+              style={dateInputStyle}
               value={toDateInputValue(importEditValue)}
               onFocus={e => { try { e.currentTarget.showPicker?.(); } catch {} }}
               onClick={e => { try { e.currentTarget.showPicker?.(); } catch {} }}
@@ -5921,7 +5922,12 @@ const App = () => {
           outline-style: none !important;
           outline-width: 0 !important;
           box-shadow: none !important;
-          border-color: transparent !important;
+        }
+        /* date inputs must NOT have box-shadow or border suppressed — browser needs these for native picker */
+        input[type="date"][data-no-focus-ring], input[type="date"][data-no-focus-ring]:focus,
+        input[type="date"][data-no-focus-ring]:focus-visible {
+          box-shadow: unset;
+          border-color: unset;
         }
         /* ── Loading animation keyframes (must be explicit for Tailwind purge) ── */
         @keyframes spin {
@@ -5956,14 +5962,21 @@ const App = () => {
         body.rfq-fill-dragging, body.rfq-fill-dragging * { cursor: crosshair !important; }
         .freeze-table-import td, .freeze-table-import th { box-shadow: inset 0 -1px 0 rgba(148, 163, 184, 0.22), inset -1px 0 0 rgba(148, 163, 184, 0.22); }
         .freeze-table-import tbody tr { height: 32px; }
-        .freeze-table-import td > * { max-height: 28px; }
+        /* max-height only on non-date cells — date picker popup needs unrestricted height */
+        .freeze-table-import td > *:not(input[type="date"]) { max-height: 28px; }
         .freeze-table-import input, .freeze-table-import textarea, .freeze-table-import select {
           outline: none !important;
           box-shadow: none !important;
         }
-        .freeze-table-import input:focus, .freeze-table-import textarea:focus, .freeze-table-import select:focus {
+        .freeze-table-import input:not([type="date"]):focus,
+        .freeze-table-import textarea:focus,
+        .freeze-table-import select:focus {
           outline: none !important;
           box-shadow: inset 0 0 0 2px #3b82f6 !important;
+        }
+        /* date input: no box-shadow override so browser can render picker normally */
+        .freeze-table-import input[type="date"] {
+          box-shadow: none !important;
         }
 
         .backdrop-blur-sm, .backdrop-blur-xl {
