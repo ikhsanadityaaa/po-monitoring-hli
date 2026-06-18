@@ -1326,6 +1326,16 @@ IMPORT_LOCAL_EDIT_FIELDS = {
     'soft_copy_doc',
 }
 
+# User-local-only fields: editable from the dashboard AND NOT managed by the
+# source sheet. These are the columns the user fills in manually — STATUS,
+# PO Send Date, ETD, ETA, Import Remarks, all checklist ticks (SAP INPUT,
+# BL/AWB, INVOICE, PL, HC, MSDS, COA, COO), SOFT COPY DOC, Incoterm,
+# Forwarder, BL Number, Inv No, NON-SKI, etc.
+# Once a row exists in the dashboard DB, Copy Sheet must NEVER overwrite these
+# fields — not even to "restore" a value the user intentionally cleared.
+# The source sheet is only authoritative for IMPORT_SOURCE_MANAGED_FIELDS.
+IMPORT_USER_LOCAL_ONLY_FIELDS = IMPORT_LOCAL_EDIT_FIELDS - IMPORT_SOURCE_MANAGED_FIELDS
+
 # Fields needed for formulas/sync but hidden from the dashboard table.
 IMPORT_SOURCE_ONLY_COLUMNS = [
     # Hidden raw source fields. In the RM source sheet these headers are on row 4:
@@ -2420,9 +2430,14 @@ def merge_import_existing_payload(existing_payload, sheet_payload):
       • Blank/placeholder source → preserve existing DB value (do not overwrite
         a filled field with emptiness just because the sheet row has a gap)
 
-    LOCAL / user-editable fields (status, etd, eta, po_send_date, import_remarks,
-    checklist ticks, soft_copy_doc, …):
-      • Never overwritten by Copy Sheet — always keep what the user typed/ticked
+    USER_LOCAL_ONLY fields (status, etd, eta, po_send_date, import_remarks,
+    checklist ticks, soft_copy_doc, incoterm, forwarder, bl_number, …):
+      • Once the row exists in DB, ALWAYS keep the DB value — even if blank.
+        The sheet must never overwrite user input, not even to "restore" a
+        value the user intentionally cleared. This is the root-cause fix for
+        "kolom yang diisi user harus dipertahankan terus meskipun copy sheet".
+      • For genuinely new rows (no existing DB payload), the sheet value is
+        used as the initial value.
 
     Formula fields (days_left, arrival_check, purchase_amount, lt_days):
       • Recomputed by apply_import_formula_columns() from the merged base values
@@ -2430,10 +2445,19 @@ def merge_import_existing_payload(existing_payload, sheet_payload):
     """
     merged = dict(sheet_payload or {})
     existing_payload = existing_payload or {}
+    row_exists_in_db = bool(existing_payload)
 
     for field in IMPORT_LOCAL_EDIT_FIELDS:
         old_value = existing_payload.get(field)
         new_value = merged.get(field)
+
+        if field in IMPORT_USER_LOCAL_ONLY_FIELDS and row_exists_in_db:
+            # User-local-only fields: once the row exists in DB, NEVER let the
+            # sheet overwrite. This protects user edits (including intentional
+            # clears) from being clobbered by Copy Sheet or the 07:00 WIB
+            # auto-sync. The sheet value is only used for genuinely new rows.
+            merged[field] = old_value
+            continue
 
         if field in IMPORT_SOURCE_MANAGED_FIELDS:
             # Non-blank source value always wins — this is the upsert step.
@@ -2447,7 +2471,7 @@ def merge_import_existing_payload(existing_payload, sheet_payload):
                 merged[field] = old_value
             continue
 
-        # User-local fields: always keep what the user typed/ticked.
+        # Other user-local fields: keep what the user typed/ticked if non-blank.
         if not import_blankish(old_value):
             merged[field] = old_value
 
