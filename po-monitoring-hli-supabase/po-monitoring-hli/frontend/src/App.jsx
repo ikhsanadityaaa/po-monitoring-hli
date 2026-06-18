@@ -4279,12 +4279,21 @@ const App = () => {
                     if (isEditable && isEditing) {
                       const tall = ['quoted_spec', 'remarks', 'photo_url'].includes(field);
                       const Control = tall ? 'textarea' : 'input';
+                      // Same pattern as Import: td shows the blue outer outline,
+                      // input/textarea/select inside has NO outline (data-no-focus-ring
+                      // + inline style + global CSS rule). This avoids the
+                      // double-blue-border bug.
+                      const rfqInputCls = `block w-full min-h-8 px-2 py-1 text-xs border-0 rounded-none ring-0 outline-none focus:outline-none focus:ring-0 focus-visible:outline-none shadow-none ${darkMode?'bg-gray-700 text-white':'bg-white text-gray-900'}`;
+                      const rfqInputStyle = { outline: 'none', outlineStyle: 'none', boxShadow: 'none', borderColor: 'transparent', borderWidth: 0 };
+                      const rfqTdCls = `relative p-0 align-top border-r outline outline-2 outline-blue-500 outline-offset-[-2px] ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`;
                       if (['rfq_date', 'closing_date'].includes(field)) {
-                        return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={`relative p-0 align-top border-r ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
+                        return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={rfqTdCls}>
                           <input
                             type="date"
+                            data-no-focus-ring=""
+                            style={rfqInputStyle}
                             value={toDateInputValue(editValue)}
-                            className={`block w-full min-h-8 px-1.5 py-1 text-xs border-0 rounded-none outline outline-2 outline-blue-500 outline-offset-[-2px] ${darkMode?'bg-gray-700 text-white':'bg-white text-gray-900'}`}
+                            className={`${rfqInputCls} px-1.5`}
                             onChange={e => setEditValue(e.target.value)}
                             onBlur={() => updateRFQCell(row.row_key, field, editValue)}
                             onKeyDown={e => {
@@ -4299,10 +4308,12 @@ const App = () => {
                         </td>;
                       }
                       if (field === 'same_replacement') {
-                        return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={`relative p-0 align-top border-r ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
+                        return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={rfqTdCls}>
                           <select
+                            data-no-focus-ring=""
+                            style={rfqInputStyle}
                             value={editValue}
-                            className={`block w-full min-h-8 px-1.5 py-1 text-xs border-0 rounded-none outline outline-2 outline-blue-500 outline-offset-[-2px] ${darkMode?'bg-gray-700 text-white':'bg-white text-gray-900'}`}
+                            className={`${rfqInputCls} px-1.5`}
                             onChange={e => { setEditValue(e.target.value); updateRFQCell(row.row_key, field, e.target.value); }}
                             onBlur={() => setEditingCell(null)}
                             onKeyDown={e => { if (e.key === 'Escape') setEditingCell(null); }}
@@ -4314,11 +4325,13 @@ const App = () => {
                           </select>
                         </td>;
                       }
-                      return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={`relative p-0 align-top border-r ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
+                      return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={rfqTdCls}>
                         <Control
+                          data-no-focus-ring=""
+                          style={rfqInputStyle}
                           value={editValue}
                           rows={tall ? 3 : undefined}
-                          className={`block w-full min-h-8 px-2 py-1 text-xs border-0 rounded-none outline outline-2 outline-blue-500 outline-offset-[-2px] ${tall ? 'resize-y' : ''} ${darkMode?'bg-gray-700 text-white':'bg-white text-gray-900'}`}
+                          className={`${rfqInputCls} ${tall ? 'resize-y' : ''}`}
                           onChange={e => setEditValue(e.target.value)}
                           onBlur={() => updateRFQCell(row.row_key, field, editValue)}
                           onPaste={e => {
@@ -4556,14 +4569,25 @@ const App = () => {
         // itself already shows the blue outer outline when editingCellNow is
         // true (see the td className above). A second inner ring here would
         // produce the double blue border the user reported.
+        //
+        // CRITICAL: we also pass inline `style={{ outline: 'none', boxShadow: 'none' }}`
+        // because Tailwind's `focus:outline-none` / `focus:ring-0` classes are
+        // NOT enough to suppress the browser's default focus ring on autoFocus
+        // inputs in Chrome/Safari/Edge. The inline style wins over the
+        // user-agent stylesheet, which is what actually kills the second blue
+        // border. The `data-no-focus-ring` attribute is also added so a CSS
+        // rule in <style> can target it as a backstop (see the global CSS
+        // block at the top of this file for `input[data-no-focus-ring]:focus`).
         const inputCls = `block w-full min-h-8 px-2 py-1 text-xs border-0 rounded-none ring-0 outline-none focus:outline-none focus:ring-0 focus-visible:outline-none shadow-none ${darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`;
+        const inputStyle = { outline: 'none', outlineStyle: 'none', boxShadow: 'none', borderColor: 'transparent', borderWidth: 0 };
         if (isDateField) {
           return (
             <input
               type="date"
               autoFocus
-              className={`${inputCls} appearance-none`}
-              style={{ outline: 'none', boxShadow: 'none', WebkitAppearance: 'none', appearance: 'none' }}
+              data-no-focus-ring=""
+              className={inputCls}
+              style={inputStyle}
               value={toDateInputValue(importEditValue)}
               onFocus={e => { try { e.currentTarget.showPicker?.(); } catch {} }}
               onClick={e => { try { e.currentTarget.showPicker?.(); } catch {} }}
@@ -4589,8 +4613,10 @@ const App = () => {
           return (
             <textarea
               autoFocus
+              data-no-focus-ring=""
               rows={3}
               className={`${inputCls} resize-y min-h-[74px]`}
+              style={inputStyle}
               value={importEditValue}
               onChange={e => setImportEditValue(e.target.value)}
               onBlur={() => updateImportCell(row._row_key, col.field, importEditValue)}
@@ -4613,7 +4639,9 @@ const App = () => {
         return (
           <input
             autoFocus
+            data-no-focus-ring=""
             className={inputCls}
+            style={inputStyle}
             value={importEditValue}
             onChange={e => setImportEditValue(e.target.value)}
             onBlur={() => updateImportCell(row._row_key, col.field, importEditValue)}
@@ -5879,6 +5907,22 @@ const App = () => {
         .recharts-wrapper *, [data-radix-popper-content-wrapper] * {
           animation: none !important;
         }
+        /* ── Kill browser default focus ring on editable table cells ──
+           When a user clicks a cell to edit, the <td> shows a blue outline
+           (the "outer" border the user wants). The <input>/<textarea> inside
+           the td would ALSO show the browser's default focus ring (the
+           "inner" border), producing the double-blue-border bug. This rule
+           kills the inner focus ring on any element tagged with
+           data-no-focus-ring, in every state (:focus, :focus-visible,
+           :focus-within) so Chrome/Safari/Edge can't sneak it back in. */
+        [data-no-focus-ring], [data-no-focus-ring]:focus, [data-no-focus-ring]:focus-visible,
+        [data-no-focus-ring]:focus-within, [data-no-focus-ring]:active {
+          outline: none !important;
+          outline-style: none !important;
+          outline-width: 0 !important;
+          box-shadow: none !important;
+          border-color: transparent !important;
+        }
         /* ── Loading animation keyframes (must be explicit for Tailwind purge) ── */
         @keyframes spin {
           from { transform: rotate(0deg); }
@@ -5921,10 +5965,7 @@ const App = () => {
           outline: none !important;
           box-shadow: inset 0 0 0 2px #3b82f6 !important;
         }
-        .freeze-table-import input[type="date"] {
-          -webkit-appearance: none !important;
-          appearance: none !important;
-        }
+
         .backdrop-blur-sm, .backdrop-blur-xl {
           backdrop-filter: none !important;
           -webkit-backdrop-filter: none !important;
