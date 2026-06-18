@@ -547,6 +547,60 @@ const SOModal = ({ title, data, onClose, darkMode, onUpdateCell }) => {
   );
 };
 
+// ─── Reusable floating-dropdown hook ──────────────────────────────────────
+// Returns a ref (attach to the trigger button) and a `menuPos` object to
+// pass as `style` on the floating menu. The menu uses `position: fixed` so
+// it escapes any `overflow-hidden` ancestor (e.g. the rounded card wrapper
+// around every table). The position is recomputed on scroll/resize and the
+// menu flips above the trigger when there isn't enough space below.
+//
+// Usage:
+//   const { triggerRef, menuPos } = useFloatingDropdown(open);
+//   <button ref={triggerRef} onClick={...}>Open</button>
+//   {open && (
+//     <div style={menuPos.style} className="fixed z-[180] ...">
+//       ...menu content...
+//     </div>
+//   )}
+const useFloatingDropdown = (open, minWidth = 320, maxWidth = 520, menuHeight = 300) => {
+  const triggerRef = useRef(null);
+  const [menuPos, setMenuPos] = useState({ top: 0, left: 0, width: minWidth, style: {} });
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const compute = () => {
+      const anchor = triggerRef.current;
+      if (!anchor || typeof window === 'undefined') return;
+      const rect = anchor.getBoundingClientRect();
+      const viewportW = window.innerWidth || 1024;
+      const viewportH = window.innerHeight || 768;
+      const width = Math.min(Math.max(rect.width, minWidth), Math.min(maxWidth, viewportW - 32));
+      const left = Math.min(Math.max(rect.left, 16), viewportW - width - 16);
+      const spaceBelow = viewportH - rect.bottom - 12;
+      const spaceAbove = rect.top - 12;
+      const preferAbove = spaceBelow < menuHeight && spaceAbove > spaceBelow;
+      const top = preferAbove
+        ? Math.max(8, rect.top - Math.min(menuHeight, spaceAbove) - 10)
+        : Math.min(rect.bottom + 6, viewportH - 120);
+      setMenuPos({
+        top,
+        left,
+        width,
+        style: { position: 'fixed', top: `${top}px`, left: `${left}px`, width: `${width}px`, maxWidth: 'calc(100vw - 32px)', zIndex: 180 },
+      });
+    };
+    compute();
+    window.addEventListener('resize', compute);
+    window.addEventListener('scroll', compute, true);
+    return () => {
+      window.removeEventListener('resize', compute);
+      window.removeEventListener('scroll', compute, true);
+    };
+  }, [open, minWidth, maxWidth, menuHeight]);
+
+  return { triggerRef, menuPos };
+};
+
 // ─── MultiSelect dropdown — Excel-style (all checked by default) ─────────
 const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, hideLabel = false }) => {
   const [open, setOpen] = useState(false);
@@ -801,9 +855,12 @@ const SearchInput = ({ placeholder, onSearch, darkMode, txt2, label }) => {
   const [open, setOpen] = useState(false);
   const [value, setValue] = useState('');
   const ref = useRef(null);
+  // Floating dropdown — escapes `overflow-hidden` parents so the search
+  // panel is never clipped by the table card border.
+  const float = useFloatingDropdown(open, 256, 320, 260);
 
   useEffect(() => {
-    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target) && !float.triggerRef.current?.contains(e.target)) setOpen(false); };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, []);
@@ -823,6 +880,7 @@ const SearchInput = ({ placeholder, onSearch, darkMode, txt2, label }) => {
   return (
     <div className="relative w-full" ref={ref}>
       <button
+        ref={float.triggerRef}
         onClick={() => setOpen(o => !o)}
         title={`Search ${label}`}
         className={`w-full h-10 flex items-center justify-between gap-1.5 px-3 py-2 rounded-lg text-sm border font-medium transition-all
@@ -835,7 +893,10 @@ const SearchInput = ({ placeholder, onSearch, darkMode, txt2, label }) => {
         <ChevronDown className="w-3.5 h-3.5 opacity-60 flex-shrink-0"/>
       </button>
       {open && (
-        <div className={`absolute left-0 top-full mt-1 z-50 rounded-xl shadow-2xl border p-3 w-64 ${darkMode?'bg-gray-800 border-gray-700':'bg-white border-gray-200'}`}>
+        <div
+          style={float.menuPos.style}
+          className={`rounded-xl shadow-2xl border p-3 ${darkMode?'bg-gray-800 border-gray-700':'bg-white border-gray-200'}`}
+        >
           <p className={`text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>
             Enter {label} (one per line):
           </p>
@@ -877,10 +938,12 @@ const RFQMultiSearch = ({
 }) => {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
+  // Floating dropdown — escapes `overflow-hidden` parents.
+  const float = useFloatingDropdown(open, 360, 440, 320);
 
   useEffect(() => {
     const handler = (event) => {
-      if (ref.current && !ref.current.contains(event.target)) setOpen(false);
+      if (ref.current && !ref.current.contains(event.target) && !float.triggerRef.current?.contains(event.target)) setOpen(false);
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
@@ -908,6 +971,7 @@ const RFQMultiSearch = ({
     <div className="relative w-full min-w-0" ref={ref}>
       <label className={`block text-xs font-semibold mb-1 ${txt2}`}>{label}</label>
       <button
+        ref={float.triggerRef}
         type="button"
         onClick={() => setOpen(current => !current)}
         className={`w-full h-10 px-3 py-2 rounded-xl text-sm border text-left flex items-center justify-between gap-2 transition-colors ${
@@ -930,7 +994,10 @@ const RFQMultiSearch = ({
       </button>
 
       {open && (
-        <div className={`absolute left-0 top-full z-[80] mt-1 w-[min(440px,calc(100vw-32px))] rounded-xl border p-3 shadow-2xl ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-200'}`}>
+        <div
+          style={float.menuPos.style}
+          className={`rounded-xl border p-3 shadow-2xl ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-200'}`}
+        >
           <p className={`mb-2 text-xs leading-relaxed ${txt2}`}>
             {description}
           </p>
@@ -1305,6 +1372,9 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
   const [startDate, setStartDate] = useState(value?.start || '');
   const [endDate, setEndDate] = useState(value?.end || '');
   const [rangeOpen, setRangeOpen] = useState(false);
+  // Floating dropdown for the Custom Date Range picker — escapes
+  // `overflow-hidden` parents so the date inputs are never clipped.
+  const rangeFloat = useFloatingDropdown(mode === 'range' && rangeOpen, 360, 440, 120);
 
   // Keep internal state in sync when the controlled `value` changes externally
   // (e.g. user changes filter on another page that shares the same global state).
@@ -1381,6 +1451,7 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
           return (
             <div key={m} className={isRange ? 'flex flex-col items-start gap-0.5' : ''}>
               <button
+                ref={isRange ? rangeFloat.triggerRef : undefined}
                 type="button"
                 onClick={() => {
                   setMode(m);
@@ -1398,7 +1469,10 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
           );
         })}
         {mode === 'range' && rangeOpen && (
-          <div className={`absolute left-0 top-full z-50 mt-2 flex items-center gap-2 rounded-xl border p-3 shadow-xl ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-200'}`}>
+          <div
+            style={rangeFloat.menuPos.style}
+            className={`flex items-center gap-2 rounded-xl border p-3 shadow-xl ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-200'}`}
+          >
             <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
               className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300'}`}/>
             <span className={`text-xs ${txt2}`}>to</span>
@@ -1536,6 +1610,10 @@ const App = () => {
   const [importSelectedCells, setImportSelectedCells] = useState(null); // Set or null
   const [importSelectionAnchor, setImportSelectionAnchor] = useState(null); // {rowIndex, field}
   const [importVendorMenuOpen, setImportVendorMenuOpen] = useState(false);
+  // Floating dropdown for the Vendor Import menu. Uses `position: fixed` so
+  // the menu escapes the table card's `overflow-hidden` and is never clipped
+  // or covered by the table/filter below.
+  const importVendorDropdown = useFloatingDropdown(importVendorMenuOpen, 224, 280, 200);
   const [importFilters, setImportFilters] = useState({ yupi_po: [], vendors: [] });
   const [importOptions, setImportOptions] = useState({ yupi_po: [], vendors: [] });
   const [importReqDlvSort, setImportReqDlvSort] = useState('newest');
@@ -1566,6 +1644,9 @@ const App = () => {
   const [vendorControlAppliedVendors, setVendorControlAppliedVendors] = useState([]);
   const [vendorControlSuggestions, setVendorControlSuggestions] = useState([]);
   const [vendorControlSuggestOpen, setVendorControlSuggestOpen] = useState(false);
+  // Floating dropdown for the vendor search suggestion list — escapes
+  // `overflow-hidden` parents so suggestions are never clipped.
+  const vendorControlSuggestFloat = useFloatingDropdown(vendorControlSuggestOpen && vendorControlSuggestions.length > 0, 360, 520, 280);
   const [vendorControlLastUpdated, setVendorControlLastUpdated] = useState(null);
   const [vendorPasswordVisible, setVendorPasswordVisible] = useState({});
 
@@ -3501,6 +3582,7 @@ const App = () => {
             <div className="min-w-0 relative">
               <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Vendor</label>
               <input
+                ref={vendorControlSuggestFloat.triggerRef}
                 value={vendorControlSearch}
                 autoComplete="off"
                 onChange={e => {
@@ -3515,7 +3597,10 @@ const App = () => {
                 className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode?'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400':'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}
               />
               {vendorControlSuggestOpen && vendorControlSuggestions.length > 0 && (
-                <div className={`absolute left-0 right-0 top-full mt-1 z-50 max-h-64 overflow-auto rounded-xl border shadow-xl ${darkMode ? 'bg-gray-800 border-gray-700 text-gray-100' : 'bg-white border-gray-200 text-gray-800'}`}>
+                <div
+                  style={vendorControlSuggestFloat.menuPos.style}
+                  className={`max-h-64 overflow-auto rounded-xl border shadow-xl ${darkMode ? 'bg-gray-800 border-gray-700 text-gray-100' : 'bg-white border-gray-200 text-gray-800'}`}
+                >
                   {vendorControlSuggestions.map(name => (
                     <button
                       key={name}
@@ -4759,6 +4844,7 @@ const App = () => {
                 action" pattern used in other tables (RFQ, Item Registration). */}
             <div className="relative">
               <button
+                ref={importVendorDropdown.triggerRef}
                 type="button"
                 onClick={() => setImportVendorMenuOpen(v => !v)}
                 onBlur={() => setTimeout(() => setImportVendorMenuOpen(false), 150)}
@@ -4768,7 +4854,10 @@ const App = () => {
                 <svg className={`w-3 h-3 transition-transform ${importVendorMenuOpen ? 'rotate-180' : ''}`} viewBox="0 0 12 12" fill="none"><path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
               </button>
               {importVendorMenuOpen && (
-                <div className={`absolute right-0 top-full mt-1 z-50 w-56 rounded-xl border shadow-2xl overflow-hidden ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
+                <div
+                  style={importVendorDropdown.menuPos.style}
+                  className={`rounded-xl border shadow-2xl overflow-hidden ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}
+                >
                   <button
                     type="button"
                     onMouseDown={(e) => { e.preventDefault(); downloadBlob('/api/import/vendor-template', `Import_Vendor_Template_${new Date().toISOString().slice(0,10)}.xlsx`, 'Import Vendor Template'); setImportVendorMenuOpen(false); }}
