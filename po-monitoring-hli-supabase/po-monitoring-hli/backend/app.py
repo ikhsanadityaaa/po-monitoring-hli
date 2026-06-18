@@ -1,10237 +1,6423 @@
-from flask import Flask, request, jsonify, send_file, send_from_directory
-from flask_sqlalchemy import SQLAlchemy
-from flask_cors import CORS
-import pandas as pd
-import numpy as np
-import re
-import os
-import json
-import html
-import hashlib
-from datetime import datetime, date, timedelta
-import io
-import time
-import threading
-from sqlalchemy import func, text, event, case, desc
-from sqlalchemy.engine import Engine
-from sqlalchemy.orm import load_only
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import {
+  LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area, ComposedChart
+} from 'recharts';
+import {
+  Upload, Download, AlertCircle, CheckCircle, XCircle,
+  Package, TrendingUp, TrendingDown, Award, Calendar, ChevronLeft,
+  ChevronRight, Moon, Sun, FileText, BarChart3, FileSpreadsheet,
+  Filter, X, ChevronDown, ChevronUp, Building2, Search, Loader2,
+  EyeOff, Eye, Trash2, RotateCcw, Plus, Coins, Wallet, Mail, Minus,
+  Clock, Wrench, Check, Link as LinkIcon, Pin, PinOff, Ship, FolderOpen, Pencil
+} from 'lucide-react';
+import axios from 'axios';
+import { format, parseISO } from 'date-fns';
+import * as XLSX from 'xlsx';
+import { saveAs } from 'file-saver';
+import { useLocation, useNavigate } from 'react-router-dom';
 
-# ─── APScheduler for daily auto copy-sheet at 07:00 WIB ─────────────────────
-try:
-    from apscheduler.schedulers.background import BackgroundScheduler
-    from apscheduler.triggers.cron import CronTrigger
-    _APSCHEDULER_AVAILABLE = True
-except ImportError:
-    _APSCHEDULER_AVAILABLE = False
-    print('[scheduler] APScheduler not installed – auto copy-sheet disabled. '
-          'Install with: pip install apscheduler')
+const BACKEND = import.meta.env.VITE_API_URL || 'http://127.0.0.1:5001';
+const api = axios.create({ baseURL: BACKEND, timeout: 600000 });
+const DASHBOARD_SUMMARY_CACHE_PREFIX = 'po-monitoring:dashboard-summary:';
+const DASHBOARD_STATS_CACHE_KEY = 'po-monitoring:dashboard-stats';
+const DASHBOARD_AGING_CACHE_KEY = 'po-monitoring:dashboard-aging';
+const DASHBOARD_PENDING_TOTAL_CACHE_KEY = 'po-monitoring:dashboard-pending-total';
+const DASHBOARD_CACHE_KEY_ALL = '__all__';
+// Cache TTL: keeps Dashboard instant on reload, while uploads still clear it explicitly.
+// localStorage is used instead of sessionStorage so refresh / browser reopen does not
+// force PythonAnywhere to recalculate the heavy KPI + Delivery Completed summary.
+const DASHBOARD_CACHE_TTL_MS = 30 * 60 * 1000;
 
-app = Flask(__name__)
+const storageGet = (key) => {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(key) || window.sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+};
 
-# ─── Indonesian Public Holidays (auto-generated, year-flexible) ───────────
-# We use the `holidays` package to generate Indonesian national holidays for
-# any year automatically — no need to hand-maintain a list when the year
-# rolls over.  Government-announced "cuti bersama" / replacement days that
-# the package doesn't know about live in `holiday_extras.json` next to this
-# file; that file is a plain JSON array of "YYYY-MM-DD" strings the user can
-# edit when SKB tahunan is published.
-_HOLIDAY_CACHE = None
-_HOLIDAY_CACHE_KEY = None
+const storageSet = (key, value) => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    try { window.sessionStorage.setItem(key, value); } catch {}
+  }
+};
 
-# Thread locks for in-memory caches. PythonAnywhere/Gunicorn can serve several
-# requests in parallel, so cache mutation needs a small guard.
-_HOLIDAY_LOCK = threading.Lock()
-_READ_CACHE_LOCK = threading.Lock()
-_COMPLETED_CACHE_LOCK = threading.Lock()
-_RATE_CACHE_LOCK = threading.Lock()
-_SIMILARITY_LOCK = threading.Lock()
-_MASTER_PIC_LOCK = threading.Lock()
+const storageRemoveWhere = (predicate) => {
+  if (typeof window === 'undefined') return;
+  for (const store of [window.localStorage, window.sessionStorage]) {
+    try {
+      Object.keys(store)
+        .filter(predicate)
+        .forEach((key) => store.removeItem(key));
+    } catch {}
+  }
+};
 
-# Short-lived in-memory response cache for heavy Delivery Completed analytics.
-# Keyed by request filters + cheap DB signature, so repeated page opens return
-# immediately while uploads/changed rows naturally invalidate the cache.
-_COMPLETED_SUMMARY_CACHE = {}
-_COMPLETED_SUMMARY_CACHE_TTL_SECONDS = 900
-_RUNTIME_CACHE_VERSION = 0
+const normalizeDashboardCacheQuery = (qs = '') => {
+  const raw = String(qs || '').replace(/^\?/, '');
+  return raw || DASHBOARD_CACHE_KEY_ALL;
+};
 
-# Similarity check cache for Item Registration
-# Stores similarity results keyed by (req_no, line_no) to avoid recalculating
-_SIMILARITY_CACHE = {}
-_SIMILARITY_CACHE_FILE = os.path.join(os.path.dirname(__file__), 'instance', 'similarity_cache.json')
-_MASTER_PIC_CACHE = {'signature': None, 'by_id': {}, 'by_name': {}}
+const dashboardStatsCacheKey = (qs = '') => `${DASHBOARD_STATS_CACHE_KEY}:${normalizeDashboardCacheQuery(qs)}`;
+const dashboardAgingCacheKey = (qs = '') => `${DASHBOARD_AGING_CACHE_KEY}:${normalizeDashboardCacheQuery(qs)}`;
+const dashboardPendingCacheKey = (qs = '') => `${DASHBOARD_PENDING_TOTAL_CACHE_KEY}:${normalizeDashboardCacheQuery(qs)}`;
 
-# ProductIDDB category_name cache. Detail Pending Delivery renders many rows;
-# doing one ProductIDDB query per row is a visible slowdown under multiple users.
-_PID_CATEGORY_CACHE = {}
-_PID_CATEGORY_CACHE_LOADED = False
+const readCachePayload = (key) => {
+  try {
+    const raw = storageGet(key);
+    if (!raw) return null;
+    const { at, data } = JSON.parse(raw);
+    if (!at || Date.now() - at > DASHBOARD_CACHE_TTL_MS) return null;
+    return data ?? null;
+  } catch {
+    return null;
+  }
+};
 
-def _pid_category_cache_load():
-    global _PID_CATEGORY_CACHE, _PID_CATEGORY_CACHE_LOADED
-    mapping = {}
-    try:
-        for pid, cat in db.session.query(ProductIDDB.product_id, ProductIDDB.category_name).all():
-            if not pid:
-                continue
-            raw = (cat or '').strip()
-            mapping[str(pid).strip()] = raw.split('>')[0].strip() if '>' in raw else raw
-    except Exception:
-        mapping = {}
-    with _MASTER_PIC_LOCK:
-        _PID_CATEGORY_CACHE = mapping
-        _PID_CATEGORY_CACHE_LOADED = True
+const writeCachePayload = (key, data) => {
+  try { storageSet(key, JSON.stringify({ at: Date.now(), data })); } catch {}
+};
 
-def _pid_category_lookup(product_id):
-    global _PID_CATEGORY_CACHE_LOADED
-    with _MASTER_PIC_LOCK:
-        loaded = _PID_CATEGORY_CACHE_LOADED
-    if not loaded:
-        _pid_category_cache_load()
-    pid = str(product_id or '').strip()
-    with _MASTER_PIC_LOCK:
-        return _PID_CATEGORY_CACHE.get(pid, '')
+const readDashboardSummaryCache = (url) => readCachePayload(`${DASHBOARD_SUMMARY_CACHE_PREFIX}${url}`);
+const writeDashboardSummaryCache = (url, data) => writeCachePayload(`${DASHBOARD_SUMMARY_CACHE_PREFIX}${url}`, data);
 
-def _pid_category_cache_invalidate():
-    global _PID_CATEGORY_CACHE_LOADED
-    with _MASTER_PIC_LOCK:
-        _PID_CATEGORY_CACHE_LOADED = False
-_READ_RESPONSE_CACHE = {}
+const clearDashboardSummaryCache = () => {
+  storageRemoveWhere((key) => key.startsWith(DASHBOARD_SUMMARY_CACHE_PREFIX));
+};
 
-def runtime_cache_get(key):
-    with _READ_CACHE_LOCK:
-        item = _READ_RESPONSE_CACHE.get(key)
-        if not item:
-            return None
-        expires_at, payload = item
-        if expires_at <= datetime.utcnow():
-            _READ_RESPONSE_CACHE.pop(key, None)
-            return None
-        return payload
+// ─── Stats & aging persistent cache ───────────────────────────────────────
+const readStatsCache = (key) => readCachePayload(key);
+const writeStatsCache = (key, data) => writeCachePayload(key, data);
 
-def runtime_cache_set(key, payload, ttl_seconds=20):
-    with _READ_CACHE_LOCK:
-        _READ_RESPONSE_CACHE[key] = (datetime.utcnow() + timedelta(seconds=ttl_seconds), payload)
+const clearStatsCache = () => {
+  storageRemoveWhere((key) => (
+    key === DASHBOARD_STATS_CACHE_KEY ||
+    key === DASHBOARD_AGING_CACHE_KEY ||
+    key === DASHBOARD_PENDING_TOTAL_CACHE_KEY ||
+    key.startsWith(`${DASHBOARD_STATS_CACHE_KEY}:`) ||
+    key.startsWith(`${DASHBOARD_AGING_CACHE_KEY}:`) ||
+    key.startsWith(`${DASHBOARD_PENDING_TOTAL_CACHE_KEY}:`)
+  ));
+};
 
-def runtime_cache_key(namespace):
-    return (namespace, request.query_string.decode('utf-8', errors='ignore'))
+const PIE_COLORS = ['#2563EB','#14B8A6','#22C55E','#EF4444','#06B6D4',
+                    '#84CC16','#EC4899','#0EA5E9','#F43F5E','#94A3B8'];
 
-def clear_runtime_caches():
-    global _RUNTIME_CACHE_VERSION
-    with _READ_CACHE_LOCK:
-        _RUNTIME_CACHE_VERSION += 1
-        _READ_RESPONSE_CACHE.clear()
-    with _COMPLETED_CACHE_LOCK:
-        _COMPLETED_SUMMARY_CACHE.clear()
-    try:
-        RFQ_CACHE['expires_at'] = None
-    except NameError:
-        pass
-    try:
-        VENDOR_CONTROL_CACHE['expires_at'] = None
-    except NameError:
-        pass
+const AGING_LABELS = ['0-30','30-90','90-180','180+'];
+const AGING_COLORS = { '0-30':'#10B981','30-90':'#0EA5E9','90-180':'#F43F5E','180+':'#EF4444' };
 
-def _holiday_set():
-    """Return cached set of Indonesian non-working public holidays.
+const PAGE_PATHS = {
+  dashboard: '/',
+  'all-so': '/Pending_Delivery',
+  'item-registration': '/Item_Registration',
+  rfq: '/RFQ',
+  import: '/Import',
+  'vendor-control': '/Vendor_Control',
+  'all-registered-items': '/Registered_Items',
+};
 
-    The cache covers the operational reporting window: two years behind,
-    the current year, and one year ahead. Holiday dates come from the
-    `holidays` package; `holiday_extras.json` only adds cuti bersama or
-    government corrections that are not generated by the package."""
-    global _HOLIDAY_CACHE, _HOLIDAY_CACHE_KEY
-    today_year = date.today().year
-    cache_key = today_year
-    if _HOLIDAY_CACHE is not None and _HOLIDAY_CACHE_KEY == cache_key:
-        return _HOLIDAY_CACHE
+const PATH_PAGES = Object.fromEntries(
+  Object.entries(PAGE_PATHS).map(([page, path]) => [path.toLowerCase(), page])
+);
 
-    years = list(range(today_year - 2, today_year + 2))
-    try:
-        import holidays as _holidays_pkg
-        s = set(_holidays_pkg.country_holidays('ID', years=years).keys())
-    except Exception:
-        # If the package fails to import (e.g. dependency not installed),
-        # fall back to weekends-only — the extras JSON still applies below.
-        s = set()
+const localISODate = (d) => {
+  const dt = new Date(d);
+  dt.setMinutes(dt.getMinutes() - dt.getTimezoneOffset());
+  return dt.toISOString().slice(0, 10);
+};
 
-    extras_path = os.path.join(os.path.dirname(__file__), 'holiday_extras.json')
-    try:
-        with open(extras_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        # Accept either {"dates": [...]} or a bare list for forward-compat.
-        items = data.get('dates', []) if isinstance(data, dict) else data
-        for ds in items or []:
-            try:
-                s.add(date.fromisoformat(str(ds).strip()))
-            except (ValueError, TypeError):
-                pass
-    except FileNotFoundError:
-        pass
-    except (OSError, json.JSONDecodeError):
-        pass
+const getDateFilterBounds = (filter) => {
+  if (!filter || filter.mode === 'all') return {};
+  if (filter.mode === 'range') return { date_from: filter.start || '', date_to: filter.end || '' };
 
-    _HOLIDAY_CACHE = s
-    _HOLIDAY_CACHE_KEY = cache_key
-    return s
+  const now = new Date();
+  const start = new Date(now);
+  const end = new Date(now);
 
-_HOLIDAY_ARRAY_CACHE = None
-_HOLIDAY_ARRAY_CACHE_KEY = None
+  if (filter.mode === 'today') {
+    return { date_from: localISODate(now), date_to: localISODate(now) };
+  }
+  if (filter.mode === 'week') {
+    const day = start.getDay() || 7;
+    start.setDate(start.getDate() - day + 1);
+    end.setTime(start.getTime());
+    end.setDate(end.getDate() + 6);
+  } else if (filter.mode === 'month') {
+    start.setDate(1);
+    end.setMonth(start.getMonth() + 1, 0);
+  } else if (filter.mode === 'year') {
+    start.setMonth(0, 1);
+    end.setMonth(11, 31);
+  } else {
+    return {};
+  }
 
-def _holiday_array():
-    """numpy datetime64[D] array mirroring _holiday_set(), used by
-    count_workdays() for a vectorised/C-speed business-day count."""
-    global _HOLIDAY_ARRAY_CACHE, _HOLIDAY_ARRAY_CACHE_KEY
-    holiday_set = _holiday_set()
-    cache_key = (_HOLIDAY_CACHE_KEY, len(holiday_set))
-    if _HOLIDAY_ARRAY_CACHE is not None and _HOLIDAY_ARRAY_CACHE_KEY == cache_key:
-        return _HOLIDAY_ARRAY_CACHE
-    arr = (np.array(sorted(holiday_set), dtype='datetime64[D]')
-           if holiday_set else np.array([], dtype='datetime64[D]'))
-    _HOLIDAY_ARRAY_CACHE = arr
-    _HOLIDAY_ARRAY_CACHE_KEY = cache_key
-    return arr
+  return { date_from: localISODate(start), date_to: localISODate(end) };
+};
 
-def is_workday(d):
-    """Return True if date is a working day (Mon–Fri, not a public holiday)."""
-    return d.weekday() < 5 and d not in _holiday_set()
+// ─── Excluded from PO without SO calculation ──────────────────────────
+const EXCLUDED_OP_UNITS = new Set(['ACM ENERGY SOLUTIONS (CONSUMABLE)']);
 
-def count_workdays(start, end):
-    """Count working days between start and end (exclusive of end).
-    Returns negative if end < start (overdue).
+const renderPctLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent }) => {
+  if (percent < 0.04) return null;
+  const RAD = Math.PI / 180;
+  const r = innerRadius + (outerRadius - innerRadius) * 0.58;
+  const x = cx + r * Math.cos(-midAngle * RAD);
+  const y = cy + r * Math.sin(-midAngle * RAD);
+  return (
+    <text x={x} y={y} fill="white" textAnchor="middle" dominantBaseline="central"
+      fontSize={11} fontWeight="bold" style={{textShadow:'0 1px 2px rgba(0,0,0,0.4)'}}>
+      {`${(percent*100).toFixed(0)}%`}
+    </text>
+  );
+};
 
-    Implemented with numpy.busday_count (C-speed) instead of a day-by-day
-    Python loop. Dashboard endpoints call this once per SO/PO row to compute
-    aging/leadtime, and rows often span hundreds of calendar days — a pure
-    Python loop there scales as O(rows x days), which is the main reason
-    dashboard data takes a long time to load on large datasets.
-    """
-    if start is None or end is None:
-        return None
-    if start == end:
-        return 0
-    holidays = _holiday_array()
-    if end > start:
-        return int(np.busday_count(start, end, holidays=holidays))
-    return -int(np.busday_count(end, start, holidays=holidays))
-
-def workdays_since(past_date, today=None):
-    """Count working days from past_date to today (aging)."""
-    if past_date is None:
-        return None
-    if today is None:
-        today = date.today()
-    return count_workdays(past_date, today)
-
-def workdays_until(future_date, today=None):
-    """Count working days from today to future_date (days remaining)."""
-    if future_date is None:
-        return None
-    if today is None:
-        today = date.today()
-    return count_workdays(today, future_date)
-
-
-CORS(app, resources={r"/api/*": {
-    "origins": "*",
-    "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    "allow_headers": ["Content-Type", "Authorization", "Accept"]
-}})
-
-_db_url = os.environ.get('DATABASE_URL', '')
-if _db_url:
-    if _db_url.startswith('postgres://'):
-        _db_url = _db_url.replace('postgres://', 'postgresql://', 1)
-    app.config['SQLALCHEMY_DATABASE_URI'] = _db_url
-    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-        'pool_pre_ping': True, 'pool_recycle': 300, 'pool_size': 5, 'max_overflow': 10,
-        # Cap how long a cold/sleeping Supabase project can stall the WSGI
-        # process during import. Without this, psycopg2 can hang for the OS
-        # TCP timeout (often 60s+), which is enough to make PythonAnywhere's
-        # post-reload health check time out ("took a long time to reload").
-        'connect_args': {'connect_timeout': 10},
+const fmtNum  = (v) => new Intl.NumberFormat('id-ID').format(v || 0);
+const fmtCur  = (v) => `IDR ${new Intl.NumberFormat('id-ID', {maximumFractionDigits:0}).format(v || 0)}`;
+const fmtCurShort = (v) => {
+  const n = parseFloat(v) || 0;
+  if (n >= 1e12) return `IDR ${(n/1e12).toFixed(1)}T`;
+  if (n >= 1e9)  return `IDR ${(n/1e9).toFixed(1)}B`;
+  if (n >= 1e6)  return `IDR ${(n/1e6).toFixed(1)}M`;
+  if (n >= 1e3)  return `IDR ${(n/1e3).toFixed(1)}K`;
+  return `IDR ${n.toLocaleString('id-ID')}`;
+};
+const fmtDate = (d) => { try { return d ? format(parseISO(d),'dd MMM yyyy') : '-'; } catch { return d||'-'; } };
+const fmtDateTime = (d) => {
+  if (!d) return '-';
+  try {
+    return new Date(d).toLocaleString('en-GB', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' });
+  } catch {
+    return d || '-';
+  }
+};
+// Backend stores last_copy_at as a plain 'YYYY-MM-DD HH:MM' string already in
+// WIB (Asia/Jakarta) local time. Do NOT pass it through new Date(...) — browsers
+// would interpret a timezone-less string as the browser's own local time, which
+// silently shifts the displayed hour for any user outside WIB. Format it as text
+// directly so "Last Copy" always shows the real WIB timestamp the backend wrote.
+const fmtWibDateTime = (raw) => {
+  if (!raw) return '-';
+  const m = String(raw).trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+  if (!m) return String(raw);
+  const [, y, mo, d, h, mi] = m;
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const monthLabel = months[parseInt(mo, 10) - 1] || mo;
+  return `${d} ${monthLabel} ${y} ${h}:${mi} WIB`;
+};
+const sanitizeFilename = (name) => String(name || 'Export')
+  .replace(/[\\/:*?"<>|]+/g, '_')
+  .replace(/\s+/g, '_')
+  .slice(0, 160);
+const downloadStyledExcel = async ({ columns, rows, filename, sheetName = 'Detail' }) => {
+  const XLSXStyleModule = await import('xlsx-js-style');
+  const XLSXStyle = XLSXStyleModule.default || XLSXStyleModule;
+  const JSZipModule = await import('jszip');
+  const JSZip = JSZipModule.default || JSZipModule;
+  const headers = columns.map(c => c.header);
+  const body = (rows || []).map(row => columns.map(col => {
+    const raw = typeof col.value === 'function' ? col.value(row) : row?.[col.key];
+    return raw == null || raw === '' ? '' : raw;
+  }));
+  const ws = XLSXStyle.utils.aoa_to_sheet([headers, ...body]);
+  const range = XLSXStyle.utils.decode_range(ws['!ref'] || 'A1:A1');
+  const border = {
+    top: { style: 'thin', color: { rgb: 'D9E2EF' } },
+    bottom: { style: 'thin', color: { rgb: 'D9E2EF' } },
+    left: { style: 'thin', color: { rgb: 'D9E2EF' } },
+    right: { style: 'thin', color: { rgb: 'D9E2EF' } },
+  };
+  for (let c = range.s.c; c <= range.e.c; c += 1) {
+    const addr = XLSXStyle.utils.encode_cell({ r: 0, c });
+    if (ws[addr]) {
+      ws[addr].s = {
+        fill: { patternType: 'solid', fgColor: { rgb: '1D4ED8' } },
+        font: { bold: true, color: { rgb: 'FFFFFF' } },
+        alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+        border,
+      };
     }
-else:
-    _inst = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance')
-    os.makedirs(_inst, exist_ok=True)
-    app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{_inst}/po_database.db'
-    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-        'pool_pre_ping': True,
-        'connect_args': {'timeout': 30},
+  }
+  for (let r = 1; r <= range.e.r; r += 1) {
+    for (let c = range.s.c; c <= range.e.c; c += 1) {
+      const addr = XLSXStyle.utils.encode_cell({ r, c });
+      if (ws[addr]) {
+        ws[addr].s = {
+          alignment: { vertical: 'center', wrapText: true },
+          border,
+        };
+      }
     }
-
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
-db = SQLAlchemy(app)
-
-@event.listens_for(Engine, 'connect')
-def _set_sqlite_pragmas(dbapi_connection, connection_record):
-    if 'sqlite' in app.config.get('SQLALCHEMY_DATABASE_URI', ''):
-        cursor = dbapi_connection.cursor()
-        cursor.execute('PRAGMA journal_mode=WAL')
-        cursor.execute('PRAGMA synchronous=NORMAL')
-        cursor.execute('PRAGMA busy_timeout=30000')
-        cursor.execute('PRAGMA temp_store=MEMORY')
-        cursor.execute('PRAGMA cache_size=-65536')
-        cursor.execute('PRAGMA wal_autocheckpoint=1000')
-        cursor.close()
-        try:
-            dbapi_connection.create_function(
-                'REGEXP',
-                2,
-                lambda pattern, value: 1 if (value is not None and re.search(pattern, str(value))) else 0
-            )
-        except Exception:
-            pass
-
-class SOData(db.Model):
-    __tablename__ = 'so_data'
-    id = db.Column(db.Integer, primary_key=True)
-    so_number = db.Column(db.String(50), index=True)
-    so_item = db.Column(db.String(100))
-    so_status = db.Column(db.String(50))
-    operation_unit_name = db.Column(db.String(200))
-    vendor_id = db.Column(db.String(100))
-    vendor_name = db.Column(db.String(200))
-    customer_po_number = db.Column(db.String(200))
-    delivery_memo = db.Column(db.Text)
-    product_name = db.Column(db.Text)
-    specification = db.Column(db.Text)
-    manufacturer_name = db.Column(db.String(300))
-    product_id = db.Column(db.String(100))
-    so_qty = db.Column(db.Float)
-    sales_unit = db.Column(db.String(20))
-    sales_price = db.Column(db.Float)
-    sales_amount = db.Column(db.Float)
-    currency = db.Column(db.String(10))
-    purchasing_price = db.Column(db.Float)
-    purchasing_amount = db.Column(db.Float)
-    purchasing_currency = db.Column(db.String(10))
-    purchasing_amount_idr = db.Column(db.Float)
-    purchasing_amount_idr_cached_at = db.Column(db.DateTime)
-    so_create_date = db.Column(db.Date)
-    delivery_possible_date = db.Column(db.Date)
-    matched_po_number = db.Column(db.String(50))
-    delivery_plan_date = db.Column(db.Date)
-    remarks = db.Column(db.Text)
-    pic_name = db.Column(db.String(100))
-    uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-class UploadLog(db.Model):
-    __tablename__ = 'upload_log'
-    id = db.Column(db.Integer, primary_key=True)
-    file_type = db.Column(db.String(50))
-    filename = db.Column(db.String(255))
-    records_count = db.Column(db.Integer)
-    uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-class ExchangeRate(db.Model):
-    """USD->IDR exchange rate per date. Auto-fetched via Frankfurter API on first need,
-    or set manually via /api/exchange-rate endpoint."""
-    __tablename__ = 'exchange_rate'
-    id         = db.Column(db.Integer, primary_key=True)
-    rate_date  = db.Column(db.Date, nullable=False, unique=True, index=True)
-    usd_to_idr = db.Column(db.Float, nullable=False)
-    source     = db.Column(db.String(50), default='manual')  # 'frankfurter'|'manual'|'fallback'
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-
-class ProductIDDB(db.Model):
-    """Database of Product ID → Category ID, downloaded from SAP."""
-    __tablename__ = 'product_id_db'
-    id               = db.Column(db.Integer, primary_key=True)
-    product_id       = db.Column(db.String(100), unique=True, nullable=False, index=True)
-    category_id      = db.Column(db.String(100))
-    category_name    = db.Column(db.String(255))
-    product_name     = db.Column(db.Text)
-    product_status   = db.Column(db.String(100))
-    specification    = db.Column(db.Text)
-    manufacturer_name = db.Column(db.String(255))
-    vendor_name      = db.Column(db.String(300))
-    order_unit       = db.Column(db.String(50))
-    hub_handling_check = db.Column(db.String(100))
-    tax_type         = db.Column(db.String(100))
-    registration_date = db.Column(db.Date, index=True)
-    product_registry_pic = db.Column(db.String(200))
-    updated_at       = db.Column(db.DateTime, default=datetime.utcnow)
-
-
-class MasterPIC(db.Model):
-    """Master mapping: Category Name → PIC name. Updated manually via UI.
-
-    `category_id` is kept for backward compatibility with existing DB schema,
-    but new Master PIC uploads use Category Name as the business unique key.
-    """
-    __tablename__ = 'master_pic'
-    id            = db.Column(db.Integer, primary_key=True)
-    category_id   = db.Column(db.String(100), unique=True, nullable=False, index=True)
-    category_name = db.Column(db.String(255))
-    pic_name      = db.Column(db.String(100))
-    updated_at    = db.Column(db.DateTime, default=datetime.utcnow)
-
-
-class ItemRegistration(db.Model):
-    __tablename__ = 'item_registration'
-    id              = db.Column(db.Integer, primary_key=True)
-    proc_status     = db.Column(db.String(100))
-    req_date        = db.Column(db.Date, index=True)
-    existing_owner  = db.Column(db.String(100))
-    client_name     = db.Column(db.String(300), index=True)
-    category        = db.Column(db.String(255))
-    category_id     = db.Column(db.String(100))
-    pic             = db.Column(db.String(200))
-    pic_name        = db.Column(db.String(200))
-    req_no          = db.Column(db.String(100), index=True)
-    prod_id         = db.Column(db.String(100), index=True)
-    product_status  = db.Column(db.String(100))
-    batch_grp_no    = db.Column(db.String(100))
-    prod_name       = db.Column(db.Text)
-    spec            = db.Column(db.Text)
-    mfr_name        = db.Column(db.String(300))
-    odr_unit        = db.Column(db.String(50))
-    vendor_name     = db.Column(db.String(300))
-    prod_price      = db.Column(db.Float)
-    curr            = db.Column(db.String(20))
-    hub_handling_check  = db.Column(db.String(100))
-    tax_type            = db.Column(db.String(50))
-    registration_date   = db.Column(db.Date, index=True)
-    product_registry_pic = db.Column(db.String(200))
-    remarks         = db.Column(db.Text)
-    uploaded_at     = db.Column(db.DateTime, default=datetime.utcnow)
-
-class RFQCellEdit(db.Model):
-    __tablename__ = 'rfq_cell_edit'
-    id         = db.Column(db.Integer, primary_key=True)
-    row_key    = db.Column(db.String(200), nullable=False, index=True)
-    field      = db.Column(db.String(100), nullable=False)
-    value      = db.Column(db.Text)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
-    __table_args__ = (db.UniqueConstraint('row_key', 'field', name='uq_rfq_cell_edit_row_field'),)
-
-class RFQDashboardRow(db.Model):
-    __tablename__ = 'rfq_dashboard_row'
-    id = db.Column(db.Integer, primary_key=True)
-    row_key = db.Column(db.String(200), unique=True, nullable=False, index=True)
-    sheet_row = db.Column(db.Integer, index=True)
-    data_json = db.Column(db.Text, nullable=False, default='{}')
-    dirty_fields_json = db.Column(db.Text, nullable=False, default='[]')
-    first_seen_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
-    last_seen_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-class ImportVendor(db.Model):
-    __tablename__ = 'import_vendor'
-    id = db.Column(db.Integer, primary_key=True)
-    vendor_name = db.Column(db.String(300), unique=True, nullable=False, index=True)
-    uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-class ImportDashboardRow(db.Model):
-    __tablename__ = 'import_dashboard_row'
-    id = db.Column(db.Integer, primary_key=True)
-    row_key = db.Column(db.String(120), unique=True, nullable=False, index=True)
-    source_key = db.Column(db.String(50), nullable=False, index=True)
-    source_label = db.Column(db.String(100))
-    source_uid = db.Column(db.String(50), nullable=False, index=True)
-    sheet_row = db.Column(db.Integer)
-    vendor_name = db.Column(db.String(300), index=True)
-    data_json = db.Column(db.Text, nullable=False, default='{}')
-    first_seen_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
-    last_seen_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-class ImportDashboardMeta(db.Model):
-    __tablename__ = 'import_dashboard_meta'
-    id = db.Column(db.Integer, primary_key=True)
-    meta_key = db.Column(db.String(100), unique=True, nullable=False, index=True)
-    value_json = db.Column(db.Text, nullable=False, default='null')
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-
-# ─── Exchange rate helpers ─────────────────────────────────────────────────
-_RATE_CACHE = {}   # {date: float} in-process cache for USD -> IDR
-_FX_RATE_CACHE = {}  # {(currency, date): float} in-process cache for non-USD FX
-
-def _fetch_rate_from_api(d, currency='USD'):
-    """Fetch one historical currency->IDR rate from Frankfurter v2."""
-    try:
-        import urllib.request, json as _json
-        cur = (currency or 'USD').strip().upper()
-        url = f"https://api.frankfurter.dev/v2/rate/{cur}/IDR?date={d.isoformat()}"
-        with urllib.request.urlopen(url, timeout=6) as resp:
-            data = _json.loads(resp.read())
-        return float(data['rate'])
-    except Exception:
-        return None
-
-def _get_fallback_rate():
-    last = ExchangeRate.query.order_by(ExchangeRate.rate_date.desc()).first()
-    return last.usd_to_idr if last else 16000.0
-
-def get_usd_to_idr(d, cache_only=False):
-    """Return USD->IDR rate for date d.
-    Order: in-memory cache -> DB exact -> (if not cache_only) API fetch -> DB nearest -> hardcoded fallback.
-
-    Pass cache_only=True when calling inside a loop that has already called
-    prefetch_exchange_rates() — this skips the expensive HTTP request path
-    entirely, relying on the already-warmed in-memory cache and DB."""
-    if d is None:
-        return _get_fallback_rate()
-    if d in _RATE_CACHE:
-        return _RATE_CACHE[d]
-    rec = ExchangeRate.query.filter_by(rate_date=d).first()
-    if rec:
-        _RATE_CACHE[d] = rec.usd_to_idr
-        return rec.usd_to_idr
-    if not cache_only and d <= date.today():
-        rate = _fetch_rate_from_api(d)
-        if rate:
-            try:
-                db.session.add(ExchangeRate(rate_date=d, usd_to_idr=rate, source='frankfurter'))
-                db.session.commit()
-            except Exception:
-                db.session.rollback()
-            _RATE_CACHE[d] = rate
-            return rate
-    # Nearest known rate (no HTTP call)
-    nearest = ExchangeRate.query.order_by(
-        func.abs(func.julianday(ExchangeRate.rate_date) - func.julianday(str(d)))
-    ).first()
-    if nearest:
-        _RATE_CACHE[d] = nearest.usd_to_idr
-        return nearest.usd_to_idr
-    return _get_fallback_rate()
-
-
-def get_currency_to_idr(currency, d, cache_only=False):
-    cur = (currency or 'IDR').strip().upper()
-    if cur in ('IDR', ''):
-        return 1.0
-    if cur == 'USD':
-        return get_usd_to_idr(d, cache_only=cache_only)
-
-    if d is None:
-        d = date.today()
-    key = (cur, d)
-    if key in _FX_RATE_CACHE:
-        return _FX_RATE_CACHE[key]
-    if not cache_only and d <= date.today():
-        rate = _fetch_rate_from_api(d, cur)
-        if rate:
-            _FX_RATE_CACHE[key] = rate
-            return rate
-
-    same_currency_rates = [(rate_date, rate) for (fx_cur, rate_date), rate in _FX_RATE_CACHE.items() if fx_cur == cur]
-    if same_currency_rates:
-        _nearest_date, nearest_rate = min(same_currency_rates, key=lambda r: abs((r[0] - d).days))
-        _FX_RATE_CACHE[key] = nearest_rate
-        return nearest_rate
-
-    fallback_rate = _fetch_rate_from_api(date.today(), cur) if not cache_only else None
-    if fallback_rate:
-        _FX_RATE_CACHE[key] = fallback_rate
-        return fallback_rate
-    return _get_fallback_rate()
-
-
-def prefetch_exchange_rates(dates, fetch_missing=True, currency='USD'):
-    """Warm the in-memory _RATE_CACHE for a collection of dates, minimising
-    round-trips to the Frankfurter API.
-
-    Algorithm:
-    1. Skip dates already in _RATE_CACHE (already warm).
-    2. Bulk-load all ExchangeRate rows from the DB in a single query and
-       populate the cache — avoids N individual DB lookups.
-    3. If fetch_missing=True, for any remaining dates (still not in cache) that
-       are ≤ today, fetch from the Frankfurter API **sequentially** and persist
-       to DB. For latency-sensitive dashboard endpoints, pass
-       fetch_missing=False so page load never waits on external API calls.
-    4. After optional API fetches, one final pass stores any date still missing
-       in the in-process cache using the nearest DB rate / fallback (no HTTP).
-
-    Call this once at the top of any endpoint that iterates over many rows and
-    calls convert_to_idr(), then pass cache_only=True to get_usd_to_idr()
-    inside the loop.
-    """
-    cur = (currency or 'USD').strip().upper()
-    if not dates or cur in ('IDR', ''):
-        return
-
-    if cur != 'USD':
-        needed = {d for d in dates if d is not None and (cur, d) not in _FX_RATE_CACHE}
-        if fetch_missing:
-            today = date.today()
-            for d in sorted(x for x in needed if x <= today):
-                rate = _fetch_rate_from_api(d, cur)
-                if rate:
-                    _FX_RATE_CACHE[(cur, d)] = rate
-                    needed.discard(d)
-        if needed:
-            same_currency_rates = [(rate_date, rate) for (fx_cur, rate_date), rate in _FX_RATE_CACHE.items() if fx_cur == cur]
-            fallback = get_currency_to_idr(cur, date.today(), cache_only=not fetch_missing)
-            for d in needed:
-                if same_currency_rates:
-                    _nearest_date, nearest_rate = min(same_currency_rates, key=lambda r: abs((r[0] - d).days))
-                    _FX_RATE_CACHE[(cur, d)] = nearest_rate
-                else:
-                    _FX_RATE_CACHE[(cur, d)] = fallback
-        return
-
-    # 1. Filter to dates not already cached
-    needed = {d for d in dates if d is not None and d not in _RATE_CACHE}
-    if not needed:
-        return
-
-    # 2. Bulk DB load — single query for all needed dates
-    db_rows = ExchangeRate.query.filter(ExchangeRate.rate_date.in_(list(needed))).all()
-    for row in db_rows:
-        _RATE_CACHE[row.rate_date] = row.usd_to_idr
-    needed -= {row.rate_date for row in db_rows}
-
-    if not needed:
-        return
-
-    # 3. Optionally fetch remaining from API (only past/today dates).
-    # Dashboard/page-load code should call this with fetch_missing=False; missing
-    # historical rates can be filled once via /api/exchange-rate/fetch and then
-    # reused from the DB forever.
-    if fetch_missing:
-        today = date.today()
-        to_api = sorted(d for d in needed if d <= today)
-        fetched_rows = []
-        for d in to_api:
-            rate = _fetch_rate_from_api(d)
-            if rate:
-                _RATE_CACHE[d] = rate
-                fetched_rows.append(ExchangeRate(rate_date=d, usd_to_idr=rate, source='frankfurter'))
-                needed.discard(d)
-
-        if fetched_rows:
-            try:
-                db.session.bulk_save_objects(fetched_rows)
-                db.session.commit()
-            except Exception:
-                db.session.rollback()
-
-    # 4. Proxy remaining with nearest known rate (no extra HTTP calls)
-    if needed:
-        fallback = _get_fallback_rate()
-        # Load all rates once for proximity search
-        all_rates = ExchangeRate.query.order_by(ExchangeRate.rate_date).all()
-        for d in needed:
-            if all_rates:
-                nearest = min(all_rates, key=lambda r: abs((r.rate_date - d).days))
-                _RATE_CACHE[d] = nearest.usd_to_idr
-            else:
-                _RATE_CACHE[d] = fallback
-
-
-def convert_to_idr(amount, currency, rate_date=None, cache_only=False):
-    """Convert amount to IDR. USD and EUR use FX rates; other currencies are returned as-is.
-
-    When called inside a loop preceded by prefetch_exchange_rates(), pass
-    cache_only=True to skip the per-row HTTP fallback path entirely."""
-    if not amount:
-        return 0.0
-    cur = (currency or 'IDR').strip().upper()
-    if cur in ('IDR', ''):
-        return float(amount)
-    if cur in ('USD', 'EUR'):
-        return float(amount) * get_currency_to_idr(cur, rate_date, cache_only=cache_only)
-    return float(amount)
-
-
-def prefetch_convertible_exchange_rates(rows, fetch_missing=False):
-    for currency in ('USD', 'EUR'):
-        dates = {
-            s.so_create_date for s in rows
-            if s.so_create_date and (s.purchasing_currency or '').strip().upper() == currency
-        }
-        prefetch_exchange_rates(dates, fetch_missing=fetch_missing, currency=currency)
-
-
-def raw_purchase_amount(s):
-    """Return the original purchasing amount before currency conversion."""
-    raw = float(s.purchasing_amount or 0)
-    if raw == 0 and s.purchasing_price:
-        raw = float(s.purchasing_price) * float(s.so_qty or 0)
-    return raw
-
-
-def purchase_amount_idr(s, allow_persist=False):
-    """Return the stored IDR purchase amount without network access on reads.
-
-    USD/EUR conversion is performed only by an explicit write/backfill flow
-    (allow_persist=True). Normal dashboard reads reuse purchasing_amount_idr.
-    """
-    cached = getattr(s, 'purchasing_amount_idr', None)
-    cur = (s.purchasing_currency or 'IDR').strip().upper()
-
-    # Important: cached EUR values are valid too. The previous EUR exception
-    # caused every page load to reconvert every EUR row.
-    if cached is not None:
-        return float(cached)
-
-    raw = raw_purchase_amount(s)
-    if cur in ('IDR', ''):
-        return raw
-
-    # Never call an external FX API from a dashboard/read request. Missing
-    # non-IDR rows must be filled by upload or /api/exchange-rate/fetch.
-    if not allow_persist:
-        return 0.0
-
-    converted = convert_to_idr(
-        raw,
-        s.purchasing_currency,
-        s.so_create_date,
-        cache_only=True,
-    )
-    s.purchasing_amount_idr = converted
-    s.purchasing_amount_idr_cached_at = datetime.utcnow()
-    return converted
-
-
-def dashboard_purchase_sql_expr():
-    """Return SQL expression for IDR purchase amount used by Dashboard.
-
-    It never calls external FX APIs. USD/EUR rows without cached conversion are
-    treated as 0 until the exchange-rate backfill fills purchasing_amount_idr.
-    """
-    currency_expr = func.upper(func.trim(func.coalesce(SOData.purchasing_currency, '')))
-    raw_purchase_expr = case(
-        (func.coalesce(SOData.purchasing_amount, 0) != 0, func.coalesce(SOData.purchasing_amount, 0)),
-        else_=func.coalesce(SOData.purchasing_price, 0) * func.coalesce(SOData.so_qty, 0),
-    )
-    return case(
-        (SOData.purchasing_amount_idr.isnot(None), SOData.purchasing_amount_idr),
-        (currency_expr.in_(['', 'IDR']), raw_purchase_expr),
-        else_=0.0,
-    )
-
-def ensure_purchase_amount_idr_cache(rows, fetch_missing=False):
-    """Persist missing USD/EUR conversions.
-
-    Set fetch_missing=True only in write/backfill flows. Dashboard endpoints
-    leave it False, so page loads never wait for Frankfurter.
-    """
-    if not fetch_missing:
-        return 0
-
-    missing = [
-        s for s in rows
-        if getattr(s, 'purchasing_amount_idr', None) is None
-        and (s.purchasing_currency or '').strip().upper() in ('USD', 'EUR')
-        and raw_purchase_amount(s) > 0
-    ]
-    if not missing:
-        return 0
-
-    prefetch_convertible_exchange_rates(missing, fetch_missing=True)
-
-    for s in missing:
-        purchase_amount_idr(s, allow_persist=True)
-
-    try:
-        db.session.commit()
-    except Exception:
-        db.session.rollback()
-        raise
-    return len(missing)
-
-
-def _ensure_extra_columns():
-    """Online migration: add optional columns that older local DBs may miss."""
-    is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
-
-    def existing_columns(table_name):
-        try:
-            if is_sqlite:
-                result = db.session.execute(text(f"PRAGMA table_info({table_name})"))
-                return {row[1].lower() for row in result}
-            result = db.session.execute(text(
-                "SELECT column_name FROM information_schema.columns "
-                f"WHERE table_name = '{table_name}'"
-            ))
-            return {row[0].lower() for row in result}
-        except Exception:
-            return set()
-
-    migration_plan = {
-        'so_data': [
-            ('specification',                      'TEXT'),
-            ('product_id',                         'VARCHAR(100)'),
-            ('vendor_id',                          'VARCHAR(100)'),
-            ('manufacturer_name',                  'VARCHAR(300)'),
-            ('purchasing_currency',                'VARCHAR(10)'),
-            ('purchasing_amount_idr',              'DOUBLE PRECISION'),
-            ('purchasing_amount_idr_cached_at',    'TIMESTAMP'),
-            ('pic_name',                           'VARCHAR(100)'),
-        ],        'item_registration': [
-            ('req_date',             'DATE'),
-            ('existing_owner',       'VARCHAR(100)'),
-            ('category_id',          'VARCHAR(100)'),
-            ('pic_name',             'VARCHAR(200)'),
-            ('product_status',       'VARCHAR(100)'),
-            ('hub_handling_check',   'VARCHAR(100)'),
-            ('tax_type',             'VARCHAR(50)'),
-            ('registration_date',    'DATE'),
-            ('product_registry_pic', 'VARCHAR(200)'),
-            ('remarks',              'TEXT'),
-        ],
-        'product_id_db': [
-            ('specification',        'TEXT'),
-            ('manufacturer_name',    'VARCHAR(255)'),
-            ('vendor_name',          'VARCHAR(300)'),
-            ('order_unit',           'VARCHAR(50)'),
-            ('product_status',       'VARCHAR(100)'),
-            ('hub_handling_check',   'VARCHAR(100)'),
-            ('tax_type',             'VARCHAR(100)'),
-            ('registration_date',    'DATE'),
-            ('product_registry_pic', 'VARCHAR(200)'),
-        ],
+  }
+  ws['!cols'] = columns.map(col => ({ wch: col.width || 16 }));
+  ws['!rows'] = [{ hpt: 24 }];
+  ws['!autofilter'] = { ref: XLSXStyle.utils.encode_range(range) };
+  ws['!freeze'] = { xSplit: 0, ySplit: 1, topLeftCell: 'A2', activePane: 'bottomLeft', state: 'frozen' };
+  const wb = XLSXStyle.utils.book_new();
+  XLSXStyle.utils.book_append_sheet(wb, ws, sheetName.slice(0, 31));
+  const xlsxArray = XLSXStyle.write(wb, { bookType: 'xlsx', type: 'array', cellStyles: true });
+  const zip = await JSZip.loadAsync(xlsxArray);
+  const sheetPath = 'xl/worksheets/sheet1.xml';
+  const sheetFile = zip.file(sheetPath);
+  if (sheetFile) {
+    const freezeSheetView = '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>';
+    const xml = await sheetFile.async('string');
+    zip.file(sheetPath, xml.replace(/<sheetViews>[\s\S]*?<\/sheetViews>/, freezeSheetView));
+  }
+  const blob = await zip.generateAsync({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  saveAs(blob, `${sanitizeFilename(filename)}.xlsx`);
+};
+const MARGIN_DETAIL_COLUMNS = [
+  { header: 'SO Item', value: r => r.so_item || '', width: 18 },
+  { header: 'Product', value: r => r.product || '', width: 34 },
+  { header: 'Vendor', value: r => r.vendor || '', width: 28 },
+  { header: 'Op Unit', value: r => r.operation_unit_name || '', width: 30 },
+  { header: 'Sales', value: r => r.sales_amount ?? '', width: 18 },
+  { header: 'Purchase', value: r => r.purchase_amount ?? '', width: 18 },
+  { header: 'Margin', value: r => r.margin ?? '', width: 18 },
+  { header: '% Margin', value: r => r.margin_pct == null ? '' : `${r.margin_pct}%`, width: 12 },
+  { header: 'Date', value: r => r.date || '', width: 16 },
+  { header: 'Status', value: r => r.so_status || '', width: 20 },
+];
+const fmtUpdateShort = (d) => {
+  if (!d) return '-';
+  try {
+    return new Date(d).toLocaleString('en-GB', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' });
+  } catch {
+    return d || '-';
+  }
+};
+
+const workingDaysUntilToday = (dateValue) => {
+  if (!dateValue) return null;
+  const start = new Date(dateValue);
+  if (Number.isNaN(start.getTime())) return null;
+
+  const today = new Date();
+  const cur = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+  const end = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+
+  if (cur > end) return 0;
+
+  let days = 0;
+  while (cur <= end) {
+    const day = cur.getDay();
+    if (day !== 0 && day !== 6) days += 1;
+    cur.setDate(cur.getDate() + 1);
+  }
+  return days;
+};
+
+// ─── Import table: Google Drive link chips, status dropdown & checklist columns ────────────
+const GDRIVE_URL_RE = /https?:\/\/(?:drive|docs)\.google\.com\/\S+/i;
+
+const extractGDriveUrl = (value) => {
+  const text = String(value || '');
+  const m = text.match(GDRIVE_URL_RE);
+  return m ? m[0].replace(/[),.;]+$/, '') : '';
+};
+
+const gDriveChipLabel = (url) => {
+  if (/\/folders\//.test(url)) return 'Folder Drive';
+  if (/spreadsheets/.test(url)) return 'Spreadsheet';
+  if (/\/document\//.test(url)) return 'Dokumen';
+  if (/presentation/.test(url)) return 'Slide';
+  if (/\/file\/d\//.test(url)) return 'File Drive';
+  return 'Buka Drive';
+};
+
+const IMPORT_STATUS_OPTIONS = ['ON PROCESS', 'ON DELIVERY', 'DELIVERED', 'CANCELED'];
+const IMPORT_CHECKLIST_TRUE = new Set(['true', '1', 'yes', 'ya', 'y', 'checked', 'done', 'ok', '✓', '✅']);
+const IMPORT_CHECKLIST_FALSE = new Set(['false', '0', 'no', 'tidak', 'n', 'unchecked', '❌']);
+const IMPORT_CHECKLIST_VALUES = new Set([...IMPORT_CHECKLIST_TRUE, ...IMPORT_CHECKLIST_FALSE]);
+const IMPORT_CHECKLIST_FIELDS = new Set(['sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo']);
+const IMPORT_FORMULA_FIELDS = new Set(['days_left', 'site', 'vendor', 'arrival_check', 'purchase_amount', 'lt_days']);
+
+const isImportChecklistColumn = (col) => Boolean(col?.checkbox) || IMPORT_CHECKLIST_FIELDS.has(col?.field);
+const isImportFormulaColumn = (col) => Boolean(col?.formula) || IMPORT_FORMULA_FIELDS.has(col?.field);
+const isImportHyperlinkColumn = (col) => Boolean(col?.hyperlink) || col?.field === 'soft_copy_doc';
+
+const importCheckboxChecked = (value) => IMPORT_CHECKLIST_TRUE.has(String(value ?? '').trim().toLowerCase());
+
+const importStatusClass = (status, darkMode = false) => {
+  const s = String(status || '').trim().toUpperCase();
+  if (s === 'NEW') return darkMode ? 'bg-blue-950/55 text-blue-100 border-blue-600' : 'bg-blue-50 text-blue-700 border-blue-200';
+  if (s === 'DELIVERED') return darkMode ? 'bg-green-900/45 text-green-100 border-green-700' : 'bg-green-50 text-green-700 border-green-200';
+  if (s === 'ON DELIVERY') return darkMode ? 'bg-blue-900/45 text-blue-100 border-blue-700' : 'bg-blue-50 text-blue-700 border-blue-200';
+  if (s === 'ON PROCESS') return darkMode ? 'bg-amber-900/45 text-amber-100 border-amber-700' : 'bg-amber-50 text-amber-700 border-amber-200';
+  if (s === 'CANCELED') return darkMode ? 'bg-red-900/45 text-red-100 border-red-700' : 'bg-red-50 text-red-700 border-red-200';
+  return darkMode ? 'bg-gray-800 text-gray-100 border-gray-600' : 'bg-white text-gray-700 border-gray-200';
+};
+
+const importStatusOptionStyle = (status) => {
+  const s = String(status || '').trim().toUpperCase();
+  if (s === 'NEW') return { backgroundColor: '#DBEAFE', color: '#1D4ED8', fontWeight: '700' };
+  if (s === 'DELIVERED') return { backgroundColor: '#DCFCE7', color: '#166534' };
+  if (s === 'ON DELIVERY') return { backgroundColor: '#DBEAFE', color: '#1D4ED8' };
+  if (s === 'ON PROCESS') return { backgroundColor: '#FEF3C7', color: '#92400E' };
+  if (s === 'CANCELED') return { backgroundColor: '#FEE2E2', color: '#B91C1C' };
+  return {};
+};
+
+const importArrivalClass = (value, darkMode = false) => {
+  const s = String(value || '').toLowerCase();
+  if (s.includes('delay')) return darkMode ? 'bg-red-900/40 text-red-100 border-red-700' : 'bg-red-50 text-red-700 border-red-200';
+  if (s.includes('on schedule')) return darkMode ? 'bg-green-900/40 text-green-100 border-green-700' : 'bg-green-50 text-green-700 border-green-200';
+  return darkMode ? 'bg-gray-800 text-gray-200 border-gray-700' : 'bg-slate-50 text-slate-700 border-slate-200';
+};
+
+const importDisplayValue = (value) => {
+  if (value === null || value === undefined || value === '') return '-';
+  return String(value);
+};
+
+
+const DownloadToast = ({ message, onClose }) => {
+  return (
+    <div className="fixed top-5 right-5 z-[200] flex items-center gap-3 px-5 py-3 rounded-xl shadow-2xl text-white bg-blue-700 max-w-sm animate-slide-in">
+      <Loader2 className="w-5 h-5 flex-shrink-0 animate-spin"/>
+      <span className="text-sm font-medium">{message}</span>
+    </div>
+  );
+};
+
+const Toast = ({ message, type, onClose }) => {
+  useEffect(() => { const t = setTimeout(onClose, 3000); return () => clearTimeout(t); }, [onClose]);
+  const bg = type === 'success' ? 'bg-green-600' : type === 'error' ? 'bg-red-600' : 'bg-blue-600';
+  return (
+    <div className={`fixed top-5 right-5 z-[100] flex items-center gap-3 px-5 py-3 rounded-xl shadow-2xl text-white ${bg} max-w-sm`}>
+      {type === 'success' ? <CheckCircle className="w-5 h-5 flex-shrink-0" /> : <AlertCircle className="w-5 h-5 flex-shrink-0" />}
+      <span className="text-sm font-medium">{message}</span>
+      <button onClick={onClose} className="ml-2 hover:opacity-70"><X className="w-4 h-4" /></button>
+    </div>
+  );
+};
+
+// ─── Download Button with press animation ─────────────────────────────────
+const DownloadButton = ({ onClick, className, children, disabled }) => {
+  const handleClick = () => {
+    onClick && onClick();
+  };
+  return (
+    <button
+      onClick={handleClick}
+      disabled={disabled}
+      className={className}
+    >
+      {children}
+    </button>
+  );
+};
+
+const SOModal = ({ title, data, onClose, darkMode, onUpdateCell }) => {
+  const [dlPage, setDlPage] = useState(1);
+  const [editing, setEditing] = useState(null);
+  const [editValue, setEditValue] = useState('');
+  const PER = 50;
+  const safeData = Array.isArray(data) ? data.filter(row => row && typeof row === 'object') : [];
+  const rowKey = (row) => row?.id || row?.so_item || row?.so_number || '';
+  const pages = Math.ceil((safeData.length || 0) / PER);
+  const rows = safeData.slice((dlPage-1)*PER, dlPage*PER);
+
+  // Determine if SO Item column exists in data (show SO Number only when SO Item is absent)
+  const hasSoItem = safeData.some(s => s.so_item);
+  const columns = [
+    { header: 'SO Item', value: s => s.so_item || '', width: 18 },
+    ...(!hasSoItem ? [{ header: 'SO Number', value: s => s.so_number || '', width: 18 }] : []),
+    { header: 'Status', value: s => s.so_status || '', width: 24 },
+    { header: 'PIC', value: s => s.pic_name || '', width: 16 },
+    { header: 'Op Unit', value: s => s.operation_unit_name || '', width: 30 },
+    { header: 'Vendor', value: s => s.vendor_name || '', width: 24 },
+    { header: 'Product', value: s => s.product_name || '', width: 34 },
+    { header: 'Qty', value: s => s.so_qty ?? '', width: 10 },
+    { header: 'Sales Amount', value: s => s.sales_amount ?? '', width: 18 },
+    { header: 'Cust PO', value: s => s.customer_po_number || '', width: 18 },
+    { header: 'Delivery Memo', value: s => s.delivery_memo || '', width: 28 },
+    { header: 'SO Date', value: s => s.so_create_date || '', width: 16 },
+    { header: 'Plan Date', value: s => s.delivery_plan_date || '', width: 16 },
+    { header: 'Remarks', value: s => s.remarks || '', width: 46 },
+  ];
+
+  const downloadExcel = () => {
+    downloadStyledExcel({ columns, rows: safeData, filename: title, sheetName: 'Detail' });
+  };
+  const startEdit = (row, field) => {
+    const key = rowKey(row);
+    if (!key || !onUpdateCell) {
+      console.warn('SO detail row is missing id/SO Item; cannot edit from modal', row);
+      return;
+    }
+    setEditing({ id: key, field });
+    setEditValue(row[field] || '');
+  };
+  const saveEdit = async () => {
+    if (!editing || !onUpdateCell) return;
+    await onUpdateCell(editing.id, editing.field, editValue);
+    setEditing(null);
+  };
+  return (
+    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
+      <div role="dialog" aria-modal="true" aria-label={title} className={`rounded-2xl overflow-hidden shadow-2xl w-full max-w-6xl max-h-[85vh] flex flex-col ${darkMode?'bg-gray-800 text-white':'bg-white'}`} onClick={e=>e.stopPropagation()}>
+        <div className={`flex justify-between items-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
+          <h3 className="font-bold text-lg">{title} <span className={`text-sm font-normal ml-2 ${darkMode?'text-gray-400':'text-gray-500'}`}>({fmtNum(safeData.length)} records)</span></h3>
+          <div className="flex gap-2">
+            <button onClick={downloadExcel} className="flex items-center gap-1 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm"><FileSpreadsheet className="w-4 h-4"/>Excel</button>
+            <button onClick={onClose} className={`p-1.5 rounded-lg ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`}><X className="w-5 h-5"/></button>
+          </div>
+        </div>
+        <div className="overflow-auto flex-1 rounded-b-2xl">
+          <table className="w-full text-sm">
+            <thead className={`sticky top-0 ${darkMode?'bg-gray-700':'bg-blue-50'}`}>
+              <tr>{columns.map(({ header: h })=>(
+                <th key={h} className={`px-3 py-2 text-center font-bold whitespace-nowrap ${darkMode?'text-gray-200':'text-gray-700'}`}>{h}</th>
+              ))}</tr>
+            </thead>
+            <tbody className={`divide-y ${darkMode?'divide-gray-700':'divide-gray-100'}`}>
+              {rows.map((s,i)=>(
+                <tr key={i} className={darkMode?'hover:bg-gray-700':'hover:bg-blue-50'}>
+                  <td className="px-3 py-2 text-blue-600 font-medium whitespace-nowrap">{s.so_item||'-'}</td>
+                  {!hasSoItem && <td className="px-3 py-2 whitespace-nowrap">{s.so_number}</td>}
+                  <td className="px-3 py-2 whitespace-nowrap"><span className={`px-2 py-0.5 rounded-full text-xs font-medium ${s.so_status==='Delivery Completed'?'bg-green-100 text-green-700':s.so_status==='SO Cancel'?'bg-red-100 text-red-700':'bg-blue-100 text-blue-700'}`}>{s.so_status||'-'}</span></td>
+                  <td className="px-3 py-2 whitespace-nowrap text-center font-semibold text-slate-600">{s.pic_name||'-'}</td>
+                  <td className="px-3 py-2 whitespace-nowrap min-w-[180px]">{s.operation_unit_name}</td>
+                  <td className="px-3 py-2 whitespace-nowrap max-w-[140px] truncate">{s.vendor_name}</td>
+                  <td className="px-3 py-2 max-w-[160px] truncate">{s.product_name}</td>
+                  <td className="px-3 py-2 text-right">{fmtNum(s.so_qty)}</td>
+                  <td className="px-3 py-2 text-center font-bold text-slate-700 whitespace-nowrap">{fmtCur(s.sales_amount)}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">{s.customer_po_number||'-'}</td>
+                  <td className="px-3 py-2 max-w-[160px] truncate">{s.delivery_memo||'-'}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">{s.so_create_date||'-'}</td>
+                  <td className="px-3 py-2 whitespace-nowrap text-blue-600">
+                    {editing?.id === rowKey(s) && editing.field === 'delivery_plan_date' ? (
+                      <input
+                        type="date"
+                        value={editValue || ''}
+                        onChange={e=>setEditValue(e.target.value)}
+                        onBlur={saveEdit}
+                        onKeyDown={e=>{ if(e.key==='Enter') saveEdit(); if(e.key==='Escape') setEditing(null); }}
+                        className={`w-36 px-2 py-1 rounded text-xs border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-300 text-gray-900'}`}
+                        autoFocus
+                      />
+                    ) : (
+                      <button type="button" onClick={()=>startEdit(s, 'delivery_plan_date')} className="text-blue-600 hover:underline text-xs whitespace-nowrap">
+                        {s.delivery_plan_date||'Set'}
+                      </button>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 min-w-[560px] max-w-[560px] truncate">
+                    {editing?.id === rowKey(s) && editing.field === 'remarks' ? (
+                      <input
+                        type="text"
+                        value={editValue || ''}
+                        onChange={e=>setEditValue(e.target.value)}
+                        onBlur={saveEdit}
+                        onKeyDown={e=>{ if(e.key==='Enter') saveEdit(); if(e.key==='Escape') setEditing(null); }}
+                        className={`w-full px-2 py-1 rounded text-xs border ${darkMode?'bg-gray-700 border-gray-600 text-white':'bg-white border-gray-300 text-gray-900'}`}
+                        autoFocus
+                      />
+                    ) : (
+                      <button type="button" onClick={()=>startEdit(s, 'remarks')} className="block max-w-full truncate text-left text-blue-600 hover:underline text-xs">
+                        {s.remarks||'Add'}
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {pages > 1 && (
+          <div className={`flex justify-between items-center px-6 py-3 border-t ${darkMode?'border-gray-700':'border-gray-100'}`}>
+            <span className={`text-sm ${darkMode?'text-gray-400':'text-gray-600'}`}>{(dlPage-1)*PER+1}–{Math.min(dlPage*PER,safeData.length)} / {fmtNum(safeData.length)}</span>
+            <div className="flex gap-2">
+              <button disabled={dlPage===1} onClick={()=>setDlPage(p=>p-1)} className={`p-1.5 rounded ${dlPage===1?'opacity-40':'hover:bg-gray-200'}`}><ChevronLeft className="w-4 h-4"/></button>
+              <span className="px-3 py-1 bg-blue-100 rounded text-sm text-blue-700">{dlPage}/{pages}</span>
+              <button disabled={dlPage===pages} onClick={()=>setDlPage(p=>p+1)} className={`p-1.5 rounded ${dlPage===pages?'opacity-40':'hover:bg-gray-200'}`}><ChevronRight className="w-4 h-4"/></button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ─── Reusable floating-dropdown hook ──────────────────────────────────────
+// Returns a ref (attach to the trigger button) and a `menuPos` object to
+// pass as `style` on the floating menu. The menu uses `position: fixed` so
+// it escapes any `overflow-hidden` ancestor (e.g. the rounded card wrapper
+// around every table). The position is recomputed on scroll/resize and the
+// menu flips above the trigger when there isn't enough space below.
+//
+// Usage:
+//   const { triggerRef, menuPos } = useFloatingDropdown(open);
+//   <button ref={triggerRef} onClick={...}>Open</button>
+//   {open && (
+//     <div style={menuPos.style} className="fixed z-[180] ...">
+//       ...menu content...
+//     </div>
+//   )}
+const useFloatingDropdown = (open, minWidth = 320, maxWidth = 520, menuHeight = 300) => {
+  const triggerRef = useRef(null);
+  const [menuPos, setMenuPos] = useState({ top: 0, left: 0, width: minWidth, style: {} });
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const compute = () => {
+      const anchor = triggerRef.current;
+      if (!anchor || typeof window === 'undefined') return;
+      const rect = anchor.getBoundingClientRect();
+      const viewportW = window.innerWidth || 1024;
+      const viewportH = window.innerHeight || 768;
+      const width = Math.min(Math.max(rect.width, minWidth), Math.min(maxWidth, viewportW - 32));
+      const left = Math.min(Math.max(rect.left, 16), viewportW - width - 16);
+      const spaceBelow = viewportH - rect.bottom - 12;
+      const spaceAbove = rect.top - 12;
+      const preferAbove = spaceBelow < menuHeight && spaceAbove > spaceBelow;
+      const top = preferAbove
+        ? Math.max(8, rect.top - Math.min(menuHeight, spaceAbove) - 10)
+        : Math.min(rect.bottom + 6, viewportH - 120);
+      setMenuPos({
+        top,
+        left,
+        width,
+        style: { position: 'fixed', top: `${top}px`, left: `${left}px`, width: `${width}px`, maxWidth: 'calc(100vw - 32px)', zIndex: 180 },
+      });
+    };
+    compute();
+    window.addEventListener('resize', compute);
+    window.addEventListener('scroll', compute, true);
+    return () => {
+      window.removeEventListener('resize', compute);
+      window.removeEventListener('scroll', compute, true);
+    };
+  }, [open, minWidth, maxWidth, menuHeight]);
+
+  return { triggerRef, menuPos };
+};
+
+// ─── MultiSelect dropdown — Excel-style (all checked by default) ─────────
+const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, hideLabel = false }) => {
+  const [open, setOpen] = useState(false);
+  const [draftSelected, setDraftSelected] = useState([]);
+  const [draftNone, setDraftNone] = useState(false);
+  const [searchText, setSearchText] = useState('');
+  const [menuPos, setMenuPos] = useState({ top: 0, left: 0, width: 320, maxHeight: 240 });
+  const ref = useRef(null);
+  const menuRef = useRef(null);
+
+  const safeOptions = useMemo(() => {
+    const seen = new Set();
+    return (Array.isArray(options) ? options : [])
+      .map(v => String(v ?? '').trim())
+      .filter(v => {
+        if (!v || seen.has(v)) return false;
+        seen.add(v);
+        return true;
+      });
+  }, [options]);
+
+  const noSelection = selected === '__NONE__';
+  const safeSelected = Array.isArray(selected) ? selected : [];
+  const noneSelected = !noSelection && safeSelected.length === 0;
+  const currentSelected = open ? draftSelected : safeSelected;
+  const currentNone = open ? draftNone : noSelection;
+  const currentAll = !currentNone && currentSelected.length === 0;
+  const someSelected = !currentNone && currentSelected.length > 0 && currentSelected.length < safeOptions.length;
+
+  const updateMenuPosition = useCallback(() => {
+    const anchor = ref.current;
+    if (!anchor || typeof window === 'undefined') return;
+    const rect = anchor.getBoundingClientRect();
+    const viewportW = window.innerWidth || 1024;
+    const viewportH = window.innerHeight || 768;
+    const width = Math.min(Math.max(rect.width, 320), Math.min(520, viewportW - 32));
+    const left = Math.min(Math.max(rect.left, 16), viewportW - width - 16);
+    const spaceBelow = viewportH - rect.bottom - 12;
+    const spaceAbove = rect.top - 12;
+    const preferAbove = spaceBelow < 260 && spaceAbove > spaceBelow;
+    const maxHeight = Math.max(168, Math.min(300, (preferAbove ? spaceAbove : spaceBelow) - 20));
+    const top = preferAbove
+      ? Math.max(8, rect.top - maxHeight - 10)
+      : Math.min(rect.bottom + 6, viewportH - 120);
+    setMenuPos({ top, left, width, maxHeight });
+  }, []);
+
+  const closeDropdown = useCallback(() => {
+    setOpen(false);
+    setDraftSelected([]);
+    setDraftNone(false);
+    setSearchText('');
+  }, []);
+
+  useEffect(() => {
+    const handler = (e) => {
+      const target = e.target;
+      if (ref.current?.contains(target) || menuRef.current?.contains(target)) return;
+      closeDropdown();
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [closeDropdown]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    setDraftSelected(safeSelected);
+    setDraftNone(noSelection);
+    updateMenuPosition();
+    const reposition = () => updateMenuPosition();
+    window.addEventListener('resize', reposition);
+    window.addEventListener('scroll', reposition, true);
+    return () => {
+      window.removeEventListener('resize', reposition);
+      window.removeEventListener('scroll', reposition, true);
+    };
+  }, [open, selected, noSelection, updateMenuPosition]);
+
+  const filteredOptions = searchText.trim()
+    ? safeOptions.filter(opt => String(opt).toLowerCase().includes(searchText.trim().toLowerCase()))
+    : safeOptions;
+
+  const applySelection = () => {
+    if (searchText.trim()) {
+      const next = filteredOptions.length === 0
+        ? '__NONE__'
+        : filteredOptions.length === safeOptions.length
+        ? []
+        : filteredOptions;
+      onChange(next);
+      closeDropdown();
+      return;
+    }
+    onChange(currentNone ? '__NONE__' : currentSelected);
+    closeDropdown();
+  };
+
+  const resetSelection = () => {
+    setDraftSelected([]);
+    setDraftNone(true);
+  };
+
+  const toggleAll = () => {
+    if (currentAll) {
+      setDraftSelected([]);
+      setDraftNone(true);
+    } else {
+      setDraftSelected([]);
+      setDraftNone(false);
+    }
+  };
+
+  const toggle = (val) => {
+    if (currentAll) {
+      const next = safeOptions.filter(x => x !== val);
+      if (next.length === 0) {
+        setDraftSelected([]);
+        setDraftNone(true);
+        return;
+      }
+      setDraftSelected(next);
+      setDraftNone(false);
+      return;
     }
 
-    for table_name, columns in migration_plan.items():
-        cols = existing_columns(table_name)
-        for col_name, col_type in columns:
-            if col_name.lower() not in cols:
-                try:
-                    db.session.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}"))
-                    db.session.commit()
-                    print(f'DB migration: added column {table_name}.{col_name}')
-                except Exception as exc:
-                    db.session.rollback()
-                    print(f'DB migration warning ({table_name}.{col_name}): {exc}')
-
-
-def _ensure_so_extra_columns():
-    """Online migration: add `specification` and `product_id` columns to
-    so_data if they don't exist yet.
-
-    Strategy (works on all SQLite versions and PostgreSQL):
-    1. Query the actual column list from the DB (PRAGMA for SQLite,
-       information_schema for Postgres).
-    2. Only issue ALTER TABLE when the column is genuinely absent.
-    This avoids the `IF NOT EXISTS` clause that many SQLite builds reject.
-    """
-    is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
-    needed = [
-        ('specification',                      'TEXT'),
-        ('product_id',                         'VARCHAR(100)'),
-        ('purchasing_currency',                'VARCHAR(10)'),
-        ('purchasing_amount_idr',              'DOUBLE PRECISION'),
-        ('purchasing_amount_idr_cached_at',    'TIMESTAMP'),
-    ]
-    try:
-        if is_sqlite:
-            result = db.session.execute(text("PRAGMA table_info(so_data)"))
-            existing_cols = {row[1].lower() for row in result}
-        else:
-            result = db.session.execute(text(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = 'so_data'"
-            ))
-            existing_cols = {row[0].lower() for row in result}
-    except Exception:
-        existing_cols = set()
-
-    for col_name, col_type in needed:
-        if col_name.lower() not in existing_cols:
-            try:
-                db.session.execute(
-                    text(f"ALTER TABLE so_data ADD COLUMN {col_name} {col_type}")
-                )
-                db.session.commit()
-                print(f'DB migration: added column so_data.{col_name}')
-            except Exception as exc:
-                db.session.rollback()
-                print(f'DB migration warning (so_data.{col_name}): {exc}')
-
-
-def _ensure_performance_indexes():
-    """Create lightweight indexes used by dashboard filters and pagination.
-
-    CREATE INDEX IF NOT EXISTS is supported on both SQLite and Postgres
-    (9.5+), so these run regardless of backend. On Postgres/Supabase,
-    skipping this previously meant every dashboard query that filters or
-    sorts by so_status / so_create_date / operation_unit_name / pic_name /
-    vendor_name / etc. did a full table scan -- a major source of slow
-    dashboard loads as so_data grows."""
-    statements = [
-        "CREATE INDEX IF NOT EXISTS idx_so_status_date ON so_data (so_status, so_create_date)",
-        "CREATE INDEX IF NOT EXISTS idx_so_op_unit ON so_data (operation_unit_name)",
-        "CREATE INDEX IF NOT EXISTS idx_so_pic_name ON so_data (pic_name)",
-        "CREATE INDEX IF NOT EXISTS idx_so_vendor_name ON so_data (vendor_name)",
-        "CREATE INDEX IF NOT EXISTS idx_so_item ON so_data (so_item)",
-        "CREATE INDEX IF NOT EXISTS idx_so_number ON so_data (so_number)",
-        "CREATE INDEX IF NOT EXISTS idx_so_product_id ON so_data (product_id)",
-        "CREATE INDEX IF NOT EXISTS idx_so_customer_po ON so_data (customer_po_number)",
-        "CREATE INDEX IF NOT EXISTS idx_upload_log_type_date ON upload_log (file_type, uploaded_at)",
-        "CREATE INDEX IF NOT EXISTS idx_item_reg_proc_client ON item_registration (proc_status, client_name)",
-        "CREATE INDEX IF NOT EXISTS idx_item_reg_pic ON item_registration (pic)",
-        "CREATE INDEX IF NOT EXISTS idx_item_reg_req_no ON item_registration (req_no)",
-        "CREATE INDEX IF NOT EXISTS idx_item_reg_mfr ON item_registration (mfr_name)",
-        "CREATE INDEX IF NOT EXISTS idx_item_reg_owner ON item_registration (existing_owner)",
-        "CREATE INDEX IF NOT EXISTS idx_product_status_unit ON product_id_db (product_status, order_unit)",
-    ]
-    for stmt in statements:
-        try:
-            db.session.execute(text(stmt))
-        except Exception as exc:
-            db.session.rollback()
-            print(f'DB index warning: {exc}')
-    try:
-        db.session.commit()
-    except Exception:
-        db.session.rollback()
-
-try:
-    with app.app_context():
-        db.create_all()
-        _ensure_extra_columns()
-        _ensure_performance_indexes()
-        print('DB schema ready.')
-except Exception as exc:
-    # Don't let a slow/unreachable database (e.g. a sleeping Supabase
-    # project) take down the whole WSGI process at import time. The app
-    # can still serve '/' (used by PythonAnywhere's reload check) and any
-    # endpoints that don't need the DB; schema setup will be retried on the
-    # next reload once the DB is reachable again.
-    print(f'DB schema setup skipped at startup (will retry next reload): {exc}')
-
-CLOSED_STATUSES = {
-    'Delivery Completed', 'SO Cancel',
-    'Approval Apply', 'Approval Complete', 'Approval Complete Step', 'Approval Reject', 'Approval Hold',
-    'Return Complete(Vendor)', 'Return Complete(HUB)', 'Customer PO Reject'
-}
-
-# Statuses that are safe to discard entirely from the DB — they are closed,
-# never queried by any analytics endpoint, and only inflate storage.
-# 'Delivery Completed' is intentionally NOT here because it is used by
-# Delivery Analytics and YoY margin reporting.
-DISCARDABLE_STATUSES = {
-    'SO Cancel',
-    'Approval Apply', 'Approval Complete Step', 'Approval Reject', 'Approval Hold',
-    'Return Complete(Vendor)', 'Return Complete(HUB)',
-    'Customer PO Reject', 'Ship. Order Reject', 'PO Received Reject',
-}
-
-EXCLUDED_OP_UNITS = {'HLI GREEN POWER (CONSUMABLE)'}
-
-# ─── PO HLI extraction patterns ──────────────────────────────────────────
-# Full PO HLI: 7+ digit number, optionally followed by `-<item line>`.  We
-# only treat `-` as the item separator (the original convention) so that
-# two adjacent PO numbers separated by space / `/` / `_` / `.` parse as
-# *two* separate POs instead of being merged.  The trailing `(?!\d)`
-# lookahead protects against truncating into a longer adjacent number
-# (e.g. "4502342011-10245" still yields PO=4502342011 with no item, not a
-# bogus item="1024").  Examples we capture from free-text fields:
-#   "4502342011-10"          → 4502342011 + item 10
-#   "4502342011"             → 4502342011 (bare)
-#   "Po No 4502202743_..."   → 4502202743
-#   "4502342011 4502342012"  → both numbers separately
-PO_HLI_RE = re.compile(r'(\d{7,})(?:-(\d{1,4}))?(?!\d)')
-# Short reference like "PO 626", "P.O #626", "PO-626", "po:626" — used to
-# match against the *suffix* of full PO HLI keys in the PO table.
-PO_SHORT_REF_RE = re.compile(
-    r'\bP\s*\.?\s*O\s*\.?\s*[#:.\-]?\s*(\d{2,6})\b',
-    re.IGNORECASE,
-)
-
-def _normalize_item_no(item_no):
-    if item_no is None:
-        return set()
-    s = str(item_no).strip()
-    variants = {s}
-    if s.endswith('.0'):
-        s = s[:-2]
-        variants.add(s)
-    try:
-        n = int(float(s))
-        variants.add(str(n))
-        variants.add(f"{n:02d}")
-        variants.add(f"{n:03d}")
-    except (ValueError, OverflowError):
-        pass
-    return variants
-
-def extract_po_hli(val):
-    """Return all candidate PO HLI keys (full PO and PO-item) found in `val`."""
-    if not val:
-        return []
-    text = str(val).strip()
-    result = set()
-    for m in PO_HLI_RE.finditer(text):
-        po_num  = m.group(1)
-        item_no = m.group(2)
-        # Skip leading-2 numbers — those are non-HLI internal PO refs the user
-        # explicitly wants ignored (e.g. "2123456789").  Real HLI POs start
-        # with 4/5/6 etc.  This also avoids accidentally matching dates that
-        # happen to be 8+ digits (e.g. "20240105") when written without
-        # separators.
-        if po_num.startswith('2'):
-            continue
-        result.add(po_num)
-        if item_no:
-            for item_var in _normalize_item_no(item_no):
-                result.add(f"{po_num}-{item_var}")
-    return list(result)
-
-
-def extract_po_short_refs(val):
-    """Return short numeric references like '626' parsed from 'PO 626'.
-
-    Used as a fallback to suffix-match against full PO HLI numbers in the PO
-    table when the customer wrote the PO in shorthand form."""
-    if not val:
-        return []
-    text = str(val).strip()
-    refs = set()
-    for m in PO_SHORT_REF_RE.finditer(text):
-        n = m.group(1)
-        # Avoid double-counting full POs that already came out of extract_po_hli.
-        if len(n) >= 7:
-            continue
-        refs.add(n)
-    return list(refs)
-
-
-def open_so_filter():
-    return db.or_(
-        SOData.so_status.is_(None),
-        SOData.so_status.notin_(list(CLOSED_STATUSES))
-    )
-
-
-def parse_so_date_args(args=None):
-    """Read date_year / date_from / date_to (with optional legacy `year`)
-    from a request args object and normalize them.
-    Returns (date_year_str, date_from_str, date_to_str)."""
-    args = args if args is not None else request.args
-    date_year = args.get('date_year', '')
-    date_from = args.get('date_from', '')
-    date_to   = args.get('date_to', '')
-    if not date_year:
-        legacy = args.get('year', '')
-        if legacy and legacy != 'all':
-            date_year = legacy
-    return date_year, date_from, date_to
-
-
-def apply_so_create_date_filter(query, date_year='', date_from='', date_to='', is_sqlite=None):
-    """Apply SO Create Date filter to any query that references SOData."""
-    if is_sqlite is None:
-        is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
-    if date_year:
-        try:
-            yr = int(date_year)
-            if is_sqlite:
-                return query.filter(func.strftime('%Y', SOData.so_create_date) == str(yr))
-            return query.filter(func.extract('year', SOData.so_create_date) == yr)
-        except (ValueError, TypeError):
-            return query
-    if date_from:
-        query = query.filter(SOData.so_create_date >= date_from)
-    if date_to:
-        query = query.filter(SOData.so_create_date <= date_to)
-    return query
-
-
-def apply_item_registration_date_filter(query, date_year='', date_from='', date_to=''):
-    """Apply the global date slicer to Item Registration.
-
-    Item Registration does not have SO Create Date, so the shared dashboard
-    slicer is applied to Req. Date (request date) for this page. Rows without
-    Req. Date are included only when the date slicer is set to All.
-    """
-    if date_year:
-        try:
-            yr = int(date_year)
-            if 'sqlite' in app.config.get('SQLALCHEMY_DATABASE_URI', ''):
-                return query.filter(func.strftime('%Y', ItemRegistration.req_date) == str(yr))
-            return query.filter(func.extract('year', ItemRegistration.req_date) == yr)
-        except (ValueError, TypeError):
-            return query
-
-    df = parse_date(date_from) if date_from else None
-    dt = parse_date(date_to) if date_to else None
-    if df:
-        query = query.filter(ItemRegistration.req_date >= df)
-    if dt:
-        query = query.filter(ItemRegistration.req_date <= dt)
-    return query
-
-
-def utc_isoformat(dt):
-    """Serialize a (naive UTC) datetime as an ISO-8601 string with a trailing
-    'Z' so JS Date() parses it as UTC and the browser converts to local time.
-    Datetimes that already carry a timezone designator (Z, +HH:MM, or -HH:MM
-    after the time portion) are returned unchanged."""
-    if dt is None:
-        return None
-    s = dt.isoformat()
-    tail = s[10:]  # everything after the date portion (skip the leading YYYY-MM-DD)
-    if s.endswith('Z') or '+' in tail or '-' in tail:
-        return s
-    return s + 'Z'
-
-def is_return_so_item(so_item):
-    if not so_item:
-        return False
-    return str(so_item).strip().startswith('9')
-
-def is_return_so_status(so_status):
-    return 'return' in str(so_status or '').strip().lower()
-
-def has_internal_po_ref(customer_po_number, delivery_memo):
-    for field in [customer_po_number, delivery_memo]:
-        if not field:
-            continue
-        text = str(field).strip()
-        for token in re.split(r'[\s,;]+', text):
-            token = token.strip()
-            if token and token[0] == '2' and re.match(r'^2\d{6,}', token):
-                return True
-    return False
-
-def so_is_countable(so_item, so_number=None, customer_po_number=None, delivery_memo=None):
-    if has_internal_po_ref(customer_po_number, delivery_memo):
-        return False
-    return True
-
-def so_countable_sql_filter():
-    """SQL equivalent of so_is_countable() for dashboard aggregates.
-
-    The old dashboard code materialised every open SO row in Python only to run
-    has_internal_po_ref() on customer PO / delivery memo. On large SO tables this
-    makes first Dashboard load slow. This filter pushes the same token rule into
-    the database so KPI and chart queries can use COUNT/SUM/GROUP BY directly.
-    """
-    pattern = r'(^|[\s,;]+)2\d{6,}'
-    uri = app.config.get('SQLALCHEMY_DATABASE_URI', '')
-    customer_po_expr = func.coalesce(SOData.customer_po_number, '')
-    delivery_memo_expr = func.coalesce(SOData.delivery_memo, '')
-    if 'sqlite' in uri:
-        internal_ref = db.or_(
-            customer_po_expr.op('REGEXP')(pattern),
-            delivery_memo_expr.op('REGEXP')(pattern),
-        )
-    else:
-        internal_ref = db.or_(
-            customer_po_expr.op('~')(pattern),
-            delivery_memo_expr.op('~')(pattern),
-        )
-    return db.not_(internal_ref)
-
-def clean(val):
-    if val is None: return None
-    try:
-        if pd.isna(val): return None
-    except (TypeError, ValueError): pass
-    s = str(val).strip()
-    return None if s.lower() in ('nan', 'none', '') else s
-
-def clean_product_id(val):
-    s = clean(val)
-    if not s:
-        return ''
-    try:
-        f = float(s)
-        if f.is_integer():
-            return str(int(f))
-    except (TypeError, ValueError):
-        pass
-    return re.sub(r'\.0+$', '', s)
-
-
-def clean_request_number(val):
-    """Keep RFQ request numbers searchable even when Sheets exports them as numbers."""
-    s = clean(val)
-    if not s:
-        return ''
-    s = str(s).strip()
-    # Google Sheets/CSV may expose numeric IDs as 12345.0 or scientific notation.
-    try:
-        from decimal import Decimal, InvalidOperation
-        number = Decimal(s)
-        if number == number.to_integral_value():
-            return format(number.quantize(Decimal('1')), 'f')
-    except (InvalidOperation, ValueError, TypeError):
-        pass
-    return re.sub(r'\.0+$', '', s)
-
-RFQ_SHEET_ID = '1JrdsYWhv1mzeXB-jbukDxDYxBgaeISzpiVKEKdgfQvw'
-RFQ_SHEET_NAME = 'Sales Submit-RFQ'
-RFQ_CACHE = {'expires_at': None, 'rows': [], 'fetched_at': None}
-RFQ_CACHE_TTL_SECONDS = 3600
-VENDOR_CONTROL_SHEET_ID = '1N0Jr_h5InHH1X2TyLxRf2SMXgDzAXIJnhswzMv5Wf4E'
-VENDOR_CONTROL_SHEET_GID = 723367207
-VENDOR_CONTROL_CACHE = {'expires_at': None, 'rows': [], 'fetched_at': None, 'sheet_name': None, 'columns': {}}
-VENDOR_CONTROL_CACHE_TTL_SECONDS = 300
-RFQ_TEMPLATE_COLUMNS = [
-    ('check', 'Check'),
-    ('sheet_status', 'Status'),
-    ('days_left', 'Days Left'),
-    ('no', 'No'),
-    ('client_name', 'Nama Client'),
-    ('rfq_date', 'RFQ Date'),
-    ('closing_date', 'Closing Date'),
-    ('sales_pic', 'Sales PIC'),
-    ('category_name', 'Category Name'),
-    ('purchase_pic', 'Purchase PIC'),
-    ('rfq_code', 'No. RFQ / KODE'),
-    ('item_name', 'Item Name'),
-    ('detail_spec', 'Detail Spec'),
-    ('brand_manufacturer', 'Brand/Manufaktur'),
-    ('qty', 'Qty'),
-    ('unit', 'Unit'),
-    ('remark', 'Remark'),
-    ('product_id', 'Product ID'),
-    ('request_number', 'Request Number'),
-    ('same_replacement', 'Same/Replacement'),
-    ('vendor_name', 'Vendor Name'),
-    ('unit_price_idr', 'Unit Price (IDR)'),
-    ('amt_idr', 'Amt (IDR)'),
-    ('quoted_item_name', 'Item Name'),
-    ('quoted_spec', 'Spec'),
-    ('quoted_brand', 'Brand'),
-    ('quoted_unit', 'Unit'),
-    ('moq', 'MOQ'),
-    ('lead_time_days', 'Lead Time (Days)'),
-    ('valid_period', 'Valid period'),
-    ('photo_url', 'Photo URL (optional)'),
-    ('remarks', 'Remarks'),
-    ('private_remarks_1', 'Private Remarks 1'),
-    ('private_remarks_2', 'Private Remarks 2'),
-]
-RFQ_SIMILARITY_COLUMNS = [
-    ('similar_prod_ids', 'Similar Product ID'),
-    ('similar_prod_name', 'Similar Product Name'),
-    ('similar_spec', 'Similar Specification'),
-    ('similar_mfr_name', 'Similar Manufacturer'),
-    ('similar_odr_unit', 'Similar Unit'),
-    ('similar_score', '%Similarity'),
-]
-RFQ_EDITABLE_FIELDS = {
-    'sheet_status', 'no', 'client_name', 'rfq_date', 'closing_date', 'sales_pic',
-    'category_name', 'purchase_pic', 'item_name', 'detail_spec', 'brand_manufacturer',
-    'qty', 'unit', 'remark', 'product_id', 'request_number',
-    'same_replacement', 'vendor_name', 'unit_price_idr', 'quoted_item_name',
-    'quoted_spec', 'quoted_brand', 'quoted_unit', 'moq', 'lead_time_days', 'valid_period',
-    'photo_url', 'remarks', 'private_remarks_1', 'private_remarks_2'
-}
-RFQ_DIRECT_UPDATE_FIELDS = {'product_id'}
-RFQ_BATCH_FIELDS = [
-    'same_replacement', 'vendor_name', 'unit_price_idr', 'quoted_item_name',
-    'quoted_spec', 'quoted_brand', 'quoted_unit', 'moq', 'lead_time_days', 'valid_period',
-    'photo_url', 'remarks', 'private_remarks_1', 'private_remarks_2'
-]
-RFQ_SHEET_COLUMN_BY_FIELD = {
-    'sheet_status': 'A',
-    'no': 'B',
-    'client_name': 'C',
-    'rfq_date': 'E',
-    'closing_date': 'F',
-    'sales_pic': 'G',
-    'request_number': 'R',
-    'item_name': 'I',
-    'detail_spec': 'J',
-    'brand_manufacturer': 'K',
-    'qty': 'L',
-    'unit': 'M',
-    'remark': 'N',
-    'category_name': 'P',
-    'product_id': 'Q',
-    'purchase_pic': 'S',
-    'same_replacement': 'V',
-    'vendor_name': 'W',
-    'unit_price_idr': 'X',
-    'quoted_item_name': 'Z',
-    'quoted_spec': 'AA',
-    'quoted_brand': 'AB',
-    'quoted_unit': 'AC',
-    'moq': 'AD',
-    'lead_time_days': 'AE',
-    'valid_period': 'AF',
-    'photo_url': 'AG',
-    'remarks': 'AH',
-}
-
-IMPORT_LAYOUT_SHEET_ID = '1i0N4VdF_vMHjr_0gjrUdS7nCKUpxPYvDWW-HOWSanEM'
-IMPORT_LAYOUT_GID = '73188127'
-
-# Canonical source_key for every Import dashboard row that comes from the live
-# tracker sheet. All other source_keys ('source_1', 'source_2', 'import_tracker')
-# are legacy and get purged on every Copy Sheet run.
-IMPORT_LAYOUT_SOURCE_KEY = 'import_layout'
-
-# Legacy source_keys that are no longer used as the data source. Any DB row
-# tagged with one of these is stale and must be purged during Copy Sheet so
-# the dashboard never shows data that doesn't match the live sheet.
-_LEGACY_IMPORT_SOURCE_KEYS = {'source_1', 'source_2', 'import_tracker'}
-
-# Transitional: the previous build tagged rows as 'import_tracker'. We still
-# SHOW those rows (alongside 'import_layout') so the table isn't blank after
-# deploying this fix — the user's previous Copy Sheet run created 62 rows
-# tagged 'import_tracker', and without this transitional include the API
-# filter would hide all of them until the user clicks Copy Sheet again.
-# The next Copy Sheet run purges 'import_tracker' rows and replaces them
-# with 'import_layout' rows, so this tuple eventually collapses to just
-# ('import_layout',).
-_IMPORT_VISIBLE_SOURCE_KEYS = (IMPORT_LAYOUT_SOURCE_KEY, 'import_tracker')
-
-IMPORT_SOURCE_SHEETS = [
-    {'key': 'source_1', 'spreadsheet_id': '1OSISIb3-D_-oxj2LXH4Q3jcG2IZWnjFGWAmTmdcPBJg', 'gid': '0', 'label': 'Source 1'},
-    {'key': 'source_2', 'spreadsheet_id': '17P7_JsUGF5mqlz-j2fdvFZ9-gX8l-WGPqZABjng5Hnc', 'gid': '0', 'label': 'Source 2'},
-]
-IMPORT_LAYOUT_VENDOR_COLUMNS = (5, 28)
-IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS = (16,)
-
-
-# Import dashboard layout copied from the reference sheet, excluding columns that
-# are hidden in the original spreadsheet. Column DA:DH are checklist columns and
-# can still be shown/hidden from the UI. Formula columns are calculated in Python
-# so the web table behaves like the spreadsheet without exposing hidden helper
-# columns.
-IMPORT_STATUS_OPTIONS = ['NEW', 'ON PROCESS', 'ON DELIVERY', 'DELIVERED', 'CANCELED']
-IMPORT_CHECKBOX_FIELDS = {'sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo'}
-IMPORT_FORMULA_FIELDS = {'days_left', 'site', 'vendor', 'arrival_check', 'purchase_amount', 'lt_days'}
-IMPORT_HYPERLINK_FIELDS = {'soft_copy_doc'}
-# Dashboard-only fields have no source-sheet column. They are stored in the
-# dashboard database and preserved on Copy Sheet, but they are not read from or
-# written back to the vendor source sheets.
-IMPORT_DASHBOARD_LOCAL_FIELDS = {'po_send_date'}
-IMPORT_SOURCE_MANAGED_FIELDS = {
-    # These values come from the two vendor source sheets. During Copy Sheet,
-    # fresh non-empty source values must replace stale dashboard placeholders.
-    'po_date_by_email', 'site', 'yupi_po', 'po_yupi', 'vendor',
-    'req_dlv_date', 'source_req_dlv_date', 'so', 'group', 'po_sementara',
-    'item_yupi', 'item_name', 'spec', 'remark_yupi', 'reschedule',
-    'ord_qty', 'unit', 'unit_price', 'amount', 'vendor_name',
-    'purchase_price', 'currency', 'incoterm', 'forwarder', 'bl_number',
-    'inv_no', 'non_ski',
-}
-
-IMPORT_LOCAL_EDIT_FIELDS = {
-    # Every visible Import column can be edited from the dashboard and should
-    # survive refreshes. Some fields are calculated by default but still map
-    # back to the source sheet when the user edits them manually.
-    'status', 'days_left', 'po_send_date', '_po_send_date_manual', 'po_date_by_email', 'site', 'yupi_po', 'po_yupi', 'vendor',
-    'req_dlv_date', 'source_req_dlv_date', 'etd', 'eta', 'arrival_check', 'import_remarks',
-    'so', 'group', 'po_sementara', 'item_yupi', 'item_name', 'spec', 'remark_yupi',
-    'reschedule', 'ord_qty', 'unit', 'unit_price', 'amount', 'vendor_name',
-    'purchase_price', 'currency', 'purchase_amount', 'lt_days', 'incoterm',
-    'forwarder', 'bl_number', 'inv_no', 'non_ski',
-    'sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo',
-    'soft_copy_doc',
-}
-
-# User-local-only fields: editable from the dashboard AND NOT managed by the
-# source sheet. These are the columns the user fills in manually — STATUS,
-# PO Send Date, ETD, ETA, Import Remarks, all checklist ticks (SAP INPUT,
-# BL/AWB, INVOICE, PL, HC, MSDS, COA, COO), SOFT COPY DOC, Incoterm,
-# Forwarder, BL Number, Inv No, NON-SKI, etc.
-# Once a row exists in the dashboard DB, Copy Sheet must NEVER overwrite these
-# fields — not even to "restore" a value the user intentionally cleared.
-# The source sheet is only authoritative for IMPORT_SOURCE_MANAGED_FIELDS.
-IMPORT_USER_LOCAL_ONLY_FIELDS = IMPORT_LOCAL_EDIT_FIELDS - IMPORT_SOURCE_MANAGED_FIELDS
-
-# Fields needed for formulas/sync but hidden from the dashboard table.
-IMPORT_SOURCE_ONLY_COLUMNS = [
-    # Hidden raw source fields. In the RM source sheet these headers are on row 4:
-    # F = PO YUPI and K = Req. Dlv Date. Keep explicit source_sheet_col fallbacks
-    # so mapping still works if Google returns a trimmed/odd header range.
-    {'source_only': True, 'source_sheet_col': 'F', 'sheet_col': 'R', 'field': 'po_yupi',             'label': 'PO YUPI'},
-    {'source_only': True, 'source_sheet_col': 'K', 'sheet_col': 'W', 'field': 'source_req_dlv_date', 'label': 'Req. Dlv Date'},
-]
-
-IMPORT_SYNC_FIELD_ALIASES = {
-    # Dashboard column -> actual source-sheet column.
-    'yupi_po': 'po_yupi',
-    'req_dlv_date': 'source_req_dlv_date',
-}
-
-IMPORT_REFERENCE_VISIBLE_COLUMNS = [
-    {'sheet_col': 'A',  'field': 'status',              'label': 'STATUS',                 'width': 132, 'type': 'status'},
-    {'sheet_col': 'B',  'field': 'days_left',           'label': 'Days Left',              'width': 64,  'formula': True},
-    {'sheet_col': 'C',  'field': 'po_send_date',         'label': 'PO Send Date',          'width': 124, 'local': True},
-    {'sheet_col': 'D',  'source_sheet_col': 'B',  'field': 'site',                'label': 'Site',                   'width': 78,  'formula': True},
-    {'sheet_col': 'E',  'source_sheet_col': 'F',  'field': 'yupi_po',             'label': 'YUPI PO',                'width': 118},
-    {'sheet_col': 'F',  'source_sheet_col': 'Q',  'field': 'vendor',              'label': 'Vendor',                 'width': 190, 'formula': True},
-    {'sheet_col': 'G',  'source_sheet_col': 'K',  'field': 'req_dlv_date',        'label': 'Req Dlv Date',           'width': 122},
-    {'sheet_col': 'H',  'field': 'etd',                 'label': 'ETD',                    'width': 116},
-    {'sheet_col': 'I',  'field': 'eta',                 'label': 'ETA',                    'width': 116},
-    {'sheet_col': 'J',  'field': 'arrival_check',       'label': 'Arrival Check',          'width': 154, 'formula': True},
-    {'sheet_col': 'K',  'field': 'import_remarks',      'label': 'Import Remarks',         'width': 220},
-    {'sheet_col': 'L',  'source_sheet_col': 'AK', 'field': 'so',                  'label': 'SO',                     'width': 140},
-    {'sheet_col': 'M',  'source_sheet_col': 'A',  'field': 'group',               'label': 'GROUP',                  'width': 116},
-    {'sheet_col': 'O',  'source_sheet_col': 'C', 'field': 'po_date_by_email',    'label': 'PO DATE\n(By Email)',    'width': 132},
-    {'sheet_col': 'Q',  'source_sheet_col': 'E',  'field': 'po_sementara',        'label': 'PO SEMENTARA',           'width': 160},
-    {'sheet_col': 'S',  'source_sheet_col': 'G',  'field': 'item_yupi',           'label': 'Item Yupi',              'width': 130},
-    {'sheet_col': 'T',  'source_sheet_col': 'H',  'field': 'item_name',           'label': 'Item name',              'width': 260},
-    {'sheet_col': 'U',  'source_sheet_col': 'I',  'field': 'spec',                'label': 'Spec',                   'width': 340},
-    {'sheet_col': 'V',  'source_sheet_col': 'J',  'field': 'remark_yupi',         'label': 'REMARK YUPI',            'width': 340},
-    {'sheet_col': 'X',  'source_sheet_col': 'L',  'field': 'reschedule',          'label': 'RESCHEDULE',             'width': 120},
-    {'sheet_col': 'Y',  'source_sheet_col': 'M',  'field': 'ord_qty',             'label': "Ord. Q'ty",             'width': 100, 'number': True},
-    {'sheet_col': 'Z',  'source_sheet_col': 'N',  'field': 'unit',                'label': 'Unit',                   'width': 76},
-    {'sheet_col': 'AA', 'source_sheet_col': 'O',  'field': 'unit_price',          'label': 'Unit Price',             'width': 120, 'number': True},
-    {'sheet_col': 'AB', 'source_sheet_col': 'P',  'field': 'amount',              'label': 'AMOUNT',                 'width': 130, 'number': True},
-    {'sheet_col': 'AC', 'source_sheet_col': 'Q',  'field': 'vendor_name',         'label': 'Vendor Name',            'width': 190},
-    {'sheet_col': 'AG', 'source_sheet_col': 'U',  'field': 'purchase_price',      'label': 'PURCHASE PRICE',         'width': 128, 'number': True},
-    {'sheet_col': 'AH', 'source_sheet_col': 'V',  'field': 'currency',            'label': 'CURRENCY',               'width': 92},
-    {'sheet_col': 'AJ', 'source_sheet_col': 'X',  'field': 'purchase_amount',     'label': 'PURCHASE\nAMOUNT',       'width': 132, 'formula': True, 'number': True},
-    {'sheet_col': 'CU', 'field': 'lt_days',             'label': 'LT (Days)',              'width': 94,  'formula': True, 'number': True},
-    {'sheet_col': 'CV', 'field': 'incoterm',            'label': 'Incoterm',               'width': 98},
-    {'sheet_col': 'CW', 'field': 'forwarder',           'label': 'Forwarder',              'width': 150},
-    {'sheet_col': 'CX', 'field': 'bl_number',           'label': 'BL Number',              'width': 150},
-    {'sheet_col': 'CY', 'field': 'inv_no',              'label': 'Inv No',                 'width': 135},
-    {'sheet_col': 'CZ', 'field': 'non_ski',             'label': 'NON-SKI',                'width': 90},
-    {'sheet_col': 'DA', 'field': 'sap_input',           'label': 'SAP INPUT',              'width': 86,  'checkbox': True},
-    {'sheet_col': 'DB', 'field': 'bl_awb',              'label': 'BL / AWB',               'width': 86,  'checkbox': True},
-    {'sheet_col': 'DC', 'field': 'invoice',             'label': 'INVOICE',                'width': 86,  'checkbox': True},
-    {'sheet_col': 'DD', 'field': 'pl',                  'label': 'PL',                     'width': 74,  'checkbox': True},
-    {'sheet_col': 'DE', 'field': 'hc',                  'label': 'HC',                     'width': 74,  'checkbox': True},
-    {'sheet_col': 'DF', 'field': 'msds',                'label': 'MSDS',                   'width': 82,  'checkbox': True},
-    {'sheet_col': 'DG', 'field': 'coa',                 'label': 'COA',                    'width': 76,  'checkbox': True},
-    {'sheet_col': 'DH', 'field': 'coo',                 'label': 'COO',                    'width': 76,  'checkbox': True},
-    {'sheet_col': 'DI', 'field': 'soft_copy_doc',       'label': 'SOFT COPY DOC',          'width': 190, 'hyperlink': True},
-]
-
-IMPORT_COLUMN_ALIASES = {
-    'status': ['status'],
-    # PO Send Date is a dashboard-local user input. Do not map it from source sheets.
-    'po_send_date': [],
-    # Source column C / header PO DATE (By Email) fills this separate field.
-    # Some source copies may still label the same source value as PO Send Date,
-    # so posenddate is deliberately mapped here, not to po_send_date.
-    'po_date_by_email': ['podatebyemail', 'podateemail', 'poemaildate', 'pokirimdate', 'posenddate'],
-    'site': ['siteidnkrg', 'site'],
-    'yupi_po': ['poyupi'],
-    'po_yupi': ['poyupi'],
-    'vendor': ['vendor', 'vendorname'],
-    'req_dlv_date': ['reqdlvdate'],
-    'source_req_dlv_date': ['reqdlvdate'],
-    'etd': ['etd'],
-    'eta': ['eta'],
-    'import_remarks': ['importremarks', 'remarksvo', 'remark'],
-    'so': ['so', 'noso'],
-    'group': ['group'],
-    'po_sementara': ['posementara'],
-    'item_yupi': ['itemyupi'],
-    'item_name': ['itemname'],
-    'spec': ['spec', 'specification'],
-    'remark_yupi': ['remarkyupi'],
-    'reschedule': ['reschedule'],
-    'ord_qty': ['ordqty', 'orderqty', 'orderedqty'],
-    'unit': ['unit'],
-    'unit_price': ['unitprice'],
-    'amount': ['amount'],
-    'vendor_name': ['vendorname', 'vendor'],
-    'purchase_price': ['purchaseprice'],
-    'currency': ['currency'],
-    'purchase_amount': ['purchaseamount'],
-    'incoterm': ['incoterm'],
-    'forwarder': ['forwarder'],
-    'bl_number': ['blnumber', 'blawb', 'awbnumber'],
-    'inv_no': ['invno', 'invoiceno', 'invoicenumber'],
-    'non_ski': ['nonski'],
-    'sap_input': ['sapinput'],
-    'bl_awb': ['blawb'],
-    'invoice': ['invoice'],
-    'pl': ['pl'],
-    'hc': ['hc'],
-    'msds': ['msds'],
-    'coa': ['coa'],
-    'coo': ['coo'],
-    'soft_copy_doc': ['softcopydoc', 'softcopy', 'gdrive', 'googledrive', 'documentlink'],
-}
-
-
-# Source-sheet fallback columns for the two Yupi Order Management workbooks.
-# Normal mapping still uses header names first. These fallbacks are only used
-# when Google returns a trimmed/odd header range or a header cell is blank.
-# RM workbook: header row 4, Purchase Amount = X, NO.SO = AK.
-# SP/Consumable workbook: header row 3, Purchase Amount = Y, NO.SO = AM.
-IMPORT_COMMON_SOURCE_FALLBACK_COLUMNS = {
-    'group': 'A',
-    'site': 'B',
-    'po_date_by_email': 'C',
-    'po_sementara': 'E',
-    'po_yupi': 'F',
-    'yupi_po': 'F',
-    'item_yupi': 'G',
-    'item_name': 'H',
-    'spec': 'I',
-    'remark_yupi': 'J',
-    'req_dlv_date': 'K',
-    'source_req_dlv_date': 'K',
-    'reschedule': 'L',
-    'ord_qty': 'M',
-    'unit': 'N',
-    'unit_price': 'O',
-    'amount': 'P',
-    'vendor': 'Q',
-    'vendor_name': 'Q',
-    'purchase_price': 'U',
-    'currency': 'V',
-}
-IMPORT_RM_SOURCE_FALLBACK_COLUMNS = {
-    **IMPORT_COMMON_SOURCE_FALLBACK_COLUMNS,
-    'purchase_amount': 'X',
-    'so': 'AK',
-}
-IMPORT_SP_SOURCE_FALLBACK_COLUMNS = {
-    **IMPORT_COMMON_SOURCE_FALLBACK_COLUMNS,
-    'purchase_amount': 'Y',
-    'so': 'AM',
-}
-
-def import_source_kind_from_header(df, header_idx):
-    """Return 'rm' or 'sp' from the detected source header row.
-
-    Priority 1: structural column-content check (most reliable).
-      RM  — PURCHASE AMOUNT in col X (index 23), NO.SO in col AK (index 36).
-      SP  — PURCHASE AMOUNT in col Y (index 24), NO.SO in col AM (index 38).
-    Priority 2: SP-only column label ('PO KIRIM DATE') present in header.
-    Priority 3: header row index (RM = row 4 = index 3, SP = row 3 = index 2).
-
-    The old code jumped straight from priority 1 to priority 3 (index),
-    which could mis-classify a sheet when header detection returned an
-    off-by-one index (e.g. section-label row counted as header).
-    """
-    try:
-        headers = [import_header_key(v) for v in df.iloc[header_idx].tolist()]
-    except Exception:
-        headers = []
-
-    def key_at(letter):
-        try:
-            idx = column_index_from_letter(letter) - 1
-            return headers[idx] if idx < len(headers) else ''
-        except Exception:
-            return ''
-
-    # Priority 1: structural column position
-    if key_at('Y') == 'purchaseamount' or key_at('AM') == 'noso':
-        return 'sp'
-    if key_at('X') == 'purchaseamount' or key_at('AK') == 'noso':
-        return 'rm'
-
-    # Priority 2: SP-only column labels that never appear in RM
-    if 'pokiriminput' in headers or 'pokirimdate' in headers:
-        return 'sp'
-
-    # Priority 3: header row index
-    if header_idx == 2:
-        return 'sp'
-    if header_idx == 3:
-        return 'rm'
-    return ''
-
-def import_source_fallback_columns(df, header_idx):
-    kind = import_source_kind_from_header(df, header_idx)
-    if kind == 'sp':
-        return IMPORT_SP_SOURCE_FALLBACK_COLUMNS
-    if kind == 'rm':
-        return IMPORT_RM_SOURCE_FALLBACK_COLUMNS
-    return IMPORT_COMMON_SOURCE_FALLBACK_COLUMNS
-
-
-def import_meta_get(key):
-    row = ImportDashboardMeta.query.filter_by(meta_key=key).first()
-    if not row:
-        return None
-    try:
-        return json.loads(row.value_json or 'null')
-    except (TypeError, json.JSONDecodeError):
-        return None
-
-def import_meta_set(key, value):
-    row = ImportDashboardMeta.query.filter_by(meta_key=key).first()
-    if not row:
-        row = ImportDashboardMeta(meta_key=key)
-        db.session.add(row)
-    row.value_json = json.dumps(value, ensure_ascii=False)
-    row.updated_at = datetime.utcnow()
-    db.session.commit()
-
-def google_csv_url(spreadsheet_id, gid='0'):
-    return f'https://docs.google.com/spreadsheets/d/{spreadsheet_id}/gviz/tq?tqx=out:csv&gid={gid}'
-
-def read_public_sheet_csv(spreadsheet_id, gid='0', nrows=None):
-    return pd.read_csv(google_csv_url(spreadsheet_id, gid), header=None, dtype=str, keep_default_na=False, nrows=nrows)
-
-def import_clean_header(value, fallback):
-    label = (clean(value) or '').replace('\r', '').replace('\n', ' / ')
-    return label or fallback
-
-def import_header_key(value):
-    return re.sub(r'[^a-z0-9]+', '', (clean(value) or '').lower())
-
-
-def import_blankish(value):
-    """True for empty/placeholder values from sheets.
-
-    Google Sheet trackers often use '-' as a visual placeholder. Treating it as
-    real data caused old cached Import rows to keep '-' in YUPI PO / Req Dlv Date
-    and block fresh values from the source sheets during Copy Sheet.
-    """
-    raw = clean(value)
-    if raw is None:
-        return True
-    s = str(raw).strip()
-    return not s or s.lower() in ('nan', 'none', 'null', 'n/a', '#n/a') or s in ('-', '–', '—')
-
-
-def import_nonblank(value):
-    return '' if import_blankish(value) else str(clean(value)).strip()
-
-def import_layout_columns(force=False):
-    """Return the fixed Import table layout from the reference sheet.
-
-    Earlier versions read the layout from Google Sheets on demand. That made the
-    Import page slower and also exposed columns that were hidden in the real
-    tracker. The dashboard now uses the exact visible-column layout from the
-    reference workbook and keeps metadata for formula, checkbox, hyperlink, and
-    status columns.
-    """
-    columns = []
-    for idx, col in enumerate(IMPORT_REFERENCE_VISIBLE_COLUMNS):
-        item = dict(col)
-        item['col_idx'] = idx
-        item['checkbox'] = bool(item.get('checkbox') or item.get('field') in IMPORT_CHECKBOX_FIELDS)
-        item['formula'] = bool(item.get('formula') or item.get('field') in IMPORT_FORMULA_FIELDS)
-        item['hyperlink'] = bool(item.get('hyperlink') or item.get('field') in IMPORT_HYPERLINK_FIELDS)
-        item['local'] = bool(item.get('local') or item.get('field') in IMPORT_DASHBOARD_LOCAL_FIELDS)
-        if item.get('field') == 'status':
-            item['options'] = IMPORT_STATUS_OPTIONS
-        columns.append(item)
-    return columns
-
-
-def import_all_mapping_columns(columns=None):
-    """Visible columns plus hidden source-only fields used for formulas/sync."""
-    base = list(columns or import_layout_columns())
-    seen = {c.get('field') for c in base}
-    for col in IMPORT_SOURCE_ONLY_COLUMNS:
-        if col.get('field') not in seen:
-            base.append(dict(col))
-            seen.add(col.get('field'))
-    return base
-
-def import_default_vendors_from_layout(force=False):
-    cache_key = ('import_default_vendors_from_layout',)
-    cached = None if force else runtime_cache_get(cache_key)
-    if cached is not None:
-        return cached
-    cached = None if force else import_meta_get('default_vendors')
-    if cached is not None:
-        runtime_cache_set(cache_key, cached, ttl_seconds=900)
-        return cached
-    try:
-        df = read_public_sheet_csv(IMPORT_LAYOUT_SHEET_ID, IMPORT_LAYOUT_GID)
-    except Exception:
-        return []
-    vendors = set()
-    for row_idx in range(2, len(df)):
-        for col_idx in IMPORT_LAYOUT_VENDOR_COLUMNS:
-            if col_idx >= df.shape[1]:
-                continue
-            name = clean(df.iloc[row_idx, col_idx])
-            if not name or name.lower() in ('vendor', 'vendor name'):
-                continue
-            vendors.add(name)
-    vendors = sorted(vendors, key=lambda s: s.lower())
-    import_meta_set('default_vendors', vendors)
-    runtime_cache_set(cache_key, vendors, ttl_seconds=900)
-    return vendors
-
-def import_uploaded_vendor_names():
-    """Vendors explicitly uploaded from the Vendor Import template.
-
-    Do not fall back to the reference layout here. The Import source sheets are
-    very large, and using the reference/default vendor list makes Copy Sheet scan
-    too many rows.
-    """
-    rows = ImportVendor.query.order_by(ImportVendor.vendor_name.asc()).all()
-    return [r.vendor_name for r in rows if clean(r.vendor_name)]
-
-def import_existing_dashboard_vendor_names():
-    """Vendor names already present in the Import dashboard DB.
-
-    If Vendor Import has been cleared/empty, Copy Sheet can still repair the
-    currently displayed Import rows by scanning source sheets only for these
-    vendors, instead of scanning all source data.
-    """
-    vendors = set()
-    for row in ImportDashboardRow.query.filter(
-        ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
-    ).all():
-        v = clean(row.vendor_name)
-        if v:
-            vendors.add(v)
-        try:
-            data = json.loads(row.data_json or '{}')
-        except (TypeError, json.JSONDecodeError):
-            data = {}
-        for field in ('vendor_name', 'vendor'):
-            v = clean(data.get(field))
-            if v:
-                vendors.add(v)
-    return sorted(vendors, key=lambda s: s.lower())
-
-
-def import_vendor_filter_names():
-    uploaded = import_uploaded_vendor_names()
-    if uploaded:
-        return uploaded, 'vendor_import'
-    existing = import_existing_dashboard_vendor_names()
-    if existing:
-        return existing, 'existing_import_rows'
-    return [], 'none'
-
-
-def import_vendor_names(force_default=False):
-    # Keep old callers/templates useful, but sync/import code should call
-    # import_uploaded_vendor_names() so it only imports the user's vendor list.
-    uploaded = import_uploaded_vendor_names()
-    return uploaded or import_default_vendors_from_layout(force=force_default)
-
-def import_detect_data_start(df):
-    for idx in range(min(len(df), 12)):
-        item = clean(df.iloc[idx, 7]) if df.shape[1] > 7 else ''
-        vendor = clean(df.iloc[idx, 16]) if df.shape[1] > 16 else ''
-        qty = clean(df.iloc[idx, 12]) if df.shape[1] > 12 else ''
-        if item and item.lower() != 'item name' and (vendor or qty):
-            return idx
-    return 3
-
-def import_detect_header_row(df):
-    """Find the real header row by matching source header names, not positions.
-
-    The two vendor source sheets have slightly different column locations. The
-    correct row is the one that contains the highest number of known Import
-    headers such as PO YUPI, Req. Dlv Date, Item name, Vendor Name, etc.
-
-    Priority 1 (new): hard-check for poyupi + reqdlvdate on the same row.
-    These two tokens are unique to the real header row and are never present
-    together on the section-label rows (e.g. 'ORDER INFO FELIX',
-    'PO&DELIVERY & PURCHASE PRICE') that appear in rows 1-3 of the RM sheet.
-    Without this check the score-based loop could return row index 2 (section
-    label) for the RM sheet, causing all column-letter fallbacks to point one
-    row too early and leaving YUPI PO / Req Dlv Date blank.
-
-    Priority 2: original score-based scan (kept as fallback).
-    """
-    if df is None or getattr(df, 'empty', True):
-        return 0
-
-    # Priority 1: find the first row that has BOTH poyupi AND reqdlvdate.
-    for idx in range(min(len(df), 12)):
-        try:
-            labels = [import_header_key(v) for v in df.iloc[idx].tolist()]
-        except Exception:
-            continue
-        if 'poyupi' in labels and 'reqdlvdate' in labels:
-            return idx
-        # Secondary hard-check: itemname + ordqty + vendorname together
-        if 'itemname' in labels and 'ordqty' in labels and 'vendorname' in labels:
-            return idx
-
-    # Priority 2: score-based fallback
-    alias_keys = set()
-    for values in IMPORT_COLUMN_ALIASES.values():
-        alias_keys.update(import_header_key(v) for v in values if v)
-    alias_keys.update(import_header_key(c.get('label')) for c in import_all_mapping_columns(import_layout_columns()))
-    alias_keys.update(import_header_key(c.get('field')) for c in import_all_mapping_columns(import_layout_columns()))
-    alias_keys.discard('')
-
-    best_idx = None
-    best_score = -1
-    max_scan = min(len(df), 60)
-    for idx in range(max_scan):
-        labels = [import_header_key(v) for v in df.iloc[idx].tolist()]
-        score = sum(1 for label in labels if label in alias_keys)
-        # Strong bonus for the columns that are currently critical for Import.
-        if 'poyupi' in labels:
-            score += 4
-        if 'reqdlvdate' in labels:
-            score += 4
-        if 'itemname' in labels:
-            score += 3
-        if 'vendorname' in labels or 'vendor' in labels:
-            score += 3
-        if 'posementara' in labels:
-            score += 2
-        if score > best_score:
-            best_idx = idx
-            best_score = score
-
-    if best_idx is not None and best_score >= 4:
-        return best_idx
-    return max(import_detect_data_start(df) - 1, 0)
-
-
-def import_source_header_score(df):
-    """Score whether a small sheet preview looks like a Yupi source order list.
-
-    This protects Copy Sheet from reading a helper/chart tab when gid=0 does
-    not point to the actual RM/Consumable order-list tab. The real source tabs
-    contain PO YUPI, Req. Dlv Date, Item name, Vendor Name, Ord. Q'ty, etc.
-    """
-    if df is None or getattr(df, 'empty', True):
-        return -1
-    idx = import_detect_header_row(df)
-    try:
-        labels = [import_header_key(v) for v in df.iloc[idx].tolist()]
-    except Exception:
-        labels = []
-    weights = {
-        'poyupi': 10,
-        'reqdlvdate': 10,
-        'itemyupi': 6,
-        'itemname': 6,
-        'vendorname': 6,
-        'posementara': 4,
-        'ordqty': 4,
-        'unitprice': 4,
-        'purchaseprice': 4,
-        'purchaseamount': 4,
-        'noso': 4,
-        'podatebyemail': 3,
-    }
-    return sum(weights.get(label, 0) for label in labels)
-
-
-def import_source_candidate_titles(source):
-    """Return possible tab titles, with the configured gid first."""
-    titles = []
-    try:
-        preferred = import_sheet_title_for_gid(source['spreadsheet_id'], source.get('gid') or '0')
-        if preferred:
-            titles.append(preferred)
-    except Exception:
-        pass
-    try:
-        metadata = google_sheets_metadata(source['spreadsheet_id'])
-        for sheet in metadata.get('sheets', []):
-            props = sheet.get('properties', {})
-            title = props.get('title')
-            if title and title not in titles:
-                titles.append(title)
-    except Exception:
-        pass
-    return titles
-
-
-def import_source_header_preview(source, force=False):
-    """Find the real source order-list tab and return (title, preview_df)."""
-    cache_key = ('import_source_header_preview_v2', source.get('spreadsheet_id'), source.get('gid'))
-    if not force:
-        cached = runtime_cache_get(cache_key)
-        if cached is not None:
-            title, values = cached
-            return title, pd.DataFrame(values).fillna('') if values else pd.DataFrame()
-
-    best_title = None
-    best_values = []
-    best_score = -1
-    for title in import_source_candidate_titles(source):
-        try:
-            values = google_sheets_values_get(
-                source['spreadsheet_id'],
-                f"'{title}'!A1:ZZ60",
-                value_render_option='FORMATTED_VALUE',
-            ).get('values', [])
-            df = pd.DataFrame(values).fillna('') if values else pd.DataFrame()
-            score = import_source_header_score(df)
-            if score > best_score:
-                best_title = title
-                best_values = values
-                best_score = score
-            if score >= 35:
-                break
-        except Exception:
-            continue
-
-    if best_title:
-        runtime_cache_set(cache_key, (best_title, best_values), ttl_seconds=3600)
-        return best_title, pd.DataFrame(best_values).fillna('') if best_values else pd.DataFrame()
-
-    title = import_sheet_title_for_gid(source['spreadsheet_id'], source.get('gid') or '0')
-    return title, pd.DataFrame()
-
-def import_source_column_map(df, columns):
-    header_idx = import_detect_header_row(df)
-    header_values = list(df.iloc[header_idx]) if len(df) else []
-    source_fallbacks = import_source_fallback_columns(df, header_idx)
-    by_key = {}
-    for idx, raw in enumerate(header_values):
-        key = import_header_key(raw)
-        if key and key not in by_key:
-            by_key[key] = idx
-
-    source_map = {}
-    for col in columns:
-        field = col.get('field')
-        # Dashboard-local fields, such as PO Send Date, must never be read
-        # from the vendor source sheets. They are user inputs stored locally
-        # and synced only to the Import tracker sheet.
-        if field in IMPORT_DASHBOARD_LOCAL_FIELDS:
-            continue
-
-        # Prefer semantic header names first. Source 1 and Source 2 do not have
-        # identical column letters, but the headers are the same.
-        keys = []
-        keys.extend(IMPORT_COLUMN_ALIASES.get(field, []))
-        keys.extend([import_header_key(col.get('label')), import_header_key(field)])
-        seen_keys = []
-        for key in keys:
-            if key and key not in seen_keys:
-                seen_keys.append(key)
-        source_idx = next((by_key[key] for key in seen_keys if key in by_key), None)
-
-        # Only use fixed letter fallback if the header cannot be found. This
-        # keeps old/local sheets usable, but the normal path remains header-based.
-        # Fallback must use the SOURCE sheet column, not the Import dashboard
-        # layout column. The dashboard layout places YUPI PO in E and Req Dlv Date
-        # in G, while the RM source sheet has PO YUPI in F and Req. Dlv Date in K.
-        # Using layout letters here is what kept these fields blank/wrong when
-        # header detection could not be used.
-        fallback_sheet_col = source_fallbacks.get(field) or col.get('source_sheet_col')
-        if not fallback_sheet_col and col.get('source_only'):
-            fallback_sheet_col = source_fallbacks.get(field) or col.get('sheet_col')
-        if source_idx is None and fallback_sheet_col:
-            try:
-                source_idx = column_index_from_letter(str(fallback_sheet_col)) - 1
-            except Exception:
-                source_idx = None
-        if source_idx is not None:
-            source_map[field] = source_idx
-
-    # Hard aliases for the columns reported in the screenshot. If one of the
-    # duplicate fields is detected, mirror it to the other field so formulas can
-    # use whichever dashboard column asks for it.
-    if 'po_yupi' in source_map and 'yupi_po' not in source_map:
-        source_map['yupi_po'] = source_map['po_yupi']
-    if 'yupi_po' in source_map and 'po_yupi' not in source_map:
-        source_map['po_yupi'] = source_map['yupi_po']
-    if 'source_req_dlv_date' in source_map and 'req_dlv_date' not in source_map:
-        source_map['req_dlv_date'] = source_map['source_req_dlv_date']
-    if 'req_dlv_date' in source_map and 'source_req_dlv_date' not in source_map:
-        source_map['source_req_dlv_date'] = source_map['req_dlv_date']
-    return source_map
-
-def import_row_vendor_candidates(values, source_map, columns):
-    candidates = []
-    for field in ('vendor_name', 'vendor'):
-        col_idx = source_map.get(field)
-        if col_idx is not None and col_idx < len(values):
-            candidates.append(values[col_idx])
-    for col_idx in IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS:
-        if col_idx < len(values):
-            candidates.append(values[col_idx])
-    return [clean(v) for v in candidates if clean(v)]
-
-def import_source_rows_fast(source, columns, vendor_set):
-    """Read only needed Import columns from one source sheet.
-
-    The old code used pd.read_csv() on the whole Google Sheet, then filtered by
-    vendor in Python. The source sheets are large, so that made the Import page
-    and Copy Sheet feel stuck. This version uses Google Sheets batchGet to fetch
-    only the columns that the dashboard actually displays/syncs plus the vendor
-    columns, then filters locally.
-
-    If the service account is not configured, we fall back to the public CSV
-    reader so the feature still works, but the fast path should be used in
-    production because sync-back already requires the service account anyway.
-
-    CRITICAL FIX: Google Sheets API may return fewer valueRanges than requested
-    when a column is entirely empty or hidden. The old zip(needed_col_indexes,
-    value_ranges) silently misaligned columns in that case — e.g. PO YUPI data
-    ended up in the wrong field. We now validate the count before zipping and
-    raise so the reliable CSV fallback is used instead.
-    """
-    mapping_columns = import_all_mapping_columns(columns)
-
-    try:
-        sheet_title, header_df = import_source_header_preview(source, force=True)
-        if header_df.empty:
-            return []
-        source_map = import_source_column_map(header_df, mapping_columns)
-        header_idx = import_detect_header_row(header_df)
-        data_start_row = header_idx + 2  # 1-based row number after the header
-
-        # Safety net for the uploaded RM/SP source formats. If header parsing
-        # returns a weak map because the tab/header is unusual, force the known
-        # source letters so core columns do not come back blank.
-        source_fallbacks = import_source_fallback_columns(header_df, header_idx)
-        for field in ('po_yupi', 'yupi_po', 'source_req_dlv_date', 'req_dlv_date', 'po_date_by_email', 'site', 'po_sementara', 'item_yupi', 'item_name', 'spec', 'remark_yupi', 'reschedule', 'ord_qty', 'unit', 'unit_price', 'amount', 'vendor_name', 'vendor', 'purchase_price', 'currency', 'purchase_amount', 'so'):
-            if field not in source_map and source_fallbacks.get(field):
-                source_map[field] = column_index_from_letter(source_fallbacks[field]) - 1
-
-        needed_col_indexes = set(source_map.values()) | set(IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS)
-        if not needed_col_indexes:
-            return []
-        needed_col_indexes = sorted(i for i in needed_col_indexes if i is not None and i >= 0)
-
-        ranges = []
-        for col_idx in needed_col_indexes:
-            letter = column_letter_from_index(col_idx + 1)
-            ranges.append(f"'{sheet_title}'!{letter}{data_start_row}:{letter}")
-
-        batch = google_sheets_values_batch_get(
-            source['spreadsheet_id'],
-            ranges,
-            value_render_option='FORMATTED_VALUE',
-            major_dimension='COLUMNS',
-        )
-        value_ranges = batch.get('valueRanges', [])
-
-        # CRITICAL FIX: validate count before zip. Google Sheets batchGet
-        # omits valueRanges for fully-empty or hidden columns, which causes
-        # zip(needed_col_indexes, value_ranges) to silently map the wrong
-        # data to each column index. Raise here to trigger the CSV fallback.
-        if len(value_ranges) != len(needed_col_indexes):
-            raise ValueError(
-                f"batchGet returned {len(value_ranges)} valueRanges but "
-                f"{len(needed_col_indexes)} were requested for '{sheet_title}'. "
-                f"Falling back to CSV reader to avoid column misalignment."
-            )
-
-        columns_by_idx = {}
-        max_len = 0
-        for col_idx, value_range in zip(needed_col_indexes, value_ranges):
-            values = value_range.get('values') or []
-            col_values = values[0] if values and isinstance(values[0], list) else []
-            col_values = [clean(v) or '' for v in col_values]
-            columns_by_idx[col_idx] = col_values
-            max_len = max(max_len, len(col_values))
-
-        rows = []
-        for offset in range(max_len):
-            values_by_idx = {col_idx: (vals[offset] if offset < len(vals) else '') for col_idx, vals in columns_by_idx.items()}
-            vendor_candidates = []
-            for field in ('vendor_name', 'vendor'):
-                col_idx = source_map.get(field)
-                if col_idx is not None:
-                    vendor_candidates.append(values_by_idx.get(col_idx, ''))
-            for col_idx in IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS:
-                vendor_candidates.append(values_by_idx.get(col_idx, ''))
-            vendor_candidates = [clean(v) for v in vendor_candidates if clean(v)]
-            row_vendor = next((v for v in vendor_candidates if v), '')
-            if vendor_set and not any(v.strip().lower() in vendor_set for v in vendor_candidates if v):
-                continue
-
-            row = {
-                '_row_key': f"{source['key']}:{data_start_row + offset}",
-                '_source_key': source['key'],
-                '_source_label': source['label'],
-                '_spreadsheet_id': source['spreadsheet_id'],
-                '_gid': source['gid'],
-                '_sheet_row': data_start_row + offset,
-                '_vendor_name': row_vendor,
-            }
-            for col in mapping_columns:
-                col_idx = source_map.get(col['field'])
-                row[col['field']] = values_by_idx.get(col_idx, '') if col_idx is not None else ''
-            if not any(row.get(col['field']) for col in mapping_columns):
-                continue
-            rows.append(row)
-        return rows
-    except Exception as exc:
-        # Log the reason so it is visible in PythonAnywhere error log.
-        print(f"[import_source_rows_fast] fast path failed for "
-              f"{source.get('key')}: {exc} — falling back to CSV reader")
-        # Fallback for local/dev environments without Google service account,
-        # and for production when batchGet returns unexpected column counts.
-        df = read_public_sheet_csv(source['spreadsheet_id'], source['gid'])
-        mapping_columns = import_all_mapping_columns(columns)
-        source_map = import_source_column_map(df, mapping_columns)
-        start_idx = import_detect_header_row(df) + 1
-        rows = []
-        for idx in range(start_idx, len(df)):
-            values = [clean(v) or '' for v in df.iloc[idx].tolist()]
-            vendor_candidates = import_row_vendor_candidates(values, source_map, columns)
-            row_vendor = next((v for v in vendor_candidates if v), '')
-            if vendor_set and not any(v.strip().lower() in vendor_set for v in vendor_candidates if v):
-                continue
-            row = {
-                '_row_key': f"{source['key']}:{idx + 1}",
-                '_source_key': source['key'],
-                '_source_label': source['label'],
-                '_spreadsheet_id': source['spreadsheet_id'],
-                '_gid': source['gid'],
-                '_sheet_row': idx + 1,
-                '_vendor_name': row_vendor,
-            }
-            for col in mapping_columns:
-                col_idx = source_map.get(col['field'])
-                row[col['field']] = values[col_idx] if col_idx is not None and col_idx < len(values) else ''
-            if not any(row.get(col['field']) for col in mapping_columns):
-                continue
-            rows.append(row)
-        return rows
-
-
-def import_sheet_rows(force_metadata=False):
-    columns = import_layout_columns(force=force_metadata)
-    filter_vendors, vendor_source = import_vendor_filter_names()
-    vendor_set = {v.strip().lower() for v in filter_vendors if v and v.strip()}
-
-    # Critical performance guard: never scan huge source sheets without a vendor
-    # filter. Prefer uploaded Vendor Import. If that list is empty but dashboard
-    # rows already exist, use those displayed vendors only, so Copy Sheet can
-    # repair stale blank/placeholder fields without reading every source row.
-    if not vendor_set:
-        return columns, []
-
-    rows = []
-    for source in IMPORT_SOURCE_SHEETS:
-        rows.extend(import_source_rows_fast(source, columns, vendor_set))
-    import_meta_set('last_import_vendor_filter', {'source': vendor_source, 'count': len(vendor_set)})
-    return columns, rows
-
-def import_truthy_checkbox_value(value):
-    s = (clean(value) or '').strip().lower()
-    return s in ('true', '1', 'yes', 'ya', 'y', 'checked', 'done', 'ok', '✓', '✅')
-
-def import_normalize_checkbox(value):
-    raw = clean(value)
-    if not raw:
-        return ''
-    return 'TRUE' if import_truthy_checkbox_value(raw) else 'FALSE'
-
-def import_date_from_value(value):
-    """Parse a value into a ``date`` object, accepting the formats the live
-    Import tracker sheet actually uses.
-
-    The sheet at IMPORT_LAYOUT_SHEET_ID stores dates in several human-friendly
-    formats that don't include a year, e.g.:
-
-      - ``2 Jun``  (``%d %b``)
-      - ``21 Sep`` (``%d %b``)
-      - ``25-May`` (``%d-%b``)
-      - ``2 June`` (``%d %B``)
-      - ``25-May`` (``%d-%B`` if the locale expands ``B`` to long month names)
-
-    These show up as plain text in the dashboard because the previous parser
-    only tried ``%d/%m/%Y``, ``%d-%m-%Y``, ``%Y-%m-%d``, ``%Y/%m/%d``,
-    ``%m/%d/%Y``, and Google Sheets serial numbers. ``pd.to_datetime`` also
-    refuses strings without a year. We now try the year-less formats
-    explicitly and assume the current year — or next year, if the resulting
-    date has already passed (so a sheet edited in December that says ``2 Jun``
-    is read as next June, not last June).
-    """
-    raw = clean(value)
-    if not raw:
-        return None
-    s = str(raw).strip()
-    # Google Sheets/XLSX serial dates. Accept only the normal modern date range
-    # so IDs like PO numbers are not misread as dates.
-    if re.match(r'^\d+(\.0+)?$', s):
-        try:
-            serial = float(s)
-            if 25000 <= serial <= 60000:
-                return (datetime(1899, 12, 30) + timedelta(days=serial)).date()
-        except (TypeError, ValueError, OverflowError):
-            pass
-    # Full date formats that include the year.
-    for fmt in ('%d/%m/%Y', '%d-%m-%Y', '%Y-%m-%d', '%Y/%m/%d', '%m/%d/%Y', '%d/%m/%y', '%d-%b-%Y', '%d-%b-%y', '%d %b %Y', '%d %b %y'):
-        try:
-            return datetime.strptime(s, fmt).date()
-        except ValueError:
-            pass
-    # Year-less formats like "2 Jun", "21 Sep", "25-May", "2 June".
-    # Assume current year; if that date has already passed, use next year
-    # (so a December-edited sheet saying "2 Jun" still means a future June).
-    yearless_formats = ('%d %b', '%d-%b', '%d %B', '%d-%B', '%b %d', '%b-%d', '%B %d', '%B-%d')
-    today = date.today()
-    for fmt in yearless_formats:
-        try:
-            d = datetime.strptime(s, fmt).date()
-        except ValueError:
-            continue
-        # strptime without %Y defaults to 1900 — replace with current year.
-        try:
-            d = d.replace(year=today.year)
-        except ValueError:
-            # Feb 29 in a non-leap year — skip to next year.
-            d = d.replace(year=today.year + 1)
-        if d < today:
-            # Date already passed this year → assume next year.
-            try:
-                d = d.replace(year=today.year + 1)
-            except ValueError:
-                # Same Feb 29 edge case.
-                d = d.replace(year=today.year + 2)
-        return d
-    return parse_date(raw)
-
-def import_date_output(value, fallback=None):
-    raw = clean(value)
-    if raw:
-        return str(raw)
-    if fallback:
-        return fallback.isoformat()
-    return ''
-
-def import_float_value(value):
-    raw = clean(value)
-    if not raw:
-        return None
-    s = str(raw).replace(',', '').replace('Rp', '').replace('IDR', '').strip()
-    try:
-        return float(s)
-    except ValueError:
-        return None
-
-def import_format_number(value):
-    if value is None:
-        return ''
-    try:
-        f = float(value)
-    except (TypeError, ValueError):
-        return str(value)
-    if abs(f - round(f)) < 0.000001:
-        return str(int(round(f)))
-    return f'{f:.2f}'.rstrip('0').rstrip('.')
-
-def apply_import_formula_columns(row):
-    """Apply spreadsheet-equivalent formulas to one Import dashboard row."""
-    if not isinstance(row, dict):
-        return row
-
-    # Checklist columns match DA:DH from the reference sheet.
-    for field in IMPORT_CHECKBOX_FIELDS:
-        if field in row:
-            row[field] = import_normalize_checkbox(row.get(field))
-
-    # Status rule:
-    # - New import item with no dashboard PO Send Date stays NEW.
-    # - Once dashboard PO Send Date is filled, the same cell becomes the normal dropdown.
-    #   If status was still blank/NEW, default it to ON PROCESS.
-    has_business_data = any(clean(row.get(f)) for f in ('po_yupi', 'yupi_po', 'po_sementara', 'item_name', 'vendor_name', 'vendor', 'so'))
-
-    # PO Send Date is a separate dashboard-local field filled by the user.
-    # A previous build accidentally imported source column C into po_send_date.
-    # Treat that legacy value as PO DATE (By Email), not as user input, unless
-    # the user has explicitly edited PO Send Date in the dashboard.
-    po_send_date_raw = clean(row.get('po_send_date'))
-    po_date_email = clean(row.get('po_date_by_email'))
-    po_send_manual = clean(row.get('_po_send_date_manual')) == '1'
-    if po_send_date_raw and not po_send_manual:
-        if not po_date_email:
-            row['po_date_by_email'] = po_send_date_raw
-            po_date_email = po_send_date_raw
-        if clean(row.get('po_date_by_email')) == po_send_date_raw:
-            row['po_send_date'] = ''
-            po_send_date_raw = ''
-    po_send_date = po_send_date_raw
-    status = (clean(row.get('status')) or '').upper()
-    if has_business_data and not po_send_date:
-        status = 'NEW'
-    elif has_business_data and (not status or status == 'NEW'):
-        status = 'ON PROCESS'
-    if status:
-        status = next((opt for opt in IMPORT_STATUS_OPTIONS if opt == status), status)
-        row['status'] = status
-
-    # Formula/matching columns from the reference sheet.
-    row['site'] = import_nonblank(row.get('site'))
-    po_yupi = import_nonblank(row.get('po_yupi')) or import_nonblank(row.get('yupi_po'))
-    row['po_yupi'] = po_yupi
-    row['yupi_po'] = po_yupi
-    row['vendor'] = import_nonblank(row.get('vendor')) or import_nonblank(row.get('vendor_name'))
-
-    # ── Date normalization ────────────────────────────────────────────────
-    # The source sheet stores dates in human-friendly formats like "2 Jun",
-    # "21 Sep", "25-May" (without year). Keep the raw sheet text in
-    # ``source_req_dlv_date`` for traceability, but normalize the displayed
-    # ``req_dlv_date`` to ISO ``YYYY-MM-DD`` so the dashboard treats it as a
-    # real date (correct sorting, correct days_left, correct date input
-    # prefill when the user clicks the cell to edit). Same treatment for
-    # ``po_date_by_email``, ``etd``, ``eta``, ``reschedule`` — every date
-    # column that may have come from the sheet as a year-less text string.
-    #
-    # CRITICAL: this whole block is wrapped in try/except because
-    # ``apply_import_formula_columns`` is called for EVERY row on EVERY page
-    # load. If any date value trips the parser, the whole /api/import/data
-    # endpoint would 500 and the table would appear empty. We never want a
-    # date formatting bug to take the whole page down — fall back to the raw
-    # text and let the user see what's in the cell.
-    try:
-        req_raw = import_nonblank(row.get('source_req_dlv_date')) or import_nonblank(row.get('req_dlv_date'))
-        row['source_req_dlv_date'] = req_raw
-        if req_raw:
-            req_parsed = import_date_from_value(req_raw)
-            if req_parsed:
-                row['req_dlv_date'] = req_parsed.isoformat()
-
-        for _date_field in ('po_date_by_email', 'etd', 'eta', 'reschedule'):
-            _raw = import_nonblank(row.get(_date_field))
-            if not _raw:
-                continue
-            _parsed = import_date_from_value(_raw)
-            if _parsed:
-                row[_date_field] = _parsed.isoformat()
-            # If parsing failed, leave the original text in place so the user
-            # can still see what was in the sheet and correct it manually.
-    except Exception:
-        # Never let date normalization crash the whole row render. The raw
-        # values are already in `row` from the sheet/DB; just keep them.
-        pass
-
-    etd_date = import_date_from_value(row.get('etd'))
-    eta_date = import_date_from_value(row.get('eta'))
-
-    req_date = req_parsed
-    status_upper = (clean(row.get('status')) or '').upper()
-    if not has_business_data:
-        row['days_left'] = ''
-    elif status_upper == 'DELIVERED':
-        row['days_left'] = '✅'
-    elif status_upper == 'CANCELED':
-        row['days_left'] = '❌'
-    elif req_date:
-        row['days_left'] = str((req_date - date.today()).days)
-    else:
-        row['days_left'] = ''
-
-    # Formula J: Arrival Check.
-    if row.get('days_left') == '✅':
-        row['arrival_check'] = '⚪'
-    elif not eta_date or not req_date:
-        row['arrival_check'] = ''
-    elif eta_date <= req_date:
-        row['arrival_check'] = '🟢 On Schedule'
-    else:
-        row['arrival_check'] = f'🔴 Delay ({(eta_date - req_date).days}D)'
-
-    # Formula AJ: purchase amount = purchase price x order quantity.
-    price = import_float_value(row.get('purchase_price'))
-    qty = import_float_value(row.get('ord_qty'))
-    if price is not None and qty is not None:
-        row['purchase_amount'] = import_format_number(price * qty)
-
-    # Formula CU: lead time days = ETA - ETD.
-    if etd_date and eta_date:
-        row['lt_days'] = str((eta_date - etd_date).days)
-    else:
-        row['lt_days'] = ''
-
-    return row
-
-def import_row_payload(row, columns):
-    payload = {
-        col['field']: '' if row.get(col['field']) is None else str(row.get(col['field']))
-        for col in import_all_mapping_columns(columns)
-    }
-    return apply_import_formula_columns(payload)
-
-def import_row_identity_detail_fingerprint(row):
-    """Stable fingerprint of an item line, independent of read order.
-
-    Used only when Item Yupi is blank (PO multi-item tanpa kode item per baris).
-    Built from fields that describe the specific item line — item name, spec,
-    quantity, unit price — so two different item lines under the same PO keep
-    different identities even if the source sheet returns rows in a different
-    order on a later Copy Sheet run. Falling back to processing order (instead
-    of this fingerprint) is what previously caused rows to swap data between
-    runs when the source sheet's row order shifted.
-    """
-    parts = [
-        import_nonblank(row.get('item_name')),
-        import_nonblank(row.get('spec')),
-        import_nonblank(row.get('ord_qty')),
-        import_nonblank(row.get('unit_price')),
-        import_nonblank(row.get('unit')),
-    ]
-    fingerprint = '|'.join((p or '').strip().upper() for p in parts)
-    return fingerprint if any(parts) else None
-
-
-def import_row_identity_payload(row):
-    """Stable Import identity for Copy Sheet.
-
-    Identity hierarchy (PO YUPI adalah nomor final, PO Sementara hanya sementara):
-      Tier 1 — PO YUPI + Item Yupi   → uid_primary  (dipakai setelah PO YUPI terisi)
-      Tier 2 — PO Sementara + Item Yupi → uid_secondary (dipakai sebelum PO YUPI ada)
-
-    Kedua uid disimpan supaya saat PO Sementara digantikan PO YUPI, row yang sama
-    bisa ditemukan dan di-update alih-alih membuat row duplikat baru.
-
-    Saat Item Yupi kosong (PO multi-item tanpa kode item), pakai fingerprint detail
-    item (nama, spec, qty, harga) sebagai pembeda antar baris dalam PO yang sama,
-    bukan urutan baca baris. Ini mencegah baris dashboard "tertukar" data antar
-    Copy Sheet run ketika source sheet mengembalikan urutan baris yang berbeda.
-    """
-    po_yupi = (import_nonblank(row.get('po_yupi')) or
-               import_nonblank(row.get('yupi_po')) or '').strip().upper()
-    item_yupi = (import_nonblank(row.get('item_yupi')) or '').strip().upper()
-    po_sementara = (import_nonblank(row.get('po_sementara')) or '').strip().upper()
-    detail_fp = import_row_identity_detail_fingerprint(row)
-
-    if po_yupi and item_yupi:
-        return {'po_yupi': po_yupi, 'item_yupi': item_yupi}
-    if po_yupi:
-        return {'po_yupi': po_yupi, 'item_yupi': '(none)', 'detail': detail_fp or '(blank)'}
-    if po_sementara and item_yupi:
-        return {'po_sementara': po_sementara, 'item_yupi': item_yupi}
-    if po_sementara:
-        return {'po_sementara': po_sementara, 'item_yupi': '(none)', 'detail': detail_fp or '(blank)'}
-    # Last resort: source + sheet row (tidak ideal tapi mencegah collision antar row kosong)
-    return {
-        'source': clean(row.get('_source_key')) or '',
-        'sheet_row': str(row.get('_sheet_row') or ''),
+    if (currentNone) {
+      setDraftSelected([val]);
+      setDraftNone(false);
+      return;
     }
 
-
-def import_row_identity_secondary(row):
-    """Return the po_sementara-based fallback key for a row, or None.
-
-    Digunakan sebagai secondary lookup saat row di DB dibuat sebelum PO YUPI tersedia.
-    Saat Copy Sheet menemukan row baru dengan PO YUPI, ia bisa match ke row lama
-    menggunakan PO Sementara + Item Yupi dari data yang tersimpan.
-    """
-    po_sementara = (import_nonblank(row.get('po_sementara')) or '').strip().upper()
-    item_yupi = (import_nonblank(row.get('item_yupi')) or '').strip().upper()
-    if not po_sementara:
-        return None
-    return {
-        'po_sementara': po_sementara,
-        'item_yupi': item_yupi or '(none)',
+    if (currentSelected.includes(val)) {
+      const next = currentSelected.filter(x => x !== val);
+      if (next.length === 0) {
+        setDraftSelected([]);
+        setDraftNone(true);
+        return;
+      }
+      setDraftSelected(next);
+    } else {
+      const next = [...currentSelected, val];
+      const normalized = next.length === safeOptions.length ? [] : next;
+      setDraftSelected(normalized);
+      setDraftNone(false);
     }
-
-
-def _identity_to_uid(payload):
-    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
-    return hashlib.sha1(raw.encode('utf-8')).hexdigest()
-
-
-def import_row_source_uid(row, columns):
-    """Return the canonical (primary) source_uid for a row."""
-    return _identity_to_uid(import_row_identity_payload(row))
-
-
-def import_row_secondary_uid(row):
-    """Return the secondary (po_sementara-based) uid, or None."""
-    sec = import_row_identity_secondary(row)
-    return _identity_to_uid(sec) if sec else None
-
-def merge_import_existing_payload(existing_payload, sheet_payload):
-    """Merge fresh source-sheet values with existing dashboard edits.
-
-    Upsert rules per field category:
-
-    SOURCE_MANAGED fields (po_yupi, item_yupi, po_sementara, req_dlv_date,
-    vendor_name, ord_qty, unit_price, amount, spec, …):
-      • Non-blank source value   → always wins (upserted from sheet)
-      • Blank/placeholder source → preserve existing DB value (do not overwrite
-        a filled field with emptiness just because the sheet row has a gap)
-
-    USER_LOCAL_ONLY fields (status, etd, eta, po_send_date, import_remarks,
-    checklist ticks, soft_copy_doc, incoterm, forwarder, bl_number, …):
-      • Once the row exists in DB, ALWAYS keep the DB value — even if blank.
-        The sheet must never overwrite user input, not even to "restore" a
-        value the user intentionally cleared. This is the root-cause fix for
-        "kolom yang diisi user harus dipertahankan terus meskipun copy sheet".
-      • For genuinely new rows (no existing DB payload), the sheet value is
-        used as the initial value.
-
-    Formula fields (days_left, arrival_check, purchase_amount, lt_days):
-      • Recomputed by apply_import_formula_columns() from the merged base values
-        so they are always consistent with the latest source + user data.
-    """
-    merged = dict(sheet_payload or {})
-    existing_payload = existing_payload or {}
-    row_exists_in_db = bool(existing_payload)
-
-    for field in IMPORT_LOCAL_EDIT_FIELDS:
-        old_value = existing_payload.get(field)
-        new_value = merged.get(field)
-
-        if field in IMPORT_USER_LOCAL_ONLY_FIELDS and row_exists_in_db:
-            # User-local-only fields: once the row exists in DB, NEVER let the
-            # sheet overwrite. This protects user edits (including intentional
-            # clears) from being clobbered by Copy Sheet or the 07:00 WIB
-            # auto-sync. The sheet value is only used for genuinely new rows.
-            merged[field] = old_value
-            continue
-
-        if field in IMPORT_SOURCE_MANAGED_FIELDS:
-            # Non-blank source value always wins — this is the upsert step.
-            # If the source sent a real value (not '-', not empty), write it through
-            # regardless of what was stored before.
-            if not import_blankish(new_value):
-                continue          # keep new_value already in merged
-            # Source is blank/missing: fall back to existing DB value so we
-            # never erase a previously filled field with an empty source cell.
-            if not import_blankish(old_value):
-                merged[field] = old_value
-            continue
-
-        # Other user-local fields: keep what the user typed/ticked if non-blank.
-        if not import_blankish(old_value):
-            merged[field] = old_value
-
-    return apply_import_formula_columns(merged)
-
-def import_dashboard_row_to_dict(row, columns):
-    """Return one ImportDashboardRow as the frontend table payload.
-
-    This function was accidentally dropped in the previous Import layout build,
-    while /api/import/data and /api/import/cell still call it. Without it, the
-    Import page returns HTTP 500 with: name 'import_dashboard_row_to_dict' is not
-    defined. Keep it close to the import helpers so both endpoints can reuse the
-    same serialization logic.
-    """
-    try:
-        data = json.loads(row.data_json or '{}')
-    except (TypeError, json.JSONDecodeError):
-        data = {}
-
-    data = apply_import_formula_columns(dict(data))
-    out = {}
-    for col in columns:
-        field = col.get('field')
-        out[field] = '' if data.get(field) is None else data.get(field, '')
-
-    out.update({
-        '_row_key': row.row_key,
-        '_source_key': row.source_key,
-        '_source_label': row.source_label,
-        '_source_uid': row.source_uid,
-        '_sheet_row': row.sheet_row,
-        '_vendor_name': row.vendor_name,
-        '_dashboard_id': row.id,
-        '_first_seen_at': row.first_seen_at.isoformat() if row.first_seen_at else '',
-        '_last_seen_at': row.last_seen_at.isoformat() if row.last_seen_at else '',
-        '_updated_at': row.updated_at.isoformat() if row.updated_at else '',
-    })
-    return out
-
-
-def import_layout_tracker_visible_rows(columns=None):
-    """Read all data rows from the live Import tracker sheet (IMPORT_LAYOUT_SHEET_ID).
-
-    This is now the SINGLE source of truth for Import dashboard rows. The sheet
-    at the URL provided by the user has an RM-style layout (PO YUPI at column E,
-    PO SEMENTARA at column D, Item Yupi at column F, etc.) — NOT the old tracker
-    layout that the previous sheet_col letters assumed. To stay robust against
-    future column reordering, we detect the actual header row by scanning for
-    `poyupi` + `reqdlvdate` + `posementara` labels (same logic used for source
-    sheets), then map every column by header text instead of hard-coded letters.
-
-    Behavioural notes:
-    - The header row may be on row 1, 3, or 4 depending on the sheet's banner
-      rows. We scan the first 12 rows for the strongest header match.
-    - PO YUPI is frequently a merged cell in these sheets — only the first row
-      of a PO has the value, the other item lines under the same PO have empty
-      PO YUPI cells. We forward-fill blank PO YUPI values from the most recent
-      non-blank value above (within the same sheet, top-to-bottom), AND we also
-      try to extract PO YUPI from PO SEMENTARA via the SVO[KI]?<num>-<line>
-      pattern as a secondary fallback. This is the root-cause fix for
-      "PO sementara SVOK410100326-04 seharusnya YUPI PO nya 410100326".
-    - Local/dashboard-only columns (status, days_left, po_send_date, etd, eta,
-      checklist ticks, import_remarks, soft_copy_doc, incoterm, forwarder, …)
-      are not present in the source sheet, so they stay blank in the payload —
-      the dashboard's user-local DB values for those fields are preserved by
-      the upsert merge logic in sync_import_sheet_to_dashboard().
-    """
-    columns = import_layout_columns() if columns is None else columns
-    sheet_title = import_layout_target_sheet_title()
-    # Read a generous range — A:DI covers every column the old tracker layout
-    # ever used, so even if the user adds columns later we still capture them.
-    resp = google_sheets_values_get(
-        IMPORT_LAYOUT_SHEET_ID,
-        f"'{sheet_title}'!A1:DI",
-        value_render_option='FORMATTED_VALUE',
-    )
-    values = resp.get('values') or []
-    if not values:
-        return []
-
-    # ── Step 1: detect the real header row. ────────────────────────────────
-    # The user's sheet has banner rows on top (row 1 has numbers, row 2 has a
-    # note, row 3 has a section title, row 4 has the real headers). Hard-coding
-    # row 4 would break if the user adds/removes banner rows. Instead we scan
-    # the first 12 rows and pick the one whose labels best match the known
-    # Import column aliases — same approach the source-sheet reader uses.
-    #
-    # Defensive: wrap in try/except so a malformed sheet (e.g. all-empty rows,
-    # a row with non-string cells) never crashes Copy Sheet. Fall back to row 0
-    # (the first row) if detection fails.
-    try:
-        alias_keys = set()
-        for vs in IMPORT_COLUMN_ALIASES.values():
-            alias_keys.update(import_header_key(v) for v in vs if v)
-        alias_keys.update(import_header_key(c.get('label')) for c in import_all_mapping_columns(columns))
-        alias_keys.update(import_header_key(c.get('field')) for c in import_all_mapping_columns(columns))
-        alias_keys.discard('')
-
-        critical_labels = ('poyupi', 'reqdlvdate', 'posementara', 'itemname', 'itemyupi')
-
-        best_idx = 0
-        best_score = -1
-        max_scan = min(len(values), 12)
-        for idx in range(max_scan):
-            labels = [import_header_key(v) for v in values[idx]]
-            score = sum(1 for label in labels if label in alias_keys)
-            # Strong bonus for the columns that are currently critical for Import.
-            for crit in critical_labels:
-                if crit in labels:
-                    score += 5
-            if score > best_score:
-                best_idx = idx
-                best_score = score
-
-        header_idx = best_idx if best_score >= 4 else 0
-    except Exception:
-        header_idx = 0
-    header = values[header_idx]
-
-    # ── Step 2: build a header-text → column-index map. ────────────────────
-    # We do NOT use the sheet_col letters from IMPORT_REFERENCE_VISIBLE_COLUMNS
-    # because those letters describe the OLD tracker layout, not the current
-    # sheet the user provided. Header-based mapping is robust to column
-    # reordering and is the only correct way to read this sheet.
-    by_header = {}
-    for idx, raw in enumerate(header):
-        key = import_header_key(raw)
-        if key and key not in by_header:
-            by_header[key] = idx
-
-    mapping_columns = import_all_mapping_columns(columns)
-
-    # Pre-compute the column index for each field once (not per row).
-    field_to_idx = {}
-    for col in mapping_columns:
-        field = col.get('field')
-        if not field:
-            continue
-        # Try every alias we know for this field, then the label, then the
-        # field name itself. First match wins.
-        keys = []
-        keys.extend(IMPORT_COLUMN_ALIASES.get(field, []))
-        keys.extend([import_header_key(col.get('label')), import_header_key(field)])
-        idx = next((by_header[k] for k in keys if k and k in by_header), None)
-        field_to_idx[field] = idx
-
-    # ── Step 3: read data rows. Skip blank rows and the header row. ────────
-    rows = []
-    last_po_yupi = ''  # for forward-fill of merged PO YUPI cells
-    last_po_sementara_prefix = ''  # track which PO the forward-fill came from
-
-    for row_offset, row_values in enumerate(values[header_idx + 1:], start=header_idx + 2):
-        payload = {
-            '_source_key': IMPORT_LAYOUT_SOURCE_KEY,
-            '_source_label': 'Import Tracker',
-            '_sheet_row': row_offset,
-        }
-        any_value = False
-        for field, idx in field_to_idx.items():
-            val = row_values[idx] if idx is not None and idx < len(row_values) else ''
-            payload[field] = val
-            if import_nonblank(val):
-                any_value = True
-
-        if not any_value:
-            # completely blank row — skip
-            continue
-
-        # ── Step 4: forward-fill PO YUPI for merged cells. ─────────────────
-        # The source sheet commonly merges the PO YUPI cell across all item
-        # lines of the same PO. Google Sheets API returns the value only for
-        # the top-left of the merge and empty strings for the other rows, so
-        # multi-item POs end up with blank PO YUPI in the dashboard. We fix
-        # this in two layers:
-        #   (a) If PO YUPI is blank but PO SEMENTARA starts with the same
-        #       SVO[KI]?<numprefix> as the row that gave us last_po_yupi,
-        #       carry last_po_yupi down. This is the merged-cell case.
-        #   (b) Otherwise, try to extract PO YUPI from PO SEMENTARA via the
-        #       SVO[KI]?<num>-<line> pattern. This handles cases where the
-        #       merge doesn't apply but PO YUPI was left blank in the sheet
-        #       while PO Sementara clearly contains the PO number.
-        po_yupi_now = import_nonblank(payload.get('po_yupi')) or import_nonblank(payload.get('yupi_po'))
-        po_sementara_now = import_nonblank(payload.get('po_sementara'))
-
-        if po_yupi_now:
-            last_po_yupi = po_yupi_now
-            # Remember the numeric prefix of the PO Sementara that this YUPI
-            # came from, so we only forward-fill into rows of the SAME PO.
-            last_po_sementara_prefix = _extract_po_yupi_from_po_sementara(po_sementara_now) or ''
-        else:
-            extracted = _extract_po_yupi_from_po_sementara(po_sementara_now)
-            if extracted:
-                # PO Sementara contains the PO YUPI — use it directly. This is
-                # the most reliable source because PO Sementara is always
-                # filled per line.
-                payload['po_yupi'] = extracted
-                payload['yupi_po'] = extracted
-                last_po_yupi = extracted
-                last_po_sementara_prefix = extracted
-            elif last_po_yupi:
-                # Same PO as the previous row (PO Sementara prefix matches) —
-                # carry the PO YUPI down to fill the merged-cell gap.
-                cur_prefix = _extract_po_yupi_from_po_sementara(po_sementara_now) or ''
-                if cur_prefix and cur_prefix == last_po_sementara_prefix:
-                    payload['po_yupi'] = last_po_yupi
-                    payload['yupi_po'] = last_po_yupi
-
-        # Keep po_yupi and yupi_po in sync (some callers check one, some the other)
-        py = import_nonblank(payload.get('po_yupi')) or import_nonblank(payload.get('yupi_po'))
-        if py:
-            payload['po_yupi'] = py
-            payload['yupi_po'] = py
-
-        # Tracker column C is the user's PO Send Date. Mark it as manual so the
-        # legacy safety in apply_import_formula_columns() does not move it to
-        # PO DATE (By Email). In the user's current sheet there is no separate
-        # PO Send Date column (column C is PO DATE By Email), so this rarely
-        # fires — but it's safe to keep for forward compatibility.
-        if not import_blankish(payload.get('po_send_date')):
-            payload['_po_send_date_manual'] = '1'
-
-        if any(import_nonblank(payload.get(f)) for f in ('po_send_date', 'status', 'po_yupi', 'yupi_po', 'po_sementara', 'item_yupi', 'item_name', 'vendor_name', 'vendor', 'so')):
-            rows.append(apply_import_formula_columns(payload))
-    return rows
-
-
-def _extract_po_yupi_from_po_sementara(po_sementara):
-    """Extract the PO YUPI number from a PO Sementara string.
-
-    PO Sementara format: ``SVO`` + optional site code (``K`` or ``I``) +
-    PO YUPI number + ``-`` + line number. Examples:
-      - ``SVOK410100326-04`` → ``410100326``
-      - ``SVOI4100301-05``   → ``4100301``
-      - ``SVOK410100279-01`` → ``410100279``
-
-    Returns the extracted PO YUPI as a string, or ``''`` if the input doesn't
-    match the expected pattern.
-    """
-    raw = clean(po_sementara)
-    if not raw:
-        return ''
-    s = str(raw).strip().upper()
-    # Match SVO + optional K/I + digits + dash + line number
-    m = re.match(r'^SVO[KI]?(\d+)-\d+$', s)
-    if m:
-        return m.group(1)
-    # Looser fallback: any digits between an alphabetic prefix and -<line>
-    m = re.match(r'^[A-Z]+(\d{5,})-\d+$', s)
-    if m:
-        return m.group(1)
-    return ''
-
-
-IMPORT_TRACKER_AUTHORITATIVE_FIELDS = {
-    # User-maintained fields in the Import tracker. If these exist in the
-    # tracker sheet, the dashboard should show them even if the local DB is blank.
-    'status', 'po_send_date', '_po_send_date_manual', 'etd', 'eta', 'import_remarks',
-    'incoterm', 'forwarder', 'bl_number', 'inv_no', 'non_ski',
-    'sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo',
-    'soft_copy_doc',
-}
-
-
-def merge_import_tracker_payload(existing_payload, tracker_payload):
-    """Merge values that already exist in the main Import tracker sheet.
-
-    Source RM/SP workbooks remain the source of truth for source-driven fields.
-    The tracker sheet is authoritative for dashboard/user-maintained fields.
-    For source-driven fields, use tracker values only to repair blanks/placeholders
-    in the dashboard DB.
-    """
-    merged = dict(existing_payload or {})
-    tracker_payload = tracker_payload or {}
-    for field, tracker_value in tracker_payload.items():
-        if field.startswith('_') and field != '_po_send_date_manual':
-            continue
-        if import_blankish(tracker_value):
-            continue
-        if field in IMPORT_TRACKER_AUTHORITATIVE_FIELDS:
-            merged[field] = tracker_value
-            continue
-        if import_blankish(merged.get(field)):
-            merged[field] = tracker_value
-
-    # Keep aliases paired.
-    if not import_blankish(merged.get('po_yupi')) and import_blankish(merged.get('yupi_po')):
-        merged['yupi_po'] = merged.get('po_yupi')
-    if not import_blankish(merged.get('yupi_po')) and import_blankish(merged.get('po_yupi')):
-        merged['po_yupi'] = merged.get('yupi_po')
-    if not import_blankish(merged.get('source_req_dlv_date')) and import_blankish(merged.get('req_dlv_date')):
-        merged['req_dlv_date'] = merged.get('source_req_dlv_date')
-    if not import_blankish(merged.get('req_dlv_date')) and import_blankish(merged.get('source_req_dlv_date')):
-        merged['source_req_dlv_date'] = merged.get('req_dlv_date')
-    return apply_import_formula_columns(merged)
-
-
-def sync_import_tracker_to_dashboard(columns=None):
-    """Pull existing rows/user inputs from the main Import tracker into DB.
-
-    Called during Copy Sheet. It updates matching DB rows and can also add rows
-    that exist only in the tracker, preventing the dashboard from looking blank
-    when the tracker sheet already has values.
-    """
-    columns = import_layout_columns() if columns is None else columns
-    tracker_rows = import_layout_tracker_visible_rows(columns)
-    if not tracker_rows:
-        return {'rows': 0, 'seen': 0, 'added': 0, 'skipped': 0}
-
-    existing_rows = ImportDashboardRow.query.filter(ImportDashboardRow.source_key != 'import_tracker').all()
-    existing_by_key = {}
-    for row in existing_rows:
-        try:
-            data = json.loads(row.data_json or '{}')
-        except (TypeError, json.JSONDecodeError):
-            data = {}
-        data = apply_import_formula_columns(dict(data))
-        for key in import_layout_target_candidate_keys(data):
-            existing_by_key.setdefault(key, row)
-
-    now = datetime.utcnow()
-    seen = 0
-    added = 0
-    skipped = 0
-    duplicate_counts = {}
-
-    for tracker_payload in tracker_rows:
-        keys = import_layout_target_candidate_keys(tracker_payload)
-        if not keys:
-            skipped += 1
-            continue
-        current = next((existing_by_key[k] for k in keys if k in existing_by_key), None)
-        if current:
-            try:
-                existing_payload = json.loads(current.data_json or '{}')
-            except (TypeError, json.JSONDecodeError):
-                existing_payload = {}
-            current.data_json = json.dumps(merge_import_tracker_payload(existing_payload, tracker_payload), ensure_ascii=False)
-            current.updated_at = now
-            if current.source_key == 'import_tracker':
-                current.last_seen_at = now
-                current.sheet_row = tracker_payload.get('_sheet_row') or current.sheet_row
-            seen += 1
-            continue
-
-        source_uid_raw = '|'.join(keys)
-        source_uid = hashlib.sha1(source_uid_raw.encode('utf-8')).hexdigest()
-        duplicate_counts[source_uid] = duplicate_counts.get(source_uid, 0) + 1
-        row_key = f"import_tracker:{source_uid}:{duplicate_counts[source_uid]}"
-        data = apply_import_formula_columns(dict(tracker_payload))
-        row = ImportDashboardRow(
-            row_key=row_key,
-            source_key='import_tracker',
-            source_label='Import Tracker',
-            source_uid=source_uid,
-            sheet_row=tracker_payload.get('_sheet_row'),
-            vendor_name=import_nonblank(data.get('vendor_name')) or import_nonblank(data.get('vendor')),
-            data_json=json.dumps(data, ensure_ascii=False),
-            first_seen_at=now,
-            last_seen_at=now,
-            updated_at=now,
-        )
-        db.session.add(row)
-        added += 1
-        for key in keys:
-            existing_by_key.setdefault(key, row)
-
-    return {'rows': len(tracker_rows), 'seen': seen, 'added': added, 'skipped': skipped}
-
-def sync_import_sheet_to_dashboard():
-    """Upsert Import rows from the single live tracker sheet into the dashboard.
-
-    Source of truth: ``IMPORT_LAYOUT_SHEET_ID`` at gid ``IMPORT_LAYOUT_GID``
-    (the URL the user provided: 
-    https://docs.google.com/spreadsheets/d/1i0N4VdF_vMHjr_0gjrUdS7nCKUpxPYvDWW-HOWSanEM/edit#gid=73188127).
-    We no longer read the legacy ``IMPORT_SOURCE_SHEETS`` (source_1/source_2)
-    because the user has consolidated everything into the single sheet above.
-    Any DB rows still tagged with ``source_1`` / ``source_2`` are leftovers
-    from the previous sync logic and are purged at the start of every run so
-    the dashboard only ever shows data that exists on the live sheet.
-
-    Identity is YUPI PO + item line (see ``import_row_identity_payload``), so a
-    PO with 5 items still creates 5 dashboard rows, and repeated Copy Sheet
-    clicks never create duplicates for the same identity.
-
-    For a row whose identity already exists in the dashboard, fresh
-    source-managed values (YUPI PO, dates, qty/price, vendor, etc.) replace
-    stale/blank placeholders via ``merge_import_existing_payload()``, while
-    dashboard-local user input (STATUS, PO Send Date, checklist ticks, remarks
-    the user typed, etc.) is preserved as-is. For a row whose identity does not
-    exist yet, a new dashboard row is inserted.
-
-    CRITICAL: this function must NEVER raise. It is called from the
-    ``/api/import/data`` endpoint (when the user clicks Copy Sheet) and from
-    the daily 07:00 WIB scheduler. If it raises, the API returns HTTP 500 and
-    the dashboard table appears blank. Every external call (Google Sheets API,
-    DB writes) is wrapped in try/except so a transient failure is reported in
-    the return dict instead of crashing the caller.
-    """
-    purged_legacy = 0
-    sheet_rows = []
-    columns = import_layout_columns(force=True)
-    filter_vendors, vendor_source = [], 'none'
-    vendor_count = len(import_uploaded_vendor_names())
-
-    # ── Step 1: purge all rows left over from the retired source sheets. ──
-    # This is the root-cause fix for "data lama tidak dipakai" — every Copy
-    # Sheet run starts from a clean slate for legacy-tagged rows so the
-    # dashboard only ever shows data from the live sheet.
-    purged_legacy = 0
-    try:
-        stale = ImportDashboardRow.query.filter(
-            ImportDashboardRow.source_key.in_(_LEGACY_IMPORT_SOURCE_KEYS)
-        ).all()
-        purged_legacy = len(stale)
-        for row in stale:
-            db.session.delete(row)
-        if purged_legacy:
-            db.session.commit()
-    except Exception:
-        db.session.rollback()
-        purged_legacy = 0
-
-    # ── Step 2: read the live tracker sheet (the URL provided by the user). ──
-    # import_layout_tracker_visible_rows() reads IMPORT_LAYOUT_SHEET_ID at the
-    # configured gid (73188127) and returns one payload per non-blank row with
-    # all visible + source-only columns mapped by HEADER TEXT (not by
-    # hard-coded sheet_col letters, which were wrong for this sheet layout).
-    # It also forward-fills PO YUPI for merged cells and extracts PO YUPI from
-    # PO Sementara as a fallback, which is the root-cause fix for
-    # "PO sementara SVOK410100326-04 seharusnya YUPI PO nya 410100326".
-    try:
-        sheet_rows = import_layout_tracker_visible_rows(columns)
-        filter_vendors, vendor_source = import_vendor_filter_names()
-    except Exception:
-        # Sheet read failed (Google API down, service account not configured,
-        # sheet moved, etc.). Don't crash the API — return what we have so
-        # the dashboard still shows the existing DB rows. The user can see
-        # the error in the returned dict and retry.
-        import traceback; traceback.print_exc()
-        return {
-            'added': 0,
-            'updated': 0,
-            'seen': 0,
-            'sheet_rows': 0,
-            'vendor_count': vendor_count,
-            'vendor_filter_count': 0,
-            'vendor_filter_source': 'none',
-            'purged_legacy': purged_legacy,
-            'copy_only': True,
-            'columns': columns,
-            'error': 'Failed to read the live Import tracker sheet. See server logs.',
-            'source_sheet_url': f'https://docs.google.com/spreadsheets/d/{IMPORT_LAYOUT_SHEET_ID}/edit#gid={IMPORT_LAYOUT_GID}',
-        }
-
-    # ── Step 3: load every existing dashboard row tagged with the canonical
-    # source_key. Legacy-tagged rows have already been purged in Step 1, so
-    # existing_rows only contains rows from previous successful Copy Sheet
-    # runs that we want to upsert (not duplicate).
-    existing_rows = ImportDashboardRow.query.filter(
-        ImportDashboardRow.source_key == IMPORT_LAYOUT_SOURCE_KEY
-    ).order_by(ImportDashboardRow.id.asc()).all()
-
-    # Map source_uid -> ordered list of existing rows sharing that identity.
-    # Ordered + matched by position so repeated duplicate identities (rare,
-    # e.g. two lines with no Item Yupi and identical item details) stay paired
-    # with the same dashboard row across runs instead of drifting.
-    existing_by_uid = {}        # primary uid  → list[row]
-    existing_by_sec_uid = {}    # secondary uid → list[row]  (po_sementara-based, pre-PO YUPI rows)
-    existing_row_keys = set()
-    for existing_row in existing_rows:
-        existing_row_keys.add(existing_row.row_key)
-        try:
-            existing_payload = json.loads(existing_row.data_json or '{}')
-        except (TypeError, json.JSONDecodeError):
-            existing_payload = {}
-
-        # Determine/recalculate primary uid
-        uid = existing_row.source_uid
-        if not uid:
-            uid = import_row_source_uid(existing_payload, columns) if existing_payload else None
-        if uid:
-            existing_by_uid.setdefault(uid, []).append(existing_row)
-
-        # Secondary uid: PO Sementara + Item Yupi (for rows created before PO YUPI arrived)
-        sec_uid = import_row_secondary_uid(existing_payload)
-        if sec_uid and sec_uid != uid:
-            existing_by_sec_uid.setdefault(sec_uid, []).append(existing_row)
-
-    now = datetime.utcnow()
-    added = 0
-    updated = 0
-    seen = 0
-    duplicate_counts = {}
-    consumed_per_uid = {}
-
-    for sheet_row in sheet_rows:
-        sheet_payload = import_row_payload(sheet_row, columns)
-        source_uid = import_row_source_uid(sheet_payload, columns)
-        duplicate_counts[source_uid] = duplicate_counts.get(source_uid, 0) + 1
-        suffix = duplicate_counts[source_uid]
-
-        candidates = existing_by_uid.get(source_uid) or []
-        used_key = source_uid
-
-        # Fallback: row may have been created when PO YUPI was still blank,
-        # so it was keyed by PO Sementara + Item Yupi (secondary uid).
-        # Now that PO YUPI is available, match via secondary uid and upgrade.
-        if not candidates:
-            sec_uid_new = import_row_secondary_uid(sheet_payload)
-            if sec_uid_new:
-                candidates = existing_by_sec_uid.get(sec_uid_new) or []
-                if candidates:
-                    used_key = sec_uid_new  # use secondary key for consumed tracking
-
-        used = consumed_per_uid.get(used_key, 0)
-        target_row = candidates[used] if used < len(candidates) else None
-
-        if target_row is not None:
-            consumed_per_uid[used_key] = used + 1
-            try:
-                existing_payload = json.loads(target_row.data_json or '{}')
-            except (TypeError, json.JSONDecodeError):
-                existing_payload = {}
-
-            merged_payload = merge_import_existing_payload(existing_payload, sheet_payload)
-
-            # Compare source-managed fields only — these are the fields that should
-            # be upserted whenever the source sheet has a new/changed value.
-            # Formula columns (days_left, arrival_check, etc.) are excluded from
-            # the diff because they are always recomputed from the base fields.
-            # User-local fields (status, etd, eta, checklist, remarks) are never
-            # replaced by Copy Sheet, so they are also excluded from the diff.
-            def _source_diff(old, new):
-                for f in IMPORT_SOURCE_MANAGED_FIELDS:
-                    old_v = (old.get(f) or '').strip()
-                    new_v = (new.get(f) or '').strip()
-                    # Only flag as changed when source has a non-blank value that
-                    # differs from what is stored — blank source values are ignored
-                    # so Copy Sheet never overwrites a filled field with emptiness.
-                    if new_v and new_v != old_v:
-                        return True
-                return False
-
-            source_changed = _source_diff(existing_payload, merged_payload)
-            # Also catch changes in local edits that may have been merged in
-            # (e.g. status auto-set to NEW after po_send_date cleared).
-            full_old = json.dumps(existing_payload, ensure_ascii=False, sort_keys=True)
-            full_new = json.dumps(merged_payload,  ensure_ascii=False, sort_keys=True)
-            any_change = source_changed or (full_old != full_new)
-
-            if any_change:
-                target_row.data_json = full_new
-                target_row.updated_at = now
-                updated += 1
-            else:
-                seen += 1
-            target_row.last_seen_at = now
-            target_row.sheet_row = sheet_row.get('_sheet_row') or target_row.sheet_row
-            target_row.vendor_name = sheet_row.get('_vendor_name') or target_row.vendor_name
-            # Always re-tag with the canonical source_key so legacy rows
-            # (source_1/source_2/import_tracker) get upgraded to 'import_layout'
-            # when they're matched and updated.
-            target_row.source_key = IMPORT_LAYOUT_SOURCE_KEY
-            target_row.source_label = sheet_row.get('_source_label') or 'Import Tracker'
-            # Upgrade source_uid to primary (PO YUPI-based) so next run uses primary index directly.
-            # This is the key step that prevents duplicates when PO Sementara → PO YUPI transition happens.
-            target_row.source_uid = source_uid
-            # Register in primary index so the same uid won't spawn another row this run
-            existing_by_uid.setdefault(source_uid, [target_row])
-            continue
-
-        # No existing dashboard row for this YUPI PO + item line yet: insert.
-        row_key = f"import:{source_uid}" if suffix == 1 else f"import:{source_uid}:{suffix}"
-        while row_key in existing_row_keys:
-            suffix += 1
-            row_key = f"import:{source_uid}:{suffix}"
-
-        new_row = ImportDashboardRow(
-            row_key=row_key,
-            source_key=IMPORT_LAYOUT_SOURCE_KEY,
-            source_label=sheet_row.get('_source_label') or '',
-            source_uid=source_uid,
-            sheet_row=sheet_row.get('_sheet_row'),
-            vendor_name=sheet_row.get('_vendor_name') or '',
-            data_json=json.dumps(sheet_payload, ensure_ascii=False),
-            first_seen_at=now,
-            last_seen_at=now,
-            updated_at=now,
-        )
-        db.session.add(new_row)
-        added += 1
-        existing_row_keys.add(row_key)
-        existing_by_uid.setdefault(source_uid, []).append(new_row)
-        consumed_per_uid[source_uid] = consumed_per_uid.get(source_uid, 0) + 1
-
-    try:
-        db.session.commit()
-    except Exception:
-        db.session.rollback()
-        import traceback; traceback.print_exc()
-    # ── persist timestamp so UI can show "Last Copy: date time" ──────────
-    try:
-        wib_now = datetime.utcnow() + timedelta(hours=7)
-        import_meta_set('last_copy_at', wib_now.strftime('%Y-%m-%d %H:%M'))
-    except Exception:
-        pass
-    clear_runtime_caches()
-    return {
-        'added': added,
-        'updated': updated,
-        'seen': seen,
-        'sheet_rows': len(sheet_rows),
-        'vendor_count': vendor_count,
-        'vendor_filter_count': len(filter_vendors),
-        'vendor_filter_source': vendor_source,
-        'purged_legacy': purged_legacy,
-        'copy_only': True,
-        'columns': columns,
-        'source_sheet_url': f'https://docs.google.com/spreadsheets/d/{IMPORT_LAYOUT_SHEET_ID}/edit#gid={IMPORT_LAYOUT_GID}',
-    }
-
-RFQ_DASHBOARD_ONLY_FIELDS = {'private_remarks_1', 'private_remarks_2'}
-
-def rfq_label(field):
-    return dict(RFQ_TEMPLATE_COLUMNS).get(field, field)
-
-def parse_rfq_number(value):
-    raw = clean(value)
-    if not raw:
-        return None
-    s = re.sub(r'[^0-9.\-]', '', str(raw))
-    if not s or s in ('-', '.', '-.'):
-        return None
-    try:
-        return float(s)
-    except ValueError:
-        return None
-
-def fmt_rfq_amount(value):
-    if value is None:
-        return None
-    if abs(value - round(value)) < 0.000001:
-        return f'{int(round(value)):,}'
-    return f'{value:,.2f}'
-
-def rfq_days_left(closing_date):
-    raw = clean(closing_date)
-    if not raw:
-        return None
-    d = None
-    for fmt in ('%d/%m/%Y', '%Y/%m/%d', '%Y-%m-%d'):
-        try:
-            d = datetime.strptime(str(raw).strip(), fmt).date()
-            break
-        except ValueError:
-            pass
-    if d is None:
-        d = parse_date(raw)
-    if not d:
-        return None
-    if d < date.today():
-        return None
-    return workdays_until(d)
-
-def parse_rfq_closing_date_value(value):
-    raw = clean(value)
-    if not raw:
-        return None
-    for fmt in ('%d/%m/%Y', '%Y/%m/%d', '%Y-%m-%d'):
-        try:
-            return datetime.strptime(str(raw).strip(), fmt).date()
-        except ValueError:
-            pass
-    return parse_date(raw)
-
-def parse_rfq_date_value(value):
-    raw = clean(value)
-    if not raw:
-        return None
-    if not re.search(r'\d{4}', str(raw)) and not re.match(r'^\d{8}(\.0)?$', str(raw).strip()):
-        return None
-    for fmt in ('%d/%m/%Y', '%Y/%m/%d', '%Y-%m-%d'):
-        try:
-            return datetime.strptime(str(raw).strip(), fmt).date()
-        except ValueError:
-            pass
-    return parse_date(raw)
-
-def sort_rfq_rows(rows, sort_order='newest'):
-    newest = sort_order != 'oldest'
-    def key(row):
-        d = parse_rfq_date_value(row.get('rfq_date'))
-        ordinal = d.toordinal() if d else 0
-        sheet_row = int(row.get('sheet_row') or 0)
-        return (d is None, -ordinal if newest else ordinal, sheet_row)
-    rows.sort(key=key)
-    return rows
-
-RFQ_SEARCH_FIELDS = ('rfq_code', 'request_number', 'item_name', 'detail_spec')
-
-
-def rfq_multiline_search_terms(value):
-    """Return unique, normalized RFQ search terms entered one per line."""
-    terms = []
-    seen = set()
-    for raw in re.split(r'[\r\n]+', str(value or '')):
-        term = raw.strip().lower()
-        if term and term not in seen:
-            seen.add(term)
-            terms.append(term)
-    return terms
-
-
-def filter_rfq_rows_by_multiline_search(rows, value):
-    """Match any entered line against Request Number, Item Name, or Detail Spec."""
-    terms = rfq_multiline_search_terms(value)
-    if not terms:
-        return rows
-
-    filtered = []
-    for row in rows:
-        searchable_values = [str(row.get(field) or '').lower() for field in RFQ_SEARCH_FIELDS]
-        if any(term in field_value for term in terms for field_value in searchable_values):
-            filtered.append(row)
-    return filtered
-
-
-def rfq_check_value(item):
-    if clean_product_id(item.get('product_id')):
-        return 'complete'
-    if 'reject' in (clean(item.get('sheet_status')) or '').lower():
-        return 'reject'
-    closing_date = parse_rfq_closing_date_value(item.get('closing_date'))
-    if closing_date and closing_date < date.today():
-        return 'closed'
-    return 'open'
-
-def rfq_check_label(value):
-    return {'complete': 'Complete', 'reject': 'Reject', 'closed': 'Closed', 'open': 'Open'}.get(value or '', 'Open')
-
-def apply_rfq_computed_fields(item):
-    item['category_name'] = (clean(item.get('category_name')) or '').split('>')[0].strip() or None
-    qty = parse_rfq_number(item.get('qty'))
-    unit_price = parse_rfq_number(item.get('unit_price_idr'))
-    item['amt_idr'] = fmt_rfq_amount(qty * unit_price) if qty is not None and unit_price is not None else None
-    item['days_left'] = rfq_days_left(item.get('closing_date'))
-    item['unit_price_missing'] = unit_price is None
-    item['status'] = bool(clean_product_id(item.get('product_id')))
-    item['check'] = rfq_check_value(item)
-    return item
-
-def rfq_cell(row, idx):
-    try:
-        return clean(row.iloc[idx])
-    except Exception:
-        return None
-
-def rfq_row_key(data, sheet_row):
-    code = clean(data.get('source_code'))
-    if code:
-        return code
-    parts = [data.get('no'), data.get('client_name'), data.get('rfq_date'), data.get('item_name')]
-    key = '|'.join(str(clean(x) or '') for x in parts).strip('|')
-    return key or f'row-{sheet_row}'
-
-def fetch_rfq_rows(force=False):
-    now = datetime.utcnow()
-    if not force and RFQ_CACHE['expires_at'] and RFQ_CACHE['expires_at'] > now:
-        return RFQ_CACHE['rows'], RFQ_CACHE['fetched_at']
-
-    from urllib.parse import quote
-    url = f'https://docs.google.com/spreadsheets/d/{RFQ_SHEET_ID}/gviz/tq?tqx=out:csv&sheet={quote(RFQ_SHEET_NAME)}'
-    df = pd.read_csv(url, header=None, dtype=str, keep_default_na=False)
-    rows = []
-    # Google CSV rows 1-3 are title/header rows; data starts at sheet row 4.
-    for idx in range(3, len(df)):
-        src = df.iloc[idx]
-        product_id = clean_product_id(rfq_cell(src, 16))
-        # Current sheet layout stores Request Number in column R (zero-based index 17).
-        # It used to be read from column H, which caused dashboard searches to miss
-        # valid request numbers such as 100010794064.
-        request_number = clean_request_number(rfq_cell(src, 17))
-        data = {
-            'sheet_row': idx + 1,
-            'no': rfq_cell(src, 1),
-            'client_name': rfq_cell(src, 2),
-            'rfq_date': rfq_cell(src, 4),
-            'closing_date': rfq_cell(src, 5),
-            'sales_pic': rfq_cell(src, 6),
-            'rfq_code': rfq_cell(src, 7),
-            'item_name': rfq_cell(src, 8),
-            'detail_spec': rfq_cell(src, 9),
-            'brand_manufacturer': rfq_cell(src, 10),
-            'qty': rfq_cell(src, 11),
-            'unit': rfq_cell(src, 12),
-            'remark': rfq_cell(src, 13),
-            'category_id': rfq_cell(src, 14),
-            'category_name': rfq_cell(src, 15),
-            'product_id': product_id,
-            'sheet_status': rfq_cell(src, 0),
-            'request_number': request_number,
-            'purchase_pic': rfq_cell(src, 18),
-            'same_replacement': rfq_cell(src, 21),
-            'vendor_name': rfq_cell(src, 22),
-            'unit_price_idr': rfq_cell(src, 23),
-            'amt_idr': rfq_cell(src, 24),
-            'quoted_item_name': rfq_cell(src, 25),
-            'quoted_spec': rfq_cell(src, 26),
-            'quoted_brand': rfq_cell(src, 27),
-            'quoted_unit': rfq_cell(src, 28),
-            'moq': rfq_cell(src, 29),
-            'lead_time_days': rfq_cell(src, 30),
-            'valid_period': rfq_cell(src, 31),
-            'photo_url': rfq_cell(src, 32),
-            'remarks': rfq_cell(src, 33),
-            # Private remarks are dashboard-only notes. Do not read them from
-            # Google Sheet columns, even if old sheet exports still contain AI/AJ.
-            'private_remarks_1': '',
-            'private_remarks_2': '',
-            'source_code': rfq_cell(src, 38),
-        }
-        data['purchase_pic'] = canonical_rfq_pic(data)
-        if not any(data.get(field) for field, _ in RFQ_TEMPLATE_COLUMNS if field != 'check'):
-            continue
-        data['row_key'] = rfq_row_key(data, idx + 1)
-        apply_rfq_computed_fields(data)
-        rows.append(data)
-
-    fetched_at = datetime.utcnow()
-    RFQ_CACHE.update({
-        'rows': rows,
-        'fetched_at': fetched_at,
-        'expires_at': fetched_at + timedelta(seconds=RFQ_CACHE_TTL_SECONDS),
-    })
-    return rows, fetched_at
-
-def rfq_json_load(value, fallback):
-    try:
-        return json.loads(value or '')
-    except (TypeError, json.JSONDecodeError):
-        return fallback
-
-def rfq_dashboard_payload(row):
-    payload = dict(row or {})
-    payload['row_key'] = clean(payload.get('row_key')) or rfq_row_key(payload, payload.get('sheet_row') or 0)
-    try:
-        payload['sheet_row'] = int(payload.get('sheet_row') or 0) or None
-    except (TypeError, ValueError):
-        payload['sheet_row'] = None
-    apply_rfq_computed_fields(payload)
-    return payload
-
-def rfq_dashboard_row_to_dict(row):
-    data = rfq_json_load(row.data_json, {})
-    data['row_key'] = row.row_key
-    data['sheet_row'] = row.sheet_row
-    return data
-
-def load_rfq_dashboard_rows():
-    db_rows = RFQDashboardRow.query.options(
-        load_only(
-            RFQDashboardRow.id,
-            RFQDashboardRow.row_key,
-            RFQDashboardRow.sheet_row,
-            RFQDashboardRow.data_json,
-            RFQDashboardRow.last_seen_at,
-        )
-    ).order_by(
-        RFQDashboardRow.sheet_row.is_(None),
-        RFQDashboardRow.sheet_row.asc(),
-        RFQDashboardRow.id.asc(),
-    ).all()
-    rows = [rfq_dashboard_row_to_dict(row) for row in db_rows]
-    fetched_at = max((row.last_seen_at for row in db_rows if row.last_seen_at), default=None)
-    return rows, fetched_at
-
-def set_rfq_runtime_rows(rows, fetched_at):
-    now = datetime.utcnow()
-    RFQ_CACHE.update({
-        'rows': [dict(row) for row in rows],
-        'fetched_at': fetched_at or now,
-        'expires_at': now + timedelta(seconds=RFQ_CACHE_TTL_SECONDS),
-    })
-
-def sync_rfq_sheet_to_dashboard():
-    sheet_rows, fetched_at = fetch_rfq_rows(force=True)
-    existing = {row.row_key: row for row in RFQDashboardRow.query.all()}
-    duplicate_counts = {}
-    now = datetime.utcnow()
-    added = 0
-    updated = 0
-    for sheet_row in sheet_rows:
-        base_key = clean(sheet_row.get('row_key'))
-        if not base_key:
-            continue
-        duplicate_counts[base_key] = duplicate_counts.get(base_key, 0) + 1
-        row_key = base_key if duplicate_counts[base_key] == 1 else f"{base_key}#{duplicate_counts[base_key]}"
-        sheet_row = dict(sheet_row)
-        sheet_row['row_key'] = row_key
-        incoming = rfq_dashboard_payload(sheet_row)
-        current = existing.get(row_key)
-        if not current:
-            db.session.add(RFQDashboardRow(
-                row_key=row_key,
-                sheet_row=incoming.get('sheet_row'),
-                data_json=json.dumps(incoming, ensure_ascii=False),
-                dirty_fields_json='[]',
-                first_seen_at=now,
-                last_seen_at=fetched_at or now,
-                updated_at=now,
-            ))
-            added += 1
-            continue
-        local = rfq_json_load(current.data_json, {})
-        dirty_fields = set(rfq_json_load(current.dirty_fields_json, []))
-        for field, value in incoming.items():
-            if field in dirty_fields and field in RFQ_EDITABLE_FIELDS:
-                continue
-            local[field] = value
-        local['row_key'] = row_key
-        local['sheet_row'] = incoming.get('sheet_row')
-        apply_rfq_computed_fields(local)
-        current.sheet_row = incoming.get('sheet_row')
-        current.data_json = json.dumps(local, ensure_ascii=False)
-        current.last_seen_at = fetched_at or now
-        current.updated_at = now
-        updated += 1
-    db.session.commit()
-    rows, loaded_at = load_rfq_dashboard_rows()
-    clear_runtime_caches()
-    set_rfq_runtime_rows(rows, loaded_at or fetched_at)
-    return {'added': added, 'updated': updated, 'sheet_rows': len(sheet_rows), 'fetched_at': loaded_at or fetched_at}
-
-def set_rfq_dashboard_cell(row_key, field, value, dirty=True, commit=True):
-    row = RFQDashboardRow.query.filter_by(row_key=row_key).first()
-    if not row:
-        return False
-    data = rfq_json_load(row.data_json, {})
-    dirty_fields = set(rfq_json_load(row.dirty_fields_json, []))
-    data[field] = value
-    data['row_key'] = row.row_key
-    data['sheet_row'] = row.sheet_row
-    apply_rfq_computed_fields(data)
-    if dirty:
-        dirty_fields.add(field)
-    else:
-        dirty_fields.discard(field)
-    row.data_json = json.dumps(data, ensure_ascii=False)
-    row.dirty_fields_json = json.dumps(sorted(dirty_fields), ensure_ascii=False)
-    row.updated_at = datetime.utcnow()
-    if commit:
-        db.session.commit()
-        RFQ_CACHE['expires_at'] = None
-        clear_runtime_caches()
-    return True
-
-def clear_rfq_dashboard_dirty_fields(updates, commit=True):
-    grouped = {}
-    for item in updates or []:
-        row_key = clean(item.get('row_key'))
-        field = clean(item.get('field'))
-        if row_key and field:
-            grouped.setdefault(row_key, set()).add(field)
-    if not grouped:
-        return
-    for row in RFQDashboardRow.query.filter(RFQDashboardRow.row_key.in_(grouped.keys())).all():
-        dirty_fields = set(rfq_json_load(row.dirty_fields_json, []))
-        dirty_fields.difference_update(grouped.get(row.row_key, set()))
-        row.dirty_fields_json = json.dumps(sorted(dirty_fields), ensure_ascii=False)
-        row.updated_at = datetime.utcnow()
-    if commit:
-        db.session.commit()
-        RFQ_CACHE['expires_at'] = None
-        clear_runtime_caches()
-
-def cleanup_rfq_sheet_backed_edits(commit=False):
-    """Remove stale local RFQ edits for fields whose source of truth is Google Sheet.
-
-    Private Remarks stay local-only in RFQCellEdit. Unit Price, Vendor, Remarks,
-    and other mapped quotation fields must be read from and written to the RFQ
-    Google Sheet, otherwise old local edits can mask newer sheet values.
-    """
-    try:
-        deleted = RFQCellEdit.query.filter(~RFQCellEdit.field.in_(list(RFQ_DASHBOARD_ONLY_FIELDS))).delete(synchronize_session=False)
-        if commit and deleted:
-            db.session.commit()
-        return deleted or 0
-    except Exception:
-        if commit:
-            db.session.rollback()
-        return 0
-
-
-def rfq_rows_with_edits(force=False, prefer_stale_cache=False):
-    now = datetime.utcnow()
-    if force:
-        sync_rfq_sheet_to_dashboard()
-        rows, fetched_at = load_rfq_dashboard_rows()
-    elif prefer_stale_cache and RFQ_CACHE.get('rows'):
-        rows, fetched_at = RFQ_CACHE['rows'], RFQ_CACHE['fetched_at']
-    elif RFQ_CACHE.get('expires_at') and RFQ_CACHE['expires_at'] > now and RFQ_CACHE.get('rows'):
-        rows, fetched_at = RFQ_CACHE['rows'], RFQ_CACHE['fetched_at']
-    else:
-        # .count() is expensive on large SQLite/Postgres tables and was being
-        # executed on every RFQ page load. A single indexed primary-key probe is
-        # enough to decide whether we need the first Google Sheet sync.
-        has_dashboard_rows = RFQDashboardRow.query.with_entities(RFQDashboardRow.id).first() is not None
-        if not has_dashboard_rows:
-            sync_rfq_sheet_to_dashboard()
-        rows, fetched_at = load_rfq_dashboard_rows()
-        set_rfq_runtime_rows(rows, fetched_at)
-
-    edits = RFQCellEdit.query.options(
-        load_only(RFQCellEdit.row_key, RFQCellEdit.field, RFQCellEdit.value)
-    ).filter(RFQCellEdit.field.in_(list(RFQ_DASHBOARD_ONLY_FIELDS))).all()
-    edit_map = {}
-    for edit in edits:
-        edit_map.setdefault(edit.row_key, {})[edit.field] = edit.value
-    merged = []
-    for row in rows:
-        item = dict(row)
-        for field, value in edit_map.get(item['row_key'], {}).items():
-            item[field] = value
-        merged.append(item)
-    return merged, fetched_at
-
-def _candidate_registered_items_for_rfq_similarity(row, limit=1200):
-    name_token = _similarity_token(row.get('item_name'))
-    spec_token = _similarity_token(row.get('detail_spec'))
-
-    if not clean(row.get('unit')) or not clean(row.get('item_name')) or not clean(row.get('detail_spec')):
-        return []
-
-    q = ProductIDDB.query.filter(
-        ProductIDDB.product_id.isnot(None),
-        ProductIDDB.product_id != '',
-        db.or_(ProductIDDB.product_status.is_(None), ProductIDDB.product_status == '', func.lower(ProductIDDB.product_status) == 'use')
-    )
-    token_filters = []
-    if name_token:
-        token_filters.append(ProductIDDB.product_name.ilike(f'%{name_token}%'))
-    if spec_token:
-        token_filters.append(ProductIDDB.specification.ilike(f'%{spec_token}%'))
-    if token_filters:
-        q = q.filter(db.or_(*token_filters))
-    return q.limit(limit).all()
-
-def find_similar_rfq_registered_items(row):
-    try:
-        if (clean(row.get('check')) or '').lower() != 'open':
-            return None
-        if clean_product_id(row.get('product_id')):
-            return None
-        key_fields = [row.get('item_name'), row.get('detail_spec'), row.get('unit')]
-        if not all(clean(v) for v in key_fields):
-            return None
-
-        current_prod_id = clean_product_id(row.get('product_id'))
-        cache_key = '|'.join([
-            'rfq_similar_v5',
-            clean(row.get('row_key')) or '',
-            current_prod_id,
-            (clean(row.get('item_name')) or '').lower(),
-            (clean(row.get('detail_spec')) or '').lower(),
-            (clean(row.get('unit')) or '').lower(),
-        ])
-        if cache_key in _SIMILARITY_CACHE:
-            return _SIMILARITY_CACHE[cache_key]
-
-        similar_items = []
-        for reg in _candidate_registered_items_for_rfq_similarity(row):
-            reg_prod_id = clean_product_id(reg.product_id)
-            if not reg_prod_id or (current_prod_id and reg_prod_id == current_prod_id):
-                continue
-            if not (clean(reg.product_name) and clean(reg.specification) and clean(reg.order_unit)):
-                continue
-            item_score = calculate_similarity(row.get('item_name'), reg.product_name)
-            spec_score = calculate_similarity(row.get('detail_spec'), reg.specification)
-            unit_score = calculate_similarity(row.get('unit'), reg.order_unit)
-            if item_score >= 70.0 and spec_score >= 70.0 and unit_score >= 70.0:
-                total_sim = (item_score + spec_score + unit_score) / 3
-                similar_items.append({
-                    'product_id': reg_prod_id,
-                    'product_name': reg.product_name or '',
-                    'specification': reg.specification or '',
-                    'manufacturer_name': reg.manufacturer_name or '',
-                    'order_unit': reg.order_unit or '',
-                    'similarity': round(total_sim, 1),
-                })
-
-        similar_items.sort(key=lambda x: (-x['similarity'], x['product_id']))
-        if not similar_items:
-            result = None
-        else:
-            result = {
-                'product_ids': '\n'.join(x['product_id'] for x in similar_items),
-                'product_name': '\n'.join(x['product_name'] or '-' for x in similar_items),
-                'specification': '\n'.join(x['specification'] or '-' for x in similar_items),
-                'manufacturer_name': '\n'.join(x['manufacturer_name'] or '-' for x in similar_items),
-                'order_unit': '\n'.join(x['order_unit'] or '-' for x in similar_items),
-                'similarity': '\n'.join(f"{x['similarity']:.0f}%" for x in similar_items),
-                'count': len(similar_items),
-            }
-        _SIMILARITY_CACHE[cache_key] = result
-        return result
-    except Exception as e:
-        print(f"Error finding RFQ similar items: {e}")
-        return None
-
-def apply_rfq_similarity(row):
-    if (clean(row.get('check')) or '').lower() != 'open':
-        row['similar_prod_ids'] = ''
-        row['similar_prod_name'] = ''
-        row['similar_spec'] = ''
-        row['similar_mfr_name'] = ''
-        row['similar_odr_unit'] = ''
-        row['similar_score'] = None
-        return row
-    similar = find_similar_rfq_registered_items(row)
-    row['similar_prod_ids'] = (similar or {}).get('product_ids', '') if clean_product_id(row.get('product_id')) else (similar or {}).get('product_ids', 'No Similar Item')
-    row['similar_prod_name'] = (similar or {}).get('product_name', '')
-    row['similar_spec'] = (similar or {}).get('specification', '')
-    row['similar_mfr_name'] = (similar or {}).get('manufacturer_name', '')
-    row['similar_odr_unit'] = (similar or {}).get('order_unit', '')
-    row['similar_score'] = (similar or {}).get('similarity', None)
-    return row
-
-def rfq_sheet_sync_credentials():
-    raw_json = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON') or os.environ.get('GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON')
-    raw_file = os.environ.get('GOOGLE_SERVICE_ACCOUNT_FILE') or os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
-    if raw_json:
-        try:
-            return json.loads(raw_json)
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f'Invalid GOOGLE_SERVICE_ACCOUNT_JSON: {e}')
-    if raw_file and os.path.exists(raw_file):
-        with open(raw_file, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return None
-
-GOOGLE_SHEETS_SCOPE = ['https://www.googleapis.com/auth/spreadsheets']
-
-def google_sheets_access_token():
-    credentials_info = rfq_sheet_sync_credentials()
-    if not credentials_info:
-        raise RuntimeError('Google service account credential is not configured')
-    try:
-        from google.oauth2.service_account import Credentials
-        from google.auth.transport.requests import Request
-    except ImportError as e:
-        raise RuntimeError('google-auth and requests are required for Google Sheets access') from e
-    creds = Credentials.from_service_account_info(credentials_info, scopes=GOOGLE_SHEETS_SCOPE)
-    creds.refresh(Request())
-    return creds.token
-
-def google_sheets_request(method, spreadsheet_id, path, params=None, body=None):
-    try:
-        import requests
-        from urllib.parse import quote
-    except ImportError as e:
-        raise RuntimeError('requests is required for Google Sheets access') from e
-    token = google_sheets_access_token()
-    encoded_path = '/'.join(quote(str(part), safe='') for part in path)
-    url = f'https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/{encoded_path}'
-    headers = {'Authorization': f'Bearer {token}'}
-    if body is not None:
-        headers['Content-Type'] = 'application/json'
-    proxies = {}
-    if os.environ.get('HTTPS_PROXY'):
-        proxies['https'] = os.environ.get('HTTPS_PROXY')
-    if os.environ.get('HTTP_PROXY'):
-        proxies['http'] = os.environ.get('HTTP_PROXY')
-    kwargs = {'headers': headers, 'params': params or {}, 'timeout': 60}
-    if body is not None:
-        kwargs['json'] = body
-    if proxies:
-        kwargs['proxies'] = proxies
-    response = requests.request(method, url, **kwargs)
-    if not response.ok:
-        detail = response.text[:500]
-        raise RuntimeError(f'Google Sheets API {method} {path} failed: {response.status_code} {detail}')
-    return response.json() if response.text else {}
-
-def google_sheets_metadata(spreadsheet_id):
-    try:
-        import requests
-    except ImportError as e:
-        raise RuntimeError('requests is required for Google Sheets access') from e
-    token = google_sheets_access_token()
-    url = f'https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}'
-    headers = {'Authorization': f'Bearer {token}'}
-    proxies = {}
-    if os.environ.get('HTTPS_PROXY'):
-        proxies['https'] = os.environ.get('HTTPS_PROXY')
-    if os.environ.get('HTTP_PROXY'):
-        proxies['http'] = os.environ.get('HTTP_PROXY')
-    kwargs = {'headers': headers, 'timeout': 60}
-    if proxies:
-        kwargs['proxies'] = proxies
-    response = requests.get(url, **kwargs)
-    if not response.ok:
-        raise RuntimeError(f'Google Sheets metadata failed: {response.status_code} {response.text[:500]}')
-    return response.json()
-
-def google_sheets_values_get(spreadsheet_id, range_name, value_render_option='UNFORMATTED_VALUE'):
-    return google_sheets_request('GET', spreadsheet_id, ['values', range_name], params={'valueRenderOption': value_render_option})
-
-def google_sheets_values_batch_get(spreadsheet_id, ranges, value_render_option='FORMATTED_VALUE', major_dimension='COLUMNS'):
-    """Read several Google Sheet ranges in one request.
-
-    Import source sheets are large, so /api/import/data and Copy Sheet must not
-    download the whole workbook as CSV. This helper lets Import fetch only the
-    visible/sync columns plus vendor columns.
-    """
-    return google_sheets_request(
-        'GET', spreadsheet_id, ['values:batchGet'],
-        params={
-            'ranges': list(ranges or []),
-            'valueRenderOption': value_render_option,
-            'majorDimension': major_dimension,
-        }
-    )
-
-def google_sheets_values_update(spreadsheet_id, range_name, values):
-    return google_sheets_request(
-        'PUT', spreadsheet_id, ['values', range_name],
-        params={'valueInputOption': 'USER_ENTERED'},
-        body={'values': values}
-    )
-
-def google_sheets_values_batch_update(spreadsheet_id, ranges):
-    return google_sheets_request(
-        'POST', spreadsheet_id, ['values:batchUpdate'],
-        body={'valueInputOption': 'USER_ENTERED', 'data': ranges}
-    )
-
-def sync_rfq_cell_to_google_sheet(row, field, value):
-    column = RFQ_SHEET_COLUMN_BY_FIELD.get(field)
-    if field in RFQ_DASHBOARD_ONLY_FIELDS:
-        return {'synced': False, 'local_only': True, 'reason': 'Dashboard-only field'}
-    if not column:
-        return {'synced': False, 'reason': 'Field is not mapped to RFQ sheet column'}
-    sheet_row = row.get('sheet_row')
-    if not sheet_row:
-        return {'synced': False, 'reason': 'RFQ sheet row is missing'}
-
-    range_name = f"'{RFQ_SHEET_NAME}'!{column}{sheet_row}"
-    google_sheets_values_update(RFQ_SHEET_ID, range_name, [[value or '']])
-    RFQ_CACHE['expires_at'] = None
-    return {'synced': True, 'range': range_name}
-
-def sync_rfq_cells_to_google_sheet(updates):
-    ranges = []
-    local_only_count = 0
-    for item in updates:
-        row = item.get('row') or {}
-        field = item.get('field')
-        value = item.get('value')
-        if field in RFQ_DASHBOARD_ONLY_FIELDS:
-            local_only_count += 1
-            continue
-        column = RFQ_SHEET_COLUMN_BY_FIELD.get(field)
-        sheet_row = row.get('sheet_row')
-        if column and sheet_row:
-            ranges.append({
-                'range': f"'{RFQ_SHEET_NAME}'!{column}{sheet_row}",
-                'values': [[value or '']]
-            })
-    if not ranges:
-        if local_only_count:
-            return {'synced': False, 'local_only': True, 'reason': 'Dashboard-only fields'}
-        return {'synced': False, 'reason': 'No mapped RFQ sheet cells to sync'}
-
-    google_sheets_values_batch_update(RFQ_SHEET_ID, ranges)
-    RFQ_CACHE['expires_at'] = None
-    return {'synced': True, 'ranges': len(ranges), 'local_only': local_only_count}
-
-def column_letter_from_index(index):
-    result = ''
-    while index > 0:
-        index, rem = divmod(index - 1, 26)
-        result = chr(65 + rem) + result
-    return result
-
-def column_index_from_letter(letter):
-    result = 0
-    for ch in str(letter or '').strip().upper():
-        if not ('A' <= ch <= 'Z'):
-            continue
-        result = result * 26 + (ord(ch) - 64)
-    return result
-
-def vendor_control_sheet_name():
-    if VENDOR_CONTROL_CACHE.get('sheet_name'):
-        return VENDOR_CONTROL_CACHE['sheet_name']
-    meta = google_sheets_metadata(VENDOR_CONTROL_SHEET_ID)
-    for sheet in meta.get('sheets', []):
-        props = sheet.get('properties', {})
-        if props.get('sheetId') == VENDOR_CONTROL_SHEET_GID:
-            VENDOR_CONTROL_CACHE['sheet_name'] = props.get('title')
-            return VENDOR_CONTROL_CACHE['sheet_name']
-    sheets = meta.get('sheets', [])
-    if sheets:
-        VENDOR_CONTROL_CACHE['sheet_name'] = sheets[0].get('properties', {}).get('title')
-        return VENDOR_CONTROL_CACHE['sheet_name']
-    raise RuntimeError('Vendor Control sheet not found')
-
-def normalized_header(value):
-    return re.sub(r'[^a-z0-9]+', '', str(value or '').lower())
-
-def find_vendor_control_columns(headers):
-    normalized = {}
-    for idx, header in enumerate(headers or []):
-        key = normalized_header(header)
-        if key and key not in normalized:
-            normalized[key] = idx + 1
-    def pick(names):
-        for name in names:
-            idx = normalized.get(normalized_header(name))
-            if idx:
-                return idx
-        return None
-    return {
-        'vendor_name': pick(['Vendor Name', 'Vendor Nm', 'Vendor', 'Supplier Name', 'Supplier']),
-        'vendor_id': pick(['Vendor ID', 'Vendor Id', 'VendorID', 'ID', 'User ID']),
-        'password': pick(['Password', 'Pass', 'PWD', 'Pwd']),
-    }
-
-def vendor_control_rows(force=False):
-    now = datetime.utcnow()
-    if (not force and VENDOR_CONTROL_CACHE.get('expires_at') and
-            VENDOR_CONTROL_CACHE['expires_at'] > now and VENDOR_CONTROL_CACHE.get('rows')):
-        return VENDOR_CONTROL_CACHE['rows'], VENDOR_CONTROL_CACHE.get('fetched_at')
-
-    sheet_name = vendor_control_sheet_name()
-    result = google_sheets_values_get(VENDOR_CONTROL_SHEET_ID, f"'{sheet_name}'!A:Z")
-    values = result.get('values', [])
-    if not values:
-        rows = []
-        fetched_at = datetime.utcnow()
-        VENDOR_CONTROL_CACHE.update({'rows': rows, 'fetched_at': fetched_at, 'expires_at': fetched_at + timedelta(seconds=VENDOR_CONTROL_CACHE_TTL_SECONDS), 'columns': {}})
-        return rows, fetched_at
-
-    header_index = 0
-    columns = {}
-    for idx, candidate_headers in enumerate(values[:20]):
-        candidate_columns = find_vendor_control_columns(candidate_headers)
-        if all(candidate_columns.get(name) for name in ('vendor_name', 'vendor_id', 'password')):
-            header_index = idx
-            columns = candidate_columns
-            break
-    missing = [name for name in ('vendor_name', 'vendor_id', 'password') if not columns.get(name)]
-    if missing:
-        raise RuntimeError(f"Vendor Control sheet missing required columns: {', '.join(missing)}")
-
-    def cell(row, col_index):
-        idx = col_index - 1
-        return clean(row[idx]) if idx < len(row) else ''
-
-    rows = []
-    for sheet_row, raw in enumerate(values[header_index + 1:], start=header_index + 2):
-        vendor_name = cell(raw, columns['vendor_name'])
-        vendor_id = cell(raw, columns['vendor_id'])
-        password = cell(raw, columns['password'])
-        if not (vendor_name and vendor_id and password):
-            continue
-        if re.fullmatch(r'\d+(?:\.0+)?', str(vendor_name).strip()):
-            continue
-        rows.append({
-            'row_key': str(sheet_row),
-            'sheet_row': sheet_row,
-            'vendor_name': vendor_name,
-            'vendor_id': vendor_id,
-            'password': password,
-        })
-    fetched_at = datetime.utcnow()
-    VENDOR_CONTROL_CACHE.update({
-        'rows': rows,
-        'fetched_at': fetched_at,
-        'expires_at': fetched_at + timedelta(seconds=VENDOR_CONTROL_CACHE_TTL_SECONDS),
-        'columns': columns,
-    })
-    return rows, fetched_at
-
-def sync_vendor_control_cell(sheet_row, field, value):
-    if field not in ('vendor_id', 'password'):
-        return {'synced': False, 'reason': 'Field is not editable'}
-    sheet_name = vendor_control_sheet_name()
-    columns = VENDOR_CONTROL_CACHE.get('columns') or {}
-    if not columns.get(field):
-        vendor_control_rows(force=True)
-        columns = VENDOR_CONTROL_CACHE.get('columns') or {}
-    column_index = columns.get(field)
-    if not column_index:
-        return {'synced': False, 'reason': f'Sheet column for {field} was not found'}
-    range_name = f"'{sheet_name}'!{column_letter_from_index(column_index)}{sheet_row}"
-    google_sheets_values_update(VENDOR_CONTROL_SHEET_ID, range_name, [[value or '']])
-    VENDOR_CONTROL_CACHE['expires_at'] = None
-    return {'synced': True, 'range': range_name}
-
-def parse_date(val):
-    if val is None:
-        return None
-    try:
-        if pd.isna(val):
-            return None
-    except (TypeError, ValueError):
-        pass
-
-    raw = str(val).strip()
-    if not raw or raw.lower() in ('nan', 'none', 'nat', '-', '#n/a', 'n/a'):
-        return None
-
-    if re.match(r'^\d{8}(\.0)?$', raw):
-        try:
-            return datetime.strptime(raw[:8], '%Y%m%d').date()
-        except ValueError:
-            pass
-
-    try:
-        parsed = pd.to_datetime(val, errors='coerce')
-        if pd.isna(parsed):
-            return None
-        return parsed.date()
-    except Exception:
-        return None
-
-def safe_float(val, default=0.0):
-    try:
-        if pd.isna(val): return default
-    except (TypeError, ValueError): pass
-    try: return float(val)
-    except: return default
-
-def find_column(df, names):
-    low = {c.lower().strip(): c for c in df.columns}
-    for n in names:
-        if n.lower().strip() in low: return low[n.lower().strip()]
-    return None
-
-def uploaded_files():
-    files = []
-    for key in ('file', 'files'):
-        files.extend(request.files.getlist(key))
-    return [f for f in files if f and f.filename]
-
-def read_upload_excel(file):
-    raw = file.read()
-    file.seek(0)
-    filename = (file.filename or '').lower()
-    is_xls_format = raw[:4] == b'\xd0\xcf\x11\xe0'
-    engine = 'xlrd' if is_xls_format or filename.endswith('.xls') else 'openpyxl'
-    return pd.read_excel(file, sheet_name=0, engine=engine)
-
-
-
-# ─── Shared upload input helpers: Excel and JSON ──────────────────────────────
-def _json_rows_to_dataframe(rows, columns=None):
-    """Convert JSON rows into a pandas DataFrame.
-
-    Supported row formats:
-    - list[dict]: [{"SO Number": "...", ...}]
-    - list[list] + columns: {"columns": ["SO Number", ...], "rows": [[...], ...]}
-    """
-    if rows is None:
-        rows = []
-    if not isinstance(rows, list):
-        raise ValueError('JSON rows/data must be a list')
-
-    if columns:
-        return pd.DataFrame(rows, columns=[str(c).strip() for c in columns])
-
-    if not rows:
-        return pd.DataFrame()
-
-    if all(isinstance(r, dict) for r in rows):
-        return pd.DataFrame(rows)
-
-    return pd.DataFrame(rows)
-
-
-def _json_payload_to_uploads(payload, default_filename='json_upload'):
-    """Normalize one JSON request body into [{'filename': str, 'df': DataFrame}].
-
-    Accepted payloads:
-    1. {"filename": "x.json", "rows": [{...}]}
-    2. {"filename": "x.json", "columns": [...], "rows": [[...]]}
-    3. {"files": [{"filename": "a.json", "rows": [...]}, ...]}
-    4. [{"col": "value"}, ...]
-    5. {"col": "value"}  -> treated as one row
-    """
-    if payload is None:
-        raise ValueError('Invalid or empty JSON body')
-
-    def one(obj, index=1):
-        if isinstance(obj, dict):
-            filename = clean(obj.get('filename')) or clean(obj.get('name')) or f'{default_filename}_{index}.json'
-            columns = obj.get('columns')
-            rows = (
-                obj.get('rows')
-                if 'rows' in obj else
-                obj.get('data')
-                if 'data' in obj else
-                obj.get('records')
-                if 'records' in obj else
-                obj.get('items')
-                if 'items' in obj else
-                None
-            )
-
-            if rows is None:
-                # Treat plain JSON object as a single row if it does not use rows/data.
-                row = {k: v for k, v in obj.items() if k not in ('filename', 'name', 'columns')}
-                rows = [row] if row else []
-
-            df = _json_rows_to_dataframe(rows, columns=columns)
-            df.columns = [str(c).strip() for c in df.columns]
-            return {'filename': filename, 'df': df}
-
-        if isinstance(obj, list):
-            filename = f'{default_filename}_{index}.json'
-            df = _json_rows_to_dataframe(obj)
-            df.columns = [str(c).strip() for c in df.columns]
-            return {'filename': filename, 'df': df}
-
-        raise ValueError('Each JSON upload must be an object or list')
-
-    uploads = []
-    if isinstance(payload, dict) and isinstance(payload.get('files'), list):
-        for idx, item in enumerate(payload.get('files') or [], start=1):
-            uploads.append(one(item, idx))
-    else:
-        uploads.append(one(payload, 1))
-
-    return [u for u in uploads if u['df'] is not None]
-
-
-def request_upload_dataframes(default_filename='upload'):
-    """Return uploads from either Excel multipart/form-data or JSON body.
-
-    This keeps manual Excel upload working, while allowing the same endpoint
-    to receive JSON from automation.
-    """
-    content_type = (request.content_type or '').lower()
-    if request.is_json or 'application/json' in content_type:
-        payload = request.get_json(silent=True)
-        uploads = _json_payload_to_uploads(payload, default_filename=default_filename)
-        return uploads, 'json'
-
-    files = uploaded_files()
-    uploads = []
-    for file in files:
-        df = read_upload_excel(file)
-        df.columns = [str(c).strip() for c in df.columns]
-        uploads.append({'filename': file.filename, 'df': df})
-    return uploads, 'excel'
-
-def upload_replace_mode():
-    """Return True only when caller explicitly wants DB to mirror upload rows."""
-    raw = request.args.get('replace') or request.args.get('snapshot') or ''
-    if not raw and request.is_json:
-        payload = request.get_json(silent=True) or {}
-        if isinstance(payload, dict):
-            raw = payload.get('replace') or payload.get('snapshot') or ''
-    return str(raw).strip().lower() in ('1', 'true', 'yes', 'replace', 'snapshot')
-
-def validate_upload_columns(filename, label, col_map, expected, required, max_missing=3):
-    missing_expected = [display for key, display in expected if not col_map.get(key)]
-    if len(missing_expected) > max_missing:
-        raise ValueError(
-            f'Struktur kolom tidak cocok untuk {label}: lebih dari {max_missing} kolom penting tidak ditemukan '
-            f'({", ".join(missing_expected)}). Pastikan file yang diupload benar.'
-        )
-    missing_required = [display for key, display in required if not col_map.get(key)]
-    if missing_required:
-        raise ValueError(
-            f'Struktur kolom tidak cocok untuk {label}: kolom wajib tidak ditemukan: '
-            f'{", ".join(missing_required)}.'
-        )
-
-def _product_id_columns(df):
-    return {
-        'product_id': find_column(df, ['Product ID', 'Prod. ID', 'Prod ID']),
-        'category_id': find_column(df, ['Category ID', 'Category Id', 'CategoryID', 'Cat. ID', 'Cat. ID.']),
-        'category_name': find_column(df, ['Category Name', 'Category Nm.', 'Cat. Nm.', 'Cat. Nm']),
-        'product_name': find_column(df, ['Product Name', 'Prod. Nm.', 'Prod. Nm', 'Product Name(EN)']),
-        'product_status': find_column(df, ['Product Status', 'Prod. Status', 'Prod Status']),
-        'specification': find_column(df, ['Specification', 'Spec.', 'Spec']),
-        'manufacturer_name': find_column(df, ['Manufacturer Name', 'Mfr. Nm.', 'Mfr. Nm', 'Maker Nm.']),
-        'vendor_name': find_column(df, ['Vendor Name', 'Vendor Nm.', 'Vendor Nm', 'Supplier Name', 'Supplier']),
-        'order_unit': find_column(df, ['Order Unit', 'Odr. Unit', 'Odr. Unit.']),
-        'hub_handling_check': find_column(df, ['HUB Handling Check', 'HUB Handling Chk.', 'HUB Handling Chk']),
-        'tax_type': find_column(df, ['Purchasing Price Tax Type', 'Tax Type', 'Tax Type.', 'Tax']),
-        'registration_date': find_column(df, ['Registration Date', 'Prod. Reg. Date', 'Product Registration Date', 'Product Reg. Date', 'Reg. Date']),
-        'product_registry_pic': find_column(df, [
-            'Product Registy PIC(Name)', 'Product Registry PIC(Name)',
-            'Product Registy PIC', 'Product Registry PIC',
-            'Product Registered by(Name)', 'Prod. Reg. PIC Nm.', 'Prod. Reg. PIC Nm',
-            'Prod. Reg. PIC', 'Product Registry PIC Name'
-        ]),
-    }
-
-def _master_pic_columns(df):
-    return {
-        'category_id': find_column(df, ['Category ID', 'Category Id', 'CategoryID', 'Cat. ID', 'Cat. ID.']),
-        'category_name': find_column(df, ['Category Name', 'Category Nm.', 'Cat. Nm.', 'Cat. Nm']),
-        'pic': find_column(df, ['PIC', 'PIC Name', 'Pur. PIC', 'Purchase PIC', 'Current PIC', 'Nama PIC']),
-        'pic_update': find_column(df, ['Update New PIC', 'New PIC', 'Update PIC', 'PIC Baru', 'New PIC Name']),
-    }
-
-def selected_clients(args=None):
-    args = args if args is not None else request.args
-    return [c.strip() for c in args.getlist('client') if c and c.strip()]
-
-def selected_pics(args=None):
-    args = args if args is not None else request.args
-    return [p.strip() for p in args.getlist('pic') if p and p.strip()]
-
-def matches_selected_client(value, clients):
-    if not clients:
-        return True
-    v = (value or '').strip().lower()
-    return any(v == c.lower() for c in clients)
-
-def apply_so_client_filter(query, clients):
-    if clients:
-        return query.filter(SOData.operation_unit_name.in_(clients))
-    return query
-
-def apply_so_pic_filter(query, pics):
-    if not pics:
-        return query
-    if '__NONE_PLACEHOLDER__' in pics:
-        return query.filter(SOData.id.is_(None))
-    non_yupi_op_unit = db.or_(SOData.operation_unit_name.is_(None), db.not_(SOData.operation_unit_name.ilike('%YUPI%')))
-    if 'ANDRE' in pics:
-        others = [p for p in pics if p != 'ANDRE']
-        andre_filter = db.or_(SOData.pic_name == 'ANDRE', SOData.operation_unit_name.ilike('%YUPI%'))
-        if others:
-            others_filter = db.and_(SOData.pic_name.in_(others), non_yupi_op_unit)
-            return query.filter(db.or_(others_filter, andre_filter))
-        return query.filter(andre_filter)
-    if '(Kosong)' in pics:
-        others = [p for p in pics if p != '(Kosong)']
-        empty_pic = db.and_(db.or_(SOData.pic_name.is_(None), SOData.pic_name == ''), non_yupi_op_unit)
-        if others:
-            others_filter = db.and_(SOData.pic_name.in_(others), non_yupi_op_unit)
-            return query.filter(db.or_(others_filter, empty_pic))
-        return query.filter(empty_pic)
-    return query.filter(SOData.pic_name.in_(pics), non_yupi_op_unit)
-
-def canonical_pending_pic(pic, client_or_op_unit=None):
-    if client_or_op_unit and 'YUPI' in str(client_or_op_unit).upper():
-        return 'ANDRE'
-    return pic or 'Unassigned'
-
-def canonical_rfq_pic(row):
-    return canonical_pending_pic(clean(row.get('purchase_pic')), row.get('client_name'))
-
-def sort_pic_kpis(rows):
-    return sorted(rows, key=lambda x: (0 if x.get('pic') == 'ANDRE' else 1, -x.get('count', 0), x.get('pic') or ''))
-
-def apply_item_registration_pic_filter(query, pics):
-    if not pics:
-        return query
-    non_yupi_client = db.or_(ItemRegistration.client_name.is_(None), db.not_(ItemRegistration.client_name.ilike('%YUPI%')))
-    if 'ANDRE' in pics:
-        others = [p for p in pics if p != 'ANDRE']
-        andre_filter = db.or_(ItemRegistration.pic == 'ANDRE', ItemRegistration.client_name.ilike('%YUPI%'))
-        if others:
-            others_filter = db.and_(ItemRegistration.pic.in_(others), non_yupi_client)
-            return query.filter(db.or_(others_filter, andre_filter))
-        return query.filter(andre_filter)
-    return query.filter(ItemRegistration.pic.in_(pics), non_yupi_client)
-
-def item_registration_dict(row, registered_items=None, include_similarity=True):
-    pic = resolve_item_registration_pic(row)
-    similar_items = find_similar_registered_items(row, registered_items) if include_similarity else None
-    return {
-        'id': row.id,
-        'proc_status': row.proc_status or '',
-        'req_date': row.req_date.isoformat() if row.req_date else '',
-        'existing_owner': row.existing_owner or '',
-        'client_name': row.client_name or '',
-        'category': source_category_level1(row.category),
-        'pic': pic,
-        'req_no': row.req_no or '',
-        'prod_id': row.prod_id or '',
-        'batch_grp_no': row.batch_grp_no or '',
-        'prod_name': row.prod_name or '',
-        'spec': row.spec or '',
-        'mfr_name': row.mfr_name or '',
-        'odr_unit': row.odr_unit or '',
-        'vendor_name': row.vendor_name or '',
-        'prod_price': row.prod_price or 0,
-        'curr': row.curr or '',
-        'remarks': row.remarks or '',
-        'uploaded_at': utc_isoformat(row.uploaded_at),
-        'similar_items': similar_items,
-        'similar_prod_ids': (similar_items or {}).get('product_ids', ''),
-        'similar_prod_name': (similar_items or {}).get('product_name', ''),
-        'similar_spec': (similar_items or {}).get('specification', ''),
-        'similar_mfr_name': (similar_items or {}).get('manufacturer_name', ''),
-        'similar_odr_unit': (similar_items or {}).get('order_unit', ''),
-        'similar_score': (similar_items or {}).get('similarity', None),
-        'similar_count': (similar_items or {}).get('count', 0),
-    }
-
-def product_category_level1(product_id):
-    if not product_id:
-        return ''
-    prod = db.session.query(ProductIDDB).filter_by(product_id=str(product_id).strip()).first()
-    if not prod or not prod.category_name:
-        return ''
-    full_category = prod.category_name.strip()
-    return full_category.split('>')[0].strip() if '>' in full_category else full_category
-
-def source_category_level1(category_value):
-    """Use the source Item Registration Cat. Nm. column and keep the text before first >."""
-    category = clean(category_value)
-    if not category:
-        return ''
-    if '>' in category:
-        return category.split('>', 1)[0].strip()
-    return category.strip()
-
-def normalize_category_id(value):
-    cat_id = clean(value)
-    if not cat_id:
-        return ''
-    if re.match(r'^\d+\.0$', cat_id):
-        return cat_id[:-2]
-    return cat_id.strip()
-
-def normalize_category_name(value):
-    category = source_category_level1(value)
-    if not category:
-        return ''
-    return re.sub(r'\s+', ' ', category).strip().lower()
-
-def master_pic_category_key(category_name):
-    """Stable internal key for MasterPIC rows created from Category Name only."""
-    norm = normalize_category_name(category_name)
-    if not norm:
-        return ''
-    return f"CATNAME_{hashlib.sha1(norm.encode('utf-8')).hexdigest()[:16]}"
-
-def find_master_pic_by_category_name(category_name):
-    norm = normalize_category_name(category_name)
-    if not norm:
-        return None
-    generated_key = master_pic_category_key(category_name)
-    if generated_key:
-        existing = db.session.query(MasterPIC).filter_by(category_id=generated_key).first()
-        if existing:
-            return existing
-    # Backward compatibility: old rows may still have a real Category ID but the
-    # same Category Name. Treat Category Name as the unique business key.
-    for item in db.session.query(MasterPIC).order_by(MasterPIC.updated_at.desc()).all():
-        if normalize_category_name(item.category_name) == norm:
-            return item
-    return None
-
-def master_pic_unique_category_count():
-    return len({
-        normalize_category_name(m.category_name)
-        for m in db.session.query(MasterPIC.category_name).all()
-        if normalize_category_name(m.category_name)
-    })
-
-def invalidate_master_pic_cache():
-    _MASTER_PIC_CACHE['signature'] = None
-    _MASTER_PIC_CACHE['by_id'] = {}
-    _MASTER_PIC_CACHE['by_name'] = {}
-
-def master_pic_maps():
-    if _MASTER_PIC_CACHE.get('signature') is not None:
-        return _MASTER_PIC_CACHE['by_id'], _MASTER_PIC_CACHE['by_name']
-
-    signature = db.session.query(func.count(MasterPIC.id), func.max(MasterPIC.updated_at)).one()
-    signature = tuple(signature)
-
-    by_id = {}
-    by_name = {}
-    for m in MasterPIC.query.with_entities(MasterPIC.category_id, MasterPIC.category_name, MasterPIC.pic_name).order_by(MasterPIC.updated_at.desc()).all():
-        pic = clean(m.pic_name)
-        if not pic:
-            continue
-        cat_id = normalize_category_id(m.category_id)
-        if cat_id and cat_id not in by_id:
-            by_id[cat_id] = pic
-        cat_name = normalize_category_name(m.category_name)
-        if cat_name and cat_name not in by_name:
-            by_name[cat_name] = pic
-    _MASTER_PIC_CACHE['signature'] = signature
-    _MASTER_PIC_CACHE['by_id'] = by_id
-    _MASTER_PIC_CACHE['by_name'] = by_name
-    return by_id, by_name
-
-def _lookup_pic_by_category(category_id=None, category_name=None):
-    by_id, by_name = master_pic_maps()
-    cat_id = normalize_category_id(category_id)
-    if cat_id and cat_id in by_id:
-        return by_id[cat_id]
-    cat_name = normalize_category_name(category_name)
-    if cat_name and cat_name in by_name:
-        return by_name[cat_name]
-    return None
-
-def resolve_item_registration_pic(row):
-    mapped = _lookup_pic_by_category(row.category_id, row.category)
-    return canonical_pending_pic(mapped or row.pic or '', row.client_name)
-
-def is_existing_owner_pur_pic(value):
-    return (clean(value) or '').strip().lower() == 'pur. pic'
-
-ITEM_REG_KPI_EXCLUDED_STATUSES = {
-    'sales pic terminate(pur. pic)',
-    'purchase exception termination',
-    'sales pic confirmation req.(pur. pic)',
-    'pre-reg. prod. proc.(pur.)',
-}
-
-def item_registration_kpi_status_expr():
-    return func.lower(func.trim(func.coalesce(ItemRegistration.proc_status, '')))
-
-def apply_item_registration_kpi_status_filter(query):
-    """KPI Item Registration counts only active pending rows.
-
-Excluded statuses are business-stop / confirmation / pre-registration process
-statuses that should remain visible in the table but not inflate PIC KPI cards.
-"""
-    status_expr = item_registration_kpi_status_expr()
-    return query.filter(
-        ~status_expr.in_(list(ITEM_REG_KPI_EXCLUDED_STATUSES)),
-        ~status_expr.like('%sales%')
-    )
-
-def apply_item_registration_visible_status_filter(query):
-    return query.filter(~item_registration_kpi_status_expr().like('%sales%'))
-
-def refresh_item_registration_mappings():
-    rows = ItemRegistration.query.all()
-    changed = False
-    for row in rows:
-        category = source_category_level1(row.category)
-        normalized_cat_id = normalize_category_id(row.category_id)
-        if row.category_id != normalized_cat_id:
-            row.category_id = normalized_cat_id
-            changed = True
-        if row.category != category:
-            row.category = category
-            changed = True
-        pic = _lookup_pic_by_category(normalized_cat_id, category) or ''
-        if row.pic != pic:
-            row.pic = pic
-            changed = True
-    if changed:
-        db.session.commit()
-
-def _item_registration_columns(df):
-    return {
-        'proc_status':  find_column(df, ['Proc. Status', 'Proc Status', 'Process Status']),
-        'req_date':     find_column(df, ['Req. Date', 'Req Date', 'Request Date']),
-        'existing_owner': find_column(df, ['Existing Owner', 'Existing Owner.', 'Owner']),
-        'client_name':  find_column(df, ['Client Nm.', 'Client Nm', 'Client Name']),
-        'category':     find_column(df, ['Cat. Nm.', 'Cat. Nm', 'Category', 'Cate. Nm.', 'Category Name']),
-        'category_id':  find_column(df, ['Cat. ID', 'Cat. ID.', 'Category ID', 'Category Id', 'CategoryID']),
-        'pic':          find_column(df, ['PIC', 'Pur. PIC', 'Purchase PIC']),
-        'req_no':       find_column(df, ['Req. No', 'Req. No.', 'Request No', 'Request Number']),
-        'prod_id':      find_column(df, ['Prod. ID', 'Prod ID', 'Product ID']),
-        'product_status': find_column(df, ['Product Status', 'Prod. Status', 'Prod Status']),
-        'batch_grp_no': find_column(df, ['Batch Grp. No.', 'Batch Grp. No', 'Batch Group No']),
-        'prod_name':    find_column(df, ['Prod. Nm.', 'Prod. Nm', 'Product Name', 'Prod. Nm.(Eng.)']),
-        'spec':         find_column(df, ['Spec.', 'Spec', 'Specification']),
-        'mfr_name':     find_column(df, ['Mfr. Nm.', 'Mfr. Nm', 'Manufacturer Name', 'Maker Nm.']),
-        'odr_unit':     find_column(df, ['Odr. Unit', 'Odr. Unit.', 'Order Unit']),
-        'vendor_name':  find_column(df, ['Vendor Nm.', 'Vendor Nm', 'Vendor Name']),
-        'prod_price':   find_column(df, ['Prod. Price', 'Product Price', 'Price']),
-        'curr':         find_column(df, ['Curr.', 'Curr', 'Currency']),
-        'hub_handling_check': find_column(df, [
-            'HUB Handling Chk.', 'HUB Handling Chk', 'HUB Handling Check',
-            'Hub Handling Check', 'Hub Handling Chk.'
-        ]),
-        'tax_type': find_column(df, ['Tax Type', 'Tax Type.', 'Tax']),
-        'registration_date': find_column(df, [
-            'Prod. Reg. Date', 'Product Reg. Date', 'Product Registration Date',
-            'Registration Date', 'Reg. Date'
-        ]),
-        'product_registry_pic': find_column(df, [
-            'Prod. Reg. PIC Nm.', 'Prod. Reg. PIC Nm', 'Prod. Reg. PIC',
-            'Product Registry PIC', 'Product Registration PIC', 'Product Reg. PIC'
-        ]),
-    }
-
-def validate_item_registration_source_file(df, filename='Item Registration'):
-    """Accept only SAP Process Pur. Info. Reg. exports for Item Registration.
-
-    Prod. Reg. Status is a different SAP export with similar registration-looking
-    columns. It must be rejected here because the Item Registration page is built
-    from Process Pur. Info. Reg. data.
-    """
-    marker_cols = {str(c).strip().lower() for c in df.columns}
-
-    process_markers = {
-        'unified vendor', 'bid/quo.', 'multi. bidding required',
-        'bid no.', 'deadline', 'pur. info. proc. compl. date',
-        'vendor confirm req. detail', 'vendor confirm proc. detail',
-    }
-    prod_reg_markers = {
-        'register request',
-        'prod. req. skip reason',
-        'prod. reg. req. compl. date',
-        'prod. reg. req. reject date',
-    }
-
-    matched_process = sorted(process_markers & marker_cols)
-    matched_prod_reg = sorted(prod_reg_markers & marker_cols)
-
-    if matched_prod_reg and not matched_process:
-        raise ValueError(
-            'Struktur kolom tidak cocok untuk Item Registration. '
-            'Upload yang benar adalah struktur SAP Process Pur. Info. Reg., bukan Prod. Reg. Status.'
-        )
-
-    if not matched_process:
-        raise ValueError(
-            'Struktur kolom tidak terlihat seperti SAP Process Pur. Info. Reg. '
-            'Kolom marker wajib tidak ditemukan: Unified Vendor / Bid/Quo. / Multi. Bidding Required / Bid No. / Deadline.'
-        )
-
-
-def import_item_registration_dataframe(df, filename='Item Registration'):
-    df.columns = [str(c).strip() for c in df.columns]
-    validate_item_registration_source_file(df, filename)
-    col = _item_registration_columns(df)
-    expected = [
-        ('proc_status', 'Proc. Status'), ('client_name', 'Client Nm.'),
-        ('category', 'Cat. Nm.'), ('category_id', 'Category ID'),
-        ('req_no', 'Req. No'), ('prod_name', 'Product Name'),
-        ('spec', 'Specification'), ('mfr_name', 'Manufacturer Name'),
-        ('odr_unit', 'Order Unit'), ('vendor_name', 'Vendor Name'),
-        ('prod_price', 'Prod. Price'), ('curr', 'Curr.')
-    ]
-    required = [
-        ('proc_status', 'Proc. Status'), ('client_name', 'Client Nm.'),
-        ('category', 'Cat. Nm.'), ('category_id', 'Category ID'),
-        ('req_no', 'Req. No'), ('prod_name', 'Product Name')
-    ]
-    validate_upload_columns(filename, 'Item Registration', col, expected, required)
-
-    incoming = {}
-    for _, row in df.iterrows():
-        req_no = clean(df_val(row, col['req_no']))
-        prod_id = clean_product_id(df_val(row, col['prod_id']))
-        prod_name = clean(df_val(row, col['prod_name']))
-        if not req_no:
-            continue
-        category_id = normalize_category_id(df_val(row, col['category_id']))
-        category = source_category_level1(df_val(row, col['category']))
-        incoming[req_no] = {
-            'proc_status': clean(df_val(row, col['proc_status'])),
-            'req_date': parse_date(df_val(row, col['req_date'])),
-            'existing_owner': clean(df_val(row, col['existing_owner'])),
-            'client_name': clean(df_val(row, col['client_name'])),
-            'category': category,
-            'category_id': category_id,
-            'pic': _lookup_pic_by_category(category_id, category) or '',
-            'req_no': req_no,
-            'prod_id': prod_id,
-            'product_status': clean(df_val(row, col['product_status'])),
-            'batch_grp_no': clean(df_val(row, col['batch_grp_no'])),
-            'prod_name': prod_name,
-            'spec': clean(df_val(row, col['spec'])),
-            'mfr_name': clean(df_val(row, col['mfr_name'])),
-            'odr_unit': clean(df_val(row, col['odr_unit'])),
-            'vendor_name': clean(df_val(row, col['vendor_name'])),
-            'prod_price': safe_float(df_val(row, col['prod_price'])),
-            'curr': clean(df_val(row, col['curr'])),
-            'hub_handling_check': clean(df_val(row, col['hub_handling_check'])),
-            'tax_type': clean(df_val(row, col['tax_type'])),
-            'registration_date': parse_date(df_val(row, col['registration_date'])),
-            'product_registry_pic': clean(df_val(row, col['product_registry_pic'])),
-            'uploaded_at': datetime.utcnow(),
-        }
-
-    req_numbers = list(incoming.keys())
-    existing_map = {}
-    duplicate_rows = []
-    if req_numbers:
-        existing_rows = ItemRegistration.query.filter(ItemRegistration.req_no.in_(req_numbers)).order_by(ItemRegistration.id.asc()).all()
-        for existing in existing_rows:
-            if existing.req_no in existing_map:
-                duplicate_rows.append(existing)
-            else:
-                existing_map[existing.req_no] = existing
-
-    added = updated = removed_duplicates = 0
-    for dup in duplicate_rows:
-        db.session.delete(dup)
-        removed_duplicates += 1
-
-    for req_no, payload in incoming.items():
-        existing = existing_map.get(req_no)
-        if existing:
-            for key, value in payload.items():
-                setattr(existing, key, value)
-            updated += 1
-        else:
-            db.session.add(ItemRegistration(**payload))
-            added += 1
-
-    db.session.add(UploadLog(file_type='ITEM_REG', filename=filename, records_count=len(incoming)))
-    return {
-        'processed': len(incoming),
-        'added': added,
-        'updated': updated,
-        'removed_duplicates': removed_duplicates,
-        'keys': list(incoming.keys()),
-    }
-
-def ensure_default_item_registration_loaded():
-    if db.session.query(func.count(ItemRegistration.id)).scalar():
-        return
-    default_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'Process+Pur.+Info.+Reg._20260526143511.xlsx')
-    if not os.path.exists(default_path):
-        return
-    df = pd.read_excel(default_path, engine='openpyxl')
-    import_item_registration_dataframe(df, os.path.basename(default_path))
-    db.session.commit()
-
-def df_val(row, col):
-    return row.get(col) if col else None
-
-def get_aging_label(workday_count):
-    """Classify aging bucket based on working days. None (no date) → '180+' bucket."""
-    if workday_count is None: return '180+'
-    if workday_count >= 180: return '180+'
-    if workday_count >= 90:  return '90-180'
-    if workday_count >= 30:  return '30-90'
-    return '0-30'
-
-def so_dict(s):
-    today = date.today()
-    age_days = workdays_since(s.so_create_date, today)
-    
-    # Get category from in-memory cache (no DB query per row).
-    category_name = _pid_category_lookup(s.product_id) if s.product_id else ''
-    
-    return {
-        'id': s.id, 'so_number': s.so_number, 'so_item': s.so_item,
-        'so_status': s.so_status, 'operation_unit_name': s.operation_unit_name,
-        'vendor_id': s.vendor_id or '', 'vendor_name': s.vendor_name,
-        'customer_po_number': s.customer_po_number,
-        'delivery_memo': s.delivery_memo, 'product_name': s.product_name,
-        'specification': s.specification, 'manufacturer_name': s.manufacturer_name or '',
-        'product_id': s.product_id,
-        'category_name': category_name,
-        'svo_po': s.matched_po_number or '',
-        'so_qty': s.so_qty, 'sales_unit': s.sales_unit or '',
-        'sales_price': s.sales_price, 'sales_amount': s.sales_amount,
-        'currency': s.currency or '',
-        'purchasing_price': s.purchasing_price, 'purchasing_amount': s.purchasing_amount,
-        'purchasing_currency': s.purchasing_currency,
-        'so_create_date': s.so_create_date.isoformat() if s.so_create_date else '',
-        'delivery_possible_date': s.delivery_possible_date.isoformat() if s.delivery_possible_date else '',
-        'delivery_plan_date': s.delivery_plan_date.isoformat() if s.delivery_plan_date else '',
-        'remarks': s.remarks or '',
-        'pic_name': canonical_pending_pic(s.pic_name, s.operation_unit_name),
-        'aging_days': age_days,
-        'aging_label': get_aging_label(age_days)
-    }
-
-# ─── Build hidden set from delete requests ────────────────────────────────
-def get_hidden_so_items():
-    """Hide feature disabled: old callers remain compatible, but nothing is excluded."""
-    return set()
-
-
-@app.route('/api/dashboard/stats', methods=['GET'])
-def get_dashboard_stats():
-    """Fast Dashboard KPI endpoint.
-
-    First-load target is below 5 seconds on a warm PythonAnywhere worker. The
-    key change is that Dashboard cards/charts are calculated with SQL aggregate
-    queries instead of loading every open SO row into Python.
-    """
-    try:
-        cache_key = runtime_cache_key('dashboard_stats_v2_sql')
-        cached = runtime_cache_get(cache_key)
-        if cached is not None:
-            return jsonify(cached)
-
-        date_year, date_from, date_to = parse_so_date_args()
-        clients = selected_clients()
-        pics = selected_pics()
-        is_sqlite = 'sqlite' in app.config.get('SQLALCHEMY_DATABASE_URI', '')
-
-        def base_open_q(apply_client=True, apply_pic=True):
-            q = db.session.query(SOData).filter(open_so_filter(), so_countable_sql_filter())
-            if apply_client:
-                q = apply_so_client_filter(q, clients)
-            if apply_pic:
-                q = apply_so_pic_filter(q, pics)
-            return apply_so_create_date_filter(q, date_year, date_from, date_to, is_sqlite=is_sqlite)
-
-        q = base_open_q()
-        sales_expr = func.coalesce(SOData.sales_amount, 0.0)
-        purchase_expr = dashboard_purchase_sql_expr()
-        # Use YYYY-MM because the frontend already formats this to MMM yy.
-        # SQLite does not support strftime('%b'), so this also prevents NULL month labels.
-        month_expr = func.strftime('%Y-%m', SOData.so_create_date) if is_sqlite else func.to_char(func.date_trunc('month', SOData.so_create_date), 'YYYY-MM')
-        month_sort_expr = month_expr
-        status_label = func.coalesce(func.nullif(func.trim(SOData.so_status), ''), 'Unknown')
-
-        total_row = q.with_entities(
-            func.count(SOData.id),
-            func.coalesce(func.sum(sales_expr), 0.0),
-        ).first()
-        total_so_count = int(total_row[0] or 0) if total_row else 0
-        total_open_so_amount = float(total_row[1] or 0) if total_row else 0.0
-        total_open_for_pct = total_so_count or 1
-
-        monthly_rows = (
-            q.filter(SOData.so_create_date.isnot(None))
-             .with_entities(
-                month_expr.label('month'),
-                month_sort_expr.label('month_sort'),
-                func.count(SOData.id).label('so_count'),
-                func.coalesce(func.sum(sales_expr), 0.0).label('amount'),
-                func.coalesce(func.sum(purchase_expr), 0.0).label('purchase_amount'),
-             )
-             .group_by(month_sort_expr, month_expr)
-             .order_by(month_sort_expr)
-             .all()
-        )
-        monthly_trend = [
-            {
-                'month': row.month,
-                'so_count': int(row.so_count or 0),
-                'amount': round(float(row.amount or 0) / 1_000_000, 2),
-                'purchase_amount': round(float(row.purchase_amount or 0) / 1_000_000, 2),
-            }
-            for row in monthly_rows
-        ]
-
-        def top_group(label_expr, out_key, amount_expr, limit):
-            rows = (
-                q.with_entities(
-                    label_expr.label(out_key),
-                    func.count(SOData.id).label('so_count'),
-                    func.coalesce(func.sum(amount_expr), 0.0).label('total_amount'),
-                )
-                .group_by(label_expr)
-                .order_by(desc(func.coalesce(func.sum(amount_expr), 0.0)))
-                .limit(limit)
-                .all()
-            )
-            return [
-                {out_key: getattr(row, out_key) or 'Unknown', 'so_count': int(row.so_count or 0), 'total_amount': round(float(row.total_amount or 0), 2)}
-                for row in rows
-            ]
-
-        vendor_label = func.coalesce(func.nullif(func.trim(SOData.vendor_name), ''), 'Unknown')
-        op_unit_label = func.coalesce(func.nullif(func.trim(SOData.operation_unit_name), ''), 'Unknown')
-        top_vendors = top_group(vendor_label, 'vendor', sales_expr, 5)
-        top_op_units = top_group(op_unit_label, 'op_unit', sales_expr, 10)
-
-        status_rows = (
-            q.with_entities(
-                status_label.label('name'),
-                func.count(SOData.id).label('value'),
-                func.coalesce(func.sum(sales_expr), 0.0).label('amount'),
-            )
-            .group_by(status_label)
-            .order_by(desc(func.count(SOData.id)))
-            .all()
-        )
-        so_status = [
-            {
-                'name': row.name or 'Unknown',
-                'value': int(row.value or 0),
-                'percentage': round((int(row.value or 0) / total_open_for_pct) * 100, 1),
-                'amount': round(float(row.amount or 0), 2),
-            }
-            for row in status_rows
-        ]
-
-        monthly_status_rows = (
-            q.filter(SOData.so_create_date.isnot(None))
-             .with_entities(
-                status_label.label('name'),
-                month_expr.label('month'),
-                month_sort_expr.label('month_sort'),
-                func.count(SOData.id).label('count'),
-                func.coalesce(func.sum(sales_expr), 0.0).label('amount'),
-             )
-             .group_by(status_label, month_sort_expr, month_expr)
-             .order_by(month_sort_expr)
-             .all()
-        )
-        status_months = []
-        status_month_sort = {}
-        status_acc = {}
-        for row in monthly_status_rows:
-            name = row.name or 'Unknown'
-            month = row.month
-            if month not in status_month_sort:
-                status_month_sort[month] = row.month_sort
-                status_months.append(month)
-            item = status_acc.setdefault(name, {'monthly': {}, 'total': 0, 'amount': 0.0})
-            c = int(row.count or 0)
-            item['monthly'][month] = c
-            item['total'] += c
-            item['amount'] += float(row.amount or 0)
-        status_months = sorted(status_months, key=lambda m: status_month_sort.get(m, m))
-        so_status_monthly = sorted(
-            [
-                {
-                    'name': name,
-                    'monthly': data['monthly'],
-                    'total': data['total'],
-                    'percentage': round((data['total'] / total_open_for_pct) * 100, 1),
-                    'amount': round(data['amount'], 2),
-                }
-                for name, data in status_acc.items()
-            ],
-            key=lambda x: x['total'],
-            reverse=True,
-        )
-
-        item_reg_base_q = apply_item_registration_kpi_status_filter(db.session.query(ItemRegistration))
-        if clients:
-            item_reg_base_q = item_reg_base_q.filter(ItemRegistration.client_name.in_(clients))
-
-        def item_registration_distribution(column, limit=None):
-            label_expr = func.coalesce(func.nullif(func.trim(column), ''), '(Kosong)')
-            rows = (
-                item_reg_base_q
-                .with_entities(label_expr.label('name'), func.count(ItemRegistration.id).label('value'))
-                .group_by(label_expr)
-                .order_by(func.count(ItemRegistration.id).desc(), label_expr.asc())
-            )
-            if limit:
-                rows = rows.limit(limit)
-            return [{'name': name or '(Kosong)', 'value': int(value or 0)} for name, value in rows.all()]
-
-        item_registration_proc_status = item_registration_distribution(ItemRegistration.proc_status)
-        item_registration_clients = item_registration_distribution(ItemRegistration.client_name, limit=10)
-
-        option_q = base_open_q(apply_client=False, apply_pic=False)
-        client_options = [r[0] for r in option_q.with_entities(SOData.operation_unit_name).filter(SOData.operation_unit_name.isnot(None), SOData.operation_unit_name != '').distinct().order_by(SOData.operation_unit_name).all()]
-        raw_pic_options = [r[0] for r in option_q.with_entities(SOData.pic_name).filter(SOData.pic_name.isnot(None), SOData.pic_name != '').distinct().order_by(SOData.pic_name).all()]
-        pic_options = []
-        seen_pics = set()
-        for p in raw_pic_options:
-            label = canonical_pending_pic(p, '')
-            if label and label not in seen_pics:
-                seen_pics.add(label)
-                pic_options.append(label)
-        if any('YUPI' in str(c or '').upper() for c in client_options) and 'ANDRE' not in seen_pics:
-            pic_options.insert(0, 'ANDRE')
-
-        last_upload = db.session.query(func.max(UploadLog.uploaded_at)).scalar()
-        last_so_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'SMRO').scalar()
-        last_item_reg_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'ItemRegistration').scalar()
-        last_po_upload = None
-        rfq_fetched_at = RFQ_CACHE.get('fetched_at')
-        so_date_range = db.session.query(func.min(SOData.so_create_date), func.max(SOData.so_create_date)).first()
-        po_date_range = (None, None)
-
-        if is_sqlite:
-            covered_rows = db.session.query(
-                func.strftime('%Y', SOData.so_create_date).label('yr'),
-                func.strftime('%m', SOData.so_create_date).label('mo'),
-            ).filter(SOData.so_create_date.isnot(None)).distinct().all()
-        else:
-            covered_rows = db.session.query(
-                func.extract('year', SOData.so_create_date).label('yr'),
-                func.extract('month', SOData.so_create_date).label('mo'),
-            ).filter(SOData.so_create_date.isnot(None)).distinct().all()
-        _MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December']
-        so_covered_months = {}
-        for yr, mo in covered_rows:
-            if yr is None or mo is None:
-                continue
-            yr_s = str(int(yr)) if not isinstance(yr, str) else yr
-            mo_i = int(mo)
-            so_covered_months.setdefault(yr_s, []).append((mo_i, _MONTH_NAMES[mo_i - 1]))
-        so_covered_months = {yr: [name for _, name in sorted(months)] for yr, months in sorted(so_covered_months.items())}
-
-        wib_today = (datetime.utcnow() + timedelta(hours=7)).date()
-        today_start_utc = datetime.combine(wib_today, datetime.min.time()) - timedelta(hours=7)
-        tomorrow_start_utc = today_start_utc + timedelta(days=1)
-        updated_today_filters = (
-            SOData.so_create_date.isnot(None),
-            SOData.uploaded_at.isnot(None),
-            SOData.uploaded_at >= today_start_utc,
-            SOData.uploaded_at < tomorrow_start_utc,
-        )
-        if is_sqlite:
-            updated_month_rows = db.session.query(
-                func.strftime('%Y', SOData.so_create_date).label('yr'),
-                func.strftime('%m', SOData.so_create_date).label('mo'),
-            ).filter(*updated_today_filters).distinct().all()
-        else:
-            updated_month_rows = db.session.query(
-                func.extract('year', SOData.so_create_date).label('yr'),
-                func.extract('month', SOData.so_create_date).label('mo'),
-            ).filter(*updated_today_filters).distinct().all()
-        so_updated_months_today = {}
-        for yr, mo in updated_month_rows:
-            if yr is None or mo is None:
-                continue
-            yr_s = str(int(yr)) if not isinstance(yr, str) else yr
-            mo_i = int(mo)
-            so_updated_months_today.setdefault(yr_s, []).append((mo_i, _MONTH_NAMES[mo_i - 1]))
-        so_updated_months_today = {yr: [name for _, name in sorted(months)] for yr, months in sorted(so_updated_months_today.items())}
-
-        payload = {
-            'po_without_so': 0,
-            'so_without_po': total_so_count,
-            'total_po_count': 0,
-            'total_po_line_count': 0,
-            'total_po_amount': 0.0,
-            'total_so_count': total_so_count,
-            'total_open_so_amount': total_open_so_amount,
-            'monthly_trend': monthly_trend,
-            'top_vendors': top_vendors,
-            'top_op_units': top_op_units,
-            'so_status': so_status,
-            'so_status_monthly': so_status_monthly,
-            'status_months': status_months,
-            'item_registration_proc_status': item_registration_proc_status,
-            'item_registration_clients': item_registration_clients,
-            'filters': {'clients': client_options, 'pics': pic_options},
-            'last_updated': utc_isoformat(last_upload),
-            'last_updated_po': utc_isoformat(last_po_upload),
-            'last_updated_smro': utc_isoformat(last_so_upload),
-            'last_updated_item_registration': utc_isoformat(last_item_reg_upload),
-            'last_updated_rfq': utc_isoformat(rfq_fetched_at),
-            'so_covered_months': so_covered_months,
-            'so_updated_months_today': so_updated_months_today,
-            'so_updated_months_today_date': wib_today.isoformat(),
-            'po_date_range': {'min': None, 'max': None},
-            'so_date_range': {
-                'min': so_date_range[0].isoformat() if so_date_range and so_date_range[0] else None,
-                'max': so_date_range[1].isoformat() if so_date_range and so_date_range[1] else None,
-            },
-        }
-        runtime_cache_set(cache_key, payload, ttl_seconds=300)
-        return jsonify(payload)
-    except Exception as e:
-        db.session.rollback()
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/debug/so-fields', methods=['GET'])
-@app.route('/api/debug/so-fields', methods=['GET'])
-def debug_so_fields():
-    """Debug endpoint — inspect spec/product_id fill rate and a sample of SO data."""
-    try:
-        total = db.session.query(func.count(SOData.id)).scalar() or 0
-        has_spec = db.session.query(func.count(SOData.id)).filter(
-            SOData.specification.isnot(None), SOData.specification != ''
-        ).scalar() or 0
-        has_pid = db.session.query(func.count(SOData.id)).filter(
-            SOData.product_id.isnot(None), SOData.product_id != ''
-        ).scalar() or 0
-        samples = db.session.query(
-            SOData.so_item, SOData.product_name, SOData.specification, SOData.product_id
-        ).limit(10).all()
-        return jsonify({
-            'total_so_records': total,
-            'records_with_specification': has_spec,
-            'records_with_product_id': has_pid,
-            'spec_fill_pct': round(has_spec / total * 100, 1) if total else 0,
-            'pid_fill_pct': round(has_pid / total * 100, 1) if total else 0,
-            'sample_rows': [
-                {'so_item': r[0], 'product_name': r[1], 'specification': r[2], 'product_id': r[3]}
-                for r in samples
-            ],
-            'hint': (
-                'If spec_fill_pct and pid_fill_pct are 0%, your SMRO Excel file likely uses '
-                'different column headers. Re-upload SMRO after checking column names. '
-                'Supported names: Specification|Spec|Specifications — Product ID|Product Id|'
-                'Product Code|Material|Material No|Material Number|Material Code|SKU'
-            )
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/debug/smro-columns', methods=['POST'])
-def debug_smro_columns():
-    """Inspect column names of an uploaded SMRO file without saving anything.
-    Returns all column names and which ones were detected as spec/pid/so_item."""
-    try:
-        if 'file' not in request.files:
-            return jsonify({'error': 'No file uploaded'}), 400
-        file = request.files['file']
-        df = pd.read_excel(file, engine='openpyxl', nrows=3)
-        df.columns = [str(c).strip() for c in df.columns]
-        all_cols = df.columns.tolist()
-
-        detected = {
-            'col_so_item':  find_column(df, ['SO Item', 'SO Item No', 'SO Line', 'Item No', 'Line']),
-            'col_so_number': find_column(df, ['SO Number','SO No','SO No.','SO','Sales Order Number','No SO','Nomor SO']),
-            'col_spec':    find_column(df, ['Specification','Spec','Specifications','Product Specification','Material Description','Material Desc','Short Text']),
-            'col_pid':     find_column(df, ['Product ID','Product Id','Product Code','Material','Material No','Material Number','Material Code','SKU','Article','Article Number']),
-            'col_prod':    find_column(df, ['Product Name','Item Name','Description','Product']),
-            'col_status':  find_column(df, ['SO Status','Status','Order Status']),
-            'col_vendor':  find_column(df, ['Vendor Name','Vendor','Supplier']),
-            'col_sodate':  find_column(df, ['SO Create Date','Order Date','SO Date','Create Date']),
-        }
-
-        col_primary = detected['col_so_item'] or detected['col_so_number']
-        missing_critical = []
-        if not col_primary:
-            missing_critical.append('col_so_item / col_so_number')
-        for k in ('col_spec', 'col_pid'):
-            if not detected[k]:
-                missing_critical.append(k)
-
-        return jsonify({
-            'total_columns': len(all_cols),
-            'all_columns': all_cols,
-            'detected': detected,
-            'primary_key_column': col_primary,
-            'missing_critical': missing_critical,
-            'diagnosis': (
-                'col_spec and/or col_pid NOT detected — column names in this file do not match any known alias. '
-                'Check "all_columns" list and update backend aliases.'
-                if missing_critical else
-                'SO Item key, col_spec, and col_pid all detected — upload should work correctly.'
-            )
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/data/aging', methods=['GET'])
-@app.route('/api/data/aging', methods=['GET'])
-def get_aging_data():
-    """SO Aging by vendor.
-    Uses IDENTICAL filtering logic as total_so_count in /api/dashboard/stats so
-    the TOTAL row in the aging table always matches the KPI card:
-      - open SO only (open_so_filter)
-      - includes all operation units, including HLI GREEN POWER (CONSUMABLE)
-      - excludes hidden SO items
-      - includes return SO/statuses
-      - excludes internal PO refs
-      - SO records without so_create_date are bucketed as '180+' (not silently dropped)
-    """
-    try:
-        cache_key = runtime_cache_key('aging')
-        cached = runtime_cache_get(cache_key)
-        if cached is not None:
-            return jsonify(cached)
-
-        today = date.today()
-        hidden_so = get_hidden_so_items()
-        clients = selected_clients()
-        pics = selected_pics()
-        date_year, date_from, date_to = parse_so_date_args()
-        vendors = {}
-
-        q = db.session.query(SOData).filter(
-            open_so_filter()
-        )
-        q = apply_so_client_filter(q, clients)
-        q = apply_so_pic_filter(q, pics)
-        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
-        aging_fields = (
-            SOData.so_number, SOData.so_item, SOData.vendor_name,
-            SOData.customer_po_number, SOData.delivery_memo,
-            SOData.so_create_date, SOData.sales_amount,
-        )
-        for s in q.options(load_only(*aging_fields)).all():
-            # Apply same exclusions as total_so_count
-            if s.so_item in hidden_so or s.so_number in hidden_so:
-                continue
-            if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
-                continue
-
-            v = s.vendor_name or 'Unknown'
-            if v not in vendors:
-                vendors[v] = {'vendor': v, 'less_30': 0, 'days_30_90': 0,
-                              'days_90_180': 0, 'more_180': 0, 'total_open': 0, 'sales_amount': 0.0}
-
-            age = workdays_since(s.so_create_date, today) if s.so_create_date else None
-            if age is None:
-                # No SO create date — put in 180+ bucket (same as total_so_count which counts them)
-                vendors[v]['more_180'] += 1
-            elif age < 30:
-                vendors[v]['less_30'] += 1
-            elif age < 90:
-                vendors[v]['days_30_90'] += 1
-            elif age < 180:
-                vendors[v]['days_90_180'] += 1
-            else:
-                vendors[v]['more_180'] += 1
-            vendors[v]['total_open'] += 1
-            vendors[v]['sales_amount'] += float(s.sales_amount or 0)
-
-        payload = sorted(vendors.values(), key=lambda x: x['total_open'], reverse=True)
-        runtime_cache_set(cache_key, payload, ttl_seconds=180)
-        return jsonify(payload)
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/data/aging-detail/<path:vendor_name>', methods=['GET'])
-def get_aging_detail(vendor_name):
-    try:
-        bucket = request.args.get('bucket')
-        today = date.today()
-        hidden_so = get_hidden_so_items()
-        date_year, date_from, date_to = parse_so_date_args()
-        clients = selected_clients()
-        pics = selected_pics()
-        q = db.session.query(SOData).filter(
-            open_so_filter(),
-            SOData.vendor_name == vendor_name
-        )
-        q = apply_so_client_filter(q, clients)
-        q = apply_so_pic_filter(q, pics)
-        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
-        sos = q.order_by(SOData.so_create_date.asc()).all()
-        sos = [s for s in sos
-               if s.so_item not in hidden_so and s.so_number not in hidden_so
-               and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
-        if bucket:
-            bucket = bucket.strip().replace(' ', '+')
-            sos = [s for s in sos if get_aging_label(workdays_since(s.so_create_date, today) if s.so_create_date else None) == bucket]
-        return jsonify([so_dict(s) for s in sos])
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/data/aging-detail-all', methods=['GET'])
-def get_aging_detail_all():
-    try:
-        bucket = request.args.get('bucket')
-        if bucket:
-            bucket = bucket.strip().replace(' ', '+')
-        today = date.today()
-        hidden_so = get_hidden_so_items()
-        date_year, date_from, date_to = parse_so_date_args()
-        clients = selected_clients()
-        pics = selected_pics()
-        q = db.session.query(SOData).filter(
-            open_so_filter()
-        )
-        q = apply_so_client_filter(q, clients)
-        q = apply_so_pic_filter(q, pics)
-        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
-        sos = q.order_by(SOData.vendor_name.asc(), SOData.so_create_date.asc()).all()
-        sos = [s for s in sos
-               if s.so_item not in hidden_so and s.so_number not in hidden_so
-               and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
-        if bucket:
-            sos = [s for s in sos if get_aging_label(workdays_since(s.so_create_date, today) if s.so_create_date else None) == bucket]
-        return jsonify([so_dict(s) for s in sos])
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/dashboard/pending-total', methods=['GET'])
-def get_dashboard_pending_total():
-    """Tiny Pending Delivery count for dashboard KPI.
-
-    The paginated SO endpoint returns table rows, filter options, approval rows,
-    and PIC aggregations. Dashboard only needs this one number, so keep the
-    response and selected DB columns small.
-    """
-    try:
-        cache_key = runtime_cache_key('dashboard_pending_total')
-        cached = runtime_cache_get(cache_key)
-        if cached is not None:
-            return jsonify(cached)
-
-        date_year, date_from, date_to = parse_so_date_args()
-        clients = selected_clients()
-        pics = selected_pics()
-        hidden_so = get_hidden_so_items()
-
-        q = db.session.query(
-            SOData.so_item,
-            SOData.so_number,
-            SOData.customer_po_number,
-            SOData.delivery_memo,
-        ).filter(open_so_filter())
-        q = apply_so_client_filter(q, clients)
-        q = apply_so_pic_filter(q, pics)
-        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
-
-        total = 0
-        for so_item, so_number, customer_po_number, delivery_memo in q.all():
-            if so_item in hidden_so or so_number in hidden_so:
-                continue
-            if not so_is_countable(
-                so_item,
-                customer_po_number=customer_po_number,
-                delivery_memo=delivery_memo,
-            ):
-                continue
-            total += 1
-
-        payload = {'total': total}
-        runtime_cache_set(cache_key, payload, ttl_seconds=60)
-        return jsonify(payload)
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/data/all-so', methods=['GET'])
-def get_all_so():
-    """Paginated SO list with filters."""
-    try:
-        cache_key = runtime_cache_key('all_so')
-        cached = runtime_cache_get(cache_key)
-        if cached is not None:
-            return jsonify(cached)
-
-        page = int(request.args.get('page', 1))
-        per_page = int(request.args.get('per_page', 10))
-        op_units = request.args.getlist('op_unit')
-        vendors = request.args.getlist('vendor')
-        manufacturers = request.args.getlist('manufacturer')
-        statuses = request.args.getlist('status')
-        aging_list = request.args.getlist('aging')
-        so_items = request.args.getlist('so_item')
-        pics = request.args.getlist('pic')
-        kpi_pic = (request.args.get('kpi_pic') or '').strip()
-        global_pics = request.args.getlist('global_pic')
-        clients = selected_clients()
-        margin_filter = request.args.get('margin_filter', 'all')
-        sort_order = request.args.get('sort_order', 'newest')  # 'newest' or 'oldest'
-        date_year, date_from, date_to = parse_so_date_args()
-
-        q = SOData.query.filter(open_so_filter())
-        q = apply_so_client_filter(q, clients)
-        q = apply_so_pic_filter(q, global_pics)
-        if op_units: q = q.filter(SOData.operation_unit_name.in_(op_units))
-        if vendors: q = q.filter(SOData.vendor_name.in_(vendors))
-        if manufacturers: q = q.filter(SOData.manufacturer_name.in_(manufacturers))
-        if statuses: q = q.filter(SOData.so_status.in_(statuses))
-        if so_items: q = q.filter(SOData.so_item.in_(so_items))
-
-        # SO Create Date filter
-        is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
-        if date_year:
-            try:
-                yr = int(date_year)
-                if is_sqlite:
-                    q = q.filter(func.strftime('%Y', SOData.so_create_date) == str(yr))
-                else:
-                    q = q.filter(func.extract('year', SOData.so_create_date) == yr)
-            except ValueError:
-                pass
-        else:
-            if date_from:
-                q = q.filter(SOData.so_create_date >= date_from)
-            if date_to:
-                q = q.filter(SOData.so_create_date <= date_to)
-
-        so_list_fields = (
-            SOData.id,
-            SOData.so_number,
-            SOData.so_item,
-            SOData.so_status,
-            SOData.operation_unit_name,
-            SOData.vendor_name,
-            SOData.manufacturer_name,
-            SOData.customer_po_number,
-            SOData.delivery_memo,
-            SOData.so_create_date,
-            SOData.pic_name,
-            SOData.sales_amount,
-            SOData.purchasing_amount,
-            SOData.purchasing_price,
-            SOData.so_qty,
-            SOData.purchasing_currency,
-            SOData.purchasing_amount_idr,
-            SOData.product_id,
-        )
-
-        # Apply sort order (deterministic by SO Create Date, then SO Item).
-        # Load only columns needed to filter/count/paginate. Full text columns
-        # are lazy-loaded only for the current page rows in so_dict(), which is
-        # far lighter than pulling every Product/Spec/Remarks value for 100k+
-        # historical SO rows on every table load.
-        if sort_order == 'oldest':
-            all_sos = q.options(load_only(*so_list_fields)).order_by(SOData.so_create_date.asc(), SOData.so_item.asc()).all()
-        else:  # newest
-            all_sos = q.options(load_only(*so_list_fields)).order_by(SOData.so_create_date.desc(), SOData.so_item.asc()).all()
-
-        # Keep Open SO table count aligned with dashboard total_so_count KPI:
-        # exclude hidden SO rows and internal/HLI-referenced rows.
-        hidden_so = get_hidden_so_items()
-        all_sos = [
-            s for s in all_sos
-            if s.so_item not in hidden_so
-            and s.so_number not in hidden_so
-            and so_is_countable(
-                s.so_item,
-                customer_po_number=s.customer_po_number,
-                delivery_memo=s.delivery_memo
-            )
-        ]
-
-        if aging_list:
-            today = date.today()
-            def matches_aging(s):
-                age = workdays_since(s.so_create_date, today)
-                return get_aging_label(age) in aging_list
-            all_sos = [s for s in all_sos if matches_aging(s)]
-
-        if margin_filter in ('positive', 'negative'):
-            # Warm cache before filtering loop to avoid per-row HTTP calls.
-            prefetch_convertible_exchange_rates(all_sos)
-
-            def calc_margin(s):
-                po_amt = convert_to_idr((s.purchasing_amount or 0) or (s.purchasing_price or 0) * (s.so_qty or 0), s.purchasing_currency, s.so_create_date, cache_only=True)
-                return float(s.sales_amount or 0) - po_amt
-            if margin_filter == 'negative':
-                all_sos = [s for s in all_sos if calc_margin(s) < 0]
-            else:
-                all_sos = [s for s in all_sos if calc_margin(s) >= 0]
-
-        approval_statuses = {'Approval Apply', 'Approval Reject'}
-        approval_q = SOData.query.filter(SOData.so_status.in_(list(approval_statuses)))
-        approval_q = apply_so_client_filter(approval_q, clients)
-        approval_q = apply_so_pic_filter(approval_q, global_pics)
-        if op_units: approval_q = approval_q.filter(SOData.operation_unit_name.in_(op_units))
-        if vendors: approval_q = approval_q.filter(SOData.vendor_name.in_(vendors))
-        if manufacturers: approval_q = approval_q.filter(SOData.manufacturer_name.in_(manufacturers))
-        if statuses: approval_q = approval_q.filter(SOData.so_status.in_(statuses))
-        if so_items: approval_q = approval_q.filter(SOData.so_item.in_(so_items))
-        approval_q = apply_so_create_date_filter(approval_q, date_year, date_from, date_to, is_sqlite)
-        if sort_order == 'oldest':
-            approval_sos = approval_q.options(load_only(*so_list_fields)).order_by(SOData.so_create_date.asc(), SOData.so_item.asc()).all()
-        else:
-            approval_sos = approval_q.options(load_only(*so_list_fields)).order_by(SOData.so_create_date.desc(), SOData.so_item.asc()).all()
-        approval_sos = [
-            s for s in approval_sos
-            if s.so_item not in hidden_so
-            and s.so_number not in hidden_so
-            and so_is_countable(
-                s.so_item,
-                customer_po_number=s.customer_po_number,
-                delivery_memo=s.delivery_memo
-            )
-        ]
-
-        # KPI PIC cards should stay visible when one PIC is selected. Build the
-        # KPI source after all non-PIC filters, then apply PIC filters only to
-        # the table data.
-        kpi_source_sos = list(all_sos)
-
-        if pics:
-            pic_set = set(pics)
-            all_sos = [s for s in all_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) in pic_set]
-            approval_sos = [s for s in approval_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) in pic_set]
-
-        if kpi_pic:
-            all_sos = [s for s in all_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) == kpi_pic]
-            approval_sos = [s for s in approval_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) == kpi_pic]
-
-        total = len(all_sos)
-        subtotal_amount = sum(float(s.sales_amount or 0) for s in all_sos)
-        paged = all_sos[(page-1)*per_page : page*per_page]
-
-        # Interdependent filter values: reflect the rows currently reachable
-        # after the active filters, instead of always showing the full DB list.
-        option_source_sos = all_sos
-        op_units_opts = sorted({s.operation_unit_name for s in option_source_sos if s.operation_unit_name})
-        vendors_opts  = sorted({s.vendor_name for s in option_source_sos if s.vendor_name})
-        manufacturers_opts = sorted({s.manufacturer_name for s in option_source_sos if s.manufacturer_name})
-        statuses_opts = sorted({s.so_status for s in option_source_sos if s.so_status})
-        pics_opts     = sorted({canonical_pending_pic(s.pic_name, s.operation_unit_name) for s in option_source_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) != 'Unassigned'})
-
-        # Calculate PIC aggregations from ALL filtered records (not just current page)
-        pic_aggregations = {}
-        for s in kpi_source_sos:
-            pic = canonical_pending_pic(s.pic_name, s.operation_unit_name)
-            if not pic or pic == 'Unassigned':
-                continue
-            if pic not in pic_aggregations:
-                pic_aggregations[pic] = {'pic': pic, 'count': 0, 'amount': 0}
-            pic_aggregations[pic]['count'] += 1
-            pic_aggregations[pic]['amount'] += float(s.sales_amount or 0)
-        
-        # Sort with ANDRE first, then by count descending and name.
-        pic_aggs_list = sort_pic_kpis(list(pic_aggregations.values()))
-
-        payload = {
-            'data': [so_dict(s) for s in paged],
-            'approval_data': [so_dict(s) for s in approval_sos],
-            'total': total, 'subtotal_amount': round(subtotal_amount, 2), 'page': page, 'per_page': per_page,
-            'filters': {'op_units': list(op_units_opts), 'vendors': list(vendors_opts), 'manufacturers': list(manufacturers_opts), 'statuses': list(statuses_opts), 'pics': list(pics_opts)},
-            'pic_aggregations': pic_aggs_list
-        }
-        runtime_cache_set(cache_key, payload, ttl_seconds=60)
-        return jsonify(payload)
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/data/so-status-detail/<path:status>', methods=['GET'])
-def get_so_status_detail(status):
-    try:
-        month = request.args.get('month')
-        hidden_so = get_hidden_so_items()
-        date_year, date_from, date_to = parse_so_date_args()
-        clients = selected_clients()
-        pics = selected_pics()
-        q = SOData.query.filter_by(so_status=status)
-        q = apply_so_client_filter(q, clients)
-        q = apply_so_pic_filter(q, pics)
-        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
-        sos = q.all()
-        if month:
-            sos = [s for s in sos if s.so_create_date and s.so_create_date.strftime('%b %Y') == month]
-        sos = [s for s in sos
-               if s.so_item not in hidden_so and s.so_number not in hidden_so
-               and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
-        return jsonify([so_dict(s) for s in sos])
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/data/so-status-detail-all', methods=['GET'])
-def get_so_status_detail_all():
-    try:
-        month = request.args.get('month')
-        hidden_so = get_hidden_so_items()
-        date_year, date_from, date_to = parse_so_date_args()
-        clients = selected_clients()
-        pics = selected_pics()
-        q = SOData.query.filter(open_so_filter())
-        q = apply_so_client_filter(q, clients)
-        q = apply_so_pic_filter(q, pics)
-        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
-        sos = q.order_by(SOData.so_create_date.desc()).all()
-        if month:
-            sos = [s for s in sos if s.so_create_date and s.so_create_date.strftime('%b %Y') == month]
-        sos = [s for s in sos
-               if s.so_item not in hidden_so and s.so_number not in hidden_so
-               and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
-        return jsonify([so_dict(s) for s in sos])
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/data/top-vendor-detail/<path:vendor_name>', methods=['GET'])
-def get_top_vendor_detail(vendor_name):
-    try:
-        hidden_so = get_hidden_so_items()
-        date_year, date_from, date_to = parse_so_date_args()
-        clients = selected_clients()
-        pics = selected_pics()
-        q = db.session.query(SOData).filter(open_so_filter(), SOData.vendor_name == vendor_name)
-        q = apply_so_client_filter(q, clients)
-        q = apply_so_pic_filter(q, pics)
-        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
-        sos = q.all()
-        sos = [s for s in sos
-               if s.so_item not in hidden_so and s.so_number not in hidden_so
-               and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)]
-        return jsonify([so_dict(s) for s in sos])
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-# ═══════════════════════════════════════════════════════════════════
-# EXCHANGE RATE ENDPOINTS
-# ═══════════════════════════════════════════════════════════════════
-
-@app.route('/api/exchange-rate', methods=['GET'])
-def list_exchange_rates():
-    """Return all stored USD->IDR rates, newest first."""
-    try:
-        rates = ExchangeRate.query.order_by(ExchangeRate.rate_date.desc()).limit(120).all()
-        return jsonify([{
-            'id': r.id, 'date': r.rate_date.isoformat(),
-            'usd_to_idr': r.usd_to_idr, 'source': r.source,
-        } for r in rates])
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/exchange-rate', methods=['POST'])
-def upsert_exchange_rate():
-    """Manually set or update a USD->IDR rate for a specific date."""
-    try:
-        data = request.json
-        d = parse_date(data.get('date'))
-        rate = float(data.get('usd_to_idr', 0))
-        if not d:
-            return jsonify({'error': 'Invalid date'}), 400
-        if rate <= 0:
-            return jsonify({'error': 'Rate must be > 0'}), 400
-        rec = ExchangeRate.query.filter_by(rate_date=d).first()
-        if rec:
-            rec.usd_to_idr = rate
-            rec.source = 'manual'
-        else:
-            rec = ExchangeRate(rate_date=d, usd_to_idr=rate, source='manual')
-            db.session.add(rec)
-        db.session.commit()
-        # Invalidate cache for this date
-        _RATE_CACHE.pop(d, None)
-        return jsonify({'success': True, 'date': d.isoformat(), 'usd_to_idr': rate})
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/exchange-rate/fetch', methods=['POST'])
-def fetch_exchange_rates_bulk():
-    """Auto-fetch USD->IDR rates from Frankfurter API for all SO create dates
-    that have USD purchasing currency but no rate stored yet.
-    Returns count of rates fetched."""
-    try:
-        # Find distinct SO create dates where purchasing_currency = USD and no rate stored
-        is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
-        usd_rows = db.session.query(SOData.so_create_date).filter(
-            SOData.purchasing_currency == 'USD',
-            SOData.so_create_date.isnot(None)
-        ).distinct().all()
-
-        dates_needed = {r[0] for r in usd_rows}
-        existing_dates = {r[0] for r in db.session.query(ExchangeRate.rate_date).all()}
-        to_fetch = sorted(dates_needed - existing_dates)
-
-        fetched = 0
-        failed = []
-        for d in to_fetch:
-            rate = _fetch_rate_from_api(d)
-            if rate:
-                try:
-                    db.session.add(ExchangeRate(rate_date=d, usd_to_idr=rate, source='frankfurter'))
-                    db.session.flush()
-                    _RATE_CACHE[d] = rate
-                    fetched += 1
-                except Exception:
-                    db.session.rollback()
-            else:
-                failed.append(d.isoformat())
-
-        db.session.commit()
-
-        # Backfill both USD and EUR transaction values. EUR rates are kept in
-        # the in-process cache for this request, while the converted IDR amount
-        # itself is persisted permanently on each SO row.
-        pending_fx_rows = SOData.query.filter(
-            SOData.purchasing_amount_idr.is_(None),
-            func.upper(func.coalesce(SOData.purchasing_currency, '')).in_(['USD', 'EUR'])
-        ).all()
-        converted_rows = ensure_purchase_amount_idr_cache(
-            pending_fx_rows,
-            fetch_missing=True,
-        )
-
-        return jsonify({
-            'dates_needed': len(dates_needed),
-            'already_stored': len(existing_dates & dates_needed),
-            'fetched': fetched,
-            'converted_rows': converted_rows,
-            'failed': failed,
-            'message': f'{fetched} kurs USD berhasil di-fetch dan {converted_rows} transaksi USD/EUR dikonversi.'
-                       + (f' {len(failed)} tanggal gagal: {", ".join(failed[:5])}' if failed else '')
-        })
-    except Exception as e:
-        db.session.rollback()
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/exchange-rate/preview', methods=['GET'])
-def preview_exchange_rate():
-    """Preview what rate would be used for a given date (for debugging)."""
-    try:
-        d = parse_date(request.args.get('date', ''))
-        if not d:
-            return jsonify({'error': 'Provide ?date=YYYY-MM-DD'}), 400
-        rate = get_usd_to_idr(d)
-        rec = ExchangeRate.query.filter_by(rate_date=d).first()
-        return jsonify({
-            'date': d.isoformat(),
-            'usd_to_idr': rate,
-            'source': rec.source if rec else 'fallback/nearest',
-            'stored_exact': rec is not None,
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-# ═══════════════════════════════════════════════════════════════════
-# UPLOAD ENDPOINTS
-# ═══════════════════════════════════════════════════════════════════
-
-CHUNK_SIZE = 200
-
-
-# Source-table cleanup helpers. Full Excel uploads are treated as the latest
-# snapshot: rows with the same business key are merged, duplicates from older
-# logic are deleted, and rows not present in the latest full upload are removed.
-def _norm_key(v):
-    return str(v or '').strip()
-
-def _latest_row(rows, timestamp_fields=('uploaded_at', 'updated_at')):
-    def score(row):
-        ts = None
-        for field in timestamp_fields:
-            val = getattr(row, field, None)
-            if val is not None:
-                ts = val
-                break
-        return (ts or datetime.min, getattr(row, 'id', 0) or 0)
-    return max(rows, key=score)
-
-def _latest_nonblank_value(rows, field, timestamp_fields=('uploaded_at', 'updated_at')):
-    candidates = [r for r in rows if str(getattr(r, field, '') or '').strip()]
-    if not candidates:
-        return None
-    return getattr(_latest_row(candidates, timestamp_fields), field)
-
-def cleanup_source_table_snapshot(model, key_attr, valid_keys=None, *, manual_fields=(), timestamp_fields=('uploaded_at', 'updated_at'), delete_blank=True, key_normalizer=_norm_key):
-    """Clean a source table by its business key.
-
-    If valid_keys is provided, the table becomes an exact snapshot of those keys.
-    If valid_keys is None, only old duplicate rows and blank-key rows are removed.
-    Returns {'removed_duplicates': n, 'removed_stale': n, 'removed_blank': n}.
-    """
-    valid_set = None if valid_keys is None else {key_normalizer(k) for k in valid_keys if key_normalizer(k)}
-    groups = {}
-    blank_rows = []
-    for row in db.session.query(model).order_by(model.id.asc()).all():
-        key = key_normalizer(getattr(row, key_attr, None))
-        if not key:
-            blank_rows.append(row)
-            continue
-        groups.setdefault(key, []).append(row)
-
-    removed_duplicates = removed_stale = removed_blank = 0
-
-    if delete_blank:
-        for row in blank_rows:
-            db.session.delete(row)
-            removed_blank += 1
-
-    for key, rows in groups.items():
-        if valid_set is not None and key not in valid_set:
-            for row in rows:
-                db.session.delete(row)
-                removed_stale += 1
-            continue
-
-        if len(rows) <= 1:
-            continue
-
-        winner = _latest_row(rows, timestamp_fields)
-        for field in manual_fields or ():
-            val = _latest_nonblank_value(rows, field, timestamp_fields)
-            if val is not None:
-                setattr(winner, field, val)
-
-        for row in rows:
-            if row is winner:
-                continue
-            db.session.delete(row)
-            removed_duplicates += 1
-
-    return {
-        'removed_duplicates': removed_duplicates,
-        'removed_stale': removed_stale,
-        'removed_blank': removed_blank,
-    }
-
-def cleanup_master_pic_by_category_name(valid_category_names=None):
-    valid_set = None if valid_category_names is None else {normalize_category_name(x) for x in valid_category_names if normalize_category_name(x)}
-    groups = {}
-    blank_rows = []
-    for row in db.session.query(MasterPIC).order_by(MasterPIC.id.asc()).all():
-        key = normalize_category_name(row.category_name)
-        if not key:
-            blank_rows.append(row)
-            continue
-        groups.setdefault(key, []).append(row)
-
-    removed_duplicates = removed_stale = removed_blank = 0
-    for row in blank_rows:
-        db.session.delete(row)
-        removed_blank += 1
-
-    for key, rows in groups.items():
-        if valid_set is not None and key not in valid_set:
-            for row in rows:
-                db.session.delete(row)
-                removed_stale += 1
-            continue
-        if len(rows) <= 1:
-            continue
-        winner = _latest_row(rows, ('updated_at', 'uploaded_at'))
-        pic = _latest_nonblank_value(rows, 'pic_name', ('updated_at', 'uploaded_at'))
-        if pic is not None:
-            winner.pic_name = pic
-        # Keep the newest visible Category Name spelling, but normalize generated category_id.
-        winner.category_name = source_category_level1(winner.category_name)
-        if str(winner.category_id or '').startswith('CATNAME_'):
-            winner.category_id = master_pic_category_key(winner.category_name)
-        for row in rows:
-            if row is winner:
-                continue
-            db.session.delete(row)
-            removed_duplicates += 1
-    return {'removed_duplicates': removed_duplicates, 'removed_stale': removed_stale, 'removed_blank': removed_blank}
-
-def cleanup_item_registration_duplicates_only():
-    return cleanup_source_table_snapshot(ItemRegistration, 'req_no', None, timestamp_fields=('uploaded_at',), delete_blank=True)
-
-
-@app.route('/api/upload/scor-json', methods=['POST'])
-@app.route('/api/upload/scor-json', methods=['POST'])
-@app.route('/api/upload/scor', methods=['POST'])
-@app.route('/api/upload/smro-json', methods=['POST'])
-@app.route('/api/upload/smro', methods=['POST'])
-def upload_smro():
-    """SMRO upload: upsert by SO Item and preserve manual remarks/plan date."""
-    try:
-        uploads, upload_mode = request_upload_dataframes('smro')
-        if not uploads:
-            return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
-        replace_existing = upload_replace_mode()
-
-        # SO Item adalah primary key upsert (format: "7001664545-10").
-        # Upload JSON dari SAP hanya punya kolom "SO Item" — SO Number di-derive otomatis dari prefix.
-        # Upload Excel lama tetap bisa pakai "SO Number" atau "SO Item No" dll.
-        required_smro_cols = {
-            'SO Item': ['SO Item', 'SO Item No', 'SO Number', 'SO No', 'SO No.', 'SO', 'Sales Order', 'Sales Order Number', 'No SO', 'Nomor SO'],
-            'SO Status': ['SO Status', 'Status', 'Order Status'],
-            'Operation Unit': ['Operation Unit Name', 'Op Unit', 'Client Name', 'Client', 'Operation Unit'],
-            'Vendor Name': ['Vendor Name', 'Vendor', 'Supplier'],
-            'Customer PO': ['Customer PO number', 'Customer PO Number', 'Customer PO', 'PO Ref', 'PO Reference'],
-            'Sales Amount': ['Sales Amount(Exclude Tax)', 'Sales Amount', 'Amount', 'Total'],
-            'SO Create Date': ['SO Create Date', 'Order Date', 'SO Date', 'Create Date', 'Create Sales Order Date'],
-        }
-
-        # Build an existing map while merging possible duplicate SO Item rows
-        # from old append logic. The latest row wins, manual Plan Date/Remarks
-        # are preserved from the latest non-blank duplicate.
-        cleanup_pre = cleanup_source_table_snapshot(
-            SOData,
-            'so_item',
-            None,
-            manual_fields=('delivery_plan_date', 'remarks'),
-            timestamp_fields=('uploaded_at',),
-            delete_blank=True,
-        )
-        db.session.flush()
-        existing_so = {s.so_item: s for s in SOData.query.all() if s.so_item}
-        total_count = total_updated = total_inserted = 0
-        total_removed_duplicates = cleanup_pre.get('removed_duplicates', 0)
-        total_removed_stale = cleanup_pre.get('removed_stale', 0)
-        total_removed_blank = cleanup_pre.get('removed_blank', 0)
-        latest_so_items = set()
-        diagnostics_by_file = []
-
-        for upload in uploads:
-            filename = upload['filename']
-            df = upload['df']
-            df.columns = [str(c).strip() for c in df.columns]
-
-            # Validasi kolom: SO Item (atau SO Number) wajib ada.
-            # Kolom lain seperti Vendor Name, Sales Amount, SO Create Date mungkin tidak ada
-            # di JSON SAP — itu normal, field tersebut tetap NULL / tidak diupdate di DB.
-            has_primary_key = (
-                find_column(df, ['SO Item', 'SO Item No', 'SO Number', 'SO No', 'SO No.', 'SO',
-                                  'Sales Order', 'Sales Order Number', 'No SO', 'Nomor SO'])
-            )
-            if not has_primary_key:
-                return jsonify({
-                    'error': (
-                        f'Invalid file "{filename}" - kolom SO Item / SO Number tidak ditemukan. '
-                        f'Available columns: {df.columns.tolist()}'
-                    )
-                }), 400
-
-            # Soft-check kolom lain: hanya log warning, tidak reject
-            missing_required = [name for name, aliases in required_smro_cols.items() if not find_column(df, aliases)]
-            # Untuk upload Excel lengkap: reject jika lebih dari 4 kolom penting tidak ada
-            # Untuk JSON dari SAP: kolom Vendor/Amount/Date mungkin memang tidak ada — tetap lanjut
-            if upload_mode == 'excel' and len(missing_required) > 4:
-                return jsonify({
-                    'error': (
-                        f'Invalid file "{filename}" - {len(missing_required)} required columns not found: '
-                        f'{", ".join(missing_required)}. Please make sure you are uploading the correct SMRO file.'
-                    )
-                }), 400
-
-            # col_soitem = primary key untuk upsert (value: "8061874935-10")
-            # Prioritas: kolom bernama "SO Item" dulu (JSON dari SAP), fallback ke "SO Number" dll (Excel lama)
-            # Deteksi kolom — alias diurutkan dari nama paling spesifik/exact ke nama fallback
-            # Nama kolom exact dari SMRO Excel diletakkan di depan list alias
-
-            # Primary key: "SO Item" di SMRO = format "7001664545-10"
-            col_soitem = find_column(df, ['SO Item', 'SO Item No', 'SO Line', 'Item No', 'Line'])
-            # SO Number numeric (angka saja, tanpa suffix -10) — optional, di-derive kalau tidak ada
-            col_so = find_column(df, ['SO Number', 'SO No', 'SO No.', 'SO', 'Sales Order', 'Sales Order Number', 'No SO', 'Nomor SO'])
-            col_primary = col_soitem or col_so
-            if not col_primary:
-                return jsonify({'error': f'SO Item / SO Number column not found in "{filename}". Available columns: {df.columns.tolist()}'}), 400
-
-            col_status   = find_column(df, ['SO Status', 'Status', 'Order Status', 'SO Status Code'])
-            col_opunit   = find_column(df, ['Operation Unit Name', 'Op Unit', 'Client Name', 'Client', 'Operation Unit'])
-            col_vendor_id = find_column(df, ['Vendor ID', 'Vendor Id', 'Vendor Code', 'Supplier ID', 'Supplier Code'])
-            col_vendor   = find_column(df, ['Vendor Name', 'Vendor', 'Supplier'])
-            # SMRO Excel: "Customer PO number" (n lowercase) dan "Customer PR number"
-            col_custpo   = find_column(df, ['Customer PO number', 'Customer PO Number', 'Customer PO', 'PO Ref', 'PO Reference'])
-            col_memo     = find_column(df, ['Delivery Memo', 'Memo', 'Delivery Note'])
-            col_prod     = find_column(df, ['Product Name', 'Item Name', 'Description', 'Product'])
-            col_spec     = find_column(df, ['Specification', 'Spec', 'Specifications', 'Product Specification', 'Material Description', 'Material Desc', 'Short Text'])
-            col_mfr      = find_column(df, ['Manufacturer Name', 'Mfr. Nm.', 'Mfr. Nm', 'Maker Nm.', 'Manufacturer'])
-            col_pid      = find_column(df, ['Product ID', 'Product Id', 'Product Code', 'Material', 'Material No', 'Material Number', 'Material Code', 'SKU', 'Article', 'Article Number'])
-            col_qty      = find_column(df, ['SO Quantity', 'SO Qty', 'Qty', 'Quantity'])
-            col_sunit    = find_column(df, ['Sales Unit', 'Unit', 'UOM'])
-            col_sprice   = find_column(df, ['Sales Price(Exclude Tax)', 'Sales Price', 'Price', 'Unit Price'])
-            col_samt     = find_column(df, ['Sales Amount(Exclude Tax)', 'Sales Amount', 'Amount', 'Total'])
-            col_cur      = find_column(df, ['Currency', 'Curr'])
-            col_pprice   = find_column(df, ['Purchasing Price', 'Purchase Price', 'PO Price'])
-            col_pamt     = find_column(df, ['Purchasing Amount', 'Purchase Amount', 'PO Amount'])
-            col_pcur     = find_column(df, ['Purchasing Currency', 'Purchase Currency', 'PO Currency', 'Purchasing Curr', 'Purchase Curr'])
-            # SMRO Excel: "SO Create Date" (exact match)
-            col_sodate   = find_column(df, ['SO Create Date', 'Order Date', 'SO Date', 'Create Date', 'Create Sales Order Date'])
-            col_delposs  = find_column(df, ['Delivery Possible Date', 'Possible Delivery Date', 'Est Delivery'])
-            # SMRO Excel: "Purchasing Order Number" = matched PO
-            col_matchpo  = find_column(df, ['Purchasing Order Number', 'Matched PO Number', 'Matched PO', 'PO HLI', 'PO HLI Number', 'PO Number'])
-
-            count = updated = inserted = spec_filled = pid_filled = 0
-
-            for _, row in df.iterrows():
-                primary_val = clean(df_val(row, col_primary))
-                if not primary_val:
-                    continue
-
-                # Skip rows whose status is never used by any analytics endpoint.
-                # Storing them only wastes disk space. If the row already exists
-                # in DB from an older upload, delete it now.
-                row_status = clean(df_val(row, col_status)) if col_status else None
-                if row_status and row_status in DISCARDABLE_STATUSES:
-                    if primary_val in existing_so:
-                        db.session.delete(existing_so.pop(primary_val))
-                    continue
-
-                # so_item = primary key DB (format "8061874935-10")
-                # so_number = prefix sebelum "-" (auto-derive jika tidak ada kolom SO Number terpisah)
-                if col_soitem:
-                    so_item_val = primary_val
-                    # Jika ada kolom SO Number terpisah, pakai itu; jika tidak, derive dari prefix
-                    so_val = clean(df_val(row, col_so)) if col_so else None
-                    if not so_val:
-                        so_val = so_item_val.rsplit('-', 1)[0] if '-' in so_item_val else so_item_val
-                else:
-                    # Upload Excel lama: primary dari kolom SO Number
-                    so_val = primary_val
-                    so_item_val = so_val  # tidak ada SO Item terpisah, pakai SO Number sebagai so_item
-
-                if so_item_val:
-                    latest_so_items.add(so_item_val)
-
-                spec_val = clean(df_val(row, col_spec)) if col_spec else None
-                pid_val = clean(df_val(row, col_pid)) if col_pid else None
-                if spec_val:
-                    spec_filled += 1
-                if pid_val:
-                    pid_filled += 1
-
-                new_data = {
-                    'so_number': so_val,
-                    'so_item': so_item_val,
-                    'so_status': clean(df_val(row, col_status)),
-                    'operation_unit_name': clean(df_val(row, col_opunit)),
-                    'vendor_id': clean(df_val(row, col_vendor_id)),
-                    'vendor_name': clean(df_val(row, col_vendor)),
-                    'customer_po_number': clean(df_val(row, col_custpo)),
-                    'delivery_memo': clean(df_val(row, col_memo)),
-                    'product_name': clean(df_val(row, col_prod)),
-                    'specification': spec_val,
-                    'manufacturer_name': clean(df_val(row, col_mfr)),
-                    'product_id': pid_val,
-                    'so_qty': safe_float(df_val(row, col_qty)),
-                    'sales_unit': clean(df_val(row, col_sunit)),
-                    'sales_price': safe_float(df_val(row, col_sprice)),
-                    'sales_amount': safe_float(df_val(row, col_samt)),
-                    'currency': clean(df_val(row, col_cur)) or 'IDR',
-                    'purchasing_price': safe_float(df_val(row, col_pprice)),
-                    'purchasing_amount': safe_float(df_val(row, col_pamt)),
-                    'purchasing_currency': clean(df_val(row, col_pcur)) if col_pcur else None,
-                    'purchasing_amount_idr': None,
-                    'purchasing_amount_idr_cached_at': None,
-                    'so_create_date': parse_date(df_val(row, col_sodate)),
-                    'delivery_possible_date': parse_date(df_val(row, col_delposs)),
-                    'matched_po_number': clean(df_val(row, col_matchpo)),
-                    'uploaded_at': datetime.utcnow(),
-                }
-
-                if so_item_val and so_item_val in existing_so:
-                    existing = existing_so[so_item_val]
-                    preserved_remarks = existing.remarks
-                    preserved_plan_date = existing.delivery_plan_date
-                    preserved_spec = existing.specification
-                    preserved_pid = existing.product_id
-                    preserved_amount_idr = existing.purchasing_amount_idr
-                    preserved_amount_idr_cached_at = existing.purchasing_amount_idr_cached_at
-                    old_purchase_signature = (
-                        float(existing.purchasing_amount or 0),
-                        float(existing.purchasing_price or 0),
-                        float(existing.so_qty or 0),
-                        (existing.purchasing_currency or 'IDR').strip().upper(),
-                        existing.so_create_date,
-                    )
-                    new_purchase_signature = (
-                        float(new_data.get('purchasing_amount') or 0),
-                        float(new_data.get('purchasing_price') or 0),
-                        float(new_data.get('so_qty') or 0),
-                        (new_data.get('purchasing_currency') or 'IDR').strip().upper(),
-                        new_data.get('so_create_date'),
-                    )
-                    purchase_inputs_changed = old_purchase_signature != new_purchase_signature
-                    for field, val in new_data.items():
-                        setattr(existing, field, val)
-                    existing.remarks = preserved_remarks
-                    existing.delivery_plan_date = preserved_plan_date
-                    if not purchase_inputs_changed:
-                        existing.purchasing_amount_idr = preserved_amount_idr
-                        existing.purchasing_amount_idr_cached_at = preserved_amount_idr_cached_at
-                    if not col_spec or spec_val is None:
-                        existing.specification = preserved_spec
-                    if not col_pid or pid_val is None:
-                        existing.product_id = preserved_pid
-                    if existing.product_id:
-                        existing.pic_name = _lookup_pic(existing.product_id)
-                    updated += 1
-                else:
-                    new_rec = SOData(**new_data)
-                    if new_rec.product_id:
-                        new_rec.pic_name = _lookup_pic(new_rec.product_id)
-                    db.session.add(new_rec)
-                    if so_item_val:
-                        existing_so[so_item_val] = new_rec
-                    inserted += 1
-
-                count += 1
-                if count % CHUNK_SIZE == 0:
-                    db.session.flush()
-
-            db.session.add(UploadLog(file_type='SO', filename=filename, records_count=count))
-            total_count += count
-            total_updated += updated
-            total_inserted += inserted
-
-            diagnostics = {
-                'filename': filename,
-                'columns_detected': {
-                    'so_item': col_primary,
-                    'so_item_col': col_soitem,
-                    'so_number_col': col_so,
-                    'specification': col_spec,
-                    'product_id': col_pid,
-                },
-                'rows_with_specification': spec_filled,
-                'rows_with_product_id': pid_filled,
-                'all_file_columns': df.columns.tolist(),
-            }
-            warnings = []
-            if not col_spec and not col_pid:
-                warnings.append("File ini tidak mengandung kolom 'Specification' maupun 'Product ID'. Spec/Product ID di DB tidak diubah.")
-            else:
-                if not col_spec:
-                    warnings.append("Kolom 'Specification' tidak ditemukan di file ini - Specification di DB dipertahankan.")
-                elif spec_filled == 0:
-                    warnings.append(f"Kolom '{col_spec}' terdeteksi tapi semua baris kosong.")
-                if not col_pid:
-                    warnings.append("Kolom 'Product ID' tidak ditemukan di file ini - Product ID di DB dipertahankan.")
-                elif pid_filled == 0:
-                    warnings.append(f"Kolom '{col_pid}' terdeteksi tapi semua baris kosong.")
-            if warnings:
-                diagnostics['warning'] = ' '.join(warnings)
-            diagnostics_by_file.append(diagnostics)
-
-        # Default manual upload is merge/upsert. Only delete rows missing from
-        # the uploaded file when caller explicitly requests replace/snapshot.
-        db.session.flush()
-        cleanup_post = cleanup_source_table_snapshot(
-            SOData,
-            'so_item',
-            latest_so_items if replace_existing else None,
-            manual_fields=('delivery_plan_date', 'remarks'),
-            timestamp_fields=('uploaded_at',),
-            delete_blank=True,
-        )
-        total_removed_duplicates += cleanup_post.get('removed_duplicates', 0)
-        total_removed_stale += cleanup_post.get('removed_stale', 0)
-        total_removed_blank += cleanup_post.get('removed_blank', 0)
-
-        db.session.commit()
-
-        # WAL checkpoint after every large upload so the WAL file stays small
-        # on PythonAnywhere's shared hosting where workers are short-lived.
-        try:
-            db.session.execute(text('PRAGMA wal_checkpoint(TRUNCATE)'))
-            db.session.commit()
-        except Exception:
-            pass
-
-        # Convert and persist new/changed USD/EUR transactions once during the
-        # upload flow. Dashboard endpoints only read the stored IDR amount.
-        fx_warning = None
-        try:
-            pending_fx_rows = SOData.query.filter(
-                SOData.purchasing_amount_idr.is_(None),
-                func.upper(func.coalesce(SOData.purchasing_currency, '')).in_(['USD', 'EUR'])
-            ).all()
-            converted_fx_rows = ensure_purchase_amount_idr_cache(
-                pending_fx_rows,
-                fetch_missing=True,
-            )
-        except Exception as fx_exc:
-            # The upload itself is already committed. Keep it successful and
-            # allow the dedicated backfill endpoint to retry FX later.
-            db.session.rollback()
-            converted_fx_rows = 0
-            fx_warning = str(fx_exc)
-
-        clear_runtime_caches()
-        diagnostics = diagnostics_by_file[-1] if diagnostics_by_file else {}
-        if len(diagnostics_by_file) > 1:
-            diagnostics = {**diagnostics, 'files': diagnostics_by_file}
-
-        return jsonify({
-            'message': f'Berhasil upload {len(uploads)} file: {total_inserted} SO baru ditambahkan, {total_updated} SO diperbarui, {total_removed_duplicates} duplicate lama dihapus, {total_removed_stale} SO lama dibuang.',
-            'uploaded': total_count,
-            'files': len(uploads),
-            'mode': upload_mode,
-            'replace': replace_existing,
-            'inserted': total_inserted,
-            'updated': total_updated,
-            'removed_duplicates': total_removed_duplicates,
-            'removed_stale': total_removed_stale,
-            'removed_blank': total_removed_blank,
-            'fx_converted': converted_fx_rows,
-            'fx_warning': fx_warning,
-            'diagnostics': diagnostics,
-        })
-    except Exception as e:
-        db.session.rollback(); import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/admin/cleanup-discardable', methods=['POST'])
-def admin_cleanup_discardable():
-    """One-time (and periodic) cleanup: delete SO rows whose status is in
-    DISCARDABLE_STATUSES. These are closed statuses that are never queried
-    by any analytics endpoint and only waste storage.
-
-    Safe to call at any time — Delivery Completed is NOT in DISCARDABLE_STATUSES
-    so delivery analytics data is preserved.
-    """
-    try:
-        deleted = db.session.query(SOData).filter(
-            SOData.so_status.in_(list(DISCARDABLE_STATUSES))
-        ).delete(synchronize_session=False)
-        db.session.commit()
-
-        # Checkpoint WAL and reclaim freed pages
-        db.session.execute(text('PRAGMA wal_checkpoint(TRUNCATE)'))
-        db.session.commit()
-
-        clear_runtime_caches()
-        return jsonify({
-            'deleted': deleted,
-            'message': f'{deleted} SO rows dengan status discardable berhasil dihapus.',
-        })
-    except Exception as e:
-        db.session.rollback()
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/upload/smro-backfill-spec-json', methods=['POST'])
-@app.route('/api/upload/smro-backfill-spec', methods=['POST'])
-def upload_smro_backfill_spec():
-    """Backfill-only upload from Excel or JSON.
-
-    Reads Specification and Product ID and updates those two fields on existing SO records.
-    Accepts either multipart Excel upload or JSON body with rows/data.
-    """
-    try:
-        uploads, upload_mode = request_upload_dataframes('smro_backfill_spec')
-        if not uploads:
-            return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
-
-        # Ensure columns exist in DB before writing
-        _ensure_so_extra_columns()
-
-        # Build lookups from all SO records in DB
-        all_so = SOData.query.all()
-        by_soitem = {}
-        by_sonum = {}
-        for s in all_so:
-            if s.so_item:
-                by_soitem[s.so_item] = s
-            if s.so_number:
-                by_sonum.setdefault(s.so_number, []).append(s)
-
-        updated = 0
-        skipped_no_match = 0
-        skipped_no_data = 0
-        flush_counter = 0
-        diagnostics = []
-
-        for upload in uploads:
-            filename = upload['filename']
-            df = upload['df']
-            df.columns = [str(c).strip() for c in df.columns]
-
-            col_sonum  = find_column(df, ['SO Number', 'SO No', 'SO No.', 'SO'])
-            col_soitem = find_column(df, ['SO Item', 'SO Item No', 'SO Line', 'Item No', 'Line'])
-            col_spec   = find_column(df, ['Specification', 'Spec', 'Specifications', 'Product Specification'])
-            col_pid    = find_column(df, ['Product ID', 'Product Id', 'Product Code',
-                                          'Material', 'Material No', 'Material Number', 'Material Code', 'SKU'])
-
-            if not col_soitem and not col_sonum:
-                return jsonify({'error': f'SO Item / SO Number column not found in "{filename}". Columns: {df.columns.tolist()}'}), 400
-            if not col_spec and not col_pid:
-                return jsonify({'error': f'Neither Specification nor Product ID column found in "{filename}".'}), 400
-
-            file_updated = 0
-            file_skipped_no_match = 0
-            file_skipped_no_data = 0
-
-            for _, row in df.iterrows():
-                so_item_val = clean(df_val(row, col_soitem)) if col_soitem else None
-                so_num_val  = clean(df_val(row, col_sonum))  if col_sonum  else None
-                spec_val    = clean(df_val(row, col_spec))   if col_spec   else None
-                pid_val     = clean(df_val(row, col_pid))    if col_pid    else None
-
-                if spec_val is None and pid_val is None:
-                    skipped_no_data += 1
-                    file_skipped_no_data += 1
-                    continue
-
-                matched_recs = []
-
-                if so_item_val:
-                    rec = by_soitem.get(so_item_val)
-                    if rec:
-                        matched_recs = [rec]
-                    else:
-                        parts = so_item_val.rsplit('-', 1)
-                        so_num_from_item = parts[0] if len(parts) == 2 else so_item_val
-                        candidates = by_sonum.get(so_num_from_item, [])
-                        if len(parts) == 2:
-                            item_line = parts[1]
-                            line_matched = [
-                                c for c in candidates
-                                if c.so_item and c.so_item.endswith(f'-{item_line}')
-                            ]
-                            matched_recs = line_matched or candidates
-                        else:
-                            matched_recs = candidates
-
-                if not matched_recs and so_num_val:
-                    matched_recs = by_sonum.get(so_num_val, [])
-
-                if not matched_recs:
-                    skipped_no_match += 1
-                    file_skipped_no_match += 1
-                    continue
-
-                for rec in matched_recs:
-                    changed = False
-                    if spec_val is not None and rec.specification != spec_val:
-                        rec.specification = spec_val
-                        changed = True
-                    if pid_val is not None and rec.product_id != pid_val:
-                        rec.product_id = pid_val
-                        changed = True
-                    if changed:
-                        updated += 1
-                        file_updated += 1
-                        flush_counter += 1
-                        if flush_counter % 300 == 0:
-                            db.session.flush()
-
-            diagnostics.append({
-                'filename': filename,
-                'updated': file_updated,
-                'skipped_no_match': file_skipped_no_match,
-                'skipped_no_data': file_skipped_no_data,
-                'spec_column_detected': col_spec,
-                'pid_column_detected': col_pid,
-                'soitem_column_detected': col_soitem,
-                'sonumber_column_detected': col_sonum,
-            })
-
-        db.session.commit()
-        clear_runtime_caches()
-        return jsonify({
-            'message': (
-                f'Backfill selesai: {updated} SO record diperbarui'
-                + (f', {skipped_no_match} baris tidak cocok di DB' if skipped_no_match else '')
-                + (f', {skipped_no_data} baris tidak ada data Spec/PID' if skipped_no_data else '')
-                + '.'
-            ),
-            'mode': upload_mode,
-            'files': len(uploads),
-            'updated': updated,
-            'skipped_no_match': skipped_no_match,
-            'skipped_no_data': skipped_no_data,
-            'diagnostics': diagnostics[-1] if len(diagnostics) == 1 else diagnostics,
-        })
-    except ValueError as e:
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        db.session.rollback()
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-@app.route('/api/data/so/<int:so_id>', methods=['PUT'])
-def update_so(so_id):
-    try:
-        data = request.json
-        so = db.session.get(SOData, so_id)
-        if not so: return jsonify({'error': 'Not found'}), 404
-        if 'delivery_plan_date' in data: so.delivery_plan_date = parse_date(data['delivery_plan_date'])
-        if 'remarks' in data: so.remarks = data['remarks']
-        db.session.commit()
-        return jsonify({'success': True})
-    except Exception as e:
-        db.session.rollback(); return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/data/so/by-item/<path:so_item>', methods=['PUT'])
-def update_so_by_item(so_item):
-    """Update editable SO fields when a detail response only has SO Item."""
-    try:
-        data = request.json or {}
-        so = SOData.query.filter_by(so_item=so_item).first()
-        if not so:
-            return jsonify({'error': 'Not found'}), 404
-        if 'delivery_plan_date' in data:
-            so.delivery_plan_date = parse_date(data['delivery_plan_date'])
-        if 'remarks' in data:
-            so.remarks = data['remarks']
-        db.session.commit()
-        return jsonify({'success': True, 'id': so.id, 'so_item': so.so_item})
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/data/so/template', methods=['GET'])
-@app.route('/api/data/so/template', methods=['GET'])
-def download_so_batch_template():
-    """Download Excel template for SO batch upload.
-    If filters are supplied (same params as /api/data/all-so), the filtered SO Items
-    are pre-populated in the template starting from row 3, with existing
-    delivery_plan_date and remarks already filled in so the user only needs to
-    update what changed.  Either column may be left blank on upload.
-    """
-    try:
-        # ── Apply same filters as fetchSOData ──────────────────────────────
-        op_units   = request.args.getlist('op_unit')
-        vendors    = request.args.getlist('vendor')
-        manufacturers = request.args.getlist('manufacturer')
-        statuses   = request.args.getlist('status')
-        aging_list = request.args.getlist('aging')
-        so_items   = request.args.getlist('so_item')
-        pics       = request.args.getlist('pic')
-        kpi_pic = (request.args.get('kpi_pic') or '').strip()
-        global_pics = request.args.getlist('global_pic')
-        clients = selected_clients()
-        margin_filter = request.args.get('margin_filter', 'all')
-        date_year, date_from, date_to = parse_so_date_args()
-
-        q = SOData.query.filter(open_so_filter())
-        q = apply_so_client_filter(q, clients)
-        q = apply_so_pic_filter(q, global_pics)
-        if op_units:  q = q.filter(SOData.operation_unit_name.in_(op_units))
-        if vendors:   q = q.filter(SOData.vendor_name.in_(vendors))
-        if manufacturers: q = q.filter(SOData.manufacturer_name.in_(manufacturers))
-        if statuses:  q = q.filter(SOData.so_status.in_(statuses))
-        if so_items:  q = q.filter(SOData.so_item.in_(so_items))
-        q = apply_so_pic_filter(q, pics)
-        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
-        all_sos = q.order_by(SOData.so_create_date.asc()).all()
-
-        # Aging filter (post-query, same as all-so endpoint)
-        if aging_list:
-            today = date.today()
-            def matches_aging(s):
-                return get_aging_label(workdays_since(s.so_create_date, today)) in aging_list
-            all_sos = [s for s in all_sos if matches_aging(s)]
-
-        # Margin filter
-        if margin_filter in ('positive', 'negative'):
-            # Warm cache before filtering loop to avoid per-row HTTP calls.
-            prefetch_convertible_exchange_rates(all_sos)
-
-            def calc_margin(s):
-                po_amt = convert_to_idr((s.purchasing_amount or 0) or (s.purchasing_price or 0) * (s.so_qty or 0), s.purchasing_currency, s.so_create_date, cache_only=True)
-                return float(s.sales_amount or 0) - po_amt
-            if margin_filter == 'negative':
-                all_sos = [s for s in all_sos if calc_margin(s) < 0]
-            else:
-                all_sos = [s for s in all_sos if calc_margin(s) >= 0]
-
-        if kpi_pic:
-            all_sos = [s for s in all_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) == kpi_pic]
-
-        # ── Build workbook ─────────────────────────────────────────────────
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "SO Batch Upload"
-
-        headers = ['SO Item', 'Delivery Plan Date', 'Remarks']
-        ws.append(headers)
-        ws.freeze_panes = 'A2'
-
-        # Row 1: header — yellow, bold, centered
-        header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-        col_widths   = [35, 25, 50]
-        for i, cell in enumerate(ws[1], 1):
-            cell.fill = header_fill
-            cell.font = Font(bold=True, color="000000")
-            cell.alignment = Alignment(horizontal='center')
-            ws.column_dimensions[get_column_letter(i)].width = col_widths[i - 1]
-
-        # Row 2: example — red font, light grey background
-        grey_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
-        red_font  = Font(color="FF0000")
-        ws.append(['example : 9008988017-10', 'example : 2025-12-31', 'example : Waiting for vendor confirmation'])
-        for cell in ws[2]:
-            cell.font = red_font
-            cell.fill = grey_fill
-
-        # Rows 3+: pre-populate with filtered SO items (if any filter active)
-        for s in all_sos:
-            if not s.so_item:
-                continue
-            plan = s.delivery_plan_date.isoformat() if s.delivery_plan_date else ''
-            ws.append([s.so_item, plan, s.remarks or ''])
-
-        output = io.BytesIO()
-        wb.save(output)
-        output.seek(0)
-        return send_file(output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name=f"Template_SO_BatchUpload_{datetime.now().strftime('%Y%m%d')}.xlsx")
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/data/so/batch-upload', methods=['POST'])
-def batch_upload_so():
-    try:
-        if 'file' not in request.files: return jsonify({'error': 'No file'}), 400
-        file = request.files['file']
-        # Row 0 = header, row 1 = example (red row) → skip with skiprows so
-        # actual data starts at row index 0 of the resulting DataFrame (Excel row 3+).
-        df = pd.read_excel(file, engine='openpyxl', skiprows=[1])
-        df.columns = [str(c).strip() for c in df.columns]
-        col_so_item = find_column(df, ['SO Item', 'SO Item No', 'SO Item Number'])
-        col_plan    = find_column(df, ['Delivery Plan Date', 'Plan Date'])
-        col_rem     = find_column(df, ['Remarks', 'Remark'])
-        if not col_so_item:
-            return jsonify({'error': f'Column "SO Item" not found. Available: {df.columns.tolist()}'}), 400
-        updated = 0
-        not_found = 0
-        for _, row in df.iterrows():
-            so_item_val = clean(df_val(row, col_so_item)) if col_so_item else None
-            if not so_item_val: continue
-            # Lookup by so_item (unique identifier) — NOT so_number
-            so = SOData.query.filter_by(so_item=so_item_val).first()
-            if so:
-                if col_plan:
-                    # Column exists, so a blank cell intentionally clears the old plan date.
-                    so.delivery_plan_date = parse_date(df_val(row, col_plan))
-                if col_rem:
-                    # Column exists, so a blank cell intentionally clears the old remarks.
-                    so.remarks = clean(df_val(row, col_rem)) or ''
-                updated += 1
-            else:
-                not_found += 1
-        db.session.commit()
-        return jsonify({'updated': updated, 'not_found': not_found})
-    except Exception as e:
-        db.session.rollback(); import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-def _style_wb(ws, headers, num_cols=None):
-    ws.append(headers)
-    ws.freeze_panes = 'A2'
-    fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
-    for i, cell in enumerate(ws[1], 1):
-        cell.fill = fill
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.alignment = Alignment(horizontal='center')
-        ws.column_dimensions[get_column_letter(i)].width = 20
-    if num_cols:
-        for row in ws.iter_rows(min_row=2):
-            for ci in num_cols:
-                row[ci-1].number_format = '#,##0.00'
-
-
-@app.route('/api/export/all-so', methods=['GET'])
-def export_all_so():
-    try:
-        q = SOData.query.filter(open_so_filter())
-        op_units = request.args.getlist('op_unit')
-        vendors  = request.args.getlist('vendor')
-        manufacturers = request.args.getlist('manufacturer')
-        statuses = request.args.getlist('status')
-        aging_list = request.args.getlist('aging')
-        so_items = request.args.getlist('so_item')
-        pics = request.args.getlist('pic')
-        kpi_pic = (request.args.get('kpi_pic') or '').strip()
-        global_pics = request.args.getlist('global_pic')
-        clients = selected_clients()
-        margin_filter = request.args.get('margin_filter', 'all')
-        sort_order = request.args.get('sort_order', 'oldest')
-        date_year, date_from, date_to = parse_so_date_args()
-        q = apply_so_client_filter(q, clients)
-        q = apply_so_pic_filter(q, global_pics)
-        if op_units: q = q.filter(SOData.operation_unit_name.in_(op_units))
-        if vendors:  q = q.filter(SOData.vendor_name.in_(vendors))
-        if manufacturers: q = q.filter(SOData.manufacturer_name.in_(manufacturers))
-        if statuses: q = q.filter(SOData.so_status.in_(statuses))
-        if so_items: q = q.filter(SOData.so_item.in_(so_items))
-        q = apply_so_pic_filter(q, pics)
-        q = apply_so_create_date_filter(q, date_year, date_from, date_to)
-        if sort_order == 'newest':
-            sos = q.order_by(SOData.so_create_date.desc(), SOData.so_item.asc()).all()
-        else:
-            sos = q.order_by(SOData.so_create_date.asc(), SOData.so_item.asc()).all()
-
-        today = date.today()
-        hidden_so = get_hidden_so_items()
-        sos = [
-            s for s in sos
-            if s.so_item not in hidden_so
-            and s.so_number not in hidden_so
-            and so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo)
-        ]
-        if aging_list:
-            sos = [s for s in sos if get_aging_label(workdays_since(s.so_create_date, today)) in aging_list]
-        if margin_filter in ('positive', 'negative'):
-            def calc_margin(s):
-                po_amt = raw_purchase_amount(s)
-                return float(s.sales_amount or 0) - po_amt
-            if margin_filter == 'negative':
-                sos = [s for s in sos if calc_margin(s) < 0]
-            else:
-                sos = [s for s in sos if calc_margin(s) >= 0]
-        if kpi_pic:
-            sos = [s for s in sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) == kpi_pic]
-
-        wb = Workbook(); ws = wb.active; ws.title = "SO List"
-        headers = [
-            'Aging', 'Day', 'SO Create Date', 'SO Item', 'PO No.', 'SO Status',
-            'Category', 'PIC', 'Product ID', 'Product Name', 'Specification',
-            'Manufacturer Name', 'SO Quantity', 'Sales Unit', 'Operation Unit Name',
-            'Vendor ID', 'Vendor Name', 'Currency', 'Sales Price(Exclude Tax)',
-            'Sales Amount(Exclude Tax)', 'Purchasing Currency', 'Purchasing Price',
-            'Margin', '%Margin', 'Delivery Memo', 'Plan Date', 'Remarks'
-        ]
-        _style_wb(ws, headers, num_cols=[2,13,19,20,22,23,24])
-        widths = [14, 10, 16, 22, 22, 24, 22, 16, 18, 30, 44, 28, 14, 14, 30, 16, 28, 12, 22, 24, 20, 18, 18, 12, 30, 16, 70]
-        for i, width in enumerate(widths, 1):
-            ws.column_dimensions[get_column_letter(i)].width = width
-        for s in sos:
-            day = workdays_since(s.so_create_date, today)
-            po_amount = raw_purchase_amount(s)
-            sales_amount = float(s.sales_amount or 0)
-            margin = sales_amount - po_amount
-            margin_pct = (margin / po_amount * 100) if po_amount else None
-            ws.append([
-                get_aging_label(day),
-                day if day is not None else '',
-                s.so_create_date.isoformat() if s.so_create_date else '',
-                s.so_item or '',
-                s.matched_po_number or '',
-                s.so_status or '',
-                product_category_level1(s.product_id),
-                canonical_pending_pic(s.pic_name, s.operation_unit_name),
-                s.product_id or '',
-                s.product_name or '',
-                s.specification or '',
-                s.manufacturer_name or '',
-                s.so_qty or 0,
-                s.sales_unit or '',
-                s.operation_unit_name or '',
-                s.vendor_id or '',
-                s.vendor_name or '',
-                s.currency or '',
-                s.sales_price or 0,
-                sales_amount,
-                s.purchasing_currency or '',
-                s.purchasing_price or 0,
-                margin,
-                margin_pct if margin_pct is not None else '',
-                s.delivery_memo or '',
-                s.delivery_plan_date.isoformat() if s.delivery_plan_date else '',
-                s.remarks or '',
-            ])
-        output = io.BytesIO(); wb.save(output); output.seek(0)
-        return send_file(output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True, download_name=f"SO_List_{datetime.now().strftime('%Y%m%d')}.xlsx")
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/completed/summary', methods=['GET'])
-def completed_summary():
-    try:
-        year_filter = request.args.get('year', 'all')
-        date_year   = request.args.get('date_year', '')
-        date_from   = request.args.get('date_from', '')
-        date_to     = request.args.get('date_to', '')
-        yoy_base_year = request.args.get('yoy_base_year', '')
-        mode = (request.args.get('mode') or '').strip().lower()
-        light_mode = mode in ('dashboard', 'light', 'kpi')
-        is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
-        clients = selected_clients()
-        pics = selected_pics()
-
-        q = db.session.query(SOData).filter(SOData.so_status == 'Delivery Completed')
-        q = apply_so_client_filter(q, clients)
-        q = apply_so_pic_filter(q, pics)
-        yoy_q = db.session.query(SOData).filter(SOData.so_status == 'Delivery Completed')
-        yoy_q = apply_so_client_filter(yoy_q, clients)
-        yoy_q = apply_so_pic_filter(yoy_q, pics)
-
-        # Apply SO Create Date filter (date_year takes precedence over range,
-        # and falls back to legacy `year` query param when present).
-        effective_year = date_year or (year_filter if year_filter and year_filter != 'all' else '')
-        if effective_year:
-            try:
-                yr = int(effective_year)
-                if is_sqlite:
-                    q = q.filter(func.strftime('%Y', SOData.so_create_date) == str(yr))
-                else:
-                    q = q.filter(func.extract('year', SOData.so_create_date) == yr)
-            except ValueError:
-                pass
-        else:
-            if date_from:
-                q = q.filter(SOData.so_create_date >= date_from)
-            if date_to:
-                q = q.filter(SOData.so_create_date <= date_to)
-
-        # Exclude consumable / non-revenue op units, matching every other
-        # SOData query in the codebase (see /api/completed/margin-detail, etc.).
-        q = q.filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS)))
-        yoy_q = yoy_q.filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS)))
-
-        cache_key = (
-            _RUNTIME_CACHE_VERSION,
-            year_filter or 'all',
-            date_year or '',
-            date_from or '',
-            date_to or '',
-            yoy_base_year or '',
-            mode or '',
-            tuple(sorted(clients)),
-            tuple(sorted(pics)),
-        )
-        now_ts = datetime.utcnow().timestamp()
-        with _COMPLETED_CACHE_LOCK:
-            cache_entry = _COMPLETED_SUMMARY_CACHE.get(cache_key)
-            if cache_entry and now_ts - cache_entry.get('created_at', 0) < _COMPLETED_SUMMARY_CACHE_TTL_SECONDS:
-                return jsonify(cache_entry['payload'])
-
-        if light_mode:
-            # SQL-aggregated Dashboard summary. This avoids materialising every
-            # Delivery Completed row into Python just to draw KPI cards and charts.
-            currency_expr = func.upper(func.trim(func.coalesce(SOData.purchasing_currency, '')))
-            raw_purchase_expr = case(
-                (func.coalesce(SOData.purchasing_amount, 0) != 0, func.coalesce(SOData.purchasing_amount, 0)),
-                else_=func.coalesce(SOData.purchasing_price, 0) * func.coalesce(SOData.so_qty, 0)
-            )
-            purchase_expr = case(
-                (SOData.purchasing_amount_idr.isnot(None), SOData.purchasing_amount_idr),
-                (currency_expr.in_(['', 'IDR']), raw_purchase_expr),
-                else_=0.0
-            )
-            sales_expr = func.coalesce(SOData.sales_amount, 0.0)
-            has_purchase_expr = db.or_(
-                db.and_(SOData.purchasing_amount.isnot(None), SOData.purchasing_amount != 0),
-                db.and_(SOData.purchasing_price.isnot(None), SOData.purchasing_price != 0),
-            )
-            margin_expr = case(
-                (has_purchase_expr, sales_expr - purchase_expr),
-                else_=None
-            )
-            sum_purchase_expr = func.coalesce(func.sum(purchase_expr), 0.0)
-            sum_sales_expr = func.coalesce(func.sum(sales_expr), 0.0)
-            sum_margin_expr = func.coalesce(func.sum(func.coalesce(margin_expr, 0.0)), 0.0)
-            count_expr = func.count(SOData.id)
-
-            kpi_row = q.with_entities(
-                count_expr,
-                sum_sales_expr,
-                sum_purchase_expr,
-                func.coalesce(func.sum(case((margin_expr > 0, 1), else_=0)), 0),
-                func.coalesce(func.sum(case((margin_expr < 0, 1), else_=0)), 0),
-                func.coalesce(func.sum(case((margin_expr == 0, 1), else_=0)), 0),
-            ).first()
-            total_count = int(kpi_row[0] or 0) if kpi_row else 0
-            total_sales = float(kpi_row[1] or 0) if kpi_row else 0.0
-            total_purchase = float(kpi_row[2] or 0) if kpi_row else 0.0
-            pos = int(kpi_row[3] or 0) if kpi_row else 0
-            neg = int(kpi_row[4] or 0) if kpi_row else 0
-            zero = int(kpi_row[5] or 0) if kpi_row else 0
-
-            month_expr = func.strftime('%Y-%m', SOData.so_create_date) if is_sqlite else func.to_char(func.date_trunc('month', SOData.so_create_date), 'YYYY-MM')
-            monthly_trend = []
-            month_rows = (
-                q.filter(SOData.so_create_date.isnot(None))
-                .with_entities(
-                    month_expr.label('month'),
-                    count_expr.label('count'),
-                    sum_sales_expr.label('sales_amount'),
-                    sum_purchase_expr.label('purchase_amount'),
-                )
-                .group_by(month_expr)
-                .order_by(month_expr)
-                .all()
-            )
-            for month, cnt, sales_amt, purchase_amt in month_rows:
-                monthly_trend.append({
-                    'month': month,
-                    'count': int(cnt or 0),
-                    'sales_amount': float(sales_amt or 0),
-                    'purchase_amount': float(purchase_amt or 0),
-                })
-
-            current_year = datetime.utcnow().year
-            def _int_year(value):
-                try:
-                    return int(str(value)[:4])
-                except (TypeError, ValueError):
-                    return None
-
-            base_year = (
-                _int_year(yoy_base_year)
-                or _int_year(effective_year)
-                or _int_year(date_from)
-                or current_year
-            )
-            latest_three_years = sorted({current_year, current_year - 1, current_year - 2})
-            yoy_years = [year for year in latest_three_years if year != base_year]
-            if len(yoy_years) > 2:
-                yoy_years = yoy_years[-2:]
-            yoy_fields = {year: f'purchase_{year}' for year in yoy_years}
-            purchase_yoy_trend = []
-            purchase_yoy_by_month = {}
-            for month_num in range(1, 13):
-                row = {
-                    'month': month_num,
-                    'month_label': datetime(current_year, month_num, 1).strftime('%B'),
-                }
-                for field in yoy_fields.values():
-                    row[field] = 0.0
-                purchase_yoy_trend.append(row)
-                purchase_yoy_by_month[month_num] = row
-
-            if yoy_years:
-                if is_sqlite:
-                    yoy_year_expr = func.strftime('%Y', SOData.so_create_date)
-                    yoy_month_expr = func.strftime('%m', SOData.so_create_date)
-                    yoy_filter = yoy_year_expr.in_([str(y) for y in yoy_years])
-                else:
-                    yoy_year_expr = func.extract('year', SOData.so_create_date)
-                    yoy_month_expr = func.extract('month', SOData.so_create_date)
-                    yoy_filter = yoy_year_expr.in_(yoy_years)
-                yoy_rows = (
-                    yoy_q.filter(SOData.so_create_date.isnot(None), yoy_filter)
-                    .with_entities(
-                        yoy_year_expr.label('yr'),
-                        yoy_month_expr.label('mo'),
-                        sum_purchase_expr.label('purchase_amount'),
-                    )
-                    .group_by(yoy_year_expr, yoy_month_expr)
-                    .all()
-                )
-                for yr, mo, purchase_amt in yoy_rows:
-                    try:
-                        year_int = int(yr)
-                        month_int = int(mo)
-                    except (TypeError, ValueError):
-                        continue
-                    field = yoy_fields.get(year_int)
-                    if field and month_int in purchase_yoy_by_month:
-                        purchase_yoy_by_month[month_int][field] = round(float(purchase_amt or 0), 2)
-
-            def group_top(base_q, label_expr, label_key, value_key='purchase_amount', limit=5, extra_filter=None):
-                gq = base_q
-                if extra_filter is not None:
-                    gq = gq.filter(extra_filter)
-                rows = (
-                    gq.with_entities(
-                        label_expr.label(label_key),
-                        count_expr.label('count'),
-                        sum_sales_expr.label('sales_amount'),
-                        sum_purchase_expr.label('purchase_amount'),
-                        sum_margin_expr.label('margin'),
-                    )
-                    .group_by(label_expr)
-                    .order_by(desc(value_key if isinstance(value_key, str) else value_key))
-                    .limit(limit)
-                    .all()
-                )
-                result = []
-                for label, cnt, sales_amt, purchase_amt, margin_amt in rows:
-                    result.append({
-                        label_key: label or 'Unknown',
-                        'count': int(cnt or 0),
-                        'sales_amount': float(sales_amt or 0),
-                        'purchase_amount': float(purchase_amt or 0),
-                        'margin': float(margin_amt or 0),
-                    })
-                return result
-
-            vendor_label = func.coalesce(func.nullif(func.trim(SOData.vendor_name), ''), 'Unknown')
-            client_label = func.coalesce(func.nullif(func.trim(SOData.operation_unit_name), ''), 'Unknown')
-            local_filter = currency_expr.in_(['', 'IDR'])
-            import_filter = db.not_(currency_expr.in_(['', 'IDR']))
-            top_vendors = group_top(q, vendor_label, 'vendor', value_key=sum_purchase_expr, limit=5)
-            top_vendors_local = group_top(q, vendor_label, 'vendor', value_key=sum_purchase_expr, limit=5, extra_filter=local_filter)
-            top_vendors_import = group_top(q, vendor_label, 'vendor', value_key=sum_purchase_expr, limit=5, extra_filter=import_filter)
-            top_clients = group_top(q, client_label, 'client', value_key=sum_sales_expr, limit=5)
-
-            # Count rows whose USD/EUR conversion cache is still missing without
-            # trying to fetch rates during dashboard page-load.
-            missing_conversion_count = q.filter(
-                SOData.purchasing_amount_idr.is_(None),
-                db.not_(currency_expr.in_(['', 'IDR'])),
-                raw_purchase_expr > 0,
-            ).count()
-
-            payload = {
-                'total_count': total_count,
-                'total_sales': total_sales,
-                'total_purchase': total_purchase,
-                'total_margin': (total_sales - total_purchase) if (total_sales > 0 and total_purchase > 0) else None,
-                'monthly_trend': monthly_trend,
-                'purchase_yoy_years': yoy_years,
-                'purchase_yoy_trend': purchase_yoy_trend,
-                'top_vendors': top_vendors,
-                'top_vendors_local': top_vendors_local,
-                'top_vendors_import': top_vendors_import,
-                'top_clients': top_clients,
-                'top_items': [],
-                'worst_margin_vendors': [],
-                'worst_margin_transactions': [],
-                'margin_distribution': {
-                    'positive': pos,
-                    'negative': neg,
-                    'zero': zero,
-                },
-                'conversion_status': {
-                    'checked': True,
-                    'had_missing_cache': missing_conversion_count > 0,
-                    'converted_count': 0,
-                    'pending_count': int(missing_conversion_count or 0),
-                    'message': 'Dashboard memakai cache currency yang sudah tersimpan. Backfill rate dijalankan terpisah.',
-                }
-            }
-            with _COMPLETED_CACHE_LOCK:
-                _COMPLETED_SUMMARY_CACHE[cache_key] = {
-                    'created_at': now_ts,
-                    'payload': payload,
-                }
-            return jsonify(payload)
-
-        completed_summary_fields = (
-            SOData.so_number,
-            SOData.so_item,
-            SOData.operation_unit_name,
-            SOData.vendor_name,
-            SOData.so_qty,
-            SOData.sales_amount,
-            SOData.purchasing_price,
-            SOData.purchasing_amount,
-            SOData.purchasing_currency,
-            SOData.purchasing_amount_idr,
-            SOData.so_create_date,
-        )
-        if not light_mode:
-            completed_summary_fields = completed_summary_fields + (
-                SOData.product_name,
-                SOData.specification,
-                SOData.product_id,
-            )
-        purchase_summary_fields = (
-            SOData.so_qty,
-            SOData.purchasing_price,
-            SOData.purchasing_amount,
-            SOData.purchasing_currency,
-            SOData.purchasing_amount_idr,
-            SOData.so_create_date,
-        )
-
-        rows = q.options(load_only(*completed_summary_fields)).all()
-        yoy_rows = yoy_q.options(load_only(*purchase_summary_fields)).all()
-
-        missing_conversion_count = sum(
-            1 for s in rows
-            if s.purchasing_amount_idr is None
-            and str(s.purchasing_currency or 'IDR').strip().upper() != 'IDR'
-            and raw_purchase_amount(s) > 0
-        )
-
-        # Read endpoints must never wait on external FX fetches. Missing
-        # conversions are filled during upload/backfill, then cached in DB.
-        converted_count = ensure_purchase_amount_idr_cache(rows, fetch_missing=False)
-
-        def po_amt_of(s):
-            return purchase_amount_idr(s)
-
-        # Pre-compute per-row sales/purchase/margin once, then reuse.
-        enriched = []
-        for s in rows:
-            po_amt = po_amt_of(s)
-            sales = float(s.sales_amount or 0)
-            # Margin is only calculated if purchase price exists and is not 0
-            # If purchase price is 0 or missing, margin should be None (displayed as "-")
-            has_purchase_data = (
-                (s.purchasing_amount is not None and s.purchasing_amount != 0) or
-                (s.purchasing_price is not None and s.purchasing_price != 0)
-            )
-            # Only calculate margin if we have valid purchase data
-            margin = (sales - po_amt) if has_purchase_data else None
-            enriched.append((s, po_amt, sales, margin))
-
-        # Monthly trend
-        monthly = {}
-        for s, po_amt, sales, _m in enriched:
-            if not s.so_create_date:
-                continue
-            key = s.so_create_date.strftime('%Y-%m')
-            if key not in monthly:
-                monthly[key] = {'month': key, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0}
-            monthly[key]['count'] += 1
-            monthly[key]['sales_amount'] += sales
-            monthly[key]['purchase_amount'] += po_amt
-
-        monthly_trend = sorted(monthly.values(), key=lambda x: x['month'])
-
-        # Year-on-year purchase amount for the other two years in the latest
-        # three-year window. The base year follows the selected bar/range year.
-        current_year = datetime.utcnow().year
-        def _int_year(value):
-            try:
-                return int(str(value)[:4])
-            except (TypeError, ValueError):
-                return None
-
-        base_year = (
-            _int_year(yoy_base_year)
-            or _int_year(effective_year)
-            or _int_year(date_from)
-            or current_year
-        )
-        latest_three_years = sorted({current_year, current_year - 1, current_year - 2})
-        yoy_years = [year for year in latest_three_years if year != base_year]
-        if len(yoy_years) > 2:
-            yoy_years = yoy_years[-2:]
-        yoy_fields = {year: f'purchase_{year}' for year in yoy_years}
-        purchase_yoy_trend = []
-        purchase_yoy_by_month = {}
-        for month_num in range(1, 13):
-            row = {
-                'month': month_num,
-                'month_label': datetime(current_year, month_num, 1).strftime('%B'),
-            }
-            for field in yoy_fields.values():
-                row[field] = 0.0
-            purchase_yoy_trend.append(row)
-            purchase_yoy_by_month[month_num] = row
-
-        ensure_purchase_amount_idr_cache(yoy_rows, fetch_missing=False)
-        for s in yoy_rows:
-            if not s.so_create_date:
-                continue
-            year = s.so_create_date.year
-            if year not in yoy_fields:
-                continue
-            purchase_yoy_by_month[s.so_create_date.month][yoy_fields[year]] += purchase_amount_idr(s)
-
-        for row in purchase_yoy_trend:
-            for field in yoy_fields.values():
-                row[field] = round(row[field], 2)
-
-        # Vendor summary (top 5 by sales)
-        def currency_bucket(s):
-            cur = (s.purchasing_currency or 'IDR').strip().upper()
-            return 'local' if cur in ('', 'IDR') else 'import'
-
-        def add_vendor(target, s, po_amt, sales, m):
-            v = s.vendor_name or 'Unknown'
-            if v not in target:
-                target[v] = {'vendor': v, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0, 'margin': 0.0}
-            target[v]['count'] += 1
-            target[v]['sales_amount'] += sales
-            target[v]['purchase_amount'] += po_amt
-            if m is not None:
-                target[v]['margin'] += m
-
-        vendor_map = {}
-        vendor_local_map = {}
-        vendor_import_map = {}
-        client_map = {}
-        for s, po_amt, sales, m in enriched:
-            add_vendor(vendor_map, s, po_amt, sales, m)
-            if currency_bucket(s) == 'local':
-                add_vendor(vendor_local_map, s, po_amt, sales, m)
-            else:
-                add_vendor(vendor_import_map, s, po_amt, sales, m)
-
-            client = s.operation_unit_name or 'Unknown'
-            if client not in client_map:
-                client_map[client] = {'client': client, 'count': 0, 'sales_amount': 0.0, 'purchase_amount': 0.0, 'margin': 0.0}
-            client_map[client]['count'] += 1
-            client_map[client]['sales_amount'] += sales
-            client_map[client]['purchase_amount'] += po_amt
-            if m is not None:
-                client_map[client]['margin'] += m
-
-        def top_purchase_vendors(mapping):
-            return sorted(
-                (row for row in mapping.values() if float(row.get('purchase_amount') or 0) > 0),
-                key=lambda x: x['purchase_amount'],
-                reverse=True
-            )[:5]
-
-        top_vendors = top_purchase_vendors(vendor_map)
-        top_vendors_local = top_purchase_vendors(vendor_local_map)
-        top_vendors_import = top_purchase_vendors(vendor_import_map)
-        top_clients = sorted(client_map.values(), key=lambda x: x['sales_amount'], reverse=True)[:5]
-
-        # Margin distribution + totals (KPI cards)
-        pos = neg = zero = 0
-        total_sales = 0.0
-        total_purchase = 0.0
-        for _s, po_amt, sales, m in enriched:
-            total_sales += sales
-            total_purchase += po_amt
-            if m is not None:
-                if m > 0:
-                    pos += 1
-                elif m < 0:
-                    neg += 1
-                else:
-                    zero += 1
-
-        # Dashboard mode does not need detail-heavy item/transaction lists.
-        # Skipping these avoids loading Product Name / Spec for every completed row.
-        top_items = []
-        worst_margin_vendors = []
-        worst_margin_transactions = []
-        if not light_mode:
-            # Top 20 items by sales amount (grouped by product / item label).
-            # Also surface Specification + Product ID so the frontend table can
-            # display them.  Group key prefers Product ID when present so the
-            # same product across multiple SOs aggregates correctly even when
-            # `product_name` differs slightly.
-            item_map = {}
-            for s, po_amt, sales, m in enriched:
-                pid = (s.product_id or '').strip()
-                label = s.product_name or s.so_item or 'Unknown'
-                key = pid or label
-                if key not in item_map:
-                    item_map[key] = {
-                        'item': label,
-                        'specification': s.specification or '',
-                        'product_id': pid,
-                        'count': 0, 'sales_amount': 0.0,
-                        'purchase_amount': 0.0, 'margin': 0.0,
-                    }
-                agg = item_map[key]
-                agg['count'] += 1
-                agg['sales_amount'] += sales
-                agg['purchase_amount'] += po_amt
-                if m is not None:
-                    agg['margin'] += m
-                # Backfill spec from later rows if the first one was empty.
-                if not agg['specification'] and s.specification:
-                    agg['specification'] = s.specification
-
-            top_items = sorted(item_map.values(), key=lambda x: x['sales_amount'], reverse=True)[:20]
-
-            # Worst-margin vendors: vendors with one or more negative-margin txns,
-            # ranked by total negative margin (most negative first).
-            neg_vendor_map = {}
-            for s, po_amt, sales, m in enriched:
-                if m is None or m >= 0:
-                    continue
-                v = s.vendor_name or 'Unknown'
-                if v not in neg_vendor_map:
-                    neg_vendor_map[v] = {
-                        'vendor': v, 'margin': 0.0, 'count': 0,
-                        'total_sales': 0.0, 'total_purchase': 0.0,
-                    }
-                neg_vendor_map[v]['margin'] += m
-                neg_vendor_map[v]['count'] += 1
-                neg_vendor_map[v]['total_sales'] += sales
-                neg_vendor_map[v]['total_purchase'] += po_amt
-
-            worst_margin_vendors = sorted(neg_vendor_map.values(), key=lambda x: x['margin'])[:50]
-
-            # Top 30 worst-margin transactions (UI scrolls within fixed-height box)
-            neg_txns = [(s, po_amt, sales, m) for s, po_amt, sales, m in enriched if m is not None and m < 0]
-            neg_txns.sort(key=lambda x: x[3])  # most negative first
-            for s, po_amt, sales, m in neg_txns[:30]:
-                pct = round(m / sales * 100, 1) if sales else None
-                worst_margin_transactions.append({
-                    'so_item': s.so_item,
-                    'so_number': s.so_number,
-                    'item_code': (s.item_code if hasattr(s, 'item_code') and s.item_code else (s.so_item or '-')),
-                    'product': s.product_name or '-',
-                    'vendor': s.vendor_name or '-',
-                    'sales_amount': sales,
-                    'purchase_amount': po_amt,
-                    'margin': m,
-                    'margin_pct': pct,
-                    'count': 1,
-                    'date': s.so_create_date.isoformat() if s.so_create_date else None,
-                })
-
-        payload = {
-            'total_count': len(rows),
-            'total_sales': total_sales,
-            'total_purchase': total_purchase,
-            'total_margin': (total_sales - total_purchase) if (total_sales > 0 and total_purchase > 0) else None,
-            'monthly_trend': monthly_trend,
-            'purchase_yoy_years': yoy_years,
-            'purchase_yoy_trend': purchase_yoy_trend,
-            'top_vendors': top_vendors,
-            'top_vendors_local': top_vendors_local,
-            'top_vendors_import': top_vendors_import,
-            'top_clients': top_clients,
-            'top_items': top_items,
-            'worst_margin_vendors': worst_margin_vendors,
-            'worst_margin_transactions': worst_margin_transactions,
-            'margin_distribution': {
-                'positive': pos,
-                'negative': neg,
-                'zero': zero
-            },
-            'conversion_status': {
-                'checked': True,
-                'had_missing_cache': missing_conversion_count > 0,
-                'converted_count': converted_count,
-                'pending_count': max(missing_conversion_count - converted_count, 0),
-                'message': (
-                    f'Konversi currency selesai dan disimpan untuk {converted_count} data baru.'
-                    if converted_count
-                    else 'Tidak ada data currency baru yang perlu dikonversi.'
-                )
-            }
-        }
-        with _COMPLETED_CACHE_LOCK:
-            _COMPLETED_SUMMARY_CACHE[cache_key] = {
-                'created_at': now_ts,
-                'payload': payload,
-            }
-        return jsonify(payload)
-
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-
-@app.route('/api/completed/margin-detail', methods=['GET'])
-def completed_margin_detail():
-    """Return rows for a specific margin category (positive/negative/zero) for popup."""
-    try:
-        category = request.args.get('category', 'positive')  # positive|negative|zero
-        date_from = request.args.get('date_from', '')
-        date_to   = request.args.get('date_to', '')
-        date_year = request.args.get('date_year', '')
-        is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
-        clients = selected_clients()
-        pics = selected_pics()
-
-        q = db.session.query(SOData).filter(SOData.so_status == 'Delivery Completed')
-        q = apply_so_client_filter(q, clients)
-        q = apply_so_pic_filter(q, pics)
-        if date_year:
-            try:
-                yr = int(date_year)
-                if is_sqlite:
-                    q = q.filter(func.strftime('%Y', SOData.so_create_date) == str(yr))
-                else:
-                    q = q.filter(func.extract('year', SOData.so_create_date) == yr)
-            except ValueError:
-                pass
-        elif date_from or date_to:
-            if date_from:
-                q = q.filter(SOData.so_create_date >= date_from)
-            if date_to:
-                q = q.filter(SOData.so_create_date <= date_to)
-
-        rows = q.filter(~SOData.operation_unit_name.in_(list(EXCLUDED_OP_UNITS))).all()
-
-        # Persist missing converted purchase amounts once. Subsequent popup
-        # loads reuse the stored IDR value.
-        ensure_purchase_amount_idr_cache(rows)
-
-        def get_po_amt(s):
-            return purchase_amount_idr(s)
-
-        result = []
-        for s in rows:
-            po_amt = get_po_amt(s)
-            # Check if purchase data exists (not 0 or None)
-            has_purchase_data = (
-                (s.purchasing_amount is not None and s.purchasing_amount != 0) or
-                (s.purchasing_price is not None and s.purchasing_price != 0)
-            )
-            # Only calculate margin if we have valid purchase data
-            m = (float(s.sales_amount or 0) - po_amt) if has_purchase_data else None
-            
-            # Skip rows without margin data for positive/negative categories
-            if m is None and category in ('positive', 'negative'):
-                continue
-            if category == 'positive' and (m is None or m <= 0):
-                continue
-            elif category == 'negative' and (m is None or m >= 0):
-                continue
-            elif category == 'zero' and (m is None or m != 0):
-                continue
-            result.append({
-                'id': s.id,
-                'so_item': s.so_item,
-                'so_number': s.so_number,
-                'product': s.product_name or '-',
-                'vendor': s.vendor_name or '-',
-                'item_code': (s.item_code if hasattr(s, 'item_code') and s.item_code else '-'),
-                'sales_amount': float(s.sales_amount or 0),
-                'purchase_amount': po_amt,
-                'margin': m,
-                'margin_pct': round(m / float(s.sales_amount) * 100, 1) if s.sales_amount else None,
-                'date': s.so_create_date.isoformat() if s.so_create_date else None,
-                'so_status': s.so_status,
-                'pic_name': canonical_pending_pic(s.pic_name, s.operation_unit_name),
-                'operation_unit_name': s.operation_unit_name,
-            })
-
-        result.sort(key=lambda x: x['margin'])
-        return jsonify(result)
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-
-
-# ─── Product ID Database & Master PIC endpoints ───────────────────────────
-
-@app.route('/api/clients', methods=['GET'])
-def get_clients():
-    try:
-        ensure_default_item_registration_loaded()
-        clients = set()
-        clients.update(c for (c,) in db.session.query(SOData.operation_unit_name).distinct().all() if c)
-        clients.update(c for (c,) in db.session.query(ItemRegistration.client_name).distinct().all() if c)
-        return jsonify(sorted(c for c in clients if c))
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-def load_similarity_cache():
-    """Load similarity cache from file."""
-    global _SIMILARITY_CACHE
-    try:
-        if os.path.exists(_SIMILARITY_CACHE_FILE):
-            with open(_SIMILARITY_CACHE_FILE, 'r', encoding='utf-8') as f:
-                _SIMILARITY_CACHE = json.load(f)
-    except Exception as e:
-        print(f"Error loading similarity cache: {e}")
-        _SIMILARITY_CACHE = {}
-
-
-def save_similarity_cache():
-    """Save similarity cache to file."""
-    try:
-        os.makedirs(os.path.dirname(_SIMILARITY_CACHE_FILE), exist_ok=True)
-        with open(_SIMILARITY_CACHE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(_SIMILARITY_CACHE, f, ensure_ascii=False, separators=(',', ':'))
-    except Exception as e:
-        print(f"Error saving similarity cache: {e}")
-
-
-def calculate_similarity(str1, str2):
-    """Calculate similarity percentage between two strings using token-based approach."""
-    if not str1 or not str2:
-        return 0.0
-    
-    # Normalize strings
-    s1 = str(str1).lower().strip()
-    s2 = str(str2).lower().strip()
-    
-    if s1 == s2:
-        return 100.0
-    
-    # Token-based similarity
-    tokens1 = set(s1.split())
-    tokens2 = set(s2.split())
-    
-    if not tokens1 or not tokens2:
-        return 0.0
-    
-    intersection = tokens1.intersection(tokens2)
-    union = tokens1.union(tokens2)
-    
-    # Jaccard similarity
-    jaccard = len(intersection) / len(union) * 100
-    
-    # Also check substring match
-    if s1 in s2 or s2 in s1:
-        substring_bonus = 20.0
-    else:
-        substring_bonus = 0.0
-    
-    return min(100.0, jaccard + substring_bonus)
-
-def _similarity_token(value):
-    text_value = (clean(value) or '').lower()
-    tokens = [t for t in re.split(r'[^a-z0-9]+', text_value) if len(t) >= 3]
-    return max(tokens, key=len) if tokens else ''
-
-def _candidate_registered_items_for_similarity(item, registered_items=None, limit=1200):
-    unit = (clean(item.odr_unit) or '').lower()
-    mfr_token = _similarity_token(item.mfr_name)
-    name_token = _similarity_token(item.prod_name)
-
-    if registered_items is not None:
-        candidates = []
-        for reg in registered_items:
-            if unit and (clean(reg.order_unit) or '').lower() != unit:
-                continue
-            reg_mfr = (clean(reg.manufacturer_name) or '').lower()
-            reg_name = (clean(reg.product_name) or '').lower()
-            token_matches = []
-            if mfr_token:
-                token_matches.append(mfr_token in reg_mfr)
-            if name_token:
-                token_matches.append(name_token in reg_name)
-            if token_matches and not any(token_matches):
-                continue
-            candidates.append(reg)
-            if len(candidates) >= limit:
-                break
-        return candidates
-
-    q = ProductIDDB.query.filter(
-        ProductIDDB.product_id.isnot(None),
-        ProductIDDB.product_id != ''
-    )
-    if unit:
-        q = q.filter(func.lower(ProductIDDB.order_unit) == unit)
-    token_filters = []
-    if mfr_token:
-        token_filters.append(ProductIDDB.manufacturer_name.ilike(f'%{mfr_token}%'))
-    if name_token:
-        token_filters.append(ProductIDDB.product_name.ilike(f'%{name_token}%'))
-    if token_filters:
-        q = q.filter(db.or_(*token_filters))
-    elif not unit:
-        return []
-    return q.limit(limit).all()
-
-
-def _similarity_score(values):
-    scores = []
-    for left, right in values:
-        if clean(left) and clean(right):
-            scores.append(calculate_similarity(left, right))
-    if not scores:
-        return 0.0
-    return sum(scores) / len(scores)
-
-
-def find_similar_registered_items(item, registered_items=None):
-    """Find Product ID master rows similar to an Item Registration row.
-
-    Similarity uses Product Name, Specification, Manufacturer Name, and Order
-    Unit. Rows with an overall score above 80% are returned. If more than one
-    registered product matches, Product IDs are joined with commas while the
-    descriptive fields are shown once from the best match.
-    """
-    try:
-        key_fields = [item.prod_name, item.spec, item.mfr_name, item.odr_unit]
-        if not any(clean(v) for v in key_fields):
-            return None
-
-        current_prod_id = clean_product_id(item.prod_id)
-        cache_key = '|'.join([
-            'similar_v4',
-            clean(item.req_no),
-            current_prod_id,
-            clean(item.prod_name).lower(),
-            clean(item.spec).lower(),
-            clean(item.mfr_name).lower(),
-            clean(item.odr_unit).lower(),
-        ])
-        if cache_key in _SIMILARITY_CACHE:
-            return _SIMILARITY_CACHE[cache_key]
-
-        registered_items = _candidate_registered_items_for_similarity(item, registered_items)
-
-        similar_items = []
-        for reg in registered_items:
-            reg_prod_id = clean_product_id(reg.product_id)
-            if not reg_prod_id or (current_prod_id and reg_prod_id == current_prod_id):
-                continue
-
-            has_descriptive_pair = any(
-                clean(left) and clean(right)
-                for left, right in [
-                    (item.prod_name, reg.product_name),
-                    (item.spec, reg.specification),
-                    (item.mfr_name, reg.manufacturer_name),
-                ]
-            )
-            if not has_descriptive_pair:
-                continue
-
-            total_sim = _similarity_score([
-                (item.prod_name, reg.product_name),
-                (item.spec, reg.specification),
-                (item.mfr_name, reg.manufacturer_name),
-                (item.odr_unit, reg.order_unit),
-            ])
-
-            if total_sim > 80.0:
-                similar_items.append({
-                    'product_id': reg_prod_id,
-                    'product_name': reg.product_name or '',
-                    'specification': reg.specification or '',
-                    'manufacturer_name': reg.manufacturer_name or '',
-                    'order_unit': reg.order_unit or '',
-                    'similarity': round(total_sim, 1)
-                })
-
-        similar_items.sort(key=lambda x: (-x['similarity'], x['product_id']))
-        if not similar_items:
-            result = None
-        else:
-            best = similar_items[0]
-            result = {
-                'product_ids': ', '.join(x['product_id'] for x in similar_items),
-                'product_name': best['product_name'],
-                'specification': best['specification'],
-                'manufacturer_name': best['manufacturer_name'],
-                'order_unit': best['order_unit'],
-                'similarity': best['similarity'],
-                'count': len(similar_items)
-            }
-
-        _SIMILARITY_CACHE[cache_key] = result
-        return result
-    except Exception as e:
-        print(f"Error finding similar items: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-
-@app.route('/api/item-registration/data', methods=['GET'])
-def get_item_registration_data():
-    try:
-        cache_key = runtime_cache_key('item_registration_data')
-        cached = runtime_cache_get(cache_key)
-        if cached is not None:
-            return jsonify(cached)
-
-        ensure_default_item_registration_loaded()
-        # Safe auto-clean for old append bugs: duplicates with the same Req. No
-        # are merged before the page count is calculated. Stale rows with a
-        # different Req. No are cleaned on the next full Item Registration upload.
-        try:
-            total_rows = db.session.query(func.count(ItemRegistration.id)).scalar() or 0
-            distinct_req = db.session.query(func.count(func.distinct(ItemRegistration.req_no))).filter(
-                ItemRegistration.req_no.isnot(None), func.trim(ItemRegistration.req_no) != ''
-            ).scalar() or 0
-            if total_rows > distinct_req:
-                cleanup_item_registration_duplicates_only()
-                db.session.commit()
-                clear_runtime_caches()
-        except Exception:
-            db.session.rollback()
-        page = int(request.args.get('page', 1))
-        per_page = int(request.args.get('per_page', 10))
-        search = request.args.get('search', '').strip()
-        req_numbers = [n.strip() for n in request.args.getlist('req_no') if n.strip()]
-        date_year, date_from, date_to = parse_so_date_args()
-        clients = selected_clients()
-        global_pics = [p.strip() for p in request.args.getlist('global_pic') if p.strip()]
-        item_clients = [c.strip() for c in request.args.getlist('item_client') if c.strip()]
-        categories = [c.strip() for c in request.args.getlist('category') if c.strip()]
-        pics = [p.strip() for p in request.args.getlist('pic') if p.strip()]
-        kpi_pic = (request.args.get('kpi_pic') or '').strip()
-        proc_statuses = [s.strip() for s in request.args.getlist('proc_status') if s.strip()]
-        mfr_names = [s.strip() for s in request.args.getlist('mfr_name') if s.strip()]
-        q = apply_item_registration_visible_status_filter(
-            apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to)
-        )
-        if clients:
-            q = q.filter(ItemRegistration.client_name.in_(clients))
-        q = apply_item_registration_pic_filter(q, global_pics)
-        if item_clients:
-            q = q.filter(ItemRegistration.client_name.in_(item_clients))
-        if categories:
-            q = q.filter(ItemRegistration.category.in_(categories))
-        if proc_statuses:
-            q = q.filter(ItemRegistration.proc_status.in_(proc_statuses))
-        if mfr_names:
-            q = q.filter(ItemRegistration.mfr_name.in_(mfr_names))
-        if req_numbers:
-            q = q.filter(ItemRegistration.req_no.in_(req_numbers))
-        if search:
-            pattern = f'%{search}%'
-            q = q.filter(db.or_(
-                ItemRegistration.req_no.ilike(pattern),
-                ItemRegistration.prod_id.ilike(pattern),
-                ItemRegistration.prod_name.ilike(pattern),
-                ItemRegistration.vendor_name.ilike(pattern),
-                ItemRegistration.mfr_name.ilike(pattern),
-                ItemRegistration.remarks.ilike(pattern),
-            ))
-
-        # KPI PIC cards should stay visible when one PIC is selected. Build the
-        # KPI source after all non-PIC filters, then apply PIC filters only to
-        # the table data.
-        kpi_q = q
-
-        missing_q = apply_item_registration_kpi_status_filter(kpi_q).filter(
-            db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-')
-        )
-        missing_prod_rows = missing_q.all()
-        missing_by_pic = {}
-        for r in missing_prod_rows:
-            pic = resolve_item_registration_pic(r)
-            if not pic or pic == 'Unassigned':
-                continue
-            missing_by_pic[pic] = missing_by_pic.get(pic, 0) + 1
-        missing_prod_id_by_pic = [
-            {'pic': pic, 'count': count}
-            for pic, count in [(row['pic'], row['count']) for row in sort_pic_kpis([{'pic': pic, 'count': count} for pic, count in missing_by_pic.items()])]
-        ]
-
-        q = apply_item_registration_pic_filter(q, pics)
-
-        if kpi_pic:
-            q = apply_item_registration_pic_filter(q, [kpi_pic])
-            q = q.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-'))
-
-        total = q.count()
-        rows = q.order_by(ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()).offset((page-1)*per_page).limit(per_page).all()
-        def item_reg_option_query(exclude_field=None):
-            oq = apply_item_registration_visible_status_filter(
-                apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to)
-            )
-            if clients:
-                oq = oq.filter(ItemRegistration.client_name.in_(clients))
-            oq = apply_item_registration_pic_filter(oq, global_pics)
-            if req_numbers:
-                oq = oq.filter(ItemRegistration.req_no.in_(req_numbers))
-            if search:
-                pattern = f'%{search}%'
-                oq = oq.filter(db.or_(
-                    ItemRegistration.req_no.ilike(pattern),
-                    ItemRegistration.prod_id.ilike(pattern),
-                    ItemRegistration.prod_name.ilike(pattern),
-                    ItemRegistration.vendor_name.ilike(pattern),
-                    ItemRegistration.mfr_name.ilike(pattern),
-                    ItemRegistration.remarks.ilike(pattern),
-                ))
-            if exclude_field != 'clients' and item_clients:
-                oq = oq.filter(ItemRegistration.client_name.in_(item_clients))
-            if exclude_field != 'categories' and categories:
-                oq = oq.filter(ItemRegistration.category.in_(categories))
-            if exclude_field != 'proc_statuses' and proc_statuses:
-                oq = oq.filter(ItemRegistration.proc_status.in_(proc_statuses))
-            if exclude_field != 'mfr_names' and mfr_names:
-                oq = oq.filter(ItemRegistration.mfr_name.in_(mfr_names))
-            if exclude_field != 'pics':
-                oq = apply_item_registration_pic_filter(oq, pics)
-            if kpi_pic:
-                if exclude_field != 'pics':
-                    oq = apply_item_registration_pic_filter(oq, [kpi_pic])
-                oq = oq.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-'))
-            return oq
-
-        def distinct_item_reg_options(exclude_field, column):
-            return sorted({
-                value for (value,) in item_reg_option_query(exclude_field).with_entities(column).distinct().all()
-                if value
-            })
-
-        all_clients = distinct_item_reg_options('clients', ItemRegistration.client_name)
-        all_categories = distinct_item_reg_options('categories', ItemRegistration.category)
-        all_proc_statuses = distinct_item_reg_options('proc_statuses', ItemRegistration.proc_status)
-        all_mfr_names = distinct_item_reg_options('mfr_names', ItemRegistration.mfr_name)
-        pic_option_rows = item_reg_option_query('pics').with_entities(
-            ItemRegistration.category_id,
-            ItemRegistration.category,
-            ItemRegistration.pic,
-            ItemRegistration.client_name,
-        ).all()
-        all_pics = sorted({resolve_item_registration_pic(r) for r in pic_option_rows if resolve_item_registration_pic(r) != 'Unassigned'})
-        last_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'ITEM_REG').scalar()
-
-        response_rows = [item_registration_dict(r, include_similarity=False) for r in rows]
-
-        payload = {
-            'data': response_rows,
-            'total': total,
-            'page': page,
-            'per_page': per_page,
-            'client_options': all_clients,
-            'category_options': all_categories,
-            'pic_options': all_pics,
-            'proc_status_options': all_proc_statuses,
-            'mfr_name_options': all_mfr_names,
-            'missing_prod_id_by_pic': missing_prod_id_by_pic,
-            'last_updated': utc_isoformat(last_upload),
-        }
-        runtime_cache_set(cache_key, payload, ttl_seconds=60)
-        return jsonify(payload)
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-
-@app.route('/api/upload/item-registration-json', methods=['POST'])
-@app.route('/api/upload/item-registration', methods=['POST'])
-def upload_item_registration():
-    try:
-        uploads, upload_mode = request_upload_dataframes('item_registration')
-        if not uploads:
-            return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
-        replace_existing = upload_replace_mode()
-
-        summary = {'processed': 0, 'added': 0, 'updated': 0, 'removed_duplicates': 0, 'removed_stale': 0, 'removed_blank': 0}
-        latest_req_numbers = set()
-        for upload in uploads:
-            df = upload['df']
-            result = import_item_registration_dataframe(df, upload['filename'])
-            latest_req_numbers.update(result.get('keys', []))
-            for key in summary:
-                summary[key] += result.get(key, 0)
-
-        # Default manual upload is merge/upsert. Only delete rows missing from
-        # the uploaded file when caller explicitly requests replace/snapshot.
-        db.session.flush()
-        cleanup = cleanup_source_table_snapshot(
-            ItemRegistration,
-            'req_no',
-            latest_req_numbers if replace_existing else None,
-            timestamp_fields=('uploaded_at',),
-            delete_blank=True,
-        )
-        for key, value in cleanup.items():
-            summary[key] = summary.get(key, 0) + value
-
-        db.session.commit()
-        clear_runtime_caches()
-        return jsonify({
-            'message': (
-                f'Berhasil upload {len(uploads)} file Item Registration: '
-                f'+{summary["added"]} added, {summary["updated"]} updated, '
-                f'{summary["removed_duplicates"]} duplicate lama dihapus, '
-                f'{summary["removed_stale"]} data lama dibuang'
-            ),
-            'uploaded': summary['processed'],
-            'files': len(uploads),
-            'mode': upload_mode,
-            'replace': replace_existing,
-            **summary,
-        })
-    except ValueError as e:
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        db.session.rollback()
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/item-registration/<int:item_id>', methods=['PUT'])
-def update_item_registration(item_id):
-    try:
-        data = request.json or {}
-        item = db.session.get(ItemRegistration, item_id)
-        if not item:
-            return jsonify({'error': 'Not found'}), 404
-        if 'remarks' in data:
-            item.remarks = data['remarks'] or ''
-        db.session.commit()
-        return jsonify({'success': True})
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 500
-
-
-def apply_item_registration_request_filters(query):
-    search = request.args.get('search', '').strip()
-    req_numbers = [n.strip() for n in request.args.getlist('req_no') if n.strip()]
-    date_year, date_from, date_to = parse_so_date_args()
-    clients = selected_clients()
-    global_pics = [p.strip() for p in request.args.getlist('global_pic') if p.strip()]
-    item_clients = [c.strip() for c in request.args.getlist('item_client') if c.strip()]
-    categories = [c.strip() for c in request.args.getlist('category') if c.strip()]
-    pics = [p.strip() for p in request.args.getlist('pic') if p.strip()]
-    kpi_pic = (request.args.get('kpi_pic') or '').strip()
-    proc_statuses = [s.strip() for s in request.args.getlist('proc_status') if s.strip()]
-    mfr_names = [s.strip() for s in request.args.getlist('mfr_name') if s.strip()]
-    query = apply_item_registration_date_filter(query, date_year, date_from, date_to)
-    if clients:
-        query = query.filter(ItemRegistration.client_name.in_(clients))
-    query = apply_item_registration_pic_filter(query, global_pics)
-    if item_clients:
-        query = query.filter(ItemRegistration.client_name.in_(item_clients))
-    if categories:
-        query = query.filter(ItemRegistration.category.in_(categories))
-    query = apply_item_registration_pic_filter(query, pics)
-    if proc_statuses:
-        query = query.filter(ItemRegistration.proc_status.in_(proc_statuses))
-    if mfr_names:
-        query = query.filter(ItemRegistration.mfr_name.in_(mfr_names))
-    if req_numbers:
-        query = query.filter(ItemRegistration.req_no.in_(req_numbers))
-    if search:
-        pattern = f'%{search}%'
-        query = query.filter(db.or_(
-            ItemRegistration.req_no.ilike(pattern),
-            ItemRegistration.prod_id.ilike(pattern),
-            ItemRegistration.prod_name.ilike(pattern),
-            ItemRegistration.vendor_name.ilike(pattern),
-            ItemRegistration.mfr_name.ilike(pattern),
-            ItemRegistration.remarks.ilike(pattern),
-        ))
-    if kpi_pic:
-        query = apply_item_registration_pic_filter(query, [kpi_pic])
-        query = apply_item_registration_kpi_status_filter(query)
-        query = query.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-'))
-    return query
-
-
-@app.route('/api/item-registration/template', methods=['GET'])
-def download_item_registration_batch_template():
-    try:
-        ensure_default_item_registration_loaded()
-        refresh_item_registration_mappings()
-        rows = apply_item_registration_request_filters(ItemRegistration.query).order_by(
-            ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()
-        ).all()
-
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Item Reg Batch Upload"
-        headers = ['Req. No', 'Remarks']
-        ws.append(headers)
-        ws.freeze_panes = 'A2'
-
-        header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-        col_widths = [28, 70]
-        for i, cell in enumerate(ws[1], 1):
-            cell.fill = header_fill
-            cell.font = Font(bold=True, color="000000")
-            cell.alignment = Alignment(horizontal='center')
-            ws.column_dimensions[get_column_letter(i)].width = col_widths[i - 1]
-
-        grey_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
-        red_font = Font(color="FF0000")
-        ws.append(['example : 100010723616', 'example : Waiting for product registration'])
-        for cell in ws[2]:
-            cell.font = red_font
-            cell.fill = grey_fill
-
-        seen = set()
-        for row in rows:
-            req_no = clean(row.req_no)
-            if not req_no or req_no in seen:
-                continue
-            seen.add(req_no)
-            ws.append([req_no, row.remarks or ''])
-
-        output = io.BytesIO()
-        wb.save(output)
-        output.seek(0)
-        return send_file(output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name=f"Template_ItemRegistration_BatchUpload_{datetime.now().strftime('%Y%m%d')}.xlsx")
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/export/item-registration', methods=['GET'])
-def export_item_registration():
-    try:
-        ensure_default_item_registration_loaded()
-        refresh_item_registration_mappings()
-        rows = apply_item_registration_request_filters(ItemRegistration.query).order_by(
-            ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()
-        ).all()
-
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Item Registration"
-        headers = [
-            'Proc. Status', 'Client Nm.', 'Category', 'PIC', 'Req. No', 'Prod. ID',
-            'Prod. Nm.', 'Spec.', 'Mfr. Nm.', 'Odr. Unit', 'Prod. Price', 'Curr.', 'Remarks'
-        ]
-        _style_wb(ws, headers, num_cols=[11])
-        widths = [26, 34, 24, 16, 18, 18, 28, 48, 24, 14, 16, 12, 60]
-        for i, width in enumerate(widths, 1):
-            ws.column_dimensions[get_column_letter(i)].width = width
-        for row in rows:
-            ws.append([
-                row.proc_status or '',
-                row.client_name or '',
-                source_category_level1(row.category),
-                row.pic or '',
-                row.req_no or '',
-                row.prod_id or '',
-                row.prod_name or '',
-                row.spec or '',
-                row.mfr_name or '',
-                row.odr_unit or '',
-                row.prod_price or 0,
-                row.curr or '',
-                row.remarks or '',
-            ])
-
-        output = io.BytesIO()
-        wb.save(output)
-        output.seek(0)
-        return send_file(output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name=f"Item_Registration_{datetime.now().strftime('%Y%m%d')}.xlsx")
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/item-registration/batch-upload', methods=['POST'])
-def batch_upload_item_registration():
-    try:
-        if 'file' not in request.files:
-            return jsonify({'error': 'No file'}), 400
-        file = request.files['file']
-        df = pd.read_excel(file, engine='openpyxl', skiprows=[1])
-        df.columns = [str(c).strip() for c in df.columns]
-        col_req = find_column(df, ['Req. No', 'Req. No.', 'Request No', 'Request Number'])
-        col_rem = find_column(df, ['Remarks', 'Remark'])
-        if not col_req:
-            return jsonify({'error': f'Column "Req. No" not found. Available: {df.columns.tolist()}'}), 400
-        if not col_rem:
-            return jsonify({'error': f'Column "Remarks" not found. Available: {df.columns.tolist()}'}), 400
-
-        updated = 0
-        not_found = 0
-        for _, row in df.iterrows():
-            req_no = clean(df_val(row, col_req))
-            if not req_no or req_no.lower().startswith('example'):
-                continue
-            req_no = req_no.replace('example :', '').replace('example:', '').strip()
-            matches = ItemRegistration.query.filter_by(req_no=req_no).all()
-            if not matches:
-                not_found += 1
-                continue
-            remarks = clean(df_val(row, col_rem)) or ''
-            for item in matches:
-                item.remarks = remarks
-                updated += 1
-        db.session.commit()
-        return jsonify({'updated': updated, 'not_found': not_found})
-    except Exception as e:
-        db.session.rollback()
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-def _lookup_pic_by_category_id(category_id):
-    """Return PIC name for a Master PIC category id, or None if not found."""
-    return _lookup_pic_by_category(category_id, None)
-
-
-def _lookup_pic(product_id_str):
-    """Return PIC name for a product_id string, or None if not found."""
-    if not product_id_str:
-        return None
-    pid = str(product_id_str).strip()
-    prod = db.session.query(ProductIDDB).filter_by(product_id=pid).first()
-    if not prod:
-        return None
-    return _lookup_pic_by_category(prod.category_id, prod.category_name)
-
-
-@app.route('/api/upload/product-id-json', methods=['POST'])
-@app.route('/api/upload/product-id', methods=['POST'])
-def upload_product_id():
-    """Upload Prod_ID Excel from SAP. Upserts product_id → category_id mapping."""
-    try:
-        uploads, upload_mode = request_upload_dataframes('product_id')
-        if not uploads:
-            return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
-        replace_existing = upload_replace_mode()
-
-        cleanup_pre = cleanup_source_table_snapshot(
-            ProductIDDB,
-            'product_id',
-            None,
-            timestamp_fields=('updated_at',),
-            delete_blank=True,
-        )
-        db.session.flush()
-        added = updated = 0
-        removed_duplicates = cleanup_pre.get('removed_duplicates', 0)
-        removed_stale = cleanup_pre.get('removed_stale', 0)
-        removed_blank = cleanup_pre.get('removed_blank', 0)
-        latest_product_ids = set()
-        pic_cache = {}  # category_id → pic_name
-
-        expected = [
-            ('product_id', 'Product ID'), ('category_id', 'Category ID'),
-            ('category_name', 'Category Name'), ('product_name', 'Product Name'),
-            ('product_status', 'Product Status'), ('specification', 'Specification'),
-            ('manufacturer_name', 'Manufacturer Name'), ('order_unit', 'Order Unit'),
-            ('hub_handling_check', 'HUB Handling Check'), ('tax_type', 'Tax Type'),
-            ('registration_date', 'Registration Date'), ('product_registry_pic', 'Product Registry PIC')
-        ]
-        required = [('product_id', 'Product ID')]
-
-        for upload in uploads:
-            df = upload['df']
-            df.columns = [str(c).strip() for c in df.columns]
-            col = _product_id_columns(df)
-            validate_upload_columns(upload['filename'], 'Prod ID', col, expected, required)
-
-            for _, row in df.iterrows():
-                pid = clean_product_id(df_val(row, col['product_id']))
-                if not pid:
-                    continue
-                latest_product_ids.add(pid)
-                cat_id = normalize_category_id(df_val(row, col['category_id']))
-                payload = {
-                    'category_id': cat_id,
-                    'category_name': clean(df_val(row, col['category_name'])),
-                    'product_name': clean(df_val(row, col['product_name'])),
-                    'product_status': clean(df_val(row, col['product_status'])),
-                    'specification': clean(df_val(row, col['specification'])),
-                    'manufacturer_name': clean(df_val(row, col['manufacturer_name'])),
-                    'vendor_name': clean(df_val(row, col['vendor_name'])),
-                    'order_unit': clean(df_val(row, col['order_unit'])),
-                    'hub_handling_check': clean(df_val(row, col['hub_handling_check'])),
-                    'tax_type': clean(df_val(row, col['tax_type'])),
-                    'registration_date': parse_date(df_val(row, col['registration_date'])),
-                    'product_registry_pic': clean(df_val(row, col['product_registry_pic'])),
-                    'updated_at': datetime.utcnow(),
-                }
-
-                existing = db.session.query(ProductIDDB).filter_by(product_id=pid).first()
-                if existing:
-                    for key, value in payload.items():
-                        setattr(existing, key, value)
-                    updated += 1
-                else:
-                    db.session.add(ProductIDDB(product_id=pid, **payload))
-                    added += 1
-
-        db.session.flush()
-        cleanup_post = cleanup_source_table_snapshot(
-            ProductIDDB,
-            'product_id',
-            latest_product_ids if replace_existing else None,
-            timestamp_fields=('updated_at',),
-            delete_blank=True,
-        )
-        removed_duplicates += cleanup_post.get('removed_duplicates', 0)
-        removed_stale += cleanup_post.get('removed_stale', 0)
-        removed_blank += cleanup_post.get('removed_blank', 0)
-
-        db.session.commit()
-        _pid_category_cache_invalidate()
-        clear_runtime_caches()
-
-        global _SIMILARITY_CACHE
-        _SIMILARITY_CACHE = {}
-
-        # After upserting ProductIDDB, refresh pic_name on SO rows that have a product_id.
-        # Master PIC is now keyed by Category Name, with Category ID kept only as
-        # a backward-compatible fallback.
-        so_rows = db.session.query(SOData).filter(
-            SOData.product_id.isnot(None), SOData.product_id != ''
-        ).all()
-        refreshed = 0
-        for s in so_rows:
-            prod = db.session.query(ProductIDDB).filter_by(product_id=str(s.product_id).strip()).first()
-            if not prod:
-                continue
-            cache_key = (normalize_category_id(prod.category_id), normalize_category_name(prod.category_name))
-            if cache_key not in pic_cache:
-                pic_cache[cache_key] = _lookup_pic_by_category(prod.category_id, prod.category_name)
-            new_pic = pic_cache[cache_key]
-            if s.pic_name != new_pic:
-                s.pic_name = new_pic
-                refreshed += 1
-        db.session.commit()
-        clear_runtime_caches()
-
-        return jsonify({
-            'status': 'ok',
-            'files': len(uploads),
-            'mode': upload_mode,
-            'added': added, 'updated': updated,
-            'removed_duplicates': removed_duplicates,
-            'removed_stale': removed_stale,
-            'removed_blank': removed_blank,
-            'so_pic_refreshed': refreshed,
-            'total_in_db': db.session.query(ProductIDDB).count()
-        })
-    except ValueError as e:
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/upload/master-pic-json', methods=['POST'])
-@app.route('/api/upload/master-pic', methods=['POST'])
-def upload_master_pic():
-    """Upload Master PIC Excel. Upserts Category Name → PIC mapping, then refreshes SO pic_name."""
-    try:
-        uploads, upload_mode = request_upload_dataframes('master_pic')
-        if not uploads:
-            return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
-        replace_existing = upload_replace_mode()
-
-        cleanup_pre = cleanup_master_pic_by_category_name(None)
-        db.session.flush()
-        added = updated = unchanged = 0
-        removed_duplicates = cleanup_pre.get('removed_duplicates', 0)
-        removed_stale = cleanup_pre.get('removed_stale', 0)
-        removed_blank = cleanup_pre.get('removed_blank', 0)
-        latest_category_names = set()
-        expected = [
-            ('category_name', 'Category Name'),
-            ('pic', 'PIC'),
-            ('pic_update', 'Update New PIC'),
-        ]
-        required = [('category_name', 'Category Name')]
-
-        for upload in uploads:
-            df = upload['df']
-            df.columns = [str(c).strip() for c in df.columns]
-            col = _master_pic_columns(df)
-            validate_upload_columns(upload['filename'], 'Update PIC', col, expected, required)
-
-            for _, row in df.iterrows():
-                cat_name = source_category_level1(df_val(row, col['category_name']))
-                if not cat_name:
-                    continue
-
-                current_pic = clean(df_val(row, col['pic']))
-                update_pic = clean(df_val(row, col['pic_update']))
-                pic_name = update_pic or current_pic
-
-                # Template rows with blank Update New PIC and blank current PIC are
-                # informational only; skip them instead of clearing the mapping.
-                if not pic_name:
-                    continue
-
-                latest_category_names.add(cat_name)
-                existing = find_master_pic_by_category_name(cat_name)
-                if existing:
-                    # If older data still contains several Category ID rows for
-                    # the same Category Name, update all of them to the same PIC
-                    # so Category Name behaves as the single business key.
-                    norm_cat_name = normalize_category_name(cat_name)
-                    targets = [
-                        m for m in db.session.query(MasterPIC).all()
-                        if normalize_category_name(m.category_name) == norm_cat_name
-                    ]
-                    if existing not in targets:
-                        targets.append(existing)
-
-                    changed = False
-                    for target in targets:
-                        new_key = master_pic_category_key(cat_name) or target.category_id
-                        if (
-                            normalize_category_name(target.category_name) != norm_cat_name
-                            or clean(target.pic_name) != pic_name
-                            or (str(target.category_id or '').startswith('CATNAME_') and target.category_id != new_key)
-                        ):
-                            changed = True
-                        target.category_name = cat_name
-                        if str(target.category_id or '').startswith('CATNAME_'):
-                            target.category_id = new_key
-                        target.pic_name = pic_name
-                        target.updated_at = datetime.utcnow()
-                    if changed:
-                        updated += 1
-                    else:
-                        unchanged += 1
-                else:
-                    db.session.add(MasterPIC(
-                        category_id=master_pic_category_key(cat_name),
-                        category_name=cat_name,
-                        pic_name=pic_name,
-                        updated_at=datetime.utcnow()
-                    ))
-                    added += 1
-
-        db.session.flush()
-        cleanup_post = cleanup_master_pic_by_category_name(latest_category_names if replace_existing else None)
-        removed_duplicates += cleanup_post.get('removed_duplicates', 0)
-        removed_stale += cleanup_post.get('removed_stale', 0)
-        removed_blank += cleanup_post.get('removed_blank', 0)
-
-        db.session.commit()
-        invalidate_master_pic_cache()
-
-        # Refresh SO rows using ProductIDDB Category Name first, Category ID as fallback.
-        prod_map = {
-            str(p.product_id).strip(): (p.category_id, p.category_name)
-            for p in db.session.query(ProductIDDB).all()
-            if p.product_id
-        }
-        pic_cache = {}
-        so_rows = db.session.query(SOData).filter(
-            SOData.product_id.isnot(None), SOData.product_id != ''
-        ).all()
-        refreshed = 0
-        for s in so_rows:
-            cat_id, cat_name = prod_map.get(str(s.product_id).strip(), (None, None))
-            cache_key = (normalize_category_id(cat_id), normalize_category_name(cat_name))
-            if cache_key not in pic_cache:
-                pic_cache[cache_key] = _lookup_pic_by_category(cat_id, cat_name)
-            new_pic = pic_cache[cache_key]
-            if s.pic_name != new_pic:
-                s.pic_name = new_pic
-                refreshed += 1
-        db.session.commit()
-        clear_runtime_caches()
-        refresh_item_registration_mappings()
-
-        return jsonify({
-            'status': 'ok',
-            'files': len(uploads),
-            'mode': upload_mode,
-            'replace': replace_existing,
-            'added': added,
-            'updated': updated,
-            'unchanged': unchanged,
-            'removed_duplicates': removed_duplicates,
-            'removed_stale': removed_stale,
-            'removed_blank': removed_blank,
-            'so_pic_refreshed': refreshed,
-            'total_categories': master_pic_unique_category_count()
-        })
-    except ValueError as e:
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/master-pic/status', methods=['GET'])
-def master_pic_status():
-    """Return summary of Master PIC and ProductID database."""
-    try:
-        total_pid = db.session.query(ProductIDDB).count()
-        last_pid = db.session.query(func.max(ProductIDDB.updated_at)).scalar()
-        total_pic = master_pic_unique_category_count()
-        last_pic = db.session.query(func.max(MasterPIC.updated_at)).scalar()
-        return jsonify({
-            'product_id_count': total_pid,
-            'last_product_id_upload': last_pid.isoformat() if last_pid else None,
-            'master_pic_count': total_pic,
-            'last_pic_update': last_pic.isoformat() if last_pic else None,
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/vendor-control/debug', methods=['GET'])
-def vendor_control_debug():
-    """Small production diagnostic for Google Sheet access. Does not return passwords."""
-    try:
-        raw_file = os.environ.get('GOOGLE_SERVICE_ACCOUNT_FILE') or os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
-        raw_json = bool(os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON') or os.environ.get('GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON'))
-        info = {
-            'credential_file': raw_file or '',
-            'credential_file_exists': bool(raw_file and os.path.exists(raw_file)),
-            'credential_json_env_set': raw_json,
-            'sheet_id': VENDOR_CONTROL_SHEET_ID,
-            'sheet_gid': VENDOR_CONTROL_SHEET_GID,
-        }
-        sheet_name = vendor_control_sheet_name()
-        info['sheet_name'] = sheet_name
-        result = google_sheets_values_get(VENDOR_CONTROL_SHEET_ID, f"'{sheet_name}'!A1:Z20")
-        values = result.get('values', [])
-        info['sample_rows'] = len(values)
-        info['header_candidates'] = []
-        matched = None
-        for idx, candidate_headers in enumerate(values[:20]):
-            candidate_columns = find_vendor_control_columns(candidate_headers)
-            looks_like_header = all(candidate_columns.get(name) for name in ('vendor_name', 'vendor_id', 'password'))
-            info['header_candidates'].append({
-                'row': idx + 1,
-                'non_empty_cells': sum(1 for cell in candidate_headers if clean(cell)),
-                'detected_columns': candidate_columns,
-                'looks_like_header': looks_like_header,
-            })
-            if looks_like_header:
-                matched = {'header_row': idx + 1, 'columns': candidate_columns, 'headers': candidate_headers}
-                break
-        info['matched_header'] = matched
-        return jsonify(info)
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/vendor-control/data', methods=['GET'])
-def get_vendor_control_data():
-    try:
-        page = max(int(request.args.get('page', 1)), 1)
-        per_page = min(max(int(request.args.get('per_page', 10)), 1), 500)
-        search = (clean(request.args.get('search')) or '').lower()
-        vendors = [clean(v) for v in request.args.getlist('vendor') if clean(v)]
-        force = str(request.args.get('refresh', '')).lower() in ('1', 'true', 'yes')
-        rows, fetched_at = vendor_control_rows(force=force)
-        if vendors:
-            vendor_needles = [v.lower() for v in vendors]
-            rows = [row for row in rows if any(
-                needle == str(row.get('vendor_name') or '').lower()
-                or needle == str(row.get('vendor_id') or '').lower()
-                or needle in str(row.get('vendor_name') or '').lower()
-                or needle in str(row.get('vendor_id') or '').lower()
-                for needle in vendor_needles
-            )]
-        if search:
-            rows = [row for row in rows if search in str(row.get('vendor_name') or '').lower() or search in str(row.get('vendor_id') or '').lower()]
-        rows = sorted(rows, key=lambda row: (str(row.get('vendor_name') or '').lower(), str(row.get('vendor_id') or '').lower()))
-        total = len(rows)
-        start = (page - 1) * per_page
-        return jsonify({
-            'data': rows[start:start + per_page],
-            'total': total,
-            'page': page,
-            'per_page': per_page,
-            'suggestions': [row.get('vendor_name') for row in rows[:20] if row.get('vendor_name')],
-            'last_updated': utc_isoformat(fetched_at),
-        })
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({
-            'error': str(e),
-            'hint': 'Check PythonAnywhere WSGI credential path, google-api-python-client/google-auth installation, service account sheet permission, and Vendor Control sheet headers.'
-        }), 500
-
-@app.route('/api/vendor-control/<path:row_key>', methods=['PUT'])
-def update_vendor_control(row_key):
-    try:
-        data = request.json or {}
-        field = clean(data.get('field')) or ''
-        value = clean(data.get('value')) or ''
-        if field not in ('vendor_id', 'password'):
-            return jsonify({'error': 'Only Vendor ID and Password can be edited'}), 400
-        try:
-            sheet_row = int(str(row_key).strip())
-        except ValueError:
-            return jsonify({'error': 'Invalid vendor row key'}), 400
-        sync = sync_vendor_control_cell(sheet_row, field, value)
-        if sync.get('synced'):
-            for row in VENDOR_CONTROL_CACHE.get('rows') or []:
-                if str(row.get('row_key')) == str(row_key):
-                    row[field] = value
-        return jsonify({'success': True, 'sheet_sync': sync})
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/vendor-control/login/<path:row_key>', methods=['GET'])
-def vendor_control_login(row_key):
-    try:
-        rows, _ = vendor_control_rows(force=False)
-        row = next((item for item in rows if str(item.get('row_key')) == str(row_key)), None)
-        if not row:
-            return '<h3>Vendor credential was not found or incomplete.</h3>', 404
-        vendor_id = row.get('vendor_id') or ''
-        password = row.get('password') or ''
-        action = 'https://mall.serveone.id/vendor/cmm/doLogin.dev?signData=noSign'
-        if vendor_id.upper().startswith('FW'):
-            action = 'https://mall.serveone.id/vendor/fwdr/fwdr/doChkFirstLogin.dev?mallType=FORWARDER'
-        vendor_name = row.get('vendor_name') or vendor_id
-        return f'''<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Vendor Login - {html.escape(str(vendor_name))}</title>
-  <style>
-    body {{ font-family: Arial, sans-serif; background: #f8fafc; color: #0f172a; display: grid; min-height: 100vh; place-items: center; margin: 0; }}
-    .box {{ background: white; border: 1px solid #e2e8f0; border-radius: 14px; padding: 24px; width: min(420px, calc(100vw - 32px)); box-shadow: 0 20px 50px rgba(15,23,42,.12); }}
-    h1 {{ font-size: 18px; margin: 0 0 6px; }}
-    p {{ color: #475569; font-size: 13px; line-height: 1.5; margin: 0 0 18px; }}
-    button {{ width: 100%; border: 0; border-radius: 10px; background: #2563eb; color: white; font-weight: 700; padding: 12px; cursor: pointer; }}
-  </style>
-</head>
-<body>
-  <div class="box">
-    <h1>Logging in to {html.escape(str(vendor_name))}</h1>
-    <p>This tab will submit the vendor login form automatically. If it does not continue, click the button below.</p>
-    <form id="vendorLoginForm" method="post" action="{html.escape(action)}">
-      <input type="hidden" name="cprtcpUsrId" value="{html.escape(str(vendor_id))}">
-      <input type="hidden" name="cprtcpSectNo" value="{html.escape(str(password))}">
-      <input type="hidden" name="agreType" value="">
-      <input type="hidden" name="signData" value="noSign">
-      <button type="submit">Log-In</button>
-    </form>
+  };
+
+  const isChecked = (val) => {
+    if (currentNone) return false;
+    if (currentAll) return true;
+    return currentSelected.includes(val);
+  };
+
+  const displayLabel = currentNone
+    ? `0 selected`
+    : noneSelected
+    ? `All ${label}`
+    : safeSelected.length === 1
+    ? String(safeSelected[0])
+    : `${safeSelected.length} selected`;
+  const hasActiveFilter = noSelection || !noneSelected;
+
+  const dropdown = open ? (
+    <div
+      ref={menuRef}
+      className={`fixed z-[180] rounded-lg shadow-2xl border overflow-hidden ${darkMode?'bg-gray-700 border-gray-600':'bg-white border-gray-200'}`}
+      style={{ top: menuPos.top, left: menuPos.left, width: menuPos.width, maxWidth: 'calc(100vw - 32px)' }}
+    >
+      <div className={`px-2 pt-2 pb-1 border-b ${darkMode?'border-gray-600':'border-gray-100'}`}>
+        <input
+          type="text"
+          value={searchText}
+          onChange={e => setSearchText(e.target.value)}
+          placeholder={`Search ${label}...`}
+          autoFocus
+          className={`w-full px-2 py-1.5 rounded text-xs border ${darkMode?'bg-gray-600 border-gray-500 text-white placeholder-gray-400':'bg-gray-50 border-gray-200 text-gray-800 placeholder-gray-400'}`}
+          onClick={e => e.stopPropagation()}
+          onKeyDown={e => { if (e.key === 'Escape') closeDropdown(); if (e.key === 'Enter') applySelection(); }}
+        />
+      </div>
+      <div className="overflow-auto" style={{ maxHeight: menuPos.maxHeight }}>
+        <label style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold border-b
+          ${darkMode?'border-gray-600 hover:bg-gray-600 text-white':'border-gray-100 hover:bg-blue-50 text-gray-700'}`}>
+          <input type="checkbox"
+            checked={currentAll}
+            ref={el => { if (el) el.indeterminate = someSelected; }}
+            onChange={toggleAll}
+            className="accent-blue-600" style={{cursor:'pointer'}}/>
+          <span>(Select All)</span>
+        </label>
+        {filteredOptions.map(opt => (
+          <label key={opt} style={{cursor:'pointer'}} className={`flex items-center gap-2 px-3 py-2 text-xs
+            ${darkMode?'hover:bg-gray-600 text-white':'hover:bg-blue-50 text-gray-700'}`}>
+            <input type="checkbox" checked={isChecked(opt)} onChange={()=>toggle(opt)}
+              className="accent-blue-600" style={{cursor:'pointer'}}/>
+            <span className="min-w-0 break-words leading-snug" title={opt}>{opt}</span>
+          </label>
+        ))}
+        {filteredOptions.length === 0 && <div className={`px-3 py-2 text-xs ${darkMode?'text-gray-400':'text-gray-500'}`}>{searchText.trim() ? 'No matching options' : 'No options'}</div>}
+      </div>
+      <div className={`flex gap-2 px-3 py-2 border-t shadow-inner ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-gray-50 border-gray-200'}`}>
+        <button
+          type="button"
+          onClick={applySelection}
+          className="flex-1 px-3 py-2 rounded-lg text-xs font-bold bg-blue-600 text-white hover:bg-blue-700 shadow-sm"
+        >
+          Apply
+        </button>
+        <button
+          type="button"
+          onClick={resetSelection}
+          className={`flex-1 px-3 py-2 rounded-lg text-xs font-semibold ${darkMode ? 'bg-gray-600 text-gray-100 hover:bg-gray-500' : 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-100'}`}
+        >
+          Clear All
+        </button>
+        {searchText.trim() && (
+          <button
+            type="button"
+            onClick={() => setSearchText('')}
+            title="Clear search"
+            className={`px-3 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1 ${darkMode ? 'bg-gray-600 text-gray-100 hover:bg-gray-500' : 'bg-white border border-gray-300 text-gray-500 hover:bg-gray-100'}`}
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </div>
+    </div>
+  ) : null;
+
+  return (
+    <div className="relative w-full min-w-0" ref={ref}>
+      {!hideLabel && <label className={`block text-xs font-medium mb-1 ${txt2}`}>{label}</label>}
+      <button onClick={(e)=>{ e.stopPropagation(); setOpen(o=>!o); }} style={{cursor:'pointer'}}
+        className={`w-full h-10 px-3 py-2 rounded-lg text-sm border text-left flex justify-between items-center transition-colors
+          ${darkMode
+            ? hasActiveFilter
+              ? 'bg-amber-900/30 border-amber-500 text-amber-100 hover:bg-amber-900/40'
+              : 'bg-gray-600 border-gray-500 text-white hover:bg-gray-500'
+            : hasActiveFilter
+              ? 'bg-amber-50 border-amber-300 text-amber-800 hover:bg-amber-100'
+              : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
+        <span className={`truncate ${hasActiveFilter ? 'font-semibold' : ''}`}>{displayLabel}</span>
+        <ChevronDown className={`w-4 h-4 flex-shrink-0 ml-1 transition-transform ${open ? 'rotate-180' : ''}`}/>
+      </button>
+      {typeof document !== 'undefined' ? createPortal(dropdown, document.body) : dropdown}
+    </div>
+  );
+};
+
+// ─── Search Input for SO / PO numbers ─────────────────────────────────────
+const SearchInput = ({ placeholder, onSearch, darkMode, txt2, label }) => {
+  const [open, setOpen] = useState(false);
+  const [value, setValue] = useState('');
+  const ref = useRef(null);
+  // Floating dropdown — escapes `overflow-hidden` parents so the search
+  // panel is never clipped by the table card border.
+  const float = useFloatingDropdown(open, 256, 320, 260);
+
+  useEffect(() => {
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target) && !float.triggerRef.current?.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const handleSearch = () => {
+    const numbers = value.split('\n').map(s=>s.trim()).filter(Boolean);
+    onSearch(numbers);
+    setOpen(false);
+  };
+
+  const handleClear = () => {
+    setValue('');
+    onSearch([]);
+    setOpen(false);
+  };
+
+  return (
+    <div className="relative w-full" ref={ref}>
+      <button
+        ref={float.triggerRef}
+        onClick={() => setOpen(o => !o)}
+        title={`Search ${label}`}
+        className={`w-full h-10 flex items-center justify-between gap-1.5 px-3 py-2 rounded-lg text-sm border font-medium transition-all
+          ${darkMode ? 'bg-gray-600 border-gray-500 text-white hover:bg-gray-500' : 'bg-white border-gray-300 text-gray-700 hover:bg-blue-50 hover:border-blue-400'}`}
+      >
+        <span className="flex items-center gap-1.5 min-w-0">
+          <Search className="w-4 h-4 flex-shrink-0"/>
+          <span className="truncate">Search {label}</span>
+        </span>
+        <ChevronDown className="w-3.5 h-3.5 opacity-60 flex-shrink-0"/>
+      </button>
+      {open && (
+        <div
+          style={float.menuPos.style}
+          className={`rounded-xl shadow-2xl border p-3 ${darkMode?'bg-gray-800 border-gray-700':'bg-white border-gray-200'}`}
+        >
+          <p className={`text-xs font-semibold mb-1.5 ${darkMode?'text-gray-300':'text-gray-600'}`}>
+            Enter {label} (one per line):
+          </p>
+          <textarea
+            value={value}
+            onChange={e => setValue(e.target.value)}
+            placeholder={placeholder}
+            rows={4}
+            className={`w-full px-2 py-1.5 rounded-lg text-xs border resize-none font-mono
+              ${darkMode?'bg-gray-700 border-gray-600 text-white placeholder-gray-500':'bg-gray-50 border-gray-300 text-gray-800 placeholder-gray-400'}`}
+            autoFocus
+          />
+          <div className="flex gap-2 mt-2">
+            <button onClick={handleSearch}
+              className="flex-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold">
+              Search
+            </button>
+            <button onClick={handleClear}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium ${darkMode?'bg-gray-600 text-gray-200 hover:bg-gray-500':'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>
+              Clear
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── Multiline search dropdown ────────────────────────────────────────────
+const RFQMultiSearch = ({
+  value,
+  onChange,
+  onSearch,
+  darkMode,
+  txt2,
+  label = 'Search',
+  description = 'Enter one Request Number, Item Name, or Spec per line. Results match any entered value.',
+  placeholder = 'REQ-0001\nBearing SKF\nStainless steel 304',
+}) => {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  // Floating dropdown — escapes `overflow-hidden` parents.
+  const float = useFloatingDropdown(open, 360, 440, 320);
+
+  useEffect(() => {
+    const handler = (event) => {
+      if (ref.current && !ref.current.contains(event.target) && !float.triggerRef.current?.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const searchValues = String(value || '')
+    .split(/\r?\n/)
+    .map(item => item.trim())
+    .filter(Boolean);
+
+  const applySearch = () => {
+    const normalized = searchValues.join('\n');
+    onChange(normalized);
+    onSearch(normalized);
+    setOpen(false);
+  };
+
+  const clearSearch = () => {
+    onChange('');
+    onSearch('');
+    setOpen(false);
+  };
+
+  return (
+    <div className="relative w-full min-w-0" ref={ref}>
+      <label className={`block text-xs font-semibold mb-1 ${txt2}`}>{label}</label>
+      <button
+        ref={float.triggerRef}
+        type="button"
+        onClick={() => setOpen(current => !current)}
+        className={`w-full h-10 px-3 py-2 rounded-xl text-sm border text-left flex items-center justify-between gap-2 transition-colors ${
+          darkMode
+            ? searchValues.length
+              ? 'bg-amber-900/30 border-amber-500 text-amber-100 hover:bg-amber-900/40'
+              : 'bg-gray-700 border-gray-600 text-white hover:bg-gray-600'
+            : searchValues.length
+              ? 'bg-amber-50 border-amber-300 text-amber-800 hover:bg-amber-100'
+              : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50'
+        }`}
+      >
+        <span className="flex min-w-0 items-center gap-2">
+          <Search className="w-4 h-4 flex-shrink-0" />
+          <span className="truncate">
+            {searchValues.length ? `${searchValues.length} value${searchValues.length > 1 ? 's' : ''}` : label}
+          </span>
+        </span>
+        <ChevronDown className="w-4 h-4 flex-shrink-0" />
+      </button>
+
+      {open && (
+        <div
+          style={float.menuPos.style}
+          className={`rounded-xl border p-3 shadow-2xl ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-200'}`}
+        >
+          <p className={`mb-2 text-xs leading-relaxed ${txt2}`}>
+            {description}
+          </p>
+          <textarea
+            value={value}
+            onChange={event => onChange(event.target.value)}
+            onKeyDown={event => {
+              if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+                event.preventDefault();
+                applySearch();
+              }
+              if (event.key === 'Escape') setOpen(false);
+            }}
+            placeholder={'REQ-0001\nBearing SKF\nStainless steel 304'}
+            className={`h-52 w-full overflow-y-auto resize-y rounded-lg border px-3 py-2 font-mono text-sm leading-6 ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-gray-50 border-gray-300 text-gray-800 placeholder:text-gray-400'}`}
+            autoFocus
+          />
+          <div className={`mt-1 text-[11px] ${txt2}`}>
+            {searchValues.length} search value{searchValues.length === 1 ? '' : 's'}
+          </div>
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              onClick={applySearch}
+              className="flex-1 rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold text-white hover:bg-blue-700"
+            >
+              Search
+            </button>
+            <button
+              type="button"
+              onClick={clearSearch}
+              className={`flex-1 rounded-lg px-3 py-2 text-xs font-semibold ${darkMode ? 'bg-gray-600 text-gray-100 hover:bg-gray-500' : 'border border-gray-300 bg-white text-gray-700 hover:bg-gray-100'}`}
+            >
+              Clear Search
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const FilterPanel = ({ children, darkMode, className = '' }) => (
+  <div className={`relative z-[70] overflow-visible mx-5 my-3 rounded-xl border p-3 ${darkMode ? 'border-gray-700 bg-gray-800/70' : 'border-gray-100 bg-[#f6f6f4]'} ${className}`}>
+    {children}
   </div>
-  <script>setTimeout(function(){{ document.getElementById('vendorLoginForm').submit(); }}, 250);</script>
-</body>
-</html>'''
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return f'<h3>Vendor login failed to prepare.</h3><p>{html.escape(str(e))}</p>', 500
-
-@app.route('/api/rfq/data', methods=['GET'])
-def get_rfq_data():
-    try:
-        force = str(request.args.get('refresh', '')).lower() in ('1', 'true', 'yes')
-        cache_key = runtime_cache_key('rfq_data')
-        if not force:
-            cached = runtime_cache_get(cache_key)
-            if cached is not None:
-                return jsonify(cached)
-
-        page = max(int(request.args.get('page', 1)), 1)
-        per_page = min(max(int(request.args.get('per_page', 10)), 1), 500)
-        search = clean(request.args.get('search')) or ''
-        pic = clean(request.args.get('pic')) or ''
-        clients = [clean(v) for v in request.args.getlist('client_name') if clean(v)]
-        rfq_numbers = [clean(v) for v in request.args.getlist('rfq_no') if clean(v)]
-        brands = [clean(v) for v in request.args.getlist('brand_manufacturer') if clean(v)]
-        purchase_pics = [clean(v) for v in request.args.getlist('purchase_pic') if clean(v)]
-        vendors = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
-        checks = [clean(v).lower() for v in request.args.getlist('check') if clean(v)]
-        include_similarity = str(request.args.get('similarity', '')).lower() in ('1', 'true', 'yes')
-
-        rows, fetched_at = rfq_rows_with_edits(force=force)
-        if search:
-            rows = filter_rfq_rows_by_multiline_search(rows, search)
-
-        search_rows = list(rows)
-
-        def rfq_filter_rows(source_rows, exclude_field=None):
-            excluded = set(exclude_field or []) if isinstance(exclude_field, (set, list, tuple)) else ({exclude_field} if exclude_field else set())
-            result = list(source_rows)
-            if 'clients' not in excluded and clients:
-                result = [row for row in result if clean(row.get('client_name')) in clients]
-            if 'rfq_numbers' not in excluded and rfq_numbers:
-                result = [row for row in result if clean(row.get('rfq_code')) in rfq_numbers]
-            if 'brands' not in excluded and brands:
-                result = [row for row in result if clean(row.get('brand_manufacturer')) in brands]
-            if 'vendors' not in excluded and vendors:
-                result = [row for row in result if clean(row.get('vendor_name')) in vendors]
-            if 'checks' not in excluded and checks:
-                result = [row for row in result if clean(row.get('check')) and clean(row.get('check')).lower() in checks]
-            if 'purchase_pics' not in excluded and purchase_pics:
-                result = [row for row in result if clean(row.get('purchase_pic')) in purchase_pics]
-            if 'pic' not in excluded and pic:
-                result = [
-                    row for row in result
-                    if clean(row.get('purchase_pic')) == pic
-                    and clean(row.get('check')) == 'open'
-                    and row.get('unit_price_missing')
-                    and not clean_product_id(row.get('product_id'))
-                ]
-            return result
-
-        # Memoize every filtered result inside this request. The previous code
-        # recalculated the same full-table filter 7+ times to build table rows,
-        # KPI cards, and interdependent dropdown options. On PythonAnywhere free
-        # this was one of the visible RFQ bottlenecks.
-        filtered_cache = {}
-        def filtered_for(exclude_field=None):
-            if isinstance(exclude_field, (set, list, tuple)):
-                key = tuple(sorted(str(x) for x in exclude_field))
-            elif exclude_field:
-                key = (str(exclude_field),)
-            else:
-                key = ()
-            if key not in filtered_cache:
-                filtered_cache[key] = rfq_filter_rows(search_rows, exclude_field)
-            return filtered_cache[key]
-
-        # KPI PIC cards should stay visible when one PIC is selected. Build the
-        # KPI source after all non-PIC filters, then apply PIC filters only to
-        # the table data.
-        kpi_rows = filtered_for({'purchase_pics', 'pic'})
-        pending_by_pic = {}
-        for row in kpi_rows:
-            if clean(row.get('check')) != 'open':
-                continue
-            if clean_product_id(row.get('product_id')):
-                continue
-            if not row.get('unit_price_missing'):
-                continue
-            row_pic = clean(row.get('purchase_pic'))
-            if not row_pic or row_pic.lower() == 'unassigned':
-                continue
-            pending_by_pic[row_pic] = pending_by_pic.get(row_pic, 0) + 1
-        pic_kpis = [{'pic': key, 'count': val} for key, val in sorted(pending_by_pic.items(), key=lambda item: (-item[1], item[0]))]
-
-        rows = filtered_for()
-        # Keep RFQ order identical to the sheet.
-
-        total = len(rows)
-        start = (page - 1) * per_page
-        page_rows = [dict(row) for row in rows[start:start + per_page]]
-        if include_similarity:
-            page_rows = [apply_rfq_similarity(row) for row in page_rows]
-            save_similarity_cache()
-
-        clients_rows = filtered_for('clients')
-        rfq_no_rows = filtered_for('rfq_numbers')
-        brand_rows = filtered_for('brands')
-        purchase_pic_rows = filtered_for('purchase_pics')
-        vendor_rows = filtered_for('vendors')
-        check_rows = filtered_for('checks')
-        available_checks = {clean(row.get('check')).lower() for row in check_rows if clean(row.get('check'))}
-
-        payload = {
-            'data': page_rows,
-            'total': total,
-            'page': page,
-            'per_page': per_page,
-            'columns': [{'field': field, 'label': label} for field, label in RFQ_TEMPLATE_COLUMNS],
-            'similarity_columns': [{'field': field, 'label': label} for field, label in RFQ_SIMILARITY_COLUMNS],
-            'editable_fields': sorted(RFQ_EDITABLE_FIELDS),
-            'pic_kpis': pic_kpis,
-            'filters': {
-                'clients': sorted({clean(row.get('client_name')) for row in clients_rows if clean(row.get('client_name'))}),
-                'rfq_numbers': sorted({clean(row.get('rfq_code')) for row in rfq_no_rows if clean(row.get('rfq_code'))}),
-                'brands': sorted({clean(row.get('brand_manufacturer')) for row in brand_rows if clean(row.get('brand_manufacturer'))}),
-                'purchase_pics': sorted({clean(row.get('purchase_pic')) for row in purchase_pic_rows if clean(row.get('purchase_pic')) and clean(row.get('purchase_pic')).lower() != 'unassigned'}),
-                'vendors': sorted({clean(row.get('vendor_name')) for row in vendor_rows if clean(row.get('vendor_name'))}),
-                'checks': [rfq_check_label(key) for key in ['complete', 'reject', 'closed', 'open'] if key in available_checks],
-            },
-            'last_updated': utc_isoformat(fetched_at),
-        }
-        runtime_cache_set(cache_key, payload, ttl_seconds=180)
-        return jsonify(payload)
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-def rfq_filtered_rows_from_request(force=False):
-    search = clean(request.args.get('search')) or ''
-    pic = clean(request.args.get('pic')) or ''
-    clients = [clean(v) for v in request.args.getlist('client_name') if clean(v)]
-    rfq_numbers = [clean(v) for v in request.args.getlist('rfq_no') if clean(v)]
-    brands = [clean(v) for v in request.args.getlist('brand_manufacturer') if clean(v)]
-    purchase_pics = [clean(v) for v in request.args.getlist('purchase_pic') if clean(v)]
-    vendors = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
-    checks = [clean(v).lower() for v in request.args.getlist('check') if clean(v)]
-    rows, fetched_at = rfq_rows_with_edits(force=force)
-    if search:
-        rows = filter_rfq_rows_by_multiline_search(rows, search)
-    if clients:
-        rows = [row for row in rows if clean(row.get('client_name')) in clients]
-    if rfq_numbers:
-        rows = [row for row in rows if clean(row.get('rfq_code')) in rfq_numbers]
-    if brands:
-        rows = [row for row in rows if clean(row.get('brand_manufacturer')) in brands]
-    if purchase_pics:
-        rows = [row for row in rows if clean(row.get('purchase_pic')) in purchase_pics]
-    if vendors:
-        rows = [row for row in rows if clean(row.get('vendor_name')) in vendors]
-    if checks:
-        rows = [row for row in rows if clean(row.get('check')) and clean(row.get('check')).lower() in checks]
-    if pic:
-        rows = [row for row in rows if clean(row.get('purchase_pic')) == pic and clean(row.get('check')) == 'open' and row.get('unit_price_missing') and not clean_product_id(row.get('product_id'))]
-    # Keep RFQ order identical to the sheet.
-    return rows, fetched_at
-
-@app.route('/api/rfq/template', methods=['GET'])
-def download_rfq_batch_template():
-    try:
-        rows, _ = rfq_filtered_rows_from_request(force=False)
-        wb = Workbook()
-        ws = wb.active
-        ws.title = 'RFQ Batch Upload'
-        context_fields = ['item_name', 'detail_spec']
-        headers = ['No'] + [rfq_label(field) for field in context_fields] + [rfq_label(field) for field in RFQ_BATCH_FIELDS]
-        _style_wb(ws, headers)
-        widths = [12, 28, 50, 20, 28, 18, 28, 42, 18, 14, 14, 18, 20, 28, 50]
-        for i, width in enumerate(widths, 1):
-            ws.column_dimensions[get_column_letter(i)].width = width
-        seen = set()
-        for row in rows:
-            no = clean(row.get('no'))
-            if not no or no in seen:
-                continue
-            seen.add(no)
-            ws.append([no] + [row.get(field) or '' for field in context_fields] + [row.get(field) or '' for field in RFQ_BATCH_FIELDS])
-        output = io.BytesIO()
-        wb.save(output)
-        output.seek(0)
-        return send_file(output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name=f'Template_RFQ_BatchUpload_{datetime.now().strftime("%Y%m%d")}.xlsx')
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/rfq/batch-upload-json', methods=['POST'])
-@app.route('/api/rfq/batch-upload', methods=['POST'])
-def batch_upload_rfq():
-    try:
-        uploads, upload_mode = request_upload_dataframes('rfq_batch')
-        if not uploads:
-            return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
-        rows, _ = rfq_rows_with_edits(force=False)
-        no_map = {}
-        row_by_key = {}
-        for row in rows:
-            row_by_key[row['row_key']] = row
-            no = clean(row.get('no'))
-            if no:
-                no_map.setdefault(no, []).append(row['row_key'])
-
-        updated = 0
-        not_found = 0
-        sheet_updates = []
-        local_updates = 0
-        for upload in uploads:
-            df = upload['df']
-            df.columns = [str(c).strip() for c in df.columns]
-            col_no = find_column(df, ['No'])
-            if not col_no:
-                return jsonify({'error': f'Column "No" not found. Available: {df.columns.tolist()}'}), 400
-            col_map = {field: find_column(df, [rfq_label(field), field]) for field in RFQ_BATCH_FIELDS}
-            for _, src in df.iterrows():
-                no = clean(df_val(src, col_no))
-                if not no or no.lower().startswith('example'):
-                    continue
-                keys = no_map.get(no, [])
-                if not keys:
-                    not_found += 1
-                    continue
-                for field, col in col_map.items():
-                    if not col:
-                        continue
-                    value = clean(df_val(src, col)) or ''
-                    for row_key in keys:
-                        if field in RFQ_DASHBOARD_ONLY_FIELDS:
-                            edit = RFQCellEdit.query.filter_by(row_key=row_key, field=field).first()
-                            if not edit:
-                                edit = RFQCellEdit(row_key=row_key, field=field)
-                                db.session.add(edit)
-                            edit.value = str(value)
-                            edit.updated_at = datetime.utcnow()
-                            set_rfq_dashboard_cell(row_key, field, str(value), dirty=False, commit=False)
-                            local_updates += 1
-                        else:
-                            base_row = row_by_key.get(row_key)
-                            if base_row:
-                                set_rfq_dashboard_cell(row_key, field, str(value), dirty=True, commit=False)
-                                sheet_updates.append({'row': base_row, 'field': field, 'value': str(value)})
-                        updated += 1
-
-        db.session.commit()
-
-        try:
-            sheet_sync = sync_rfq_cells_to_google_sheet(sheet_updates) if sheet_updates else {'synced': True, 'updated_ranges': 0}
-            if sheet_sync.get('synced'):
-                clear_rfq_dashboard_dirty_fields(sheet_updates)
-        except Exception as sync_error:
-            sheet_sync = {'synced': False, 'reason': str(sync_error)}
-
-        clear_runtime_caches()
-        return jsonify({
-            'updated': updated,
-            'sheet_updates': len(sheet_updates),
-            'local_updates': local_updates,
-            'not_found': not_found,
-            'files': len(uploads),
-            'mode': upload_mode,
-            'sheet_sync': sheet_sync,
-        })
-    except Exception as e:
-        db.session.rollback()
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-def _style_rfq_export_sheet(ws, headers, editable_start_col=19):
-    last_col = len(headers)
-    last_col_letter = get_column_letter(last_col)
-    ref_end_col = editable_start_col - 1
-
-    ws.freeze_panes = 'A3'
-    ws.auto_filter.ref = f'A2:{last_col_letter}{ws.max_row}'
-
-    ref_header_fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
-    ref_body_fill = PatternFill(start_color='EDEDED', end_color='EDEDED', fill_type='solid')
-    input_header_fill = PatternFill(start_color='2563EB', end_color='2563EB', fill_type='solid')
-    note_font = Font(color='0070C0')
-    ref_header_font = Font(bold=True, color='000000')
-    input_header_font = Font(bold=True, color='FFFFFF')
-    thin_border = Border(
-        left=Side(style='thin', color='D9E2EF'),
-        right=Side(style='thin', color='D9E2EF'),
-        top=Side(style='thin', color='D9E2EF'),
-        bottom=Side(style='thin', color='D9E2EF'),
-    )
-
-    # Instruction row, starts exactly at the first editable quotation column.
-    note_cell = ws.cell(row=1, column=editable_start_col)
-    note_cell.value = 'Silahkan isi penawaran di Kolom Biru / Kindly fill in your quotation in the blue columns'
-    note_cell.font = note_font
-
-    for cell in ws[2]:
-        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-        cell.border = thin_border
-        if cell.column <= ref_end_col:
-            cell.fill = ref_header_fill
-            cell.font = ref_header_font
-        else:
-            cell.fill = input_header_fill
-            cell.font = input_header_font
-
-    for row in ws.iter_rows(min_row=3, max_row=ws.max_row, min_col=1, max_col=last_col):
-        for cell in row:
-            cell.alignment = Alignment(vertical='center', wrap_text=True)
-            cell.border = thin_border
-            if cell.column <= ref_end_col:
-                cell.fill = ref_body_fill
-
-    widths = [
-        10, 10, 10, 7, 55, 14, 18, 12, 28, 14, 24, 42, 20, 8, 8, 24, 18, 20,
-        17, 18, 18, 18, 24, 42, 18, 12, 12, 18, 18, 28, 50, 32, 32
-    ]
-    for i, width in enumerate(widths[:last_col], 1):
-        ws.column_dimensions[get_column_letter(i)].width = width
-
-    for row_idx in range(3, ws.max_row + 1):
-        ws.row_dimensions[row_idx].height = 30
-    ws.row_dimensions[2].height = 26
-
-@app.route('/api/export/rfq', methods=['GET'])
-def export_rfq():
-    try:
-        rows, _ = rfq_filtered_rows_from_request(force=False)
-        wb = Workbook()
-        ws = wb.active
-        ws.title = 'RFQ'
-        headers = [label for _, label in RFQ_TEMPLATE_COLUMNS]
-
-        # Row 1 = instruction note. Row 2 = header. Row 3+ = data, matching
-        # the RFQ example file style and preserving the sheet order.
-        ws.append([''] * len(headers))
-        ws.append(headers)
-        for row in rows:
-            values = []
-            for field, _label in RFQ_TEMPLATE_COLUMNS:
-                if field == 'check':
-                    values.append(rfq_check_label(row.get('check')))
-                elif field == 'days_left':
-                    values.append(row.get('days_left') if row.get('days_left') is not None else '-')
-                else:
-                    values.append(row.get(field) or '')
-            ws.append(values)
-
-        _style_rfq_export_sheet(ws, headers, editable_start_col=19)
-
-        output = io.BytesIO()
-        wb.save(output)
-        output.seek(0)
-        return send_file(output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name=f'RFQ_{datetime.now().strftime("%Y%m%d")}.xlsx')
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/rfq/batch-cells', methods=['PUT'])
-def update_rfq_cells_batch():
-    try:
-        payload = request.get_json(silent=True) or {}
-        updates = payload.get('updates') or []
-        if not isinstance(updates, list) or not updates:
-            return jsonify({'error': 'No RFQ cell updates supplied'}), 400
-        if len(updates) > 1000:
-            return jsonify({'error': 'Maximum 1000 cells can be updated at once'}), 400
-
-        base_rows, _ = rfq_rows_with_edits(force=False, prefer_stale_cache=True)
-        row_map = {row.get('row_key'): row for row in base_rows}
-        sheet_updates = []
-        updated = 0
-        skipped = []
-
-        for idx, item in enumerate(updates):
-            row_key = clean(item.get('row_key'))
-            field = clean(item.get('field'))
-            value = item.get('value')
-            if field not in RFQ_EDITABLE_FIELDS and field not in RFQ_DIRECT_UPDATE_FIELDS:
-                skipped.append({'index': idx, 'reason': 'Field is not editable', 'field': field})
-                continue
-            base_row = row_map.get(row_key)
-            if not base_row:
-                skipped.append({'index': idx, 'reason': 'RFQ row not found', 'row_key': row_key})
-                continue
-
-            clean_value = clean_product_id(value) if field == 'product_id' else ('' if value is None else str(value))
-            if field in RFQ_DASHBOARD_ONLY_FIELDS:
-                edit = RFQCellEdit.query.filter_by(row_key=row_key, field=field).first()
-                if not edit:
-                    edit = RFQCellEdit(row_key=row_key, field=field)
-                    db.session.add(edit)
-                edit.value = clean_value
-                edit.updated_at = datetime.utcnow()
-                set_rfq_dashboard_cell(row_key, field, clean_value, dirty=False, commit=False)
-            else:
-                set_rfq_dashboard_cell(row_key, field, clean_value, dirty=True, commit=False)
-                sheet_updates.append({'row': base_row, 'field': field, 'value': clean_value})
-            updated += 1
-
-        db.session.commit()
-        clear_runtime_caches()
-        try:
-            sheet_sync = sync_rfq_cells_to_google_sheet(sheet_updates) if sheet_updates else {'synced': True, 'local_only': True}
-            if sheet_sync.get('synced'):
-                clear_rfq_dashboard_dirty_fields(sheet_updates)
-        except Exception as sync_error:
-            sheet_sync = {'synced': False, 'reason': str(sync_error)}
-        return jsonify({'success': True, 'updated': updated, 'skipped': skipped, 'sheet_sync': sheet_sync})
-    except Exception as e:
-        db.session.rollback()
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/rfq/<path:row_key>', methods=['PUT'])
-def update_rfq_cell(row_key):
-    try:
-        payload = request.get_json(silent=True) or {}
-        field = clean(payload.get('field'))
-        value = payload.get('value')
-        if field not in RFQ_EDITABLE_FIELDS and field not in RFQ_DIRECT_UPDATE_FIELDS:
-            return jsonify({'error': 'Field is not editable'}), 400
-        base_rows, _ = rfq_rows_with_edits(force=False, prefer_stale_cache=True)
-        base_row = next((row for row in base_rows if row.get('row_key') == row_key), None)
-        if not base_row:
-            return jsonify({'error': 'RFQ row not found'}), 404
-        clean_value = clean_product_id(value) if field == 'product_id' else ('' if value is None else str(value))
-        if field in RFQ_DASHBOARD_ONLY_FIELDS:
-            edit = RFQCellEdit.query.filter_by(row_key=row_key, field=field).first()
-            if not edit:
-                edit = RFQCellEdit(row_key=row_key, field=field)
-                db.session.add(edit)
-            edit.value = clean_value
-            edit.updated_at = datetime.utcnow()
-            set_rfq_dashboard_cell(row_key, field, clean_value, dirty=False, commit=False)
-            db.session.commit()
-            clear_runtime_caches()
-            sheet_sync = {'synced': True, 'local_only': True}
-        else:
-            RFQCellEdit.query.filter_by(row_key=row_key, field=field).delete()
-            db.session.commit()
-            set_rfq_dashboard_cell(row_key, field, clean_value, dirty=True)
-            try:
-                sheet_sync = sync_rfq_cell_to_google_sheet(base_row, field, clean_value)
-                if sheet_sync.get('synced'):
-                    clear_rfq_dashboard_dirty_fields([{'row_key': row_key, 'field': field}])
-            except Exception as sync_error:
-                sheet_sync = {'synced': False, 'reason': str(sync_error)}
-            clear_runtime_caches()
-        return jsonify({'success': True, 'row_key': row_key, 'field': field, 'value': clean_value, 'sheet_sync': sheet_sync})
-    except Exception as e:
-        db.session.rollback()
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-def import_sheet_title_for_gid(spreadsheet_id, gid):
-    metadata = google_sheets_metadata(spreadsheet_id)
-    gid_int = int(gid)
-    for sheet in metadata.get('sheets', []):
-        props = sheet.get('properties', {})
-        if props.get('sheetId') == gid_int:
-            return props.get('title')
-    raise RuntimeError(f'Sheet gid {gid} not found')
-
-
-def import_source_config(source_key):
-    return next((s for s in IMPORT_SOURCE_SHEETS if s.get('key') == source_key), None)
-
-def import_source_sheet_title(source):
-    cache_key = ('import_source_sheet_title_v2', source.get('spreadsheet_id'), source.get('gid'))
-    cached = runtime_cache_get(cache_key)
-    if cached:
-        return cached
-    try:
-        title, _preview_df = import_source_header_preview(source)
-    except Exception:
-        title = import_sheet_title_for_gid(source['spreadsheet_id'], source.get('gid') or '0')
-    runtime_cache_set(cache_key, title, ttl_seconds=3600)
-    return title
-
-def import_source_map_for_sync(source):
-    cache_key = ('import_source_map_for_sync_v2', source.get('spreadsheet_id'), source.get('gid'))
-    cached = runtime_cache_get(cache_key)
-    if cached is not None:
-        return cached
-    columns = import_all_mapping_columns(import_layout_columns())
-    try:
-        _sheet_title, df = import_source_header_preview(source)
-    except Exception:
-        df = read_public_sheet_csv(source['spreadsheet_id'], source.get('gid') or '0', nrows=60)
-    source_map = import_source_column_map(df, columns)
-    header_idx = import_detect_header_row(df)
-    source_fallbacks = import_source_fallback_columns(df, header_idx)
-    for field in ('po_yupi', 'yupi_po', 'source_req_dlv_date', 'req_dlv_date', 'po_date_by_email', 'site', 'po_sementara', 'item_yupi', 'item_name', 'spec', 'remark_yupi', 'reschedule', 'ord_qty', 'unit', 'unit_price', 'amount', 'vendor_name', 'vendor', 'purchase_price', 'currency', 'purchase_amount', 'so'):
-        if field not in source_map and source_fallbacks.get(field):
-            source_map[field] = column_index_from_letter(source_fallbacks[field]) - 1
-    runtime_cache_set(cache_key, source_map, ttl_seconds=300)
-    return source_map
-
-def import_sheet_field_for_dashboard_field(field):
-    return IMPORT_SYNC_FIELD_ALIASES.get(field, field)
-
-def set_import_payload_field_aliases(data, field, value):
-    data[field] = value
-    if field == 'po_send_date':
-        data['_po_send_date_manual'] = '1' if clean(value) else ''
-    if field == 'yupi_po':
-        data['po_yupi'] = value
-    elif field == 'po_yupi':
-        data['yupi_po'] = value
-    elif field == 'req_dlv_date':
-        data['source_req_dlv_date'] = value
-    elif field == 'source_req_dlv_date':
-        data['req_dlv_date'] = value
-    return data
-
-def sync_import_cells_to_source_sheets(items):
-    """Sync dashboard edits back to the two source Google Sheets.
-
-    Each item: {'row': ImportDashboardRow, 'field': field, 'value': value}
-    """
-    grouped = {}
-    skipped = 0
-    for item in items:
-        row = item.get('row')
-        field = clean(item.get('field'))
-        value = '' if item.get('value') is None else str(item.get('value'))
-        if not row or not field:
-            skipped += 1
-            continue
-        if field in IMPORT_DASHBOARD_LOCAL_FIELDS:
-            skipped += 1
-            continue
-        source = import_source_config(row.source_key)
-        if not source:
-            skipped += 1
-            continue
-        sheet_field = import_sheet_field_for_dashboard_field(field)
-        try:
-            source_map = import_source_map_for_sync(source)
-        except Exception:
-            source_map = {}
-        col_idx = source_map.get(sheet_field)
-        if col_idx is None:
-            skipped += 1
-            continue
-        try:
-            sheet_title = import_source_sheet_title(source)
-        except Exception:
-            skipped += 1
-            continue
-        sheet_row = row.sheet_row
-        if not sheet_row:
-            skipped += 1
-            continue
-        col_letter = column_letter_from_index(col_idx + 1)
-        spreadsheet_id = source['spreadsheet_id']
-        grouped.setdefault(spreadsheet_id, []).append({
-            'range': f"'{sheet_title}'!{col_letter}{sheet_row}",
-            'values': [[value or '']],
-        })
-    if not grouped:
-        return {'synced': False, 'reason': 'No mapped Import sheet cells to sync', 'skipped': skipped}
-    total_ranges = 0
-    for spreadsheet_id, ranges in grouped.items():
-        google_sheets_values_batch_update(spreadsheet_id, ranges)
-        total_ranges += len(ranges)
-    return {'synced': True, 'ranges': total_ranges, 'spreadsheets': len(grouped), 'skipped': skipped}
-
-
-# Target Import tracker sync -------------------------------------------------
-# The dashboard reads new Import items from the two vendor/source sheets, but
-# user-maintained fields must also be written to the main Import tracker sheet:
-# https://docs.google.com/spreadsheets/d/1i0N4VdF_vMHjr_0gjrUdS7nCKUpxPYvDWW-HOWSanEM
-# In that tracker, column C is PO Send Date (dashboard user input), while source
-# column C is PO DATE (By Email). Keep these two fields separate.
-IMPORT_LAYOUT_TARGET_FORMULA_FIELDS = {
-    'days_left', 'site', 'yupi_po', 'vendor', 'req_dlv_date',
-    'arrival_check', 'purchase_amount', 'lt_days',
-}
-
-
-def import_layout_target_sheet_title():
-    cache_key = ('import_layout_target_sheet_title', IMPORT_LAYOUT_SHEET_ID, IMPORT_LAYOUT_GID)
-    cached = runtime_cache_get(cache_key)
-    if cached:
-        return cached
-    title = import_sheet_title_for_gid(IMPORT_LAYOUT_SHEET_ID, IMPORT_LAYOUT_GID)
-    runtime_cache_set(cache_key, title, ttl_seconds=3600)
-    return title
-
-
-def import_layout_target_field_columns():
-    mapping = {}
-    for col in import_all_mapping_columns(import_layout_columns()):
-        field = col.get('field')
-        sheet_col = col.get('sheet_col')
-        if field and sheet_col:
-            mapping[field] = str(sheet_col).upper()
-    return mapping
-
-
-def import_layout_target_field_for_dashboard_field(field):
-    # Dashboard formula/display columns map to their raw tracker input columns.
-    if field == 'yupi_po':
-        return 'po_yupi'
-    if field == 'req_dlv_date':
-        return 'source_req_dlv_date'
-    return field
-
-
-def import_layout_target_candidate_keys(data):
-    data = data or {}
-    po_sementara = clean(data.get('po_sementara'))
-    so = clean(data.get('so'))
-    item_yupi = clean(data.get('item_yupi'))
-    po_yupi = clean(data.get('po_yupi')) or clean(data.get('yupi_po'))
-    keys = []
-    def add(prefix, *parts):
-        parts = [clean(p) for p in parts]
-        if all(parts):
-            keys.append(prefix + ':' + '|'.join(p.strip().lower() for p in parts))
-    add('po_sem_item_so', po_sementara, item_yupi, so)
-    add('po_sem_item', po_sementara, item_yupi)
-    add('po_yupi_item_so', po_yupi, item_yupi, so)
-    add('po_yupi_item', po_yupi, item_yupi)
-    add('so_item', so, item_yupi)
-    add('po_sem', po_sementara)
-    # preserve order, remove duplicates
-    out = []
-    for key in keys:
-        if key not in out:
-            out.append(key)
-    return out
-
-
-def import_layout_target_lookup(sheet_title):
-    # Read only the identity area A:S. This avoids pulling the full DI-width sheet
-    # just to find the target row.
-    resp = google_sheets_values_get(
-        IMPORT_LAYOUT_SHEET_ID,
-        f"'{sheet_title}'!A2:S",
-        value_render_option='FORMATTED_VALUE',
-    )
-    values = resp.get('values') or []
-    by_key = {}
-    max_row = 1
-    def cell(row, one_based_idx):
-        idx = one_based_idx - 1
-        return row[idx] if idx < len(row) else ''
-    for row_no, row_values in enumerate(values, start=2):
-        if any(clean(v) for v in row_values):
-            max_row = row_no
-        row_data = {
-            'yupi_po': cell(row_values, 5),
-            'so': cell(row_values, 12),
-            'po_sementara': cell(row_values, 17),
-            'po_yupi': cell(row_values, 18),
-            'item_yupi': cell(row_values, 19),
-        }
-        for key in import_layout_target_candidate_keys(row_data):
-            by_key.setdefault(key, row_no)
-    return {'by_key': by_key, 'max_row': max_row}
-
-
-def sync_import_cells_to_layout_sheet(items):
-    """Sync dashboard edits to the main Import tracker sheet.
-
-    This is separate from the source-sheet sync. Source sheets remain the data
-    source; the Import tracker receives user inputs such as PO Send Date, status,
-    ETD/ETA, remarks, checklist ticks, and Soft Copy Doc links.
-    """
-    if not items:
-        return {'synced': False, 'reason': 'No Import cells to sync'}
-
-    field_columns = import_layout_target_field_columns()
-    if not field_columns:
-        return {'synced': False, 'reason': 'No Import tracker columns are mapped'}
-
-    sheet_title = import_layout_target_sheet_title()
-    lookup = import_layout_target_lookup(sheet_title)
-    by_key = lookup['by_key']
-    next_row = lookup['max_row'] + 1
-
-    grouped = {}
-    for item in items:
-        row = item.get('row')
-        field = clean(item.get('field'))
-        if not row or not field:
-            continue
-        grouped.setdefault(row.row_key, {'row': row, 'fields': set()})['fields'].add(field)
-
-    ranges = []
-    skipped = 0
-    appended = 0
-    updated_rows = set()
-
-    for group in grouped.values():
-        row = group['row']
-        try:
-            data = json.loads(row.data_json or '{}')
-        except (TypeError, json.JSONDecodeError):
-            data = {}
-        data = apply_import_formula_columns(dict(data))
-
-        target_row = None
-        is_new_target_row = False
-        for key in import_layout_target_candidate_keys(data):
-            if key in by_key:
-                target_row = by_key[key]
-                break
-        if not target_row:
-            target_row = next_row
-            next_row += 1
-            appended += 1
-            is_new_target_row = True
-            for key in import_layout_target_candidate_keys(data):
-                by_key.setdefault(key, target_row)
-
-        # Existing rows: sync only fields the user edited, plus their raw alias
-        # columns. New rows: write all non-formula mapped fields so the tracker
-        # has enough identity data for future syncs. Formula columns are left for
-        # the spreadsheet formulas/array formulas.
-        candidate_fields = set(data.keys()) if is_new_target_row else set(group['fields'])
-
-        expanded_fields = set()
-        for field in candidate_fields:
-            mapped = import_layout_target_field_for_dashboard_field(field)
-            expanded_fields.add(mapped)
-            # Keep raw/display aliases in sync for the tracker identity columns.
-            if field in ('yupi_po', 'po_yupi'):
-                expanded_fields.add('po_yupi')
-            if field in ('req_dlv_date', 'source_req_dlv_date'):
-                expanded_fields.add('source_req_dlv_date')
-            if field == 'po_send_date':
-                expanded_fields.add('status')
-
-        for field in sorted(expanded_fields):
-            if field in IMPORT_LAYOUT_TARGET_FORMULA_FIELDS:
-                continue
-            col_letter = field_columns.get(field)
-            if not col_letter:
-                skipped += 1
-                continue
-            value = data.get(field, '')
-            if field == 'po_yupi':
-                value = clean(data.get('po_yupi')) or clean(data.get('yupi_po'))
-            elif field == 'source_req_dlv_date':
-                value = clean(data.get('source_req_dlv_date')) or clean(data.get('req_dlv_date'))
-            ranges.append({
-                'range': f"'{sheet_title}'!{col_letter}{target_row}",
-                'values': [['' if value is None else str(value)]],
-            })
-            updated_rows.add(target_row)
-
-    if not ranges:
-        return {'synced': False, 'reason': 'No mapped Import tracker cells to sync', 'skipped': skipped}
-
-    google_sheets_values_batch_update(IMPORT_LAYOUT_SHEET_ID, ranges)
-    return {
-        'synced': True,
-        'ranges': len(ranges),
-        'rows': len(updated_rows),
-        'appended_rows': appended,
-        'skipped': skipped,
-        'spreadsheet_id': IMPORT_LAYOUT_SHEET_ID,
+);
+
+const PagePagination = ({ darkMode, txt2, page, totalPages, total, perPage, onPageChange, onPerPageChange }) => {
+  const from = total ? (page - 1) * perPage + 1 : 0;
+  const to = Math.min(page * perPage, total);
+  return (
+    <div className={`px-5 py-3 border-t ${darkMode ? 'border-gray-700' : 'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+      <div className="flex items-center gap-3">
+        <span className={`text-sm ${txt2}`}>Showing {from}-{to} of {fmtNum(total)}</span>
+        <label className={`flex items-center gap-1 text-xs ${txt2}`}>Rows
+          <select
+            className={`px-2 py-1 rounded-lg text-xs border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200'}`}
+            value={perPage}
+            onChange={e => onPerPageChange(Number(e.target.value))}
+          >
+            <option value={10}>10</option><option value={25}>25</option><option value={50}>50</option><option value={100}>100</option><option value={500}>500</option>
+          </select>
+        </label>
+      </div>
+      <div className="flex gap-1 items-center">
+        <button disabled={page === 1} onClick={() => onPageChange(page - 1)} className={`p-1.5 rounded ${page === 1 ? 'opacity-40' : 'hover:bg-blue-100'}`}><ChevronLeft className="w-4 h-4" /></button>
+        <span className={`px-3 py-1 rounded text-sm font-semibold ${darkMode ? 'bg-gray-700 text-white' : 'bg-blue-100 text-blue-700'}`}>{page}/{totalPages}</span>
+        <button disabled={page === totalPages} onClick={() => onPageChange(page + 1)} className={`p-1.5 rounded ${page === totalPages ? 'opacity-40' : 'hover:bg-blue-100'}`}><ChevronRight className="w-4 h-4" /></button>
+      </div>
+    </div>
+  );
+};
+
+const FloatingTableScrollbar = ({ targetRef, darkMode }) => {
+  const barRef = useRef(null);
+  const syncingRef = useRef(false);
+  const [state, setState] = useState({ visible: false, left: 0, width: 0, scrollWidth: 0 });
+
+  useEffect(() => {
+    const target = targetRef.current;
+    if (!target) return undefined;
+
+    const update = () => {
+      const rect = target.getBoundingClientRect();
+      const hasOverflow = target.scrollWidth > target.clientWidth + 2;
+      const tableVisible = rect.bottom > 96 && rect.top < window.innerHeight - 42;
+      const nativeBottomScrollbarVisible = rect.bottom <= window.innerHeight - 12;
+      setState({
+        visible: hasOverflow && tableVisible && !nativeBottomScrollbarVisible,
+        left: Math.max(8, rect.left),
+        width: Math.min(rect.width, window.innerWidth - Math.max(8, rect.left) - 8),
+        scrollWidth: target.scrollWidth,
+      });
+      if (barRef.current && barRef.current.scrollLeft !== target.scrollLeft) {
+        barRef.current.scrollLeft = target.scrollLeft;
+      }
+    };
+
+    const syncFromTarget = () => {
+      if (syncingRef.current) return;
+      syncingRef.current = true;
+      if (barRef.current) barRef.current.scrollLeft = target.scrollLeft;
+      syncingRef.current = false;
+      update();
+    };
+
+    update();
+    target.addEventListener('scroll', syncFromTarget, { passive: true });
+    window.addEventListener('scroll', update, { passive: true });
+    window.addEventListener('resize', update);
+    const resizeObserver = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null;
+    resizeObserver?.observe(target);
+
+    return () => {
+      target.removeEventListener('scroll', syncFromTarget);
+      window.removeEventListener('scroll', update);
+      window.removeEventListener('resize', update);
+      resizeObserver?.disconnect();
+    };
+  }, [targetRef]);
+
+  if (!state.visible) return null;
+
+  return (
+    <div
+      ref={barRef}
+      className={`floating-table-scrollbar ${darkMode ? 'floating-table-scrollbar-dark' : ''}`}
+      style={{ left: state.left, width: state.width }}
+      onScroll={(e) => {
+        const target = targetRef.current;
+        if (!target || syncingRef.current) return;
+        syncingRef.current = true;
+        target.scrollLeft = e.currentTarget.scrollLeft;
+        syncingRef.current = false;
+      }}
+    >
+      <div style={{ width: state.scrollWidth, height: 1 }} />
+    </div>
+  );
+};
+
+const DataTableScroll = ({ children, className = '', darkMode }) => {
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const frame = ref.current;
+    if (!frame || typeof document === 'undefined') return undefined;
+
+    let raf = null;
+    let mirror = null;
+    let mirrorTable = null;
+    let lastHtml = '';
+
+    const removeMirror = () => {
+      if (mirror) {
+        mirror.remove();
+        mirror = null;
+        mirrorTable = null;
+        lastHtml = '';
+      }
+    };
+
+    const ensureMirror = () => {
+      if (mirror) return;
+      mirror = document.createElement('div');
+      mirror.className = `window-sticky-table-header ${darkMode ? 'window-sticky-table-header-dark' : ''}`;
+      mirror.style.display = 'none';
+      mirror.style.position = 'fixed';
+      mirror.style.top = '0px';
+      mirror.style.overflow = 'hidden';
+      mirror.style.pointerEvents = 'none';
+      mirror.style.zIndex = '130';
+      mirror.style.boxSizing = 'border-box';
+
+      mirrorTable = document.createElement('table');
+      mirrorTable.className = 'window-sticky-table-header-table';
+      mirrorTable.style.borderCollapse = 'collapse';
+      mirrorTable.style.tableLayout = 'fixed';
+      mirrorTable.style.margin = '0';
+      mirrorTable.style.transformOrigin = 'top left';
+      mirror.appendChild(mirrorTable);
+      document.body.appendChild(mirror);
+    };
+
+    const syncMirrorHeader = (table, thead) => {
+      ensureMirror();
+      if (!mirrorTable) return;
+
+      const tableStyles = window.getComputedStyle(table);
+      mirrorTable.className = `${table.className || ''} window-sticky-table-header-table`;
+      mirrorTable.style.fontSize = tableStyles.fontSize;
+      mirrorTable.style.lineHeight = tableStyles.lineHeight;
+      mirrorTable.style.letterSpacing = tableStyles.letterSpacing;
+
+      const html = thead.outerHTML;
+      if (html !== lastHtml) {
+        mirrorTable.innerHTML = html;
+        lastHtml = html;
+      }
+
+      const originalThs = Array.from(thead.querySelectorAll('th'));
+      const mirrorThs = Array.from(mirrorTable.querySelectorAll('th'));
+      originalThs.forEach((th, idx) => {
+        const clone = mirrorThs[idx];
+        if (!clone) return;
+        const rect = th.getBoundingClientRect();
+        const width = Math.max(1, rect.width);
+        clone.style.width = `${width}px`;
+        clone.style.minWidth = `${width}px`;
+        clone.style.maxWidth = `${width}px`;
+        clone.style.height = `${Math.max(1, rect.height)}px`;
+        clone.style.boxSizing = 'border-box';
+        clone.style.position = 'relative';
+        clone.style.left = 'auto';
+        clone.style.zIndex = '1';
+        clone.style.backgroundClip = 'padding-box';
+        const thStyles = window.getComputedStyle(th);
+        clone.style.fontSize = thStyles.fontSize;
+        clone.style.fontWeight = thStyles.fontWeight;
+        clone.style.lineHeight = thStyles.lineHeight;
+        clone.style.paddingTop = thStyles.paddingTop;
+        clone.style.paddingRight = thStyles.paddingRight;
+        clone.style.paddingBottom = thStyles.paddingBottom;
+        clone.style.paddingLeft = thStyles.paddingLeft;
+        clone.style.textAlign = thStyles.textAlign;
+        clone.style.verticalAlign = thStyles.verticalAlign;
+        clone.style.overflow = 'hidden';
+      });
+
+      const tableRect = table.getBoundingClientRect();
+      mirrorTable.style.width = `${Math.max(frame.scrollWidth, tableRect.width)}px`;
+      mirrorTable.style.transform = `translateX(${-frame.scrollLeft}px)`;
+    };
+
+    const applyHeaderLock = () => {
+      raf = null;
+      const table = frame.querySelector('table');
+      const thead = frame.querySelector('thead');
+      if (!table || !thead) {
+        removeMirror();
+        return;
+      }
+
+      const frameRect = frame.getBoundingClientRect();
+      const tableRect = table.getBoundingClientRect();
+      const headerHeight = thead.getBoundingClientRect().height || 0;
+      const topOffset = 0;
+
+      const shouldStick = (
+        frameRect.top < topOffset &&
+        tableRect.bottom > topOffset + headerHeight &&
+        frameRect.right > 0 &&
+        frameRect.left < window.innerWidth
+      );
+
+      if (!shouldStick) {
+        if (mirror) mirror.style.display = 'none';
+        return;
+      }
+
+      syncMirrorHeader(table, thead);
+      if (!mirror || !mirrorTable) return;
+
+      const left = Math.max(frameRect.left, 0);
+      const right = Math.min(frameRect.right, window.innerWidth);
+      const width = Math.max(0, right - left);
+
+      mirror.style.display = 'block';
+      mirror.style.left = `${left}px`;
+      mirror.style.width = `${width}px`;
+      mirror.style.height = `${headerHeight}px`;
+      mirror.style.background = darkMode ? '#111827' : '#ffffff';
+      mirror.classList.toggle('window-sticky-table-header-dark', !!darkMode);
+    };
+
+    const schedule = () => {
+      if (raf != null) return;
+      raf = window.requestAnimationFrame(applyHeaderLock);
+    };
+
+    schedule();
+    window.addEventListener('scroll', schedule, { passive: true });
+    window.addEventListener('resize', schedule);
+    frame.addEventListener('scroll', schedule, { passive: true });
+    const resizeObserver = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(schedule) : null;
+    resizeObserver?.observe(frame);
+
+    return () => {
+      if (raf != null) window.cancelAnimationFrame(raf);
+      window.removeEventListener('scroll', schedule);
+      window.removeEventListener('resize', schedule);
+      frame.removeEventListener('scroll', schedule);
+      resizeObserver?.disconnect();
+      removeMirror();
+    };
+  }, [children, darkMode]);
+
+  return (
+    <>
+      <div
+        ref={ref}
+        className={`data-table-scroll data-table-scroll-frame ${className}`}
+        style={{ overflowX: 'auto', overflowY: 'visible' }}
+      >
+        {children}
+      </div>
+      <FloatingTableScrollbar targetRef={ref} darkMode={darkMode} />
+    </>
+  );
+};
+
+// ─── SO Status Pie ─────────────────────────────────────────────────────────
+const StatusPie = ({ data, darkMode }) => {
+  const [etcHover, setEtcHover] = useState(false);
+  const [etcPos, setEtcPos] = useState({x:0, y:0});
+  const sorted = [...(data||[])].sort((a,b) => b.value - a.value);
+  const top5 = sorted.slice(0, 5);
+  const rest = sorted.slice(5);
+  const etcValue = rest.reduce((s, d) => s + d.value, 0);
+  const pieData = etcValue > 0
+    ? [...top5, { name: `Etc (${rest.length} others)`, value: etcValue, isEtc: true, etcItems: rest }]
+    : top5;
+  return (
+    <div style={{position:'relative'}}>
+      <ResponsiveContainer width="100%" height={300}>
+        <PieChart>
+          <Pie data={pieData} cx="50%" cy="42%" innerRadius={52} outerRadius={88} isAnimationActive={false}
+            paddingAngle={0} dataKey="value" labelLine={false} label={renderPctLabel}>
+            {pieData.map((d,i)=>(
+              <Cell key={i} fill={d.isEtc ? '#9CA3AF' : PIE_COLORS[i % PIE_COLORS.length]}/>
+            ))}
+          </Pie>
+          <Tooltip contentStyle={{backgroundColor:darkMode?'#1F2937':'#fff',borderRadius:'8px'}}
+            formatter={(v,n,p)=> p.payload.isEtc
+              ? [fmtNum(v), `${p.payload.etcItems?.map(x=>x.name).join(', ')}`]
+              : [fmtNum(v), n]}/>
+          <Legend iconSize={8} layout="horizontal" align="center" verticalAlign="bottom"
+            formatter={(v, entry) => {
+              if (entry.payload?.isEtc) {
+                return (
+                  <span className="text-xs" style={{cursor:'help', color: darkMode?'#D1D5DB':'#374151'}}
+                    onMouseEnter={e=>{setEtcHover(true);setEtcPos({x:e.clientX,y:e.clientY});}}
+                    onMouseLeave={()=>setEtcHover(false)}>
+                    {v}
+                  </span>
+                );
+              }
+              return <span className="text-xs" style={{color: darkMode?'#D1D5DB':'#374151'}}>{v}</span>;
+            }}/>
+        </PieChart>
+      </ResponsiveContainer>
+      {etcHover && rest.length > 0 && (
+        <div className="fixed z-[200] bg-gray-900 text-white text-xs rounded-lg px-3 py-2 shadow-xl pointer-events-none max-w-xs"
+          style={{left: etcPos.x + 12, top: etcPos.y - 10}}>
+          <div className="font-bold mb-1">Etc ({rest.length} statuses):</div>
+          {rest.map((r,i)=>(
+            <div key={i} className="flex justify-between gap-3">
+              <span>{r.name}</span><span className="font-semibold">{fmtNum(r.value)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+
+// ─── Date Range Filter ────────────────────────────────────────────────────
+const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = 'Filter SO Create Date', compact = false }) => {
+  const [mode, setMode] = useState(value?.mode || 'all'); // all | today | week | month | year | range
+  const [startDate, setStartDate] = useState(value?.start || '');
+  const [endDate, setEndDate] = useState(value?.end || '');
+  const [rangeOpen, setRangeOpen] = useState(false);
+  // Floating dropdown for the Custom Date Range picker — escapes
+  // `overflow-hidden` parents so the date inputs are never clipped.
+  const rangeFloat = useFloatingDropdown(mode === 'range' && rangeOpen, 360, 440, 120);
+
+  // Keep internal state in sync when the controlled `value` changes externally
+  // (e.g. user changes filter on another page that shares the same global state).
+  useEffect(() => {
+    if (!value) return;
+    setMode(value.mode || 'all');
+    if (value.start !== undefined) setStartDate(value.start || '');
+    if (value.end   !== undefined) setEndDate(value.end || '');
+  }, [value?.mode, value?.start, value?.end]);
+
+  useEffect(() => {
+    const next =
+      mode === 'all'
+        ? { mode: 'all' }
+        : mode === 'range'
+        ? { mode: 'range', start: startDate, end: endDate }
+        : { mode };
+
+    if (mode === 'range') return;
+
+    const current =
+      !value || value.mode === 'all'
+        ? { mode: 'all' }
+        : value.mode === 'range'
+        ? { mode: 'range', start: value.start || '', end: value.end || '' }
+        : { mode: value.mode };
+
+    // Only notify the parent when the user actually changed the filter.
+    // Without this guard, mounting the filter emits a new `{ mode: 'all' }`
+    // object, which re-fetches Delivery Completed, hides the page behind the
+    // loading state, remounts the filter, and creates a fast blank/loading loop.
+    if (JSON.stringify(next) !== JSON.stringify(current)) {
+      onFilter(next);
+    }
+  }, [mode, startDate, endDate, value, onFilter]);
+
+  const reset = () => {
+    setMode('all');
+    setStartDate(''); setEndDate('');
+    setRangeOpen(false);
+    onFilter({ mode: 'all' });
+  };
+
+  const applyRange = () => {
+    if (!startDate || !endDate) return;
+    onFilter({ mode: 'range', start: startDate, end: endDate });
+    setRangeOpen(false);
+  };
+
+  const formatRangeLabel = (start, end) => {
+    if (!start || !end) return '';
+    try {
+      return `${format(parseISO(start), 'dd/MM/yyyy')} - ${format(parseISO(end), 'dd/MM/yyyy')}`;
+    } catch {
+      return `${start} - ${end}`;
+    }
+  };
+
+  const appliedRangeLabel = value?.mode === 'range' ? formatRangeLabel(value.start, value.end) : '';
+
+  return (
+    <div data-tour="date-filter" className={`relative flex min-h-[64px] min-w-0 flex-1 flex-col items-start gap-2 px-5 py-3 rounded-xl ${card} shadow ${compact ? 'mb-0' : 'mb-4'}`}>
+      <div className="flex items-center gap-3">
+        <Calendar className="w-4 h-4 text-blue-500 flex-shrink-0"/>
+        <span className={`text-sm font-semibold ${txt} flex-shrink-0`}>{label}:</span>
+      </div>
+      {/* Mode selector */}
+      <div className="relative flex w-full flex-wrap items-start gap-1.5">
+        {[
+          ['all','All'], ['today','Today'], ['week','This Week'],
+          ['month','This Month'], ['year','This Year'], ['range','Custom Date Range']
+        ].map(([m, lbl]) => {
+          const isRange = m === 'range';
+          return (
+            <div key={m} className={isRange ? 'flex flex-col items-start gap-0.5' : ''}>
+              <button
+                ref={isRange ? rangeFloat.triggerRef : undefined}
+                type="button"
+                onClick={() => {
+                  setMode(m);
+                  setRangeOpen(isRange ? true : false);
+                }}
+                className={`px-3 py-1 rounded-full text-xs font-semibold transition-all
+                  ${mode === m ? 'bg-blue-600 text-white shadow' : darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-100 text-gray-600 hover:bg-blue-100'}`}
+              >
+                {lbl}
+              </button>
+              {isRange && appliedRangeLabel && (
+                <span className={`pl-3 whitespace-nowrap text-[11px] font-semibold leading-tight ${txt2}`}>{appliedRangeLabel}</span>
+              )}
+            </div>
+          );
+        })}
+        {mode === 'range' && rangeOpen && (
+          <div
+            style={rangeFloat.menuPos.style}
+            className={`flex items-center gap-2 rounded-xl border p-3 shadow-xl ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-200'}`}
+          >
+            <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
+              className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300'}`}/>
+            <span className={`text-xs ${txt2}`}>to</span>
+            <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)}
+              className={`px-3 py-1.5 rounded-lg text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300'}`}/>
+            <button
+              type="button"
+              disabled={!startDate || !endDate}
+              onClick={applyRange}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${!startDate || !endDate ? 'opacity-50 cursor-not-allowed' : ''} ${darkMode ? 'bg-blue-600 text-white hover:bg-blue-500' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
+            >
+              Set
+            </button>
+          </div>
+        )}
+        {mode !== 'all' && (
+          <button onClick={reset} className={`px-3 py-1 rounded-lg text-xs font-medium ${darkMode ? 'bg-gray-600 text-gray-200 hover:bg-gray-500' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}>
+            Reset
+          </button>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// MAIN APP
+// ═══════════════════════════════════════════════════════════════════
+const App = () => {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [darkMode, setDarkMode] = useState(false);
+  const activePage = PATH_PAGES[location.pathname.toLowerCase()] || 'dashboard';
+  const setActivePage = useCallback((page) => {
+    navigate(PAGE_PATHS[page] || '/', { replace: false });
+  }, [navigate]);
+  const openPage = useCallback((event, page, reset = () => {}) => {
+    event.preventDefault();
+    reset();
+    setActivePage(page);
+    window.scrollTo({ top: 0 });
+  }, [setActivePage]);
+  const [showUploadDropdown, setShowUploadDropdown] = useState(false);
+  const [sidebarExpanded, setSidebarExpanded] = useState(false);
+  const uploadDropdownRef = useRef(null);
+  const dashboardRequestSeq = useRef(0);
+  const [frozenColumns, setFrozenColumns] = useState({});
+
+  const [stats, setStats] = useState(() => readStatsCache(dashboardStatsCacheKey()));
+  const [summaryPendingTotal, setSummaryPendingTotal] = useState(() => {
+    const cachedStats = readStatsCache(dashboardStatsCacheKey());
+    const cachedPending = readStatsCache(dashboardPendingCacheKey());
+    const n = Number(cachedPending?.total ?? cachedStats?.total_so_count);
+    return Number.isFinite(n) ? n : null;
+  });
+  const [agingData, setAgingData] = useState(() => readStatsCache(dashboardAgingCacheKey()) || []);
+  const [allSOData, setAllSOData] = useState([]);
+  const [approvalSOData, setApprovalSOData] = useState([]);
+  const [picAggregations, setPicAggregations] = useState([]); // PIC aggregations from backend (all filtered data)
+  const [soTotal, setSoTotal] = useState(0);
+  const [soSubtotalAmount, setSoSubtotalAmount] = useState(0);
+  const [soFilterOptions, setSoFilterOptions] = useState({ op_units: [], vendors: [], manufacturers: [], statuses: [], pics: [] });
+
+  // SO filters
+  const [soFilters, setSoFilters] = useState({ op_units: [], vendors: [], manufacturers: [], statuses: [], aging: [], pics: [] });
+  const [soSearchNums, setSoSearchNums] = useState([]); // search SO Item
+  const [soMarginFilter, setSoMarginFilter] = useState('all'); // 'all' | 'positive' | 'negative'
+  const [soSortOrder, setSoSortOrder] = useState('oldest'); // 'oldest' | 'newest'
+  const [soPage, setSoPage] = useState(1);
+  const [soPerPage, setSoPerPage] = useState(10);
+  const [pendingPicHighlight, setPendingPicHighlight] = useState('');
+
+  // SO Approval Status filters (same as Open SO except Vendor Name)
+  const [approvalFilters, setApprovalFilters] = useState({ op_units: [], statuses: [], aging: [] });
+  const [approvalSearchNums, setApprovalSearchNums] = useState([]);
+  const [approvalPage, setApprovalPage] = useState(1);
+  const [approvalPerPage, setApprovalPerPage] = useState(10);
+
+  // Item Registration
+  const [itemRegData, setItemRegData] = useState([]);
+  const [itemRegTotal, setItemRegTotal] = useState(0);
+  const [itemRegPage, setItemRegPage] = useState(1);
+  const [itemRegPerPage, setItemRegPerPage] = useState(10);
+  const [itemRegSearch, setItemRegSearch] = useState([]);
+  const [itemRegAppliedSearch, setItemRegAppliedSearch] = useState([]);
+  const [itemRegLastUpdated, setItemRegLastUpdated] = useState(null);
+  const [itemRegFilters, setItemRegFilters] = useState({ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] });
+  const [itemRegOptions, setItemRegOptions] = useState({ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] });
+  const [itemRegMissingPicKpis, setItemRegMissingPicKpis] = useState([]);
+  const [itemRegPicHighlight, setItemRegPicHighlight] = useState('');
+
+  // RFQ
+  const [rfqData, setRfqData] = useState([]);
+  const [rfqTotal, setRfqTotal] = useState(0);
+  const [rfqPage, setRfqPage] = useState(1);
+  const [rfqPerPage, setRfqPerPage] = useState(10);
+  const [rfqSearch, setRfqSearch] = useState('');
+  const [rfqAppliedSearch, setRfqAppliedSearch] = useState('');
+  const [rfqColumns, setRfqColumns] = useState([]);
+  const [rfqSimilarityColumns, setRfqSimilarityColumns] = useState([]);
+  const [rfqShowSimilarity, setRfqShowSimilarity] = useState(false);
+  const [rfqEditableFields, setRfqEditableFields] = useState([]);
+  const [rfqPicKpis, setRfqPicKpis] = useState([]);
+  const [rfqPicFilter, setRfqPicFilter] = useState('');
+  const [rfqFilters, setRfqFilters] = useState({ checks: [], clients: [], rfq_numbers: [], brands: [], purchase_pics: [], vendors: [] });
+  const [rfqOptions, setRfqOptions] = useState({ checks: [], clients: [], rfq_numbers: [], brands: [], purchase_pics: [], vendors: [] });
+  const [rfqSelectedCell, setRfqSelectedCell] = useState(null);
+  const [rfqFillRange, setRfqFillRange] = useState(null);
+  // Multi-select state for Shift+click in the RFQ table (same pattern as Import).
+  const [rfqSelectedCells, setRfqSelectedCells] = useState(null);
+  const [rfqSelectionAnchor, setRfqSelectionAnchor] = useState(null);
+  const [rfqSimilarAction, setRfqSimilarAction] = useState(null);
+  const [rfqLastUpdated, setRfqLastUpdated] = useState(null);
+
+  // Import
+  const [importData, setImportData] = useState([]);
+  const [importColumns, setImportColumns] = useState([]);
+  const [importTotal, setImportTotal] = useState(0);
+  const [importPage, setImportPage] = useState(1);
+  const [importPerPage, setImportPerPage] = useState(10);
+  const [importSearch, setImportSearch] = useState('');
+  const [importAppliedSearch, setImportAppliedSearch] = useState('');
+  const [importVendorCount, setImportVendorCount] = useState(0);
+  const [importLastCopyAt, setImportLastCopyAt] = useState('');
+  const [importEditingCell, setImportEditingCell] = useState(null);
+  const [importEditValue, setImportEditValue] = useState('');
+  const [showImportChecklist, setShowImportChecklist] = useState(false);
+  const [importSelectedCell, setImportSelectedCell] = useState(null);
+  const [importFillRange, setImportFillRange] = useState(null);
+  // Multi-select state for Shift+click (Excel-like). Stores a Set of
+  // "{rowKey}|{field}" strings so we can select arbitrary rectangles of
+  // cells. Anchor stores the first cell clicked so Shift+click extends from
+  // there. Same-column multi-select (clicking multiple rows in one column)
+  // is supported by checking if the Shift-clicked cell shares the field.
+  const [importSelectedCells, setImportSelectedCells] = useState(null); // Set or null
+  const [importSelectionAnchor, setImportSelectionAnchor] = useState(null); // {rowIndex, field}
+  const [importVendorMenuOpen, setImportVendorMenuOpen] = useState(false);
+  // Floating dropdown for the Vendor Import menu. Uses `position: fixed` so
+  // the menu escapes the table card's `overflow-hidden` and is never clipped
+  // or covered by the table/filter below.
+  const importVendorDropdown = useFloatingDropdown(importVendorMenuOpen, 224, 280, 200);
+  const [importFilters, setImportFilters] = useState({ yupi_po: [], vendors: [] });
+  const [importOptions, setImportOptions] = useState({ yupi_po: [], vendors: [] });
+  const [importReqDlvSort, setImportReqDlvSort] = useState('newest');
+  const [importYupiPoSort, setImportYupiPoSort] = useState('');
+  const [rfqEditedRowKeys, setRfqEditedRowKeys] = useState(new Set());
+  const rfqDashboardOnlyFields = new Set(['private_remarks_1', 'private_remarks_2']);
+
+  // All Registered Items
+  const [registeredItemsData, setRegisteredItemsData] = useState([]);
+  const [registeredItemsTotal, setRegisteredItemsTotal] = useState(0);
+  const [registeredItemsPage, setRegisteredItemsPage] = useState(1);
+  const [registeredItemsPerPage, setRegisteredItemsPerPage] = useState(10);
+  const [registeredItemsSearch, setRegisteredItemsSearch] = useState('');
+  const [registeredItemsAppliedSearch, setRegisteredItemsAppliedSearch] = useState('');
+  const [registeredItemsProdIds, setRegisteredItemsProdIds] = useState([]);
+  const [registeredItemsAppliedProdIds, setRegisteredItemsAppliedProdIds] = useState([]);
+  const [registeredItemsFilters, setRegisteredItemsFilters] = useState({ mfr_names: [], vendor_names: [] });
+  const [registeredItemsOptions, setRegisteredItemsOptions] = useState({ mfr_names: [], vendor_names: [] });
+
+  // Vendor Control
+  const [vendorControlData, setVendorControlData] = useState([]);
+  const [vendorControlTotal, setVendorControlTotal] = useState(0);
+  const [vendorControlPage, setVendorControlPage] = useState(1);
+  const [vendorControlPerPage, setVendorControlPerPage] = useState(10);
+  const [vendorControlSearch, setVendorControlSearch] = useState('');
+  const [vendorControlAppliedSearch, setVendorControlAppliedSearch] = useState('');
+  const [vendorControlSelectedVendors, setVendorControlSelectedVendors] = useState([]);
+  const [vendorControlAppliedVendors, setVendorControlAppliedVendors] = useState([]);
+  const [vendorControlSuggestions, setVendorControlSuggestions] = useState([]);
+  const [vendorControlSuggestOpen, setVendorControlSuggestOpen] = useState(false);
+  // Floating dropdown for the vendor search suggestion list — escapes
+  // `overflow-hidden` parents so suggestions are never clipped.
+  const vendorControlSuggestFloat = useFloatingDropdown(vendorControlSuggestOpen && vendorControlSuggestions.length > 0, 360, 520, 280);
+  const [vendorControlLastUpdated, setVendorControlLastUpdated] = useState(null);
+  const [vendorPasswordVisible, setVendorPasswordVisible] = useState({});
+
+  const [pageLoading, setPageLoading] = useState(() => activePage === 'dashboard' && stats === null);
+  const [initialPageLoading, setInitialPageLoading] = useState(() => activePage === 'dashboard' && stats === null);
+  const setLoading = setPageLoading;
+  const [uploadProgress, setUploadProgress] = useState(null);
+  const [toasts, setToasts] = useState([]);
+  const [modal, setModal] = useState(null);
+  const [editingCell, setEditingCell] = useState(null);
+  const [editValue, setEditValue] = useState('');
+  const [downloadToast, setDownloadToast] = useState(null);
+  const [completedData, setCompletedData] = useState(null);
+  const [completedYear, setCompletedYear] = useState('all');
+  const [dashboardMarginData, setDashboardMarginData] = useState(null);
+  const [vendorPurchaseType, setVendorPurchaseType] = useState('all');
+  const [completedLoading, setCompletedLoading] = useState(false);
+  const [completedLoaded, setCompletedLoaded] = useState(false);
+  const [marginDetailModal, setMarginDetailModal] = useState(null); // {category, data}
+  const [picDbStatus, setPicDbStatus] = useState(null); // {product_id_count, master_pic_count, last_product_id_upload, last_pic_update}
+  const [picUploadMsg, setPicUploadMsg] = useState(''); // feedback message for PIC uploads
+
+  // Dynamic color palette for PIC badges — each unique name gets a consistent color
+  const PIC_COLORS = [
+    { bg: 'bg-indigo-100',  text: 'text-indigo-700'  },
+    { bg: 'bg-emerald-100', text: 'text-emerald-700' },
+    { bg: 'bg-amber-100',   text: 'text-amber-700'   },
+    { bg: 'bg-cyan-100',    text: 'text-cyan-700'    },
+    { bg: 'bg-blue-100',  text: 'text-blue-700'  },
+    { bg: 'bg-slate-100',   text: 'text-slate-700'   },
+    { bg: 'bg-teal-100',    text: 'text-teal-700'    },
+    { bg: 'bg-pink-100',    text: 'text-pink-700'    },
+    { bg: 'bg-lime-100',    text: 'text-lime-700'    },
+    { bg: 'bg-fuchsia-100', text: 'text-fuchsia-700' },
+    { bg: 'bg-blue-100',  text: 'text-blue-700'  },
+    { bg: 'bg-slate-100',   text: 'text-slate-700'   },
+  ];
+  const picColorMap = useRef({});
+  const picColorCounter = useRef(0);
+  const getPicColor = (name) => {
+    if (!name) return null;
+    if (!picColorMap.current[name]) {
+      picColorMap.current[name] = PIC_COLORS[picColorCounter.current % PIC_COLORS.length];
+      picColorCounter.current += 1;
+    }
+    return picColorMap.current[name];
+  };
+  const getFrozenIndex = (value) => (typeof value === 'object' && value ? value.index : value);
+  const getFreezeLeft = (event) => {
+    const headerCell = event?.currentTarget?.closest?.('th');
+    const scrollBox = event?.currentTarget?.closest?.('.overflow-x-auto');
+    if (!headerCell || !scrollBox) return 0;
+    const headerRect = headerCell.getBoundingClientRect();
+    const scrollRect = scrollBox.getBoundingClientRect();
+    const maxLeft = Math.max(0, scrollBox.clientWidth - headerRect.width);
+    return Math.max(0, Math.min(Math.round(headerRect.left - scrollRect.left), maxLeft));
+  };
+  const toggleFrozenColumn = useCallback((tableKey, colIndex, event) => {
+    const left = getFreezeLeft(event);
+    setFrozenColumns(prev => {
+      const activeIndex = getFrozenIndex(prev[tableKey]);
+      return { ...prev, [tableKey]: activeIndex === colIndex ? null : { index: colIndex, left } };
+    });
+  }, []);
+  const renderFreezeHeader = (tableKey, colIndex, label) => {
+    const active = getFrozenIndex(frozenColumns[tableKey]) === colIndex;
+    return (
+      <div className="freeze-header group relative flex min-h-8 w-full min-w-0 items-center justify-center">
+        <span className="freeze-header-label max-w-full text-center leading-tight">{label}</span>
+        <button
+          type="button"
+          aria-label={active ? `Unfreeze ${label}` : `Freeze ${label}`}
+          title={active ? `Unfreeze ${label}` : `Freeze ${label}`}
+          onClick={(e) => { e.stopPropagation(); toggleFrozenColumn(tableKey, colIndex, e); }}
+          className={`absolute right-0 top-1/2 inline-flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-md border opacity-0 shadow-sm transition-all group-hover:opacity-100 group-focus-within:opacity-100 ${active ? 'border-amber-300 bg-amber-100 text-amber-700' : darkMode ? 'border-gray-600 bg-gray-700/90 text-gray-300 hover:bg-gray-600' : 'border-slate-200 bg-white/95 text-slate-500 hover:bg-slate-100'}`}
+        >
+          {active ? <PinOff className="h-3 w-3" /> : <Pin className="h-3 w-3" />}
+        </button>
+      </div>
+    );
+  };
+  const frozenColumnCss = useMemo(() => Object.entries(frozenColumns)
+    .map(([tableKey, spec]) => ({ tableKey, idx: getFrozenIndex(spec), left: (typeof spec === 'object' && spec ? spec.left : 0) }))
+    .filter(({ idx }) => Number(idx) > 0)
+    .map(({ tableKey, idx, left }) => `
+      .freeze-table-${tableKey} th:nth-child(${idx}),
+      .freeze-table-${tableKey} td:nth-child(${idx}) {
+        position: sticky;
+        left: ${Number(left) || 0}px;
+        z-index: 25;
+        box-shadow: 10px 0 14px -14px rgba(15, 23, 42, 0.85);
+        background-clip: padding-box;
+      }
+      .freeze-table-${tableKey} thead th:nth-child(${idx}) {
+        z-index: 45;
+      }
+      .data-table-page:not(.data-table-page-dark) .freeze-table-${tableKey} td:nth-child(${idx}):not([class*="bg-"]) {
+        background: #ffffff;
+      }
+      .data-table-page:not(.data-table-page-dark) .freeze-table-${tableKey} thead th:nth-child(${idx}):not([class*="bg-"]) {
+        background: #e2e8f0;
+      }
+      .data-table-page-dark .freeze-table-${tableKey} td:nth-child(${idx}):not([class*="bg-"]) {
+        background: #1f2937;
+      }
+      .data-table-page-dark .freeze-table-${tableKey} thead th:nth-child(${idx}):not([class*="bg-"]) {
+        background: #374151;
+      }
+    `)
+    .join('\n'), [frozenColumns]);
+  // ── Global SO Create Date filter (shared across Dashboard / All SO / Delivery Completed)
+  const [globalDateFilter, setGlobalDateFilter] = useState({ mode: 'all' });
+  const [globalClientFilter, setGlobalClientFilter] = useState([]);
+  const [globalPicFilter, setGlobalPicFilter] = useState([]);
+  const [dashboardFilterOptions, setDashboardFilterOptions] = useState(() => {
+    const cachedStats = readStatsCache(dashboardStatsCacheKey());
+    return cachedStats?.filters || { clients: [], pics: [] };
+  });
+  // Aliases kept so existing references continue to compile.
+  const dashDateFilter      = globalDateFilter;
+  const setDashDateFilter   = setGlobalDateFilter;
+  const soDateFilter        = globalDateFilter;
+  const setSODateFilter     = setGlobalDateFilter;
+  const completedDateFilter = globalDateFilter;
+  const setCompletedDateFilter = setGlobalDateFilter;
+
+  // Click-outside handlers
+
+  useEffect(() => {
+    const handler = (e) => { if (uploadDropdownRef.current && !uploadDropdownRef.current.contains(e.target)) setShowUploadDropdown(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const addToast = useCallback((message, type='success') => {
+    const id = Date.now(); setToasts(t => [...t, { id, message, type }]);
+  }, []);
+  const removeToast = useCallback((id) => setToasts(t => t.filter(x => x.id !== id)), []);
+
+  function appendMultiParam(params, key, value) {
+    if (value === '__NONE__') {
+      params.append(key, '__NONE_PLACEHOLDER__');
+      return;
+    }
+    (Array.isArray(value) ? value : []).forEach(v => params.append(key, v));
+  }
+
+  const fetchDashboard = useCallback(async (dateFilter) => {
+    const requestId = dashboardRequestSeq.current + 1;
+    dashboardRequestSeq.current = requestId;
+    const isCurrent = () => dashboardRequestSeq.current === requestId;
+    const f = dateFilter || globalDateFilter;
+    const params = new URLSearchParams();
+    Object.entries(dateFilterParams(f)).forEach(([key, value]) => { if (value) params.append(key, value); });
+    appendMultiParam(params, 'client', globalClientFilter);
+    appendMultiParam(params, 'pic', globalPicFilter);
+    const qs = params.toString() ? `?${params}` : '';
+
+    const completedParams = new URLSearchParams();
+    params.forEach((value, key) => completedParams.append(key, value));
+    // Dashboard uses a lightweight SQL-aggregated payload. Drilldown details stay lazy.
+    completedParams.set('mode', 'dashboard');
+
+    const summaryUrl = (summaryParams) => {
+      const summaryQs = summaryParams.toString();
+      return summaryQs ? `/api/completed/summary?${summaryQs}` : '/api/completed/summary';
+    };
+    const completedUrl = summaryUrl(completedParams);
+    const cachedCompleted = readDashboardSummaryCache(completedUrl);
+    const hasSummaryCache = Boolean(cachedCompleted);
+
+    const statsCacheKey = dashboardStatsCacheKey(qs);
+    const agingCacheKey = dashboardAgingCacheKey(qs);
+    const pendingCacheKey = dashboardPendingCacheKey(qs);
+    const cachedStats = readStatsCache(statsCacheKey);
+    const cachedAging = readStatsCache(agingCacheKey);
+    const cachedPending = readStatsCache(pendingCacheKey);
+    const pendingNumber = Number(cachedPending?.total ?? cachedStats?.total_so_count);
+    const hasStatsCache = Boolean(cachedStats && Number.isFinite(pendingNumber));
+    const hasAgingCache = Array.isArray(cachedAging);
+
+    if (hasStatsCache && isCurrent()) {
+      setStats(cachedStats);
+      setSummaryPendingTotal(pendingNumber);
+      setDashboardFilterOptions(cachedStats?.filters || { clients: [], pics: [] });
+      setLoading(false);
+      setInitialPageLoading(false);
+    }
+    if (hasAgingCache && isCurrent()) {
+      setAgingData(cachedAging);
     }
 
+    setCompletedLoading(!hasSummaryCache);
+    setCompletedLoaded(hasSummaryCache);
+    setCompletedData(hasSummaryCache ? cachedCompleted : null);
+    setDashboardMarginData(hasSummaryCache ? cachedCompleted : null);
 
-def sync_import_cells_to_google_sheet(items):
-    """Dashboard edits stay local in the dashboard database.
-
-    Import page now acts as a one-way Copy Sheet tool: source sheets are read
-    only when the user clicks Copy Sheet, and user edits in the dashboard are
-    not pushed back to any Google Sheet.
-    """
-    return {
-        'synced': False,
-        'source': {'synced': False, 'reason': 'Dashboard Import edits are local only'},
-        'import_tracker': {'synced': False, 'reason': 'Dashboard Import edits are local only'},
+    // If the light Dashboard and completed chart are already cached, do not touch PythonAnywhere.
+    if (hasStatsCache && hasAgingCache && hasSummaryCache) {
+      setLoading(false);
+      setInitialPageLoading(false);
+      setCompletedLoading(false);
+      return;
     }
 
-def sync_import_cell_to_google_sheet(row, field, value):
-    result = sync_import_cells_to_google_sheet([{'row': row, 'field': field, 'value': value}])
-    return result
-
-
-def import_sort_date_value(value):
-    """Parse Import display/source dates for sorting.
-
-    Source sheets often display Req Dlv Date as `2 Jul` or `20-Apr` without a
-    year. Python's generic parser can return None for that format, so sort looked
-    broken. Use the current year for month/day-only values.
-    """
-    raw = import_nonblank(value)
-    if not raw:
-        return None
-    d = import_date_from_value(raw)
-    if d:
-        return d
-    s = str(raw).strip().replace('.', '')
-    for fmt in ('%d %b %Y', '%d-%b-%Y', '%d %B %Y', '%d-%B-%Y', '%Y/%m/%d', '%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y'):
-        try:
-            return datetime.strptime(s, fmt).date()
-        except ValueError:
-            pass
-    for fmt in ('%d %b', '%d-%b', '%d %B', '%d-%B'):
-        try:
-            parsed = datetime.strptime(s, fmt)
-            return date(date.today().year, parsed.month, parsed.day)
-        except ValueError:
-            pass
-    return None
-
-@app.route('/api/import/data', methods=['GET'])
-def get_import_data():
-    try:
-        force = str(request.args.get('refresh', '')).lower() in ('1', 'true', 'yes')
-        page = max(int(request.args.get('page', 1)), 1)
-        per_page = min(max(int(request.args.get('per_page', 25)), 1), 500)
-        search = clean(request.args.get('search')) or ''
-        selected_yupi_po = [clean(v) for v in request.args.getlist('yupi_po') if clean(v)]
-        selected_vendors = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
-        req_dlv_sort = str(clean(request.args.get('req_dlv_sort')) or '').lower() or 'newest'
-        if req_dlv_sort not in ('oldest', 'newest'):
-            req_dlv_sort = 'newest'
-        yupi_po_sort = str(clean(request.args.get('yupi_po_sort')) or '').lower()
-        if yupi_po_sort not in ('asc', 'desc'):
-            yupi_po_sort = ''
-        none_yupi_po = any(v == '__NONE_PLACEHOLDER__' for v in selected_yupi_po)
-        none_vendor = any(v == '__NONE_PLACEHOLDER__' for v in selected_vendors)
-        selected_yupi_po = {v.strip().lower() for v in selected_yupi_po if v != '__NONE_PLACEHOLDER__'}
-        selected_vendors = {v.strip().lower() for v in selected_vendors if v != '__NONE_PLACEHOLDER__'}
-        sync_info = None
-
-        # Do not auto-sync when the table is empty. Opening /Import must not scan
-        # the huge source sheets. The source sheets and main Import tracker are
-        # read only when the user explicitly clicks Copy Sheet or uploads Vendor Import.
-        if force:
-            sync_info = sync_import_sheet_to_dashboard()
-
-        columns = sync_info['columns'] if sync_info else import_layout_columns()
-        vendor_count = sync_info.get('vendor_count') if sync_info else len(import_uploaded_vendor_names())
-
-        # Show rows from the canonical source_key AND transitional
-        # 'import_tracker' rows (created by the previous build before this
-        # fix was deployed). The next Copy Sheet run purges 'import_tracker'
-        # rows and replaces them with 'import_layout' rows.
-        q = ImportDashboardRow.query.filter(
-            ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
-        )
-        if search:
-            terms = [t.strip().lower() for t in re.split(r'[\n,]+', search) if t.strip()]
-            for term in terms:
-                pattern = f'%{term}%'
-                q = q.filter(db.or_(
-                    ImportDashboardRow.row_key.ilike(pattern),
-                    ImportDashboardRow.source_label.ilike(pattern),
-                    ImportDashboardRow.vendor_name.ilike(pattern),
-                    ImportDashboardRow.data_json.ilike(pattern),
-                ))
-
-        # Import filters live inside data_json, so filter after the cheap DB
-        # search. Import rows are already vendor-scoped by Copy Sheet and much
-        # smaller than the source sheets, so this stays fast while giving exact
-        # dropdown behavior.
-        candidate_rows = q.order_by(
-            ImportDashboardRow.first_seen_at.desc(),
-            ImportDashboardRow.id.desc(),
-        ).all()
-
-        parsed = []
-        for row in candidate_rows:
-            try:
-                data = json.loads(row.data_json or '{}')
-            except (TypeError, json.JSONDecodeError):
-                data = {}
-            data = apply_import_formula_columns(dict(data))
-            yupi = import_nonblank(data.get('yupi_po')) or import_nonblank(data.get('po_yupi'))
-            vendor = import_nonblank(data.get('vendor_name')) or import_nonblank(data.get('vendor')) or import_nonblank(row.vendor_name)
-            parsed.append({'row': row, 'data': data, 'yupi_po': yupi, 'vendor': vendor})
-
-        def passes(item, ignore=None):
-            if none_yupi_po or none_vendor:
-                return False
-            if ignore != 'yupi_po' and selected_yupi_po and str(item.get('yupi_po') or '').strip().lower() not in selected_yupi_po:
-                return False
-            if ignore != 'vendor' and selected_vendors and str(item.get('vendor') or '').strip().lower() not in selected_vendors:
-                return False
-            return True
-
-        filtered_items = [item for item in parsed if passes(item)]
-        yupi_options = sorted({str(item.get('yupi_po') or '').strip() for item in parsed if str(item.get('yupi_po') or '').strip() and passes(item, ignore='yupi_po')}, key=lambda s: s.lower())
-        vendor_options = sorted({str(item.get('vendor') or '').strip() for item in parsed if str(item.get('vendor') or '').strip() and passes(item, ignore='vendor')}, key=lambda s: s.lower())
-
-        def _import_req_date_key(item):
-            data = item.get('data') or {}
-            d = import_sort_date_value(import_nonblank(data.get('req_dlv_date')) or import_nonblank(data.get('source_req_dlv_date')))
-            try:
-                if d is None or pd.isna(d):
-                    return (1, 0)
-                ordinal = d.toordinal()
-            except Exception:
-                return (1, 0)
-            return (0, ordinal if req_dlv_sort == 'oldest' else -ordinal)
-
-        if yupi_po_sort:
-            # First sort by Req Dlv Date so it remains the secondary order inside
-            # each YUPI PO group, then sort non-blank YUPI PO values. Blank YUPI
-            # PO rows are kept at the bottom for both ascending and descending.
-            filtered_items.sort(key=_import_req_date_key)
-            with_yupi = [item for item in filtered_items if str(item.get('yupi_po') or '').strip()]
-            without_yupi = [item for item in filtered_items if not str(item.get('yupi_po') or '').strip()]
-            with_yupi.sort(key=lambda item: str(item.get('yupi_po') or '').strip().lower(), reverse=(yupi_po_sort == 'desc'))
-            filtered_items = with_yupi + without_yupi
-        else:
-            filtered_items.sort(key=_import_req_date_key)
-
-        total = len(filtered_items)
-        page_items = filtered_items[(page - 1) * per_page: page * per_page]
-        rows = [import_dashboard_row_to_dict(item['row'], columns) for item in page_items]
-
-        # Read last_copy_at from meta for header display
-        last_copy_at = import_meta_get('last_copy_at') or ''
-
-        return jsonify({
-            'data': rows,
-            'columns': columns,
-            'total': total,
-            'page': page,
-            'per_page': per_page,
-            'vendor_count': vendor_count,
-            'last_copy_at': last_copy_at,
-            'filters': {
-                'yupi_po': yupi_options,
-                'vendors': vendor_options,
-            },
-            'req_dlv_sort': req_dlv_sort,
-            'yupi_po_sort': yupi_po_sort,
-            'sources': [{'key': s['key'], 'label': s['label']} for s in IMPORT_SOURCE_SHEETS],
-            'sync': sync_info,
-        })
-    except Exception as e:
-        db.session.rollback()
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/import/debug-source', methods=['GET'])
-def import_debug_source():
-    """Diagnostic only: show header detection, column map, and a few raw rows
-    for one Import source sheet, optionally filtered to one vendor.
-
-    Usage examples:
-      /api/import/debug-source?source=source_1&vendor=CURT GEORGI GMBH & CO
-      /api/import/debug-source?source=source_2&vendor=GNT Singapore Pte Ltd
-
-    This makes it possible to see whether yupi_po / req_dlv_date are blank
-    because the live source sheet really has no value for that row, or
-    because header/column detection is mapping them to the wrong column.
-    """
-    try:
-        source_key = clean(request.args.get('source')) or 'source_1'
-        vendor_filter = clean(request.args.get('vendor')) or ''
-        source = next((s for s in IMPORT_SOURCE_SHEETS if s['key'] == source_key), None)
-        if not source:
-            return jsonify({
-                'error': f"Unknown source key '{source_key}'",
-                'available_sources': [s['key'] for s in IMPORT_SOURCE_SHEETS],
-            }), 400
-
-        columns = import_layout_columns()
-        mapping_columns = import_all_mapping_columns(columns)
-        sheet_title, header_df = import_source_header_preview(source, force=True)
-        if header_df.empty:
-            return jsonify({
-                'error': 'Could not read a usable header preview for this source (empty result).',
-                'sheet_title_tried': sheet_title,
-                'spreadsheet_id': source['spreadsheet_id'],
-            }), 500
-
-        header_idx = import_detect_header_row(header_df)
-        kind = import_source_kind_from_header(header_df, header_idx)
-        source_map = import_source_column_map(header_df, mapping_columns)
-        header_row_values = [clean(v) for v in header_df.iloc[header_idx].tolist()] if len(header_df) else []
-
-        source_map_letters = {}
-        for field, idx in source_map.items():
-            try:
-                source_map_letters[field] = column_letter_from_index(idx + 1)
-            except Exception:
-                source_map_letters[field] = f'(idx {idx})'
-
-        if vendor_filter:
-            vendor_set = {vendor_filter.strip().lower()}
-        else:
-            filter_vendors, _ = import_vendor_filter_names()
-            vendor_set = {v.strip().lower() for v in filter_vendors}
-
-        sample_rows = import_source_rows_fast(source, columns, vendor_set)[:5]
-        sample_out = []
-        for row in sample_rows:
-            sample_out.append({
-                'sheet_row': row.get('_sheet_row'),
-                'vendor_name_detected': row.get('_vendor_name'),
-                'po_yupi': row.get('po_yupi'),
-                'yupi_po': row.get('yupi_po'),
-                'po_sementara': row.get('po_sementara'),
-                'req_dlv_date': row.get('req_dlv_date'),
-                'po_date_by_email': row.get('po_date_by_email'),
-                'etd': row.get('etd'),
-                'eta': row.get('eta'),
-                'so': row.get('so'),
-                'group': row.get('group'),
-                'item_name': row.get('item_name'),
-            })
-
-        return jsonify({
-            'source_key': source['key'],
-            'spreadsheet_id': source['spreadsheet_id'],
-            'sheet_title_used': sheet_title,
-            'detected_header_row_1based': header_idx + 1,
-            'detected_kind': kind or '(none -> common fallback letters used)',
-            'header_row_raw_values': header_row_values,
-            'column_map_field_to_letter': source_map_letters,
-            'vendor_filter_used': sorted(vendor_set),
-            'matched_row_count': len(sample_rows),
-            'sample_rows': sample_out,
-        })
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/import/cell', methods=['PUT'])
-def update_import_cell():
-    try:
-        payload = request.get_json(silent=True) or {}
-        row_key = clean(payload.get('row_key'))
-        field = clean(payload.get('field'))
-        value = '' if payload.get('value') is None else str(payload.get('value'))
-        if not row_key or not field:
-            return jsonify({'error': 'row_key and field are required'}), 400
-        columns = import_layout_columns()
-        column = next((col for col in columns if col['field'] == field), None)
-        if not column:
-            return jsonify({'error': 'Unknown import column'}), 400
-        row = ImportDashboardRow.query.filter_by(row_key=row_key).first()
-        if not row:
-            return jsonify({'error': 'Import dashboard row not found'}), 404
-        try:
-            data = json.loads(row.data_json or '{}')
-        except (TypeError, json.JSONDecodeError):
-            data = {}
-        data = set_import_payload_field_aliases(data, field, value)
-        data = apply_import_formula_columns(data)
-        row.data_json = json.dumps(data, ensure_ascii=False)
-        row.updated_at = datetime.utcnow()
-        sheet_sync = {'synced': False, 'reason': 'Not attempted'}
-        try:
-            sync_items = [{'row': row, 'field': field, 'value': value}]
-            if field in ('purchase_price', 'ord_qty') and clean(data.get('purchase_amount')):
-                sync_items.append({'row': row, 'field': 'purchase_amount', 'value': data.get('purchase_amount')})
-            sheet_sync = sync_import_cells_to_google_sheet(sync_items)
-        except Exception as sync_exc:
-            sheet_sync = {'synced': False, 'reason': str(sync_exc)}
-        db.session.commit()
-        clear_runtime_caches()
-        columns = import_layout_columns()
-        updated_row = import_dashboard_row_to_dict(row, columns)
-        return jsonify({'success': True, 'row_key': row_key, 'field': field, 'value': value, 'row': updated_row, 'sheet_sync': sheet_sync})
-    except Exception as e:
-        db.session.rollback()
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e), 'sheet_sync': {'synced': False, 'reason': str(e)}}), 500
-
-
-@app.route('/api/import/export', methods=['GET'])
-def export_import_data():
-    """Download the currently displayed Import table as an Excel file.
-    Applies the same YUPI PO and vendor filters as /api/import/data.
-    """
-    try:
-        search = clean(request.args.get('search')) or ''
-        selected_yupi_po_raw = [clean(v) for v in request.args.getlist('yupi_po') if clean(v)]
-        selected_vendors_raw = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
-        none_yupi_po = any(v == '__NONE_PLACEHOLDER__' for v in selected_yupi_po_raw)
-        none_vendor = any(v == '__NONE_PLACEHOLDER__' for v in selected_vendors_raw)
-        selected_yupi_po = {v.strip().lower() for v in selected_yupi_po_raw if v != '__NONE_PLACEHOLDER__'}
-        selected_vendors = {v.strip().lower() for v in selected_vendors_raw if v != '__NONE_PLACEHOLDER__'}
-
-        columns = import_layout_columns()
-        q = ImportDashboardRow.query.filter(
-            ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
-        )
-        if search:
-            terms = [t.strip().lower() for t in re.split(r'[\n,]+', search) if t.strip()]
-            for term in terms:
-                pattern = f'%{term}%'
-                q = q.filter(db.or_(
-                    ImportDashboardRow.row_key.ilike(pattern),
-                    ImportDashboardRow.source_label.ilike(pattern),
-                    ImportDashboardRow.vendor_name.ilike(pattern),
-                    ImportDashboardRow.data_json.ilike(pattern),
-                ))
-
-        candidate_rows = q.order_by(
-            ImportDashboardRow.first_seen_at.desc(),
-            ImportDashboardRow.id.desc(),
-        ).all()
-
-        filtered = []
-        for row in candidate_rows:
-            try:
-                data = json.loads(row.data_json or '{}')
-            except (TypeError, json.JSONDecodeError):
-                data = {}
-            data = apply_import_formula_columns(dict(data))
-            yupi = import_nonblank(data.get('yupi_po')) or import_nonblank(data.get('po_yupi'))
-            vendor = import_nonblank(data.get('vendor_name')) or import_nonblank(data.get('vendor')) or import_nonblank(row.vendor_name)
-            if none_yupi_po or none_vendor:
-                continue
-            if selected_yupi_po and str(yupi or '').strip().lower() not in selected_yupi_po:
-                continue
-            if selected_vendors and str(vendor or '').strip().lower() not in selected_vendors:
-                continue
-            filtered.append((row, data))
-
-        wb = Workbook()
-        ws = wb.active
-        ws.title = 'Import Dashboard'
-
-        # Build header row from column definitions
-        visible_cols = [col for col in columns if not col.get('source_only')]
-        header_labels = [col.get('label', col.get('field', '')).replace('\n', ' ') for col in visible_cols]
-        ws.append(header_labels)
-
-        # Style header
-        header_fill = PatternFill(start_color='1E3A5F', end_color='1E3A5F', fill_type='solid')
-        for cell in ws[1]:
-            cell.fill = header_fill
-            cell.font = Font(bold=True, color='FFFFFF')
-            cell.alignment = Alignment(horizontal='center', wrap_text=True)
-        ws.row_dimensions[1].height = 32
-
-        # Set column widths from definition
-        for i, col in enumerate(visible_cols, 1):
-            width = min(max((col.get('width', 120)) / 7, 8), 50)
-            ws.column_dimensions[get_column_letter(i)].width = width
-
-        # Data rows
-        alt_fill = PatternFill(start_color='F0F4FF', end_color='F0F4FF', fill_type='solid')
-        for row_idx, (db_row, data) in enumerate(filtered, 2):
-            row_vals = []
-            for col in visible_cols:
-                field = col.get('field', '')
-                val = data.get(field, '')
-                if col.get('checkbox'):
-                    val = 'YES' if import_truthy_checkbox_value(val) else ''
-                row_vals.append(val if val is not None else '')
-            ws.append(row_vals)
-            if row_idx % 2 == 0:
-                for cell in ws[row_idx]:
-                    cell.fill = alt_fill
-
-        ws.freeze_panes = 'A2'
-        output = io.BytesIO()
-        wb.save(output)
-        output.seek(0)
-        filename = f"Import_Dashboard_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-        return send_file(
-            output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name=filename,
-        )
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/import/cells', methods=['PUT'])
-def update_import_cells_batch():
-    try:
-        payload = request.get_json(silent=True) or {}
-        updates = payload.get('updates') or []
-        if not isinstance(updates, list) or not updates:
-            return jsonify({'error': 'updates must be a non-empty list'}), 400
-        columns = import_layout_columns()
-        valid_fields = {col['field'] for col in import_all_mapping_columns(columns)}
-        row_keys = [clean(item.get('row_key')) for item in updates if clean(item.get('row_key'))]
-        rows = ImportDashboardRow.query.filter(ImportDashboardRow.row_key.in_(row_keys)).all() if row_keys else []
-        row_by_key = {r.row_key: r for r in rows}
-        sheet_items = []
-        updated_keys = set()
-        for item in updates:
-            row_key = clean(item.get('row_key'))
-            field = clean(item.get('field'))
-            value = '' if item.get('value') is None else str(item.get('value'))
-            if not row_key or not field or field not in valid_fields:
-                continue
-            row = row_by_key.get(row_key)
-            if not row:
-                continue
-            try:
-                data = json.loads(row.data_json or '{}')
-            except (TypeError, json.JSONDecodeError):
-                data = {}
-            data = set_import_payload_field_aliases(data, field, value)
-            data = apply_import_formula_columns(data)
-            row.data_json = json.dumps(data, ensure_ascii=False)
-            row.updated_at = datetime.utcnow()
-            sheet_items.append({'row': row, 'field': field, 'value': value})
-            if field in ('purchase_price', 'ord_qty') and clean(data.get('purchase_amount')):
-                sheet_items.append({'row': row, 'field': 'purchase_amount', 'value': data.get('purchase_amount')})
-            updated_keys.add(row_key)
-        sheet_sync = {'synced': False, 'reason': 'No mapped Import sheet cells to sync'}
-        if sheet_items:
-            try:
-                sheet_sync = sync_import_cells_to_google_sheet(sheet_items)
-            except Exception as sync_exc:
-                sheet_sync = {'synced': False, 'reason': str(sync_exc)}
-        db.session.commit()
-        clear_runtime_caches()
-        updated_rows = [import_dashboard_row_to_dict(row_by_key[k], columns) for k in updated_keys if k in row_by_key]
-        return jsonify({'success': True, 'updated': len(sheet_items), 'rows': updated_rows, 'sheet_sync': sheet_sync})
-    except Exception as e:
-        db.session.rollback()
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e), 'sheet_sync': {'synced': False, 'reason': str(e)}}), 500
-
-@app.route('/api/import/cleanup', methods=['POST'])
-def import_cleanup_duplicates():
-    """Remove duplicate ImportDashboardRow entries that share the same business key
-    (PO Sementara + Item Yupi), keeping only the most recently updated one.
-    This fixes rows created by old backend logic before the upsert was working correctly.
-    """
-    try:
-        columns = import_layout_columns()
-        all_rows = ImportDashboardRow.query.filter(
-            ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
-        ).order_by(ImportDashboardRow.updated_at.desc(), ImportDashboardRow.id.desc()).all()
-
-        # Group by canonical business key: prefer YUPI PO + item, else po_sementara
-        groups = {}
-        for row in all_rows:
-            try:
-                data = json.loads(row.data_json or '{}')
-            except (TypeError, json.JSONDecodeError):
-                data = {}
-            po_yupi = import_nonblank(data.get('po_yupi')) or import_nonblank(data.get('yupi_po'))
-            item_yupi = import_nonblank(data.get('item_yupi'))
-            po_sementara = import_nonblank(data.get('po_sementara'))
-            # CRITICAL: when Item Yupi is blank, multiple genuinely different item
-            # lines can share the same PO YUPI / PO Sementara. Without a detail
-            # fingerprint here, every item line in that PO collapses into one
-            # cleanup group and all-but-one get deleted as "duplicates" — even
-            # though they are different items with different qty/price/name.
-            # Append the same fingerprint used by import_row_identity_payload so
-            # cleanup only merges rows that are truly the same business row.
-            detail_fp = import_row_identity_detail_fingerprint(data) or '(blank)'
-
-            # Use same hierarchy as import_row_identity_payload:
-            # Primary = PO YUPI + Item Yupi, Secondary = PO Sementara + Item Yupi
-            # For cleanup, group by primary key only (ignore po_sementara as biz_key
-            # because a row with PO YUPI and a row with only PO Sementara for the
-            # SAME order are the SAME business row and should be merged)
-            if po_yupi and item_yupi:
-                biz_key = f"poyupi:{po_yupi.strip().upper()}|item:{item_yupi.strip().upper()}"
-            elif po_yupi:
-                biz_key = f"poyupi:{po_yupi.strip().upper()}|item:(none)|detail:{detail_fp}"
-            elif po_sementara and item_yupi:
-                # Rows that share PO Sementara + Item Yupi should be grouped —
-                # they are the same order line before PO YUPI was assigned
-                biz_key = f"posem:{po_sementara.strip().upper()}|item:{item_yupi.strip().upper()}"
-            elif po_sementara:
-                biz_key = f"posem:{po_sementara.strip().upper()}|item:(none)|detail:{detail_fp}"
-            else:
-                continue  # no key = skip
-
-            if biz_key not in groups:
-                groups[biz_key] = []
-            groups[biz_key].append(row)
-
-        deleted = 0
-        merged = 0
-        # Status progression order, used to pick the most "advanced" status across
-        # duplicates instead of blindly keeping whichever row has the latest
-        # updated_at. Without this, a row stuck at the default 'NEW' status could
-        # be chosen as winner over a duplicate the user had already manually
-        # advanced to 'DELIVERED', silently reverting that manual update.
-        status_rank = {s: i for i, s in enumerate(IMPORT_STATUS_OPTIONS)}
-
-        def _status_progress(data):
-            return status_rank.get(str(data.get('status') or '').strip().upper(), -1)
-
-        for biz_key, rows in groups.items():
-            if len(rows) <= 1:
-                continue
-
-            # Pick the winner as the row with the most advanced STATUS first
-            # (so a manually-updated DELIVERED/ON DELIVERY row is never discarded
-            # in favor of a stale NEW duplicate), then fall back to the most
-            # recent updated_at/id for ties.
-            def _row_data(r):
-                try:
-                    return json.loads(r.data_json or '{}')
-                except Exception:
-                    return {}
-
-            rows_with_data = [(r, _row_data(r)) for r in rows]
-            rows_with_data.sort(
-                key=lambda rd: (_status_progress(rd[1]), rd[0].updated_at or datetime.min, rd[0].id),
-                reverse=True,
-            )
-            winner, winner_data = rows_with_data[0]
-            duplicates = [rd[0] for rd in rows_with_data[1:]]
-
-            for dup in duplicates:
-                dup_data = _row_data(dup)
-                # Preserve non-blank user-local fields from older duplicates
-                for field in IMPORT_LOCAL_EDIT_FIELDS:
-                    if field in IMPORT_SOURCE_MANAGED_FIELDS:
-                        continue
-                    if field == 'status':
-                        continue  # status already chosen via _status_progress above
-                    if import_blankish(winner_data.get(field)) and not import_blankish(dup_data.get(field)):
-                        winner_data[field] = dup_data[field]
-
-            winner.data_json = json.dumps(apply_import_formula_columns(winner_data), ensure_ascii=False)
-            winner.updated_at = datetime.utcnow()
-            merged += 1
-
-            for dup in duplicates:
-                db.session.delete(dup)
-                deleted += 1
-
-        db.session.commit()
-        clear_runtime_caches()
-        return jsonify({
-            'success': True,
-            'deleted': deleted,
-            'merged': merged,
-            'message': f'{deleted} baris duplikat dihapus, {merged} baris dipertahankan dengan data tergabung.',
-        })
-    except Exception as e:
-        db.session.rollback()
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/import/vendor-template', methods=['GET'])
-def download_import_vendor_template():
-    try:
-        wb = Workbook()
-        ws = wb.active
-        ws.title = 'Import Vendors'
-        ws.append(['Vendor Name'])
-        for vendor in import_vendor_names():
-            ws.append([vendor])
-        ws.column_dimensions['A'].width = 42
-        ws['A1'].font = Font(bold=True, color='FFFFFF')
-        ws['A1'].fill = PatternFill('solid', fgColor='2563EB')
-        output = io.BytesIO()
-        wb.save(output)
-        output.seek(0)
-        return send_file(output, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', as_attachment=True, download_name='Import_Vendor_Template.xlsx')
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/import/vendors/upload', methods=['POST'])
-def upload_import_vendors():
-    try:
-        files = request.files.getlist('file') or request.files.getlist('files')
-        if not files:
-            return jsonify({'error': 'No file uploaded'}), 400
-        vendors = set()
-        for file in files:
-            name = (file.filename or '').lower()
-            if name.endswith('.csv'):
-                df = pd.read_csv(file, dtype=str, keep_default_na=False)
-            else:
-                df = pd.read_excel(file, dtype=str, keep_default_na=False)
-            if df.empty:
-                continue
-            col = next((c for c in df.columns if str(c).strip().lower() in ('vendor name', 'vendor', 'vendor_name')), df.columns[0])
-            for value in df[col].tolist():
-                vendor = clean(value)
-                if vendor and vendor.lower() not in ('vendor', 'vendor name'):
-                    vendors.add(vendor)
-        ImportVendor.query.delete()
-        now = datetime.utcnow()
-        for vendor in sorted(vendors, key=lambda s: s.lower()):
-            db.session.add(ImportVendor(vendor_name=vendor, uploaded_at=now))
-        db.session.commit()
-        clear_runtime_caches()
-        return jsonify({'success': True, 'count': len(vendors), 'message': f'Import vendor list updated: {len(vendors)} vendors'})
-    except Exception as e:
-        db.session.rollback()
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-def base_all_registered_items_query():
-    return db.session.query(ProductIDDB).filter(db.or_(
-        ProductIDDB.product_status.is_(None),
-        ProductIDDB.product_status == '',
-        func.lower(ProductIDDB.product_status) == 'use'
-    ))
-
-
-def apply_all_registered_items_filters(q, args, exclude_fields=None):
-    exclude_fields = set(exclude_fields or [])
-    search = (args.get('search', '') or '').strip()
-    prod_ids = [clean_product_id(p) for p in args.getlist('prod_id') if clean_product_id(p)]
-    date_filter = args.get('date_filter', 'all')
-    date_from = args.get('date_from', '')
-    date_to = args.get('date_to', '')
-    pic_name = (args.get('pic_name', '') or '').strip()
-    mfr_names = [clean(v) for v in args.getlist('mfr_name') if clean(v)]
-    vendor_names = [clean(v) for v in args.getlist('vendor_name') if clean(v)]
-
-    if date_filter != 'all':
-        today = datetime.now().date()
-        if date_filter == 'today':
-            q = q.filter(func.date(ProductIDDB.registration_date) == today)
-        elif date_filter == 'week':
-            week_start = today - timedelta(days=today.weekday())
-            q = q.filter(ProductIDDB.registration_date >= week_start)
-        elif date_filter == 'month':
-            q = q.filter(ProductIDDB.registration_date >= today.replace(day=1))
-        elif date_filter == 'year':
-            q = q.filter(ProductIDDB.registration_date >= today.replace(month=1, day=1))
-        elif date_filter == 'custom':
-            if date_from:
-                q = q.filter(ProductIDDB.registration_date >= date_from)
-            if date_to:
-                q = q.filter(ProductIDDB.registration_date <= date_to)
-
-    if pic_name:
-        q = q.filter(ProductIDDB.product_registry_pic.ilike(f'%{pic_name}%'))
-    if prod_ids:
-        q = q.filter(ProductIDDB.product_id.in_(prod_ids))
-    if 'mfr_name' not in exclude_fields and mfr_names:
-        q = q.filter(ProductIDDB.manufacturer_name.in_(mfr_names))
-    if 'vendor_name' not in exclude_fields and vendor_names:
-        q = q.filter(ProductIDDB.vendor_name.in_(vendor_names))
-
-    if search:
-        terms = rfq_multiline_search_terms(search)
-        term_filters = []
-        for term in terms:
-            pattern = f'%{term}%'
-            term_filters.append(db.or_(
-                ProductIDDB.product_id.ilike(pattern),
-                ProductIDDB.product_name.ilike(pattern),
-                ProductIDDB.specification.ilike(pattern),
-                ProductIDDB.manufacturer_name.ilike(pattern),
-                ProductIDDB.vendor_name.ilike(pattern),
-                ProductIDDB.category_name.ilike(pattern),
-            ))
-        if term_filters:
-            q = q.filter(db.or_(*term_filters))
-    return q
-
-
-def serialize_registered_product(row, pic_map=None):
-    pic_map = pic_map or {}
-    cat_id = normalize_category_id(row.category_id)
-    return {
-        'id': row.id,
-        'prod_id': clean_product_id(row.product_id),
-        'category': source_category_level1(row.category_name),
-        'pic': pic_map.get(cat_id) or '',
-        'prod_name': row.product_name or '',
-        'spec': row.specification or '',
-        'mfr_name': row.manufacturer_name or '',
-        'vendor_name': row.vendor_name or '',
-        'odr_unit': row.order_unit or '',
-        'hub_handling_check': row.hub_handling_check or '',
-        'tax_type': row.tax_type or '',
-        'registration_date': row.registration_date.isoformat() if row.registration_date else '',
-        'product_registry_pic': row.product_registry_pic or '',
-        'client_name': '',
-        'req_no': '',
-        'proc_status': row.product_status or '',
-        'prod_price': 0,
-        'curr': '',
-        'batch_grp_no': '',
-    }
-
-
-@app.route('/api/all-registered-items', methods=['GET'])
-def get_all_registered_items():
-    """Return all registered items from uploaded Prod ID master data."""
-    try:
-        cache_key = runtime_cache_key('all_registered_items')
-        cached = runtime_cache_get(cache_key)
-        if cached is not None:
-            return jsonify(cached)
-
-        page = int(request.args.get('page', 1))
-        per_page = int(request.args.get('per_page', 10))
-        q = apply_all_registered_items_filters(base_all_registered_items_query(), request.args)
-        total = q.count()
-        rows = q.order_by(ProductIDDB.registration_date.desc(), ProductIDDB.product_id.asc()).offset((page-1)*per_page).limit(per_page).all()
-        pic_map = {normalize_category_id(m.category_id): m.pic_name for m in db.session.query(MasterPIC).all()}
-        data = [serialize_registered_product(row, pic_map) for row in rows]
-        mfr_option_q = apply_all_registered_items_filters(base_all_registered_items_query(), request.args, exclude_fields={'mfr_name'})
-        vendor_option_q = apply_all_registered_items_filters(base_all_registered_items_query(), request.args, exclude_fields={'vendor_name'})
-        payload = {
-            'data': data,
-            'total': total,
-            'page': page,
-            'per_page': per_page,
-            'filters': {
-                'mfr_names': sorted([r[0] for r in mfr_option_q.with_entities(ProductIDDB.manufacturer_name).distinct().all() if r[0]]),
-                'vendor_names': sorted([r[0] for r in vendor_option_q.with_entities(ProductIDDB.vendor_name).distinct().all() if r[0]]),
-            }
+    // Ping is intentionally DB-free in the backend now, so it only wakes the worker.
+    api.get('/api/ping').catch(() => {});
+
+    if (!hasStatsCache) {
+      setLoading(true);
+      setInitialPageLoading(true);
+      try {
+        // First paint waits only for the KPI/status payload. Aging is fetched below in the background.
+        const sRes = await api.get(`/api/dashboard/stats${qs}`);
+        if (!isCurrent()) return;
+        const nextStats = sRes.data || {};
+        const nextPending = { total: Number(nextStats.total_so_count) || 0 };
+        setStats(nextStats);
+        setSummaryPendingTotal(nextPending.total);
+        setDashboardFilterOptions(nextStats?.filters || { clients: [], pics: [] });
+        writeStatsCache(statsCacheKey, nextStats);
+        writeStatsCache(pendingCacheKey, nextPending);
+      } catch (e) {
+        if (isCurrent()) {
+          addToast(`Error: ${e.response?.data?.error || e.message}`, 'error');
+          setCompletedLoading(false);
         }
-        runtime_cache_set(cache_key, payload, ttl_seconds=60)
-        return jsonify(payload)
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/export/all-registered-items', methods=['GET'])
-def export_all_registered_items():
-    """Export all registered items with current filters to Excel."""
-    try:
-        q = apply_all_registered_items_filters(base_all_registered_items_query(), request.args)
-        rows = q.order_by(ProductIDDB.registration_date.desc(), ProductIDDB.product_id.asc()).all()
-        pic_map = {normalize_category_id(m.category_id): m.pic_name for m in db.session.query(MasterPIC).all()}
-        wb = Workbook()
-        ws = wb.active
-        ws.title = 'All Registered Items'
-        headers = ['Product ID', 'Category', 'PIC', 'Product Name', 'Specification', 'Manufacturer Name', 'Vendor Name', 'Order Unit', 'Hub Handling Check', 'Tax Type', 'Registration Date', 'Registry PIC', 'Status']
-        ws.append(headers)
-        header_fill = PatternFill(start_color="1D4ED8", end_color="1D4ED8", fill_type="solid")
-        for cell in ws[1]:
-            cell.fill = header_fill
-            cell.font = Font(bold=True, color="FFFFFF")
-            cell.alignment = Alignment(horizontal='center')
-        for row in rows:
-            item = serialize_registered_product(row, pic_map)
-            ws.append([
-                item['prod_id'], item['category'], item['pic'], item['prod_name'], item['spec'],
-                item['mfr_name'], item['vendor_name'], item['odr_unit'], item['hub_handling_check'],
-                item['tax_type'], item['registration_date'], item['product_registry_pic'], item['proc_status']
-            ])
-        widths = [18, 28, 18, 35, 45, 28, 28, 14, 20, 14, 18, 24, 16]
-        for i, width in enumerate(widths, 1):
-            ws.column_dimensions[get_column_letter(i)].width = width
-        output = io.BytesIO()
-        wb.save(output)
-        output.seek(0)
-        return send_file(output, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', as_attachment=True, download_name=f"All_Registered_Items_{datetime.now().strftime('%Y%m%d')}.xlsx")
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-
-@app.route('/api/dashboard/status-detail', methods=['GET'])
-def get_dashboard_status_detail():
-    """Return detailed SO list for a specific status from dashboard/heatmap."""
-    try:
-        status = request.args.get('status', '').strip()
-        month = request.args.get('month', '').strip()
-        hidden_so = get_hidden_so_items()
-        date_year, date_from, date_to = parse_so_date_args()
-        clients = selected_clients()
-        pics = selected_pics()
-
-        def so_q(*extra_filters):
-            q = db.session.query(SOData).filter(*extra_filters) if extra_filters else db.session.query(SOData)
-            q = apply_so_client_filter(q, clients)
-            q = apply_so_pic_filter(q, pics)
-            return apply_so_create_date_filter(q, date_year, date_from, date_to)
-
-        q = so_q(open_so_filter())
-        if status:
-            q = q.filter(SOData.so_status == status)
-        if month:
-            try:
-                month_date = datetime.strptime(month, '%b %Y')
-                q = q.filter(func.strftime('%Y-%m', SOData.so_create_date) == month_date.strftime('%Y-%m'))
-            except Exception:
-                pass
-
-        rows = q.all()
-        result = []
-        for s in rows:
-            if s.so_item in hidden_so or s.so_number in hidden_so:
-                continue
-            if not so_is_countable(s.so_item, customer_po_number=s.customer_po_number, delivery_memo=s.delivery_memo):
-                continue
-            result.append({
-                'so_item': s.so_item,
-                'so_number': s.so_number,
-                'so_status': s.so_status,
-                'pic_name': canonical_pending_pic(s.pic_name, s.operation_unit_name),
-                'operation_unit_name': s.operation_unit_name,
-                'vendor_name': s.vendor_name,
-                'product_name': s.product_name,
-                'so_qty': s.so_qty,
-                'sales_price': s.sales_price,
-                'sales_amount': s.sales_amount,
-                'customer_po_number': s.customer_po_number,
-                'delivery_memo': s.delivery_memo,
-                'so_create_date': s.so_create_date.isoformat() if s.so_create_date else None,
-                'delivery_plan_date': s.delivery_plan_date.isoformat() if s.delivery_plan_date else None,
-                'remarks': s.remarks,
-            })
-        return jsonify(result)
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/data/pic-kpi', methods=['GET'])
-def get_pic_kpi():
-    """Return KPI metrics per PIC for Open SO."""
-    try:
-        # Get date filter params
-        date_from = request.args.get('date_from', '')
-        date_to = request.args.get('date_to', '')
-        date_year = request.args.get('date_year', '')
-        is_sqlite = 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']
-        
-        # Base query: Open SO only (exclude Delivery Completed and SO Cancel)
-        q = db.session.query(SOData).filter(
-            SOData.so_status.notin_(['Delivery Completed', 'SO Cancel'])
-        )
-        
-        # Apply date filters
-        if date_year:
-            try:
-                yr = int(date_year)
-                if is_sqlite:
-                    q = q.filter(func.strftime('%Y', SOData.so_create_date) == str(yr))
-                else:
-                    q = q.filter(func.extract('year', SOData.so_create_date) == yr)
-            except ValueError:
-                pass
-        elif date_from or date_to:
-            if date_from:
-                q = q.filter(SOData.so_create_date >= date_from)
-            if date_to:
-                q = q.filter(SOData.so_create_date <= date_to)
-        
-        rows = q.all()
-        
-        # Group by PIC
-        pic_map = {}
-        for s in rows:
-            pic = s.pic_name or 'Unassigned'
-            if pic not in pic_map:
-                pic_map[pic] = {
-                    'pic_name': pic,
-                    'so_count': 0,
-                    'total_sales': 0.0,
-                    'total_purchase': 0.0,
-                    'total_margin': 0.0,
-                    'positive_margin_count': 0,
-                    'negative_margin_count': 0,
-                }
-            
-            pic_map[pic]['so_count'] += 1
-            sales = float(s.sales_amount or 0)
-            po_price = float(s.purchasing_price or 0)
-            qty = float(s.so_qty or 0)
-            po_amount = po_price * qty
-            margin = sales - po_amount
-            
-            pic_map[pic]['total_sales'] += sales
-            pic_map[pic]['total_purchase'] += po_amount
-            pic_map[pic]['total_margin'] += margin
-            
-            if margin > 0:
-                pic_map[pic]['positive_margin_count'] += 1
-            elif margin < 0:
-                pic_map[pic]['negative_margin_count'] += 1
-        
-        # Convert to list and sort by SO count descending
-        result = sorted(pic_map.values(), key=lambda x: x['so_count'], reverse=True)
-        
-        return jsonify(result)
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/template/master-pic', methods=['GET'])
-def download_master_pic_template():
-    """Generate Master PIC update template using Category Name as the unique key."""
-    try:
-        wb = Workbook()
-        ws = wb.active
-        ws.title = 'Master PIC'
-
-        headers = ['Category Name', 'PIC', 'Update New PIC']
-        ws.append(headers)
-        ws.freeze_panes = 'A2'
-
-        # Match the uploaded example: Category/PIC are reference columns,
-        # Update New PIC is the editable blue column.
-        ref_header_fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
-        input_header_fill = PatternFill(start_color='0070C0', end_color='0070C0', fill_type='solid')
-        input_font = Font(bold=True, color='FFFFFF', size=10)
-        ref_font = Font(bold=True, color='000000', size=10)
-        body_font = Font(size=10)
-        center = Alignment(horizontal='center', vertical='center')
-        left = Alignment(horizontal='left', vertical='center')
-
-        for cell in ws[1]:
-            cell.alignment = center
-            if cell.column <= 2:
-                cell.fill = ref_header_fill
-                cell.font = ref_font
-            else:
-                cell.fill = input_header_fill
-                cell.font = input_font
-
-        # Existing Master PIC categories plus ProductIDDB categories that have not
-        # been mapped yet. User can append a new Category Name manually too.
-        category_rows = {}
-        for m in db.session.query(MasterPIC).order_by(MasterPIC.category_name).all():
-            cat_name = source_category_level1(m.category_name)
-            norm = normalize_category_name(cat_name)
-            if norm:
-                category_rows[norm] = {'category_name': cat_name, 'pic': clean(m.pic_name)}
-        for (cat_name_raw,) in db.session.query(ProductIDDB.category_name).filter(
-            ProductIDDB.category_name.isnot(None), ProductIDDB.category_name != ''
-        ).distinct().all():
-            cat_name = source_category_level1(cat_name_raw)
-            norm = normalize_category_name(cat_name)
-            if norm and norm not in category_rows:
-                category_rows[norm] = {'category_name': cat_name, 'pic': _lookup_pic_by_category(None, cat_name) or ''}
-
-        for item in sorted(category_rows.values(), key=lambda x: x['category_name'].lower()):
-            ws.append([item['category_name'], item['pic'], ''])
-
-        # Add blank rows so new categories can be inserted without changing format.
-        min_rows = max(20, len(category_rows) + 5)
-        while ws.max_row < min_rows:
-            ws.append(['', '', ''])
-
-        for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=3):
-            for cell in row:
-                cell.font = body_font
-                cell.alignment = left if cell.column == 1 else center
-                cell.number_format = '@'
-
-        ws.column_dimensions['A'].width = 32
-        ws.column_dimensions['B'].width = 12
-        ws.column_dimensions['C'].width = 20
-        ws.auto_filter.ref = f'A1:C{ws.max_row}'
-
-        output = io.BytesIO()
-        wb.save(output)
-        output.seek(0)
-
-        return send_file(
-            output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name='Master_PIC_Update_Template.xlsx'
-        )
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  DELIVERY MONITORING
-# ═══════════════════════════════════════════════════════════════════════════
-
-# Process stages in business order.
-# Important:
-# - SO Create is the first process, then PO Create.
-# - HUB stages only apply to import items.
-# - Import is determined from Pur. Curr.; anything other than IDR is import.
-DLV_PROCESS_STAGES = [
-    ('so_erp_create_date', 'SO(ERP) Create Date', 'SO ERP Created'),
-    ('po_create_date',     'PO Create Date',      'PO Created'),
-    ('po_rcvd_date',       'PO Rcvd. Date',       'PO Received'),
-    ('ship_odr_date',      'Ship. Odr. Date',     'Shipping Order'),
-    ('ship_compl_date',    'Ship. Compl. Date',   'Shipping Confirmed'),
-    ('hub_rcv_date',       'HUB Rcv. Date',       'HUB Received'),
-    ('hub_ship_date',      'HUB Ship. Date',      'HUB Shipped'),
-    ('dlv_compl_date',     'Dlv. Compl. Date',    'Delivery Completed'),
-]
-
-DLV_LOCAL_PROCESS_STAGES = [
-    ('so_erp_create_date', 'SO(ERP) Create Date', 'SO ERP Created'),
-    ('po_create_date',     'PO Create Date',      'PO Created'),
-    ('po_rcvd_date',       'PO Rcvd. Date',       'PO Received'),
-    ('ship_odr_date',      'Ship. Odr. Date',     'Shipping Order'),
-    ('ship_compl_date',    'Ship. Compl. Date',   'Shipping Confirmed'),
-    ('dlv_compl_date',     'Dlv. Compl. Date',    'Delivery Completed'),
-]
-
-
-def _is_import_delivery(row):
-    """Return True when Pur. Curr. indicates an import item."""
-    pur_curr = (getattr(row, 'pur_curr', None) or 'IDR').strip().upper()
-    return bool(pur_curr and pur_curr != 'IDR')
-
-
-def _delivery_stage_flow(row):
-    """Return the applicable delivery process flow for a row."""
-    return DLV_PROCESS_STAGES if _is_import_delivery(row) else DLV_LOCAL_PROCESS_STAGES
-
-
-def _delivery_stage_pairs_for_row(row):
-    stages = _delivery_stage_flow(row)
-    return [
-        (stages[i][0], stages[i + 1][0], stages[i][2], stages[i + 1][2])
-        for i in range(len(stages) - 1)
-    ]
-
-
-def _delivery_stage_pairs_all():
-    """Canonical output order for Avg. Leadtime, including local and import paths."""
-    return [
-        ('so_erp_create_date', 'po_create_date', 'SO ERP Created', 'PO Created'),
-        ('po_create_date', 'po_rcvd_date', 'PO Created', 'PO Received'),
-        ('po_rcvd_date', 'ship_odr_date', 'PO Received', 'Shipping Order'),
-        ('ship_odr_date', 'ship_compl_date', 'Shipping Order', 'Shipping Confirmed'),
-        ('ship_compl_date', 'dlv_compl_date', 'Shipping Confirmed', 'Delivery Completed'),
-        ('ship_compl_date', 'hub_rcv_date', 'Shipping Confirmed', 'HUB Received'),
-        ('hub_rcv_date', 'hub_ship_date', 'HUB Received', 'HUB Shipped'),
-        ('hub_ship_date', 'dlv_compl_date', 'HUB Shipped', 'Delivery Completed'),
-    ]
-
-
-def _parse_dt(val):
-    """Parse a value to date/datetime, return None if not parseable."""
-    if val is None or (isinstance(val, float) and pd.isna(val)):
-        return None
-    if isinstance(val, (datetime, date)):
-        return val
-    try:
-        import pandas as _pd
-        ts = _pd.to_datetime(val, errors='coerce')
-        if _pd.isna(ts):
-            return None
-        return ts.to_pydatetime()
-    except Exception:
-        return None
-
-
-def _dt_to_date(val):
-    """Convert datetime/date to date object."""
-    if val is None:
-        return None
-    if isinstance(val, datetime):
-        return val.date()
-    if isinstance(val, date):
-        return val
-    return None
-
-
-def _calc_stage_leadtimes(row):
-    """
-    Calculate workday leadtime between consecutive process stages.
-    Returns list of dicts: {stage_from, stage_to, label_from, label_to, workdays, pending}
-    pending=True means the 'to' date is still not set (process not completed yet).
-    """
-    if row.po_status and 'cancel' in row.po_status.lower():
-        return []
-
-    results = []
-    for field_from, field_to, label_from, label_to in _delivery_stage_pairs_for_row(row):
-        dt_from = getattr(row, field_from, None)
-        dt_to   = getattr(row, field_to,   None)
-        d_from  = _dt_to_date(dt_from) if dt_from else None
-        d_to    = _dt_to_date(dt_to)   if dt_to   else None
-
-        if d_from is None:
-            # Can't compute; skip
-            continue
-
-        if d_to is None:
-            # Stage not yet completed — pending, count from d_from to today
-            today = date.today()
-            wdays = count_workdays(d_from, today)
-            results.append({
-                'stage_from': field_from,
-                'stage_to':   field_to,
-                'label_from': label_from,
-                'label_to':   label_to,
-                'workdays':   wdays,
-                'pending':    True,
-            })
-        else:
-            wdays = count_workdays(d_from, d_to)
-            results.append({
-                'stage_from': field_from,
-                'stage_to':   field_to,
-                'label_from': label_from,
-                'label_to':   label_to,
-                'workdays':   wdays,
-                'pending':    False,
-            })
-    return results
-
-
-_COMPLETED_WARMUP_STARTED = False
-_RFQ_WARMUP_STARTED = False
-_DASHBOARD_STATS_WARMUP_STARTED = False
-
-
-def warm_dashboard_stats_cache_async():
-    """Warm /api/dashboard/stats and /api/data/aging immediately after startup.
-
-    These back the main KPI cards and aging chart. Without pre-warming, the
-    first page visit hits a cold SQLite + Python module state and takes 3-8 s.
-    The warmup runs ~3 s after boot so the cache is hot by the time the first
-    real user opens the dashboard.
-    """
-    global _DASHBOARD_STATS_WARMUP_STARTED
-    if _DASHBOARD_STATS_WARMUP_STARTED or os.environ.get('PO_MONITOR_DISABLE_WARMUP') == '1':
-        return
-    _DASHBOARD_STATS_WARMUP_STARTED = True
-
-    def _worker():
-        try:
-            # Do not compete with the real first visitor. Warm after the app is idle.
-            time.sleep(20)
-            with app.app_context():
-                client = app.test_client()
-                client.get('/api/dashboard/stats')
-                client.get('/api/data/aging')
-        except Exception as exc:
-            print(f'Dashboard stats warmup skipped: {exc}')
-
-    threading.Thread(target=_worker, daemon=True, name='dashboard-stats-warmup').start()
-
-
-def warm_completed_summary_cache_async():
-    """Precompute the two Delivery Completed summaries used by Dashboard."""
-    global _COMPLETED_WARMUP_STARTED
-    if _COMPLETED_WARMUP_STARTED or os.environ.get('PO_MONITOR_DISABLE_WARMUP') == '1':
-        return
-    _COMPLETED_WARMUP_STARTED = True
-
-    def _worker():
-        try:
-            # Give the WSGI worker a few seconds to finish booting and answer
-            # PythonAnywhere's post-reload check before we start hammering
-            # the DB with this heavy analytics query.
-            # The old warmup used the heavy detail summary and could block the first
-            # user request. Warm only the dashboard/light aggregate after startup.
-            time.sleep(30)
-            current_year = datetime.utcnow().year
-            urls = [
-                '/api/completed/summary?mode=dashboard',
-                f'/api/completed/summary?date_year={current_year}&yoy_base_year={current_year}&mode=dashboard',
-            ]
-            with app.app_context():
-                client = app.test_client()
-                for url in urls:
-                    client.get(url)
-        except Exception as exc:
-            print(f'Completed summary warmup skipped: {exc}')
-
-    threading.Thread(target=_worker, daemon=True, name='completed-summary-warmup').start()
-
-def warm_rfq_dashboard_cache_async():
-    """Warm RFQ from local DB only; never hits Google Sheet."""
-    global _RFQ_WARMUP_STARTED
-    if _RFQ_WARMUP_STARTED or os.environ.get('PO_MONITOR_DISABLE_WARMUP') == '1':
-        return
-    _RFQ_WARMUP_STARTED = True
-
-    def _worker():
-        try:
-            time.sleep(8)
-            with app.app_context():
-                if RFQDashboardRow.query.count() == 0:
-                    return
-                rows, fetched_at = load_rfq_dashboard_rows()
-                set_rfq_runtime_rows(rows, fetched_at)
-                app.test_client().get('/api/rfq/data?page=1&per_page=10')
-        except Exception as exc:
-            print(f'RFQ dashboard warmup skipped: {exc}')
-
-    threading.Thread(target=_worker, daemon=True, name='rfq-dashboard-warmup').start()
-
-@app.route('/api/ping', methods=['GET'])
-def ping():
-    """DB-free keepalive/warmup probe.
-
-    The frontend calls this before dashboard requests. Counting SO rows here
-    made cold starts slower because the "light" ping still touched SQLite.
-    Pass ?db=1 only when you explicitly want a DB health check.
-    """
-    if request.args.get('db') != '1':
-        return jsonify({'ok': True, 'db_checked': False, 'ts': datetime.utcnow().isoformat()})
-    try:
-        total_so = db.session.query(func.count(SOData.id)).scalar() or 0
-        return jsonify({'ok': True, 'db_checked': True, 'total_so': total_so, 'ts': datetime.utcnow().isoformat()})
-    except Exception as e:
-        return jsonify({'ok': False, 'db_checked': True, 'error': str(e)}), 200
-
-
-FRONTEND_DIST_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'frontend', 'dist'))
-
-@app.route('/', defaults={'path': ''})
-@app.route('/<path:path>')
-def serve_frontend(path):
-    if path.startswith('api/'):
-        return jsonify({'error': 'Not found'}), 404
-    if os.path.isdir(FRONTEND_DIST_DIR):
-        target = os.path.join(FRONTEND_DIST_DIR, path)
-        if path and os.path.isfile(target):
-            return send_from_directory(FRONTEND_DIST_DIR, path)
-        index_path = os.path.join(FRONTEND_DIST_DIR, 'index.html')
-        if os.path.isfile(index_path):
-            return send_from_directory(FRONTEND_DIST_DIR, 'index.html')
-    return jsonify({'status': 'ok', 'message': 'PO Monitoring API running'}), 200
-
-warm_dashboard_stats_cache_async()
-warm_completed_summary_cache_async()
-warm_rfq_dashboard_cache_async()
-
-# ─── Daily auto copy-sheet at 07:00 WIB (00:00 UTC) ─────────────────────────
-_SCHEDULER_STARTED = False
-
-def _auto_copy_sheet_job():
-    """Background job: run Copy Sheet automatically every day at 07:00 WIB."""
-    try:
-        with app.app_context():
-            print(f'[scheduler] Auto copy-sheet started at {datetime.utcnow().isoformat()} UTC')
-            result = sync_import_sheet_to_dashboard()
-            print(f'[scheduler] Auto copy-sheet done: added={result.get("added")}, '
-                  f'updated={result.get("updated")}, seen={result.get("seen")}')
-    except Exception as exc:
-        print(f'[scheduler] Auto copy-sheet error: {exc}')
-
-
-def start_auto_copy_scheduler():
-    global _SCHEDULER_STARTED
-    if _SCHEDULER_STARTED:
-        return
-    if not _APSCHEDULER_AVAILABLE:
-        print('[scheduler] APScheduler not available – skipping daily auto copy-sheet.')
-        return
-    if os.environ.get('PO_MONITOR_DISABLE_SCHEDULER') == '1':
-        print('[scheduler] Daily scheduler disabled via PO_MONITOR_DISABLE_SCHEDULER=1')
-        return
-    try:
-        scheduler = BackgroundScheduler(timezone='Asia/Jakarta')
-        # Run at 07:00 WIB (Asia/Jakarta) every day
-        scheduler.add_job(
-            _auto_copy_sheet_job,
-            trigger=CronTrigger(hour=7, minute=0, timezone='Asia/Jakarta'),
-            id='auto_copy_sheet',
-            name='Daily Import Copy Sheet at 07:00 WIB',
-            replace_existing=True,
-        )
-        scheduler.start()
-        _SCHEDULER_STARTED = True
-        print('[scheduler] Daily auto copy-sheet scheduled at 07:00 WIB (Asia/Jakarta).')
-    except Exception as exc:
-        print(f'[scheduler] Failed to start scheduler: {exc}')
-
-
-start_auto_copy_scheduler()
-
-
-@app.route('/api/import/scheduler-status', methods=['GET'])
-def import_scheduler_status():
-    """Return whether the auto copy-sheet scheduler is running."""
-    return jsonify({
-        'scheduler_available': _APSCHEDULER_AVAILABLE,
-        'scheduler_started': _SCHEDULER_STARTED,
-        'schedule': '07:00 WIB (Asia/Jakarta) daily',
-        'disable_env': 'PO_MONITOR_DISABLE_SCHEDULER=1',
-        'last_copy_at': import_meta_get('last_copy_at') or '',
+        return;
+      } finally {
+        if (isCurrent()) {
+          setLoading(false);
+          setInitialPageLoading(false);
+        }
+      }
+    } else {
+      setLoading(false);
+      setInitialPageLoading(false);
+    }
+
+    if (!hasAgingCache) {
+      api.get(`/api/data/aging${qs}`)
+        .then((aRes) => {
+          if (!isCurrent()) return;
+          const nextAging = Array.isArray(aRes.data) ? aRes.data : [];
+          setAgingData(nextAging);
+          writeStatsCache(agingCacheKey, nextAging);
+        })
+        .catch((e) => {
+          if (isCurrent()) addToast(`Error memuat aging: ${e.response?.data?.error || e.message}`, 'error');
+        });
+    }
+
+    if (hasSummaryCache) {
+      setCompletedLoading(false);
+      return;
+    }
+
+    // Delay the heavier completed chart until the Dashboard has painted.
+    // requestIdleCallback keeps page switches/table loads from being blocked by summary processing.
+    await new Promise((resolve) => {
+      if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+        const timeout = window.setTimeout(resolve, 1800);
+        window.requestIdleCallback(() => {
+          window.clearTimeout(timeout);
+          resolve();
+        }, { timeout: 1800 });
+      } else {
+        window.setTimeout(resolve, 1200);
+      }
+    });
+    if (!isCurrent() || activePage !== 'dashboard') {
+      setCompletedLoading(false);
+      return;
+    }
+
+    try {
+      const res = await api.get(completedUrl);
+      if (!isCurrent()) return;
+      writeDashboardSummaryCache(completedUrl, res.data);
+      setCompletedData(res.data);
+      setDashboardMarginData(res.data);
+      setCompletedLoaded(true);
+    } catch (e) {
+      if (isCurrent()) {
+        setCompletedLoaded(true);
+        addToast(`Error memuat summary: ${e.response?.data?.error || e.message}`, 'error');
+      }
+    } finally {
+      if (isCurrent()) setCompletedLoading(false);
+    }
+  }, [addToast, activePage, globalDateFilter, globalClientFilter, globalPicFilter]);
+
+  // Helper: filter array of objects by date field using a DateRangeFilter config
+  const applyDateFilter = useCallback((arr, dateField, filter) => {
+    if (!filter || filter.mode === 'all') return arr;
+    const bounds = getDateFilterBounds(filter);
+    return arr.filter(item => {
+      const d = item[dateField];
+      if (!d) return false;
+      const iso = d.slice(0, 10);
+      if (bounds.date_from && iso < bounds.date_from) return false;
+      if (bounds.date_to && iso > bounds.date_to) return false;
+      return true;
+    });
+  }, []);
+
+  // Helper: build date query params for backend
+  const dateFilterParams = (filter) => {
+    if (!filter || filter.mode === 'all') return {};
+    if (filter.mode === 'range') return { date_from: filter.start || '', date_to: filter.end || '' };
+    return getDateFilterBounds(filter);
+  };
+
+  const appendDateQuery = (url, filter = globalDateFilter) => {
+    const params = new URLSearchParams(dateFilterParams(filter));
+    appendMultiParam(params, 'client', globalClientFilter);
+    appendMultiParam(params, 'pic', globalPicFilter);
+    const qs = params.toString();
+    if (!qs) return url;
+    return `${url}${url.includes('?') ? '&' : '?'}${qs}`;
+  };
+
+  const openNegativeVendorDetail = async (vendor) => {
+    try {
+      const params = new URLSearchParams({ category: 'negative' });
+      Object.entries(dateFilterParams(completedDateFilter)).forEach(([key, value]) => { if (value) params.append(key, value); });
+      appendMultiParam(params, 'client', globalClientFilter);
+      appendMultiParam(params, 'pic', globalPicFilter);
+      const res = await api.get(`/api/completed/margin-detail?${params}`);
+      const rows = (Array.isArray(res.data) ? res.data : []).filter(row => String(row.vendor || '-') === String(vendor || '-'));
+      setMarginDetailModal({ category: `Vendor: ${vendor || '-'}`, data: rows });
+    } catch(e) {
+      addToast(`Failed to load vendor margin detail: ${e.response?.data?.error || e.message}`, 'error');
+    }
+  };
+
+  // Helper: resolve filter array
+  const resolveFilter = (val) => {
+    if (val === '__NONE__') return ['__NONE_PLACEHOLDER__']; // backend will return 0 rows
+    if (!Array.isArray(val) || val.length === 0) return []; // empty = no filter = all
+    return val;
+  };
+  const filterValues = (val) => Array.isArray(val) ? val : [];
+
+  const fetchSOData = useCallback(async (filters, page, perPage, searchNums, marginFilter, dateFilter, sortOrder = soSortOrder, kpiPic = pendingPicHighlight) => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ page, per_page: perPage, sort_order: sortOrder });
+      resolveFilter(filters.op_units).forEach(v => params.append('op_unit', v));
+      resolveFilter(filters.vendors).forEach(v => params.append('vendor', v));
+      resolveFilter(filters.manufacturers).forEach(v => params.append('manufacturer', v));
+      resolveFilter(filters.statuses).forEach(v => params.append('status', v));
+      resolveFilter(filters.pics).forEach(v => params.append('pic', v));
+      if (kpiPic) params.append('kpi_pic', kpiPic);
+      filterValues(filters.aging).forEach(a => params.append('aging', a));
+      (searchNums || []).forEach(n => params.append('so_item', n));
+      appendMultiParam(params, 'client', globalClientFilter);
+      appendMultiParam(params, 'global_pic', globalPicFilter);
+      if (marginFilter && marginFilter !== 'all') params.append('margin_filter', marginFilter);
+      Object.entries(dateFilterParams(dateFilter)).forEach(([key, value]) => { if (value) params.append(key, value); });
+      const res = await api.get(`/api/data/all-so?${params}`);
+      setAllSOData(Array.isArray(res.data.data) ? res.data.data : []);
+      setApprovalSOData(Array.isArray(res.data.approval_data) ? res.data.approval_data : []);
+      setPicAggregations(Array.isArray(res.data.pic_aggregations) ? res.data.pic_aggregations : []);
+      setSoTotal(res.data.total || 0);
+      setSoSubtotalAmount(Number(res.data.subtotal_amount) || 0);
+      setSoFilterOptions(res.data.filters || { op_units: [], vendors: [], manufacturers: [], statuses: [], pics: [] });
+    } catch (e) {
+      addToast(`Failed to load SO: ${e.message}`, 'error');
+    } finally { setLoading(false); }
+  }, [addToast, soSortOrder, pendingPicHighlight, globalClientFilter, globalPicFilter]);
+
+  const fetchItemRegistration = useCallback(async (page = itemRegPage, perPage = itemRegPerPage, search = itemRegAppliedSearch, filters = itemRegFilters, kpiPic = itemRegPicHighlight, dateFilter = globalDateFilter) => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ page, per_page: perPage });
+      Object.entries(dateFilterParams(dateFilter)).forEach(([key, value]) => { if (value) params.append(key, value); });
+      appendMultiParam(params, 'client', globalClientFilter);
+      appendMultiParam(params, 'global_pic', globalPicFilter);
+      if (Array.isArray(search)) search.forEach(v => params.append('req_no', v));
+      else if (search) params.append('search', search);
+      resolveFilter(filters.clients).forEach(v => params.append('item_client', v));
+      resolveFilter(filters.categories).forEach(v => params.append('category', v));
+      resolveFilter(filters.pics).forEach(v => params.append('pic', v));
+      resolveFilter(filters.proc_statuses).forEach(v => params.append('proc_status', v));
+      resolveFilter(filters.mfr_names).forEach(v => params.append('mfr_name', v));
+      if (kpiPic) params.append('kpi_pic', kpiPic);
+      const res = await api.get(`/api/item-registration/data?${params}`);
+      const rows = Array.isArray(res.data.data) ? res.data.data : [];
+      setItemRegData(rows);
+      setItemRegTotal(res.data.total || 0);
+      setItemRegLastUpdated(res.data.last_updated || null);
+      setItemRegMissingPicKpis(Array.isArray(res.data.missing_prod_id_by_pic) ? res.data.missing_prod_id_by_pic : []);
+      setItemRegOptions({
+        clients: res.data.client_options || [],
+        categories: res.data.category_options || [],
+        pics: res.data.pic_options || [],
+        proc_statuses: res.data.proc_status_options || [],
+        mfr_names: res.data.mfr_name_options || []
+      });
+    } catch (e) {
+      addToast(`Failed to load Item Registration: ${e.response?.data?.error || e.message}`, 'error');
+    } finally { setLoading(false); }
+  }, [addToast, itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters, itemRegPicHighlight, globalDateFilter, globalClientFilter, globalPicFilter]);
+
+  const fetchRegisteredItems = useCallback(async (
+    page = registeredItemsPage,
+    perPage = registeredItemsPerPage,
+    search = registeredItemsAppliedSearch,
+    prodIds = registeredItemsAppliedProdIds,
+    filters = registeredItemsFilters
+  ) => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ page, per_page: perPage });
+      if (search) params.append('search', search);
+      (prodIds || []).forEach(v => params.append('prod_id', v));
+      resolveFilter(filters.mfr_names).forEach(v => params.append('mfr_name', v));
+      resolveFilter(filters.vendor_names).forEach(v => params.append('vendor_name', v));
+      const res = await api.get(`/api/all-registered-items?${params}`);
+      setRegisteredItemsData(Array.isArray(res.data.data) ? res.data.data : []);
+      setRegisteredItemsTotal(res.data.total || 0);
+      setRegisteredItemsOptions(res.data.filters || { mfr_names: [], vendor_names: [] });
+    } catch (e) {
+      addToast(`Failed to load All Registered Items: ${e.response?.data?.error || e.message}`, 'error');
+    } finally { setLoading(false); }
+  }, [
+    addToast,
+    registeredItemsPage,
+    registeredItemsPerPage,
+    registeredItemsAppliedSearch,
+    registeredItemsAppliedProdIds,
+    registeredItemsFilters
+  ]);
+
+  const fetchRFQData = useCallback(async (page = rfqPage, perPage = rfqPerPage, search = rfqAppliedSearch, refresh = false, filters = rfqFilters, pic = rfqPicFilter, showSimilarity = rfqShowSimilarity) => {
+    setRfqEditedRowKeys(new Set());
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ page, per_page: perPage });
+      if (search) params.append('search', search);
+      if (refresh) params.append('refresh', '1');
+      if (pic) params.append('pic', pic);
+      if (showSimilarity) params.append('similarity', '1');
+      resolveFilter(filters.checks).forEach(v => params.append('check', v));
+      resolveFilter(filters.clients).forEach(v => params.append('client_name', v));
+      resolveFilter(filters.rfq_numbers).forEach(v => params.append('rfq_no', v));
+      resolveFilter(filters.brands).forEach(v => params.append('brand_manufacturer', v));
+      resolveFilter(filters.purchase_pics)
+        .filter(v => String(v || '').trim().toLowerCase() !== 'unassigned')
+        .forEach(v => params.append('purchase_pic', v));
+      resolveFilter(filters.vendors).forEach(v => params.append('vendor_name', v));
+      const res = await api.get(`/api/rfq/data?${params}`);
+      setRfqData(Array.isArray(res.data.data) ? res.data.data : []);
+      setRfqTotal(res.data.total || 0);
+      setRfqColumns(Array.isArray(res.data.columns) ? res.data.columns : []);
+      setRfqSimilarityColumns(Array.isArray(res.data.similarity_columns) ? res.data.similarity_columns : []);
+      setRfqEditableFields(Array.isArray(res.data.editable_fields) ? res.data.editable_fields : []);
+      setRfqPicKpis(Array.isArray(res.data.pic_kpis) ? res.data.pic_kpis : []);
+      const nextOptions = res.data.filters || { checks: [], clients: [], rfq_numbers: [], brands: [], purchase_pics: [], vendors: [] };
+      setRfqOptions({
+        ...nextOptions,
+        purchase_pics: (nextOptions.purchase_pics || []).filter(v => String(v || '').trim().toLowerCase() !== 'unassigned')
+      });
+      setRfqLastUpdated(res.data.last_updated || null);
+    } catch (e) {
+      addToast(`Failed to load RFQ: ${e.response?.data?.error || e.message}`, 'error');
+    } finally { setLoading(false); }
+  }, [addToast, rfqPage, rfqPerPage, rfqAppliedSearch, rfqFilters, rfqPicFilter, rfqShowSimilarity]);
+
+  const fetchImportData = useCallback(async (page = importPage, perPage = importPerPage, search = importAppliedSearch, refresh = false, filters = importFilters, reqDlvSort = importReqDlvSort, yupiPoSort = importYupiPoSort) => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ page, per_page: perPage });
+      if (search) params.append('search', search);
+      if (refresh) params.append('refresh', '1');
+      if (reqDlvSort) params.append('req_dlv_sort', reqDlvSort);
+      if (yupiPoSort) params.append('yupi_po_sort', yupiPoSort);
+      resolveFilter(filters?.yupi_po).forEach(v => params.append('yupi_po', v));
+      resolveFilter(filters?.vendors).forEach(v => params.append('vendor_name', v));
+      const res = await api.get(`/api/import/data?${params}`);
+      setImportData(Array.isArray(res.data.data) ? res.data.data : []);
+      setImportColumns(Array.isArray(res.data.columns) ? res.data.columns : []);
+      setImportTotal(res.data.total || 0);
+      setImportVendorCount(res.data.vendor_count || 0);
+      setImportLastCopyAt(res.data.last_copy_at || '');
+      setImportOptions(res.data.filters || { yupi_po: [], vendors: [] });
+      if (refresh && res.data.sync) {
+        const added = Number(res.data.sync.added || 0);
+        const seen = Number(res.data.sync.seen || 0);
+        const sheetRows = Number(res.data.sync.sheet_rows || 0);
+        const vendorFilterCount = Number(res.data.sync.vendor_filter_count || 0);
+        const vendorSource = res.data.sync.vendor_filter_source === 'existing_import_rows' ? 'current Import vendors' : 'Vendor Import';
+        const msg = added
+          ? `Copied ${added} new Import rows and skipped ${seen} existing rows`
+          : sheetRows
+            ? `No new rows. ${seen} existing Import rows already in dashboard (${vendorFilterCount} ${vendorSource})`
+            : 'No Import rows found in source sheets';
+        addToast(msg, 'success');
+      }
+    } catch (e) {
+      addToast(`Failed to load Import data: ${e.response?.data?.error || e.message}`, 'error');
+    } finally { setLoading(false); }
+  }, [addToast, importPage, importPerPage, importAppliedSearch, importFilters, importReqDlvSort, importYupiPoSort]);
+
+  const updateImportCell = async (rowKey, field, value) => {
+    setImportEditingCell(null);
+    const previousRows = importData;
+    setImportData(prev => prev.map(row => row._row_key === rowKey ? { ...row, [field]: value } : row));
+    try {
+      const res = await api.put('/api/import/cell', { row_key: rowKey, field, value });
+      if (res.data?.row) {
+        setImportData(prev => prev.map(row => row._row_key === rowKey ? { ...row, ...res.data.row } : row));
+      }
+      return true;
+    } catch (e) {
+      setImportData(previousRows);
+      addToast(`Failed to update Import data: ${e.response?.data?.error || e.message}`, 'error');
+      return false;
+    }
+  };
+
+  const updateImportCellsBatch = async (updates) => {
+    const safeUpdates = Array.isArray(updates) ? updates.filter(u => u?.row_key && u?.field) : [];
+    if (!safeUpdates.length) return false;
+    const previousRows = importData;
+    setImportEditingCell(null);
+    setImportData(prev => {
+      const next = prev.map(row => ({ ...row }));
+      for (const update of safeUpdates) {
+        const idx = next.findIndex(row => row._row_key === update.row_key);
+        if (idx >= 0) next[idx][update.field] = update.value;
+      }
+      return next;
+    });
+    try {
+      const res = await api.put('/api/import/cells', { updates: safeUpdates });
+      const updatedRows = Array.isArray(res.data?.rows) ? res.data.rows : [];
+      if (updatedRows.length) {
+        const byKey = new Map(updatedRows.map(row => [row._row_key, row]));
+        setImportData(prev => prev.map(row => byKey.has(row._row_key) ? { ...row, ...byKey.get(row._row_key) } : row));
+      }
+      return true;
+    } catch (e) {
+      setImportData(previousRows);
+      addToast(`Failed to update Import data: ${e.response?.data?.error || e.message}`, 'error');
+      return false;
+    }
+  };
+
+  const fetchVendorControl = useCallback(async (page = vendorControlPage, perPage = vendorControlPerPage, search = vendorControlAppliedSearch, refresh = false, vendors = vendorControlAppliedVendors) => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ page, per_page: perPage });
+      if (search) params.append('search', search);
+      (vendors || []).forEach(v => params.append('vendor', v));
+      if (refresh) params.append('refresh', '1');
+      const res = await api.get(`/api/vendor-control/data?${params}`);
+      setVendorControlData(Array.isArray(res.data.data) ? res.data.data : []);
+      setVendorControlTotal(res.data.total || 0);
+      setVendorControlSuggestions(Array.isArray(res.data.suggestions) ? res.data.suggestions : []);
+      setVendorControlLastUpdated(res.data.last_updated || null);
+    } catch (e) {
+      addToast(`Failed to load Vendor Control: ${e.response?.data?.error || e.message}`, 'error');
+    } finally { setLoading(false); }
+  }, [addToast, vendorControlPage, vendorControlPerPage, vendorControlAppliedSearch, vendorControlAppliedVendors]);
+
+  const updateVendorControlCell = async (rowKey, field, value) => {
+    setEditingCell(null);
+    const previousRows = vendorControlData;
+    setVendorControlData(prev => prev.map(row => row.row_key === rowKey ? { ...row, [field]: value } : row));
+    try {
+      const res = await api.put(`/api/vendor-control/${encodeURIComponent(rowKey)}`, { field, value });
+      if (res.data?.sheet_sync && res.data.sheet_sync.synced === false) {
+        addToast(`Vendor updated locally. Sheet sync not active: ${res.data.sheet_sync.reason}`, 'warning');
+      }
+    } catch (e) {
+      setVendorControlData(previousRows);
+      addToast(`Failed to update Vendor Control: ${e.response?.data?.error || e.message}`, 'error');
+    }
+  };
+
+  const openVendorLogin = (row) => {
+    if (!row?.row_key) return;
+    window.open(`${BACKEND}/api/vendor-control/login/${encodeURIComponent(row.row_key)}`, '_blank', 'noopener,noreferrer');
+  };
+
+  useEffect(() => { fetchPicDbStatus(); }, []);
+  useEffect(() => {
+    if (activePage === 'dashboard') {
+      fetchDashboard(globalDateFilter);
+      return;
+    }
+    // Invalidate any Dashboard request that is still waiting for summary so it
+    // cannot keep the global loading overlay alive after the user changes page.
+    dashboardRequestSeq.current += 1;
+    setCompletedLoading(false);
+    setLoading(false);
+    setInitialPageLoading(false);
+  }, [activePage, globalDateFilter, globalClientFilter, globalPicFilter, fetchDashboard]);
+  useEffect(() => {
+    if (activePage === 'all-so') {
+      fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter, soSortOrder);
+    }
+  }, [activePage, soSortOrder, soPage, soPerPage, soFilters, soSearchNums, soMarginFilter, soDateFilter, globalClientFilter, globalPicFilter, fetchSOData]);
+
+  useEffect(() => {
+    if (activePage === 'item-registration') {
+      fetchItemRegistration(itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters, itemRegPicHighlight, globalDateFilter);
+    }
+  }, [activePage, itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters, itemRegPicHighlight, globalDateFilter, globalClientFilter, globalPicFilter, fetchItemRegistration]);
+
+  useEffect(() => {
+    if (activePage === 'rfq') {
+      fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter, rfqShowSimilarity);
+    }
+  }, [activePage]);
+
+  useEffect(() => {
+    if (activePage === 'import') {
+      fetchImportData(importPage, importPerPage, importAppliedSearch);
+    }
+  }, [activePage]);
+
+  useEffect(() => {
+    if (activePage === 'vendor-control') {
+      fetchVendorControl(vendorControlPage, vendorControlPerPage, vendorControlAppliedSearch, false, vendorControlAppliedVendors);
+    }
+  }, [activePage, vendorControlPage, vendorControlPerPage, vendorControlAppliedSearch, vendorControlAppliedVendors, fetchVendorControl]);
+
+  useEffect(() => {
+    const q = vendorControlSearch.trim();
+    if (activePage !== 'vendor-control' || q.length < 2) {
+      setVendorControlSuggestions([]);
+      setVendorControlSuggestOpen(false);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ page: 1, per_page: 1, search: q });
+        const res = await api.get(`/api/vendor-control/data?${params}`);
+        if (cancelled) return;
+        const suggestions = Array.isArray(res.data.suggestions) ? res.data.suggestions : [];
+        setVendorControlSuggestions(suggestions);
+        setVendorControlSuggestOpen(suggestions.length > 0);
+      } catch {
+        if (!cancelled) {
+          setVendorControlSuggestions([]);
+          setVendorControlSuggestOpen(false);
+        }
+      }
+    }, 220);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [activePage, vendorControlSearch]);
+
+  useEffect(() => {
+    if (activePage === 'all-registered-items') {
+      fetchRegisteredItems(
+        registeredItemsPage,
+        registeredItemsPerPage,
+        registeredItemsAppliedSearch,
+        registeredItemsAppliedProdIds
+      );
+    }
+  }, [
+    activePage,
+    registeredItemsPage,
+    registeredItemsPerPage,
+    registeredItemsAppliedSearch,
+    registeredItemsAppliedProdIds,
+    fetchRegisteredItems
+  ]);
+
+  const handleUpload = async (e, type) => {
+    const files = Array.from(e.target.files || []); if (!files.length) return;
+    e.target.value = '';
+    const label = files.length > 1 ? `SO - Search Client Odr (${files.length} files)` : 'SO - Search Client Odr';
+    const endpoint = '/api/upload/smro';
+
+    const fd = new FormData(); files.forEach(file => fd.append('file', file));
+    setUploadProgress({ label, pct: 0 });
+    try {
+      const res = await api.post(endpoint, fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (ev) => setUploadProgress({ label, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
+      });
+      setUploadProgress(null);
+      // Combine success message and SO Specification/Product ID diagnostics
+      // into a single toast so the success and diagnostic don't get the same
+      // Date.now() ID and trample each other.
+      const diag = res.data.diagnostics;
+      let toastMsg = `✅ ${res.data.message}`;
+      let toastKind = 'success';
+      if (type === 'scor' && diag) {
+        const det = diag.columns_detected || {};
+        const detail = `Specification col=${det.specification||'(none)'}; Product ID col=${det.product_id||'(none)'}. ` +
+                       `Filled rows: spec=${diag.rows_with_specification||0}, pid=${diag.rows_with_product_id||0}.`;
+        toastMsg += diag.warning ? `\n⚠️ ${diag.warning} ${detail}` : `\nℹ️ ${detail}`;
+        if (diag.warning) toastKind = 'warning';
+      }
+      addToast(toastMsg, toastKind);
+      clearDashboardSummaryCache();
+      clearStatsCache();
+      if (activePage === 'dashboard') fetchDashboard();
+      if (activePage === 'all-so') fetchSOData(soFilters, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+      setSoPage(1);
+    } catch (e) {
+      setUploadProgress(null);
+      addToast(`❌ Failed to upload ${label}: ${e.response?.data?.error || e.message}`, 'error');
+    }
+  };
+
+  const fetchPicDbStatus = async () => {
+    try {
+      const res = await api.get('/api/master-pic/status');
+      setPicDbStatus(res.data);
+    } catch {}
+  };
+
+  const handleUploadProductID = async (e) => {
+    const files = Array.from(e.target.files || []); if (!files.length) return;
+    e.target.value = '';
+    const fd = new FormData(); files.forEach(file => fd.append('file', file));
+    const label = files.length > 1 ? `Product ID (${files.length} files)` : 'Product ID';
+    setPicUploadMsg('⏳ Uploading Product ID database...');
+    setUploadProgress({ label, pct: 0 });
+    try {
+      const res = await api.post('/api/upload/product-id', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (ev) => setUploadProgress({ label, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
+      });
+      const d = res.data;
+      setUploadProgress(null);
+      setPicUploadMsg(`✅ Prod ID (${d.files || files.length} file): +${d.added} added, ${d.updated} updated (total: ${d.total_in_db}). SO PIC refreshed: ${d.so_pic_refreshed} rows.`);
+      clearDashboardSummaryCache();
+      clearStatsCache();
+      fetchPicDbStatus();
+      if (activePage === 'all-so') fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+    } catch (err) {
+      setUploadProgress(null);
+      const msg = err?.response?.data?.error || err.message;
+      setPicUploadMsg(`❌ Error: ${msg}`);
+      addToast(`❌ ${msg}`, 'error');
+    }
+  };
+
+  const handleUpdatePIC = async (e) => {
+    const files = Array.from(e.target.files || []); if (!files.length) return;
+    e.target.value = '';
+    const fd = new FormData(); files.forEach(file => fd.append('file', file));
+    const label = files.length > 1 ? `Master PIC (${files.length} files)` : 'Master PIC';
+    setPicUploadMsg('⏳ Updating Master PIC...');
+    setUploadProgress({ label, pct: 0 });
+    try {
+      const res = await api.post('/api/upload/master-pic', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (ev) => setUploadProgress({ label, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
+      });
+      const d = res.data;
+      setUploadProgress(null);
+      setPicUploadMsg(`✅ Master PIC (${d.files || files.length} file): +${d.added} added, ${d.updated} updated${d.unchanged ? `, ${d.unchanged} unchanged` : ''} (total category names: ${d.total_categories}). SO rows updated: ${d.so_pic_refreshed}.`);
+      clearDashboardSummaryCache();
+      clearStatsCache();
+      fetchPicDbStatus();
+      if (activePage === 'all-so') fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+    } catch (err) {
+      setUploadProgress(null);
+      const msg = err?.response?.data?.error || err.message;
+      setPicUploadMsg(`❌ Error: ${msg}`);
+      addToast(`❌ ${msg}`, 'error');
+    }
+  };
+
+  const handleUploadItemRegistration = async (e) => {
+    const files = Array.from(e.target.files || []); if (!files.length) return;
+    e.target.value = '';
+    const fd = new FormData(); files.forEach(file => fd.append('file', file));
+    const label = files.length > 1 ? `Item Registration (${files.length} files)` : 'Item Registration';
+    setUploadProgress({ label, pct: 0 });
+    try {
+      const res = await api.post('/api/upload/item-registration', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (ev) => setUploadProgress({ label, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
+      });
+      setUploadProgress(null);
+      addToast(`✅ ${res.data.message || 'Item Registration uploaded successfully'}`, 'success');
+      clearDashboardSummaryCache();
+      clearStatsCache();
+      setItemRegPage(1);
+      if (activePage === 'dashboard') fetchDashboard();
+      if (activePage === 'item-registration') fetchItemRegistration(1, itemRegPerPage, itemRegAppliedSearch, itemRegFilters);
+    } catch (err) {
+      setUploadProgress(null);
+      addToast(`❌ Failed to upload Item Registration: ${err?.response?.data?.error || err.message}`, 'error');
+    }
+  };
+
+  const handleBatchUpload = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    e.target.value = '';
+    const fd = new FormData(); fd.append('file', file);
+    setUploadProgress({ label: 'Batch Update', pct: 0 });
+    try {
+      const res = await api.post('/api/data/so/batch-upload', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (ev) => setUploadProgress({ label: 'Batch Update', pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
+      });
+      setUploadProgress(null);
+      addToast(`✅ Batch update: ${res.data.updated} records updated`, 'success');
+      clearDashboardSummaryCache();
+      clearStatsCache();
+      fetchSOData(soFilters, soPage, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+    } catch (e) {
+      setUploadProgress(null);
+      addToast(`❌ Failed to batch upload: ${e.response?.data?.error || e.message}`, 'error');
+    }
+  };
+
+  const handleItemRegistrationBatchUpload = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    e.target.value = '';
+    const fd = new FormData(); fd.append('file', file);
+    setUploadProgress({ label: 'Item Registration Batch', pct: 0 });
+    try {
+      const res = await api.post('/api/item-registration/batch-upload', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (ev) => setUploadProgress({ label: 'Item Registration Batch', pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
+      });
+      setUploadProgress(null);
+      addToast(`Item Registration batch: ${res.data.updated} records updated${res.data.not_found ? `, ${res.data.not_found} Req. No not found` : ''}`, 'success');
+      clearDashboardSummaryCache();
+      clearStatsCache();
+      fetchItemRegistration(itemRegPage, itemRegPerPage, itemRegAppliedSearch, itemRegFilters);
+    } catch (e) {
+      setUploadProgress(null);
+      addToast(`Failed to upload Item Registration batch: ${e.response?.data?.error || e.message}`, 'error');
+    }
+  };
+
+  const downloadBlob = async (url, filename, label) => {
+    const toastId = Date.now();
+    setDownloadToast({ id: toastId, message: `Downloading ${label || filename}...` });
+    try {
+      const res = await api.get(url, { responseType: 'blob' });
+      const link = document.createElement('a');
+      link.href = window.URL.createObjectURL(new Blob([res.data]));
+      link.setAttribute('download', filename);
+      document.body.appendChild(link); link.click(); link.remove();
+      setDownloadToast(null);
+      addToast(`✅ File "${filename}" downloaded successfully`, 'success');
+    } catch (e) {
+      setDownloadToast(null);
+      addToast('❌ Failed to download file', 'error');
+    }
+  };
+
+  const downloadMasterPICTemplate = () => {
+    downloadBlob('/api/template/master-pic', `Master_PIC_Update_Template_${new Date().toISOString().slice(0,10)}.xlsx`, 'Master PIC Update Template');
+  };
+
+  const downloadItemRegistrationTemplate = () => {
+    const p = new URLSearchParams();
+    Object.entries(dateFilterParams(globalDateFilter)).forEach(([key, value]) => { if (value) p.append(key, value); });
+    appendMultiParam(p, 'client', globalClientFilter);
+    appendMultiParam(p, 'global_pic', globalPicFilter);
+    (itemRegAppliedSearch || []).forEach(v => p.append('req_no', v));
+    resolveFilter(itemRegFilters.clients).forEach(v => p.append('item_client', v));
+    resolveFilter(itemRegFilters.categories).forEach(v => p.append('category', v));
+    resolveFilter(itemRegFilters.pics).forEach(v => p.append('pic', v));
+    resolveFilter(itemRegFilters.proc_statuses).forEach(v => p.append('proc_status', v));
+    resolveFilter(itemRegFilters.mfr_names).forEach(v => p.append('mfr_name', v));
+    if (itemRegPicHighlight) p.append('kpi_pic', itemRegPicHighlight);
+    downloadBlob(`/api/item-registration/template?${p}`, `Template_ItemRegistration_BatchUpload_${new Date().toISOString().slice(0,10)}.xlsx`, 'Item Registration Batch Upload Template');
+  };
+
+  const cleanupImportDuplicates = async () => {
+    if (!window.confirm('Bersihkan baris duplikat di Import? Baris dengan identitas bisnis yang sama (PO YUPI + Item Yupi, atau PO Sementara + Item Yupi) akan digabung menjadi satu, baris berlebih akan dihapus. Aksi ini tidak bisa dibatalkan.')) return;
+    try {
+      const res = await api.post('/api/import/cleanup', {});
+      addToast(res.data?.message || `${res.data?.deleted || 0} baris duplikat dihapus`, 'success');
+      fetchImportData(1, importPerPage, importAppliedSearch, false, importFilters, importReqDlvSort, importYupiPoSort);
+      setImportPage(1);
+    } catch (e) {
+      addToast(`Gagal membersihkan duplikat: ${e.response?.data?.error || e.message}`, 'error');
+    }
+  };
+
+  const downloadImportExcel = () => {
+    const p = new URLSearchParams();
+    if (importAppliedSearch) p.append('search', importAppliedSearch);
+    resolveFilter(importFilters?.yupi_po).forEach(v => p.append('yupi_po', v));
+    resolveFilter(importFilters?.vendors).forEach(v => p.append('vendor_name', v));
+    downloadBlob(`/api/import/export?${p}`, `Import_Dashboard_${new Date().toISOString().slice(0,10)}.xlsx`, 'Import Dashboard Excel');
+  };
+
+  const downloadItemRegistrationExcel = () => {
+    const p = new URLSearchParams();
+    Object.entries(dateFilterParams(globalDateFilter)).forEach(([key, value]) => { if (value) p.append(key, value); });
+    appendMultiParam(p, 'client', globalClientFilter);
+    appendMultiParam(p, 'global_pic', globalPicFilter);
+    (itemRegAppliedSearch || []).forEach(v => p.append('req_no', v));
+    resolveFilter(itemRegFilters.clients).forEach(v => p.append('item_client', v));
+    resolveFilter(itemRegFilters.categories).forEach(v => p.append('category', v));
+    resolveFilter(itemRegFilters.pics).forEach(v => p.append('pic', v));
+    resolveFilter(itemRegFilters.proc_statuses).forEach(v => p.append('proc_status', v));
+    resolveFilter(itemRegFilters.mfr_names).forEach(v => p.append('mfr_name', v));
+    if (itemRegPicHighlight) p.append('kpi_pic', itemRegPicHighlight);
+    downloadBlob(`/api/export/item-registration?${p}`, `Item_Registration_${new Date().toISOString().slice(0,10)}.xlsx`, 'Item Registration Excel');
+  };
+
+  const fetchCompletedData = useCallback(async (year='all', dateFilter=null) => {
+    setCompletedLoading(true);
+    try {
+      const params = new URLSearchParams({ year });
+      Object.entries(dateFilterParams(dateFilter)).forEach(([key, value]) => { if (value) params.append(key, value); });
+      appendMultiParam(params, 'client', globalClientFilter);
+      appendMultiParam(params, 'pic', globalPicFilter);
+      const res = await api.get(`/api/completed/summary?${params}`);
+      setCompletedData(res.data);
+      setCompletedLoaded(true);
+    } catch(e) { addToast(`❌ Failed to load completed data: ${e.message}`, 'error'); }
+    finally { setCompletedLoading(false); }
+  }, []);
+
+  const downloadSOExcel = () => {
+    const p = new URLSearchParams();
+    resolveFilter(soFilters.op_units).forEach(v => p.append('op_unit', v));
+    resolveFilter(soFilters.vendors).forEach(v => p.append('vendor', v));
+    resolveFilter(soFilters.manufacturers).forEach(v => p.append('manufacturer', v));
+    resolveFilter(soFilters.statuses).forEach(v => p.append('status', v));
+    filterValues(soFilters.aging).forEach(v => p.append('aging', v));
+    (soSearchNums||[]).forEach(n => p.append('so_item', n));
+    appendMultiParam(p, 'client', globalClientFilter);
+    appendMultiParam(p, 'global_pic', globalPicFilter);
+    if (pendingPicHighlight) p.append('kpi_pic', pendingPicHighlight);
+    if (soSortOrder) p.append('sort_order', soSortOrder);
+    if (soMarginFilter && soMarginFilter !== 'all') p.append('margin_filter', soMarginFilter);
+    Object.entries(dateFilterParams(soDateFilter)).forEach(([key, value]) => { if (value) p.append(key, value); });
+    downloadBlob(`/api/export/all-so?${p}`, `SO_List_${new Date().toISOString().slice(0,10)}.xlsx`, 'SO List');
+  };
+  const downloadApprovalSOExcel = () => {
+    const rows = sortedApprovalSOData.map((so) => {
+      const poAmount = (Number(so.purchasing_price) || 0) * (Number(so.so_qty) || 0);
+      const margin = (Number(so.sales_amount) || 0) - poAmount;
+      return {
+        'SO Item': so.so_item || '',
+        'Item Name': so.product_name || '',
+        'Status': so.so_status || '',
+        'Operation Unit': so.operation_unit_name || '',
+        'Vendor': so.vendor_name || '',
+        'Qty': Number(so.so_qty) || 0,
+        'Sales Amount': Number(so.sales_amount) || 0,
+        'PO Price': Number(so.purchasing_price) || 0,
+        'PO Amount': poAmount,
+        'Margin': margin,
+        'SO Create Date': so.so_create_date || '',
+        'Possible Delivery': so.delivery_possible_date || '',
+        'Plan Date': so.delivery_plan_date || '',
+        'Remarks': so.remarks || ''
+      };
+    });
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'SO Approval Status');
+    saveAs(new Blob([XLSX.write(wb,{bookType:'xlsx',type:'array'})],
+      {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),
+      `SO_Approval_Status_${new Date().toISOString().slice(0,10)}.xlsx`);
+    addToast('✅ SO Approval Status Excel downloaded successfully', 'success');
+  };
+  const downloadSOTemplate = () => {
+    const p = new URLSearchParams();
+    resolveFilter(soFilters.op_units).forEach(v => p.append('op_unit', v));
+    resolveFilter(soFilters.vendors).forEach(v => p.append('vendor', v));
+    resolveFilter(soFilters.manufacturers).forEach(v => p.append('manufacturer', v));
+    resolveFilter(soFilters.statuses).forEach(v => p.append('status', v));
+    filterValues(soFilters.aging).forEach(v => p.append('aging', v));
+    (soSearchNums||[]).forEach(n => p.append('so_item', n));
+    appendMultiParam(p, 'client', globalClientFilter);
+    appendMultiParam(p, 'global_pic', globalPicFilter);
+    if (pendingPicHighlight) p.append('kpi_pic', pendingPicHighlight);
+    if (soMarginFilter && soMarginFilter !== 'all') p.append('margin_filter', soMarginFilter);
+    Object.entries(dateFilterParams(soDateFilter)).forEach(([key, value]) => { if (value) p.append(key, value); });
+    downloadBlob(`/api/data/so/template?${p}`, `Template_SO_BatchUpload_${new Date().toISOString().slice(0,10)}.xlsx`, 'SO Batch Upload Template');
+  };
+
+  const updateSOCell = async (soId, field, value) => {
+    setEditingCell(null);
+    try {
+      const isNumericId = typeof soId === 'number' || /^\d+$/.test(String(soId));
+      const endpoint = isNumericId ? `/api/data/so/${soId}` : `/api/data/so/by-item/${encodeURIComponent(soId)}`;
+      await api.put(endpoint, { [field]: value });
+      const matches = (s) => (isNumericId ? String(s.id) === String(soId) : String(s.so_item) === String(soId));
+      setAllSOData(prev => prev.map(s => matches(s) ? { ...s, [field]: value } : s));
+      setModal(prev => prev ? { ...prev, data: (prev.data || []).map(s => matches(s) ? { ...s, [field]: value } : s) } : prev);
+    } catch (e) { addToast(`❌ Failed to update: ${e.message}`, 'error'); }
+  };
+
+  const updateItemRegistrationCell = async (itemId, field, value) => {
+    setEditingCell(null);
+    try {
+      await api.put(`/api/item-registration/${itemId}`, { [field]: value });
+      setItemRegData(prev => prev.map(row => row.id === itemId ? { ...row, [field]: value } : row));
+    } catch (e) { addToast(`Failed to update Item Registration: ${e.response?.data?.error || e.message}`, 'error'); }
+  };
+
+  const applyRFQLocalUpdates = (updates) => {
+    const parseNumber = (v) => {
+      const s = String(v ?? '').replace(/[^0-9.-]/g, '');
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    };
+    const formatAmount = (n) => Number.isFinite(n) ? Math.round(n).toLocaleString('en-US') : null;
+    setRfqData(prev => prev.map(row => {
+      const rowUpdates = updates.filter(item => item.row_key === row.row_key);
+      if (!rowUpdates.length) return row;
+      const next = { ...row };
+      rowUpdates.forEach(({ field, value }) => {
+        next[field] = value;
+        if (field === 'product_id') {
+          next.product_id = value;
+          next.status = Boolean(value);
+          next.check = value ? 'complete' : next.check;
+          next.similar_prod_ids = '';
+          next.similar_prod_name = '';
+          next.similar_spec = '';
+          next.similar_mfr_name = '';
+          next.similar_odr_unit = '';
+          next.similar_score = null;
+        }
+      });
+      if (rowUpdates.some(({ field }) => field === 'unit_price_idr' || field === 'qty')) {
+        const qty = parseNumber(next.qty);
+        const unitPrice = parseNumber(next.unit_price_idr);
+        next.amt_idr = qty != null && unitPrice != null ? formatAmount(qty * unitPrice) : null;
+        next.unit_price_missing = unitPrice == null;
+      }
+      return next;
+    }).filter(row => !rfqPicFilter || rfqEditedRowKeys.has(row.row_key) || (row.purchase_pic === rfqPicFilter && row.check === 'open' && row.unit_price_missing && !row.product_id)));
+  };
+
+  const updateRFQCell = async (rowKey, field, value, options = {}) => {
+    const quiet = Boolean(options.quiet);
+    if (!quiet) setEditingCell(null);
+    if (field === 'product_id') setRfqSimilarAction(null);
+    setRfqEditedRowKeys(prev => { const s = new Set(prev); s.add(rowKey); return s; });
+    const previousRows = rfqData;
+    applyRFQLocalUpdates([{ row_key: rowKey, field, value }]);
+    try {
+      const res = await api.put(`/api/rfq/${encodeURIComponent(rowKey)}`, { field, value });
+      if (!quiet && res.data?.sheet_sync && res.data.sheet_sync.synced === false && !res.data.sheet_sync.local_only && !rfqDashboardOnlyFields.has(field)) {
+        addToast(`RFQ updated locally. Sheet sync not active: ${res.data.sheet_sync.reason}`, 'warning');
+      }
+      const parseNumber = (v) => {
+        const s = String(v ?? '').replace(/[^0-9.-]/g, '');
+        const n = Number(s);
+        return Number.isFinite(n) ? n : null;
+      };
+      const formatAmount = (n) => Number.isFinite(n) ? Math.round(n).toLocaleString('en-US') : null;
+      if (field === 'unit_price_idr') {
+        const current = rfqData.find(row => row.row_key === rowKey);
+        const oldMissing = current?.unit_price_missing;
+        const newMissing = parseNumber(value) == null;
+        const pic = current?.purchase_pic;
+        if (pic && current?.check === 'open' && !current?.product_id && oldMissing !== newMissing) {
+          setRfqPicKpis(prev => {
+            const next = prev.map(row => row.pic === pic ? { ...row, count: Math.max(0, (Number(row.count) || 0) + (newMissing ? 1 : -1)) } : row)
+              .filter(row => Number(row.count) > 0);
+            if (newMissing && !next.some(row => row.pic === pic)) next.push({ pic, count: 1 });
+            return next.sort((a, b) => (Number(b.count) || 0) - (Number(a.count) || 0) || String(a.pic).localeCompare(String(b.pic)));
+          });
+        }
+      }
+      if (field === 'product_id') {
+        const current = rfqData.find(row => row.row_key === rowKey);
+        if (value && current?.check === 'open' && current?.unit_price_missing && !current?.product_id && current?.purchase_pic) {
+          setRfqPicKpis(prev => prev.map(kpi => kpi.pic === current.purchase_pic ? { ...kpi, count: Math.max(0, (Number(kpi.count) || 0) - 1) } : kpi).filter(kpi => Number(kpi.count) > 0));
+        }
+      }
+      setRfqData(prev => prev.map(row => {
+        if (row.row_key !== rowKey) return row;
+        const next = { ...row, [field]: value };
+        if (field === 'product_id') {
+          next.product_id = value;
+          next.status = Boolean(value);
+          next.check = value ? 'complete' : next.check;
+          next.similar_prod_ids = '';
+          next.similar_prod_name = '';
+          next.similar_spec = '';
+          next.similar_mfr_name = '';
+          next.similar_odr_unit = '';
+          next.similar_score = null;
+        }
+        if (field === 'unit_price_idr' || field === 'qty') {
+          const qty = parseNumber(next.qty);
+          const unitPrice = parseNumber(next.unit_price_idr);
+          next.amt_idr = qty != null && unitPrice != null ? formatAmount(qty * unitPrice) : null;
+          if (field === 'unit_price_idr') next.unit_price_missing = unitPrice == null;
+        }
+        return next;
+      }).filter(row => !rfqPicFilter || rfqEditedRowKeys.has(row.row_key) || (row.purchase_pic === rfqPicFilter && row.check === 'open' && row.unit_price_missing && !row.product_id)));
+      return true;
+    } catch (e) {
+      setRfqData(previousRows);
+      if (!quiet) addToast(`Failed to update RFQ: ${e.response?.data?.error || e.message}`, 'error');
+      return false;
+    }
+  };
+
+  const updateRFQCellsBatch = async (updates) => {
+    const cleanUpdates = (updates || []).filter(item => item?.row_key && item?.field);
+    if (!cleanUpdates.length) return false;
+    setRfqEditedRowKeys(prev => { const s = new Set(prev); cleanUpdates.forEach(u => s.add(u.row_key)); return s; });
+    const previousRows = rfqData;
+    applyRFQLocalUpdates(cleanUpdates);
+    try {
+      const res = await api.put('/api/rfq/batch-cells', { updates: cleanUpdates });
+      const onlyDashboardOnly = cleanUpdates.every(item => rfqDashboardOnlyFields.has(item.field));
+      if (res.data?.sheet_sync && res.data.sheet_sync.synced === false && !res.data.sheet_sync.local_only && !onlyDashboardOnly) {
+        addToast(`RFQ batch updated locally. Sheet sync not active: ${res.data.sheet_sync.reason}`, 'warning');
+      }
+      if (res.data?.skipped?.length) {
+        addToast(`RFQ batch skipped ${res.data.skipped.length} cells`, 'warning');
+      }
+      return true;
+    } catch (e) {
+      setRfqData(previousRows);
+      addToast(`Failed to update RFQ batch: ${e.response?.data?.error || e.message}`, 'error');
+      return false;
+    }
+  };
+
+  const openModal = async (title, endpointOrData) => {
+    if (Array.isArray(endpointOrData)) { setModal({ title, data: endpointOrData }); return; }
+    try {
+      const res = await api.get(endpointOrData);
+      const detailRows = Array.isArray(res.data) ? res.data.filter(row => row && typeof row === 'object') : [];
+      setModal({ title, data: detailRows });
+    } catch (e) { addToast(`❌ Failed to load details: ${e.message}`, 'error'); }
+  };
+
+  const toggleAgingFilter = (label) => {
+    setSoFilters(f => {
+      const aging = f.aging.includes(label) ? f.aging.filter(a=>a!==label) : [...f.aging, label];
+      return {...f, aging};
+    });
+  };
+
+  const openPendingDeliveryWithAging = (label) => {
+    const aging = soFilters.aging.includes(label) ? soFilters.aging.filter(a => a !== label) : [...soFilters.aging, label];
+    const next = { ...soFilters, aging };
+    setSoFilters(next);
+    setSoPage(1);
+    setActivePage('all-so');
+    window.scrollTo({ top: 0 });
+  };
+
+  const sortedApprovalSOData = [...approvalSOData]
+    .filter((so) => {
+      if (approvalFilters.op_units.length && !approvalFilters.op_units.includes(so.operation_unit_name)) return false;
+      if (approvalFilters.statuses.length && !approvalFilters.statuses.includes(so.so_status)) return false;
+      if (approvalSearchNums.length && !approvalSearchNums.includes(so.so_item)) return false;
+      if (approvalFilters.aging.length) {
+        const age = so.so_create_date ? Math.floor((new Date() - new Date(so.so_create_date)) / (1000 * 60 * 60 * 24)) : null;
+        const label = age === null ? 'Unknown' : age <= 30 ? '0-30 days' : age <= 60 ? '31-60 days' : age <= 90 ? '61-90 days' : '>90 days';
+        if (!approvalFilters.aging.includes(label)) return false;
+      }
+      return true;
     })
+    .sort((a, b) => {
+      const da = a.so_create_date ? new Date(a.so_create_date).getTime() : 0;
+      const db = b.so_create_date ? new Date(b.so_create_date).getTime() : 0;
+      return da - db;
+    });
+  const approvalSOTotalAmount = sortedApprovalSOData.reduce((sum, so) => sum + Number(so.sales_amount || 0), 0);
+  const approvalTotalPages = Math.max(1, Math.ceil(sortedApprovalSOData.length / approvalPerPage));
+  const approvalRows = sortedApprovalSOData.slice((approvalPage-1)*approvalPerPage, approvalPage*approvalPerPage);
 
+  const sortedSOData = [...allSOData].sort((a, b) => {
+    const da = a.so_create_date ? new Date(a.so_create_date).getTime() : 0;
+    const db = b.so_create_date ? new Date(b.so_create_date).getTime() : 0;
+    return soSortOrder === 'newest' ? db - da : da - db;
+  });
+  const soTotalPages = Math.max(1, Math.ceil(soTotal / soPerPage));
+  const itemRegTotalPages = Math.max(1, Math.ceil(itemRegTotal / itemRegPerPage));
 
-if __name__ == '__main__':
-    load_similarity_cache()
-    warm_dashboard_stats_cache_async()
-    warm_completed_summary_cache_async()
-    warm_rfq_dashboard_cache_async()
-    print("Backend: http://127.0.0.1:5001")
-    app.run(debug=True, host='0.0.0.0', port=5001)
+  const card  = darkMode ? 'bg-gray-800 border border-gray-700 shadow-sm' : 'bg-white border border-gray-200/80 shadow-[0_8px_24px_rgba(15,23,42,0.05)]';
+  const txt   = darkMode ? 'text-white' : 'text-[#1f2937]';
+  const txt2  = darkMode ? 'text-gray-400' : 'text-[#55585d]';
+  const tblHd = darkMode ? 'bg-gray-800/60' : 'bg-slate-50';
+  const tblDv = darkMode ? 'divide-gray-700' : 'divide-gray-100';
+  const trHov = darkMode ? 'hover:bg-gray-700' : 'hover:bg-[#f7f7f5]';
+  const kpiValue = darkMode ? 'text-gray-100' : 'text-[#334155]';
+  const neutralIcon = darkMode ? 'bg-gray-700 text-gray-200' : 'bg-slate-100 text-slate-600';
+
+  // ══════════════════════════════════════════════════════════════
+  // RENDER COMPLETED TRANSACTIONS PAGE
+  // ══════════════════════════════════════════════════════════════
+  const renderCompleted = () => {
+    const d = completedData;
+    const CPIE = ['#10B981','#EF4444','#9CA3AF'];
+    const fmtM = (v) => v >= 1e9 ? `${(v/1e9).toFixed(1)}B` : v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `${(v/1e3).toFixed(0)}K` : String(Math.round(v));
+    const mc = (m) => m > 0 ? 'text-green-600' : m < 0 ? 'text-red-600' : 'text-gray-400';
+    const mcBg = (m) => m < 0 ? (darkMode?'bg-red-900/20':'bg-red-50') : (darkMode?'bg-gray-700':'bg-gray-50');
+    const monthLabel = (m) => { try { const [y,mo] = m.split('-'); return format(new Date(parseInt(y), parseInt(mo)-1, 1), 'MMM yy'); } catch { return m; } };
+    const renderPriceChange = (value, pct, trend) => {
+      const isUp = trend === 'up';
+      const isDown = trend === 'down';
+      const color = isUp ? 'text-green-600' : isDown ? 'text-red-600' : txt2;
+      const icon = isUp ? <TrendingUp className="w-4 h-4"/> : isDown ? <TrendingDown className="w-4 h-4"/> : <Minus className="w-4 h-4"/>;
+      if (value == null) {
+        return <div className={`text-right font-semibold ${txt2}`}>No data</div>;
+      }
+      return (
+        <div className={`text-right font-bold ${color}`}>
+          <div className="flex items-center justify-end gap-1">
+            {icon}
+            <span>{fmtCurShort(Math.abs(value))}</span>
+          </div>
+          <div className="text-[11px] font-semibold">
+            {pct == null ? '0%' : `${pct > 0 ? '+' : ''}${pct}%`}
+          </div>
+        </div>
+      );
+    };
+
+    if (completedLoading || !completedLoaded) return (
+      <div className="flex items-center justify-center h-64">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"/>
+          <p className={`text-sm ${txt2}`}>Loading completed transactions...</p>
+          <p className={`text-xs ${txt2} text-center max-w-sm`}>
+            Preparing cached USD to IDR values. Existing historical data will be reused, only new non-IDR rows are converted.
+          </p>
+        </div>
+      </div>
+    );
+
+    if (!d) return (
+      <div className={`flex flex-col items-center justify-center h-64 rounded-2xl ${card}`}>
+        <Coins className="w-16 h-16 text-gray-300 mb-4"/>
+        <p className={`text-lg font-semibold ${txt}`}>No completed data yet</p>
+        <p className={`text-sm ${txt2} mt-1`}>Upload SO data to see completed transactions</p>
+      </div>
+    );
+
+    const totalCompleted = d.margin_distribution.positive + d.margin_distribution.negative + d.margin_distribution.zero;
+    const marginPieData = [
+      { name: 'Positive', value: d.margin_distribution.positive },
+      { name: 'Negative', value: d.margin_distribution.negative },
+      { name: 'Zero / No Data', value: d.margin_distribution.zero },
+    ].filter(x => x.value > 0);
+
+    return (
+      <div className="space-y-6">
+
+        {/* ── Date Range Filter ───────────────────────────────── */}
+        <DateRangeFilter
+          darkMode={darkMode} txt={txt} txt2={txt2} card={card}
+          value={globalDateFilter}
+          label="Filter SO Create Date"
+          onFilter={(f) => {
+            setGlobalDateFilter(f);
+            setCompletedYear('all'); fetchCompletedData('all', f);
+          }}
+        />
+
+        {/* ── KPI Cards ───────────────────────────────────────── */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          {[
+            { label:'Completed Transactions', value: fmtNum(d.total_count),
+              icon:<CheckCircle className="w-6 h-6"/>, bg: neutralIcon, color:kpiValue },
+            { label:'Total Sales Amount', value: fmtCurShort(d.total_sales), sub: fmtCur(d.total_sales),
+              icon:<Wallet className="w-6 h-6"/>, bg: neutralIcon, color:kpiValue },
+            { label:'Total Purchase Amount', value: fmtCurShort(d.total_purchase), sub: fmtCur(d.total_purchase),
+              icon:<Coins className="w-6 h-6"/>, bg: neutralIcon, color:kpiValue },
+            { label:'Total Margin', value: fmtCurShort(d.total_margin), sub: fmtCur(d.total_margin),
+              icon: d.total_margin>=0?<TrendingUp className="w-6 h-6"/>:<TrendingDown className="w-6 h-6"/>,
+              bg: neutralIcon, color:kpiValue },
+          ].map((k,i)=>(
+            <div key={i} className={`p-5 rounded-2xl transition-all ${card}`}>
+              <div className="flex justify-between items-start">
+                <div>
+                  <p className={`text-sm font-medium ${txt2}`}>{k.label}</p>
+                  <h3 className={`text-2xl font-bold mt-1 ${k.color}`}>{k.value}</h3>
+                  {k.sub && <p className={`text-xs mt-0.5 ${txt2}`}>{k.sub}</p>}
+                </div>
+                <div className={`p-3 ${k.bg} rounded-xl`}>{k.icon}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* ── Monthly Trend: Combined Amount + Transaction Count ── */}
+        <div className={`p-5 rounded-2xl shadow ${card}`}>
+          <h3 className={`text-base font-bold mb-1 ${txt}`}>Monthly Trend — Delivery Completed</h3>
+          <p className={`text-xs mb-4 ${txt2}`}>Sales Amount, Purchase Amount (bar) & Transaction Count (line)</p>
+          <ResponsiveContainer width="100%" height={320}>
+            <ComposedChart data={(d.monthly_trend||[]).map(m => ({
+              ...m,
+              monthLabel: (() => { try { const [y,mo] = m.month.split('-'); return format(new Date(parseInt(y), parseInt(mo)-1, 1), 'MMM yy'); } catch { return m.month; } })()
+            }))} barGap={2}>
+              <defs>
+                <linearGradient id="cgSales" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#1D4ED8" stopOpacity={0.92}/><stop offset="95%" stopColor="#1D4ED8" stopOpacity={0.58}/>
+                </linearGradient>
+                <linearGradient id="cgPurchase" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#93C5FD" stopOpacity={0.9}/><stop offset="95%" stopColor="#BFDBFE" stopOpacity={0.62}/>
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke={darkMode?'#374151':'#F3F4F6'}/>
+              <XAxis dataKey="monthLabel" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10}/>
+              <YAxis yAxisId="amt" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10} tickFormatter={fmtM}/>
+              <YAxis yAxisId="cnt" orientation="right" stroke="#64748B" fontSize={10}/>
+              <Tooltip
+                formatter={(v, n) => n === 'Transactions' ? [fmtNum(v), n] : [fmtCur(v), n]}
+                contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}
+                labelStyle={{color:darkMode?'#F3F4F6':'#111827'}}
+                itemStyle={{color:darkMode?'#F3F4F6':'#111827'}}/>
+              <Legend wrapperStyle={{fontSize:12,color:darkMode?'#F3F4F6':'#111827'}} iconType="rect"/>
+              <Bar yAxisId="amt" dataKey="sales_amount" name="Sales Amount" fill="url(#cgSales)" radius={[4,4,0,0]} isAnimationActive={false}/>
+              <Bar yAxisId="amt" dataKey="purchase_amount" name="Purchase Amount" fill="url(#cgPurchase)" radius={[4,4,0,0]} isAnimationActive={false}/>
+              <Line yAxisId="cnt" type="monotone" dataKey="count" name="Transactions" stroke="#64748B" strokeWidth={3} dot={{r:3,fill:'#64748B'}} activeDot={{r:5, fill:'#64748B'}} z={10} isAnimationActive={false}/>
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+
+        {/* ── Top 5 Vendors  +  Margin Pie ────────────────────── */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+          {/* Top 5 Vendors */}
+          <div className={`p-5 rounded-2xl shadow ${card}`}>
+            <h3 className={`text-base font-bold mb-4 ${txt} flex items-center gap-2`}>
+              <Award className="w-5 h-5 text-blue-500"/> Top 5 Vendors — Completed Transactions
+            </h3>
+            <div className="space-y-4">
+              {(d.top_vendors||[]).map((v,i)=>{
+                const maxAmt = d.top_vendors[0]?.sales_amount || 1;
+                const pct = Math.round(v.sales_amount / maxAmt * 100);
+                const rankColors = ['bg-blue-600 text-white','bg-slate-200 text-slate-700','bg-teal-100 text-teal-700','bg-blue-100 text-blue-700','bg-slate-100 text-slate-600'];
+                return (
+                  <div key={i}>
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${rankColors[i]||'bg-gray-100 text-gray-700'}`}>{i+1}</span>
+                        <span className={`text-sm font-semibold truncate ${txt}`} title={v.vendor}>{v.vendor}</span>
+                      </div>
+                      <span className="text-xs font-bold text-blue-600 ml-2 flex-shrink-0">{fmtCurShort(v.sales_amount)}</span>
+                    </div>
+                    <div className={`w-full h-2 rounded-full ${darkMode?'bg-gray-700':'bg-gray-100'}`}>
+                      <div className="h-2 rounded-full bg-gradient-to-r from-blue-600 to-blue-400" style={{width:`${pct}%`}}/>
+                    </div>
+                    <div className="flex justify-between text-xs mt-0.5">
+                      <span className={txt2}>{fmtNum(v.count)} transactions · Purchase {fmtCurShort(v.purchase_amount)}</span>
+                      <span className={mc(v.margin)}>Margin: {fmtCurShort(v.margin)}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Margin Pie */}
+          <div className={`p-5 rounded-2xl shadow ${card}`}>
+            <h3 className={`text-base font-bold mb-3 ${txt} flex items-center gap-2`}>
+              <BarChart3 className="w-5 h-5 text-green-500"/> Margin Distribution — PO Count
+            </h3>
+            <div className="flex flex-col gap-4">
+              {/* Top boxes (Positive / Negative / Zero) */}
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { cat:'positive', label:'Positive', color:'text-green-600', bg: darkMode?'bg-green-900/30 border-green-700':'bg-green-50 border-green-200', count: d.margin_distribution.positive },
+                  { cat:'negative', label:'Negative', color:'text-red-600', bg: darkMode?'bg-red-900/30 border-red-700':'bg-red-50 border-red-200', count: d.margin_distribution.negative },
+                  { cat:'zero', label:'Zero / No Data', color:'text-gray-500', bg: darkMode?'bg-gray-700 border-gray-600':'bg-gray-50 border-gray-200', count: d.margin_distribution.zero },
+                ].map(({cat, label, color, bg, count}) => (
+                  <button key={cat} onClick={async () => {
+                    try {
+                      const params = new URLSearchParams({category: cat});
+                      Object.entries(dateFilterParams(completedDateFilter)).forEach(([key, value]) => { if (value) params.append(key, value); });
+                      appendMultiParam(params, 'client', globalClientFilter);
+                      appendMultiParam(params, 'pic', globalPicFilter);
+                      const res = await api.get(`/api/completed/margin-detail?${params}`);
+                      setMarginDetailModal({ category: label, data: Array.isArray(res.data) ? res.data : [] });
+                    } catch(e) { addToast(`Failed to load detail: ${e.message}`, 'error'); }
+                  }}
+                    className={`text-left p-3 rounded-xl border cursor-pointer transition-all hover:shadow-md ${bg}`}>
+                    <p className={`text-xs font-bold ${color} mb-1`}>{label}</p>
+                    <p className={`text-lg font-bold ${color}`}>{fmtNum(count)} <span className="text-xs font-normal">PO</span></p>
+                    <p className={`text-xs ${txt2} mt-0.5`}>{totalCompleted ? Math.round(count/totalCompleted*100) : 0}% of total</p>
+                    <p className={`text-xs text-blue-500 font-semibold mt-1`}>Click for details →</p>
+                  </button>
+                ))}
+              </div>
+              {/* Pie chart */}
+              <div className="w-full">
+                <ResponsiveContainer width="100%" height={220}>
+                  <PieChart>
+                    <Pie data={marginPieData} cx="50%" cy="50%" innerRadius={55} outerRadius={88} isAnimationActive={false}
+                      dataKey="value" labelLine={false} label={renderPctLabel}>
+                      {marginPieData.map((_,i)=><Cell key={i} fill={CPIE[i]}/>)}
+                    </Pie>
+                    <Tooltip formatter={(v,n)=>[`${fmtNum(v)} PO (${totalCompleted ? Math.round(v/totalCompleted*100) : 0}%)`, n]}
+                      contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ── Price Tracking ───────────────────────────────────── */}
+        <div className={`p-5 rounded-2xl shadow ${card}`}>
+          <div className="flex flex-wrap items-start justify-between gap-2 mb-4">
+            <div className="min-w-0 pr-3">
+              <h3 className={`text-base font-bold ${txt} flex items-center gap-2`}>
+                <Package className="w-5 h-5 text-slate-600"/> Price Tracking by Month — Top 20 Items
+              </h3>
+              <p className={`text-xs mt-1 ${txt2}`}>Monthly unit price trend from completed delivery transactions.</p>
+            </div>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className={tblHd}>
+                  {['#','Item / Product','Specification','Product ID','Order Freq','Total Purchase Amount','Previous Price','Last Price','Trend','MoM Price Change','YoY Price Change'].map(h=>(
+                    <th key={h} className={`px-3 py-2 text-center font-bold ${darkMode?'text-blue-300':'text-blue-700'}`}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className={`divide-y ${tblDv}`}>
+                {(d.price_tracking||d.top_items||[]).map((item,i)=>{
+                  const isUp = item.trend === 'up';
+                  const isDown = item.trend === 'down';
+                  const trendData = (item.monthly_prices||[]).map(p => ({ ...p, monthLabel: monthLabel(p.month) }));
+                  return (
+                    <tr key={i} className={trHov}>
+                      <td className={`px-3 py-2 font-bold ${txt2}`}>{i+1}</td>
+                      <td className={`px-3 py-2 font-medium ${txt} max-w-xs truncate`} title={item.item}>{item.item}</td>
+                      <td className={`px-3 py-2 ${txt2} max-w-xs truncate`} title={item.specification||''}>{item.specification||'—'}</td>
+                      <td className={`px-3 py-2 ${txt2} font-mono whitespace-nowrap`}>{item.product_id||'—'}</td>
+                      <td className={`px-3 py-2 ${txt2}`}>{fmtNum(item.count)}</td>
+                      <td className={`px-3 py-2 font-semibold whitespace-nowrap ${kpiValue}`}>{fmtCurShort(item.purchase_amount)}</td>
+                      <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{item.previous_price ? fmtCurShort(item.previous_price) : '—'}</td>
+                      <td className="px-3 py-2 text-blue-600 font-semibold whitespace-nowrap">{item.current_price ? fmtCurShort(item.current_price) : '—'}</td>
+                      <td className="px-3 py-2 min-w-[130px]">
+                        <div className="w-28 h-10 mx-auto">
+                          {trendData.length > 1 ? (
+                            <ResponsiveContainer width="100%" height="100%">
+                              <LineChart data={trendData}>
+                                <XAxis dataKey="monthLabel" hide />
+                                <Tooltip
+                                  formatter={(v)=>[fmtCurShort(v), 'Price']}
+                                  contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}
+                                />
+                                <Line type="monotone" dataKey="price" stroke={isDown?'#EF4444':'#10B981'} strokeWidth={2.5} dot={false} isAnimationActive={false}/>
+                              </LineChart>
+                            </ResponsiveContainer>
+                          ) : <div className={`h-full flex items-center justify-center ${txt2}`}>—</div>}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 min-w-[120px]">{renderPriceChange(item.change_value, item.change_pct, item.trend)}</td>
+                      <td className="px-3 py-2 min-w-[120px]">{renderPriceChange(item.yoy_change_value, item.yoy_change_pct, item.yoy_trend)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* ── Worst Margin Vendors  +  Worst 10 Transactions ── */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+          {/* Vendors ranked by most negative margin */}
+          <div className={`p-5 rounded-2xl shadow ${card}`}>
+            <h3 className={`text-base font-bold mb-4 ${txt} flex items-center gap-2`}>
+              <TrendingDown className="w-5 h-5 text-red-500"/> Vendors — Largest Negative Margin
+            </h3>
+            {(d.worst_margin_vendors||[]).length === 0
+              ? <div className="flex flex-col items-center justify-center py-10">
+                  <CheckCircle className="w-10 h-10 text-green-400 mb-2"/>
+                  <p className={`text-sm font-semibold ${txt2}`}>No vendors with negative margin 🎉</p>
+                </div>
+              : <div className="space-y-2 overflow-y-auto max-h-80">
+                  {d.worst_margin_vendors.map((v,i)=>{
+                    const maxAbs = Math.abs(d.worst_margin_vendors[0]?.margin || 1);
+                    const barPct = Math.round(Math.abs(v.margin) / maxAbs * 100);
+                    return (
+                      <button type="button" key={i} onClick={() => openNegativeVendorDetail(v.vendor)} className={`block w-full text-left p-3 rounded-xl ${mcBg(v.margin)} transition-all hover:shadow-md hover:-translate-y-0.5`}>
+                        <div className="flex items-center justify-between mb-1">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className={`text-xs font-bold flex-shrink-0 ${darkMode?'text-gray-400':'text-gray-500'}`}>#{i+1}</span>
+                            <span className={`text-sm font-semibold truncate ${txt}`} title={v.vendor}>{v.vendor}</span>
+                          </div>
+                          <span className="text-sm font-bold text-red-600 ml-2 flex-shrink-0">{fmtCurShort(v.margin)}</span>
+                        </div>
+                        <div className={`w-full h-1.5 rounded-full ${darkMode?'bg-gray-600':'bg-red-100'} mb-1`}>
+                          <div className="h-1.5 rounded-full bg-red-500" style={{width:`${barPct}%`}}/>
+                        </div>
+                        <div className="flex justify-between text-xs">
+                          <span className={txt2}>{fmtNum(v.count)} negative txn{v.count!==1?'s':''}</span>
+                          <span className={txt2}>Sales: {fmtCurShort(v.total_sales||0)} · PO: {fmtCurShort(v.total_purchase||0)}</span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+            }
+          </div>
+
+          {/* Top 30 worst margin transactions (scrollable, table size unchanged) */}
+          <div className={`p-5 rounded-2xl shadow ${card}`}>
+            <h3 className={`text-base font-bold mb-4 ${txt} flex items-center gap-2`}>
+              <TrendingDown className="w-5 h-5 text-red-500"/> Top 30 Transactions — Largest Negative Margin
+            </h3>
+            {(d.worst_margin_transactions||[]).length === 0
+              ? <div className="flex flex-col items-center justify-center py-10">
+                  <CheckCircle className="w-10 h-10 text-green-400 mb-2"/>
+                  <p className={`text-sm font-semibold ${txt2}`}>No negative margin transactions 🎉</p>
+                </div>
+              : <div className="overflow-x-auto overflow-y-auto max-h-80">
+                  <table className="w-full text-xs">
+                    <thead className={`sticky top-0 z-10 ${darkMode?'bg-gray-800':'bg-white'}`}>
+                      <tr className={tblHd}>
+                        {['#','SO Item','Product','Vendor','Sales','Purchase','Margin','%','Txns','Last Date'].map(h=>(
+                          <th key={h} className={`px-2 py-2 text-center font-bold ${darkMode?'text-blue-300':'text-blue-700'}`}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className={`divide-y ${tblDv}`}>
+                      {d.worst_margin_transactions.map((t,i)=>(
+                        <tr key={i} className={`${trHov} ${i===0?darkMode?'bg-red-900/20':'bg-red-50':''}`}>
+                          <td className={`px-2 py-2 font-bold text-red-600`}>{i+1}</td>
+                          <td className="px-2 py-2">
+                            <p className="font-semibold text-blue-600 whitespace-nowrap">{t.so_item||'-'}</p>
+                          </td>
+                          <td className="px-2 py-2">
+                            <p className={`truncate max-w-[120px] ${txt}`} title={t.product}>{t.product}</p>
+                          </td>
+                          <td className={`px-2 py-2 ${txt} truncate max-w-[90px]`} title={t.vendor}>{t.vendor}</td>
+                          <td className="px-2 py-2 text-blue-600 whitespace-nowrap">{fmtCurShort(t.sales_amount)}</td>
+                          <td className={`px-2 py-2 whitespace-nowrap ${kpiValue}`}>{fmtCurShort(t.purchase_amount)}</td>
+                          <td className="px-2 py-2 font-bold text-red-600 whitespace-nowrap">{fmtCurShort(t.margin)}</td>
+                          <td className="px-2 py-2 font-semibold text-red-500 whitespace-nowrap">{t.margin_pct != null ? `${t.margin_pct}%` : '—'}</td>
+                          <td className={`px-2 py-2 text-center ${txt2}`}>{fmtNum(t.count||1)}</td>
+                          <td className={`px-2 py-2 ${txt2} whitespace-nowrap`}>{t.date ? fmtDate(t.date) : '-'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+            }
+          </div>
+        </div>
+
+      </div>
+    );
+  };
+
+  const fmtDateRange = (range) => {
+    if (!range?.min) return 'No data available';
+    return `${fmtDate(range.min)} — ${fmtDate(range.max)}`;
+  };
+
+  // ══════════════════════════════════════════════════════════════
+  // RENDER DASHBOARD
+  // ══════════════════════════════════════════════════════════════
+  const globalSlicerPages = new Set(['dashboard', 'all-so', 'item-registration']);
+  const renderGlobalSlicer = () => {
+    if (!globalSlicerPages.has(activePage)) return null;
+    const showDateFilter = true;
+    const slicerClientOptions = activePage === 'item-registration' ? (itemRegOptions.clients || []) : (dashboardFilterOptions.clients || []);
+    const slicerPicOptions = activePage === 'item-registration' ? (itemRegOptions.pics || []) : (dashboardFilterOptions.pics || []);
+    return (
+      <div className={showDateFilter ? "mb-5 flex flex-col gap-3 xl:flex-row xl:items-start" : "mb-5 flex justify-end"}>
+        {showDateFilter && (
+          <DateRangeFilter
+            darkMode={darkMode}
+            txt={txt}
+            txt2={txt2}
+            card={card}
+            value={globalDateFilter}
+            label="Filter SO Create Date"
+            compact
+            onFilter={(f) => { setGlobalDateFilter(f); if (activePage === 'item-registration') setItemRegPage(1); }}
+          />
+        )}
+        <div className={`flex min-h-[64px] w-full flex-col gap-3 px-5 py-3 rounded-xl sm:flex-row sm:flex-wrap sm:items-end ${card} shadow xl:flex-nowrap xl:w-auto xl:shrink-0 xl:min-w-[440px] xl:max-w-[560px]`}>
+          <div className="min-w-0 flex-1">
+            <label className={`mb-1 block text-xs font-semibold ${txt}`}>Client Nm.</label>
+            <MultiSelect label="Client Nm." options={slicerClientOptions} selected={globalClientFilter} onChange={setGlobalClientFilter} darkMode={darkMode} txt2={txt2} hideLabel />
+          </div>
+          <div className="min-w-0 flex-1">
+            <label className={`mb-1 block text-xs font-semibold ${txt}`}>PIC Name</label>
+            <MultiSelect label="PIC Name" options={slicerPicOptions} selected={globalPicFilter} onChange={setGlobalPicFilter} darkMode={darkMode} txt2={txt2} hideLabel />
+          </div>
+          <button
+            type="button"
+            onClick={() => { setGlobalDateFilter({ mode: 'all' }); setGlobalClientFilter([]); setGlobalPicFilter([]); }}
+            className={`h-10 w-full shrink-0 px-4 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap sm:w-20 ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const renderDashboardOverview = () => {
+    const d = completedData || {};
+    const marginD = dashboardMarginData || {};
+    const summaryLoading = completedLoading || !completedLoaded;
+    
+    // Create month buckets from the global SO Create Date filter. KPI remains
+    // all-data when filter is All; monthly chart/table defaults to current year.
+    const currentYear = new Date().getFullYear();
+    const monthlyDataMap = {};
+    (marginD.monthly_trend || []).forEach(m => {
+      if (m.month) monthlyDataMap[m.month] = m;
+    });
+
+    const parseLocalISO = (iso) => {
+      const [year, month, day] = String(iso || '').split('-').map(Number);
+      return Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)
+        ? new Date(year, month - 1, day)
+        : null;
+    };
+    const monthWindow = (() => {
+      const bounds = dateFilterParams(globalDateFilter);
+      const fallbackStart = new Date(currentYear, 0, 1);
+      const fallbackEnd = new Date(currentYear, 11, 1);
+      let start = parseLocalISO(bounds.date_from) || parseLocalISO(bounds.date_to) || fallbackStart;
+      let end = parseLocalISO(bounds.date_to) || parseLocalISO(bounds.date_from) || fallbackEnd;
+      if (start > end) [start, end] = [end, start];
+      start = new Date(start.getFullYear(), start.getMonth(), 1);
+      end = new Date(end.getFullYear(), end.getMonth(), 1);
+      const months = [];
+      const cursor = new Date(start);
+      while (cursor <= end && months.length < 36) {
+        months.push({ year: cursor.getFullYear(), monthIndex: cursor.getMonth() });
+        cursor.setMonth(cursor.getMonth() + 1);
+      }
+      const sameYear = start.getFullYear() === end.getFullYear();
+      const label = sameYear
+        ? String(start.getFullYear())
+        : `${format(start, 'MMM yyyy')} - ${format(end, 'MMM yyyy')}`;
+      return { months, sameYear, label };
+    })();
+    
+    const monthlyCompleted = monthWindow.months.map(({ year, monthIndex }) => {
+      const monthKey = `${year}-${String(monthIndex + 1).padStart(2, '0')}`;
+      const monthName = format(new Date(year, monthIndex, 1), monthWindow.sameYear ? 'MMMM' : 'MMM yy');
+      const existing = monthlyDataMap[monthKey];
+      
+      if (existing) {
+        const margin = (existing.sales_amount || 0) - (existing.purchase_amount || 0);
+        return {
+          ...existing,
+          monthLabel: monthName,
+          margin,
+          margin_pct: existing.sales_amount ? margin / existing.sales_amount * 100 : null
+        };
+      }
+      
+      return {
+        month: monthKey,
+        monthLabel: monthName,
+        sales_amount: null,
+        purchase_amount: null,
+        margin: null,
+        margin_pct: null,
+        count: null
+      };
+    });
+    const marginPct = d.total_sales ? ((d.total_margin || 0) / d.total_sales * 100) : null;
+    const fmtM = (v) => v >= 1e9 ? `${(v/1e9).toFixed(1)}B` : v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `${(v/1e3).toFixed(0)}K` : String(Math.round(v || 0));
+    const purchaseYoyYears = (marginD.purchase_yoy_years && marginD.purchase_yoy_years.length)
+      ? marginD.purchase_yoy_years
+      : [currentYear - 1, currentYear - 2];
+    const purchaseYoyData = (marginD.purchase_yoy_trend && marginD.purchase_yoy_trend.length)
+      ? marginD.purchase_yoy_trend
+      : Array.from({ length: 12 }, (_, i) => ({
+          month: i + 1,
+          month_label: format(new Date(currentYear, i, 1), 'MMMM'),
+          ...purchaseYoyYears.reduce((acc, year) => ({ ...acc, [`purchase_${year}`]: 0 }), {})
+        }));
+    const activePurchaseYoyYears = purchaseYoyYears.filter(year =>
+      purchaseYoyData.some(row => Number(row[`purchase_${year}`] || 0) > 0)
+    );
+    const completedTrendData = monthlyCompleted.map((m) => {
+      const monthNum = Number(String(m.month || '').slice(5, 7));
+      const yoyRow = purchaseYoyData.find(row => Number(row.month) === monthNum) || {};
+      const yoyValues = purchaseYoyYears.reduce((acc, year) => {
+        const value = Number(yoyRow[`purchase_${year}`] || 0);
+        acc[`purchase_${year}`] = value > 0 ? value : null;
+        return acc;
+      }, {});
+      return { ...m, ...yoyValues };
+    });
+    const purchaseYoyColors = ['#14B8A6', '#94A3B8'];
+    const completedTrendLegendPayload = [
+      { value: 'PO Amount', type: 'rect', color: '#93C5FD', dataKey: 'purchase_amount' },
+      { value: 'Sales Amount', type: 'rect', color: '#2563EB', dataKey: 'sales_amount' },
+      ...activePurchaseYoyYears.map((year, i) => ({
+        value: `PO ${year}`,
+        type: 'line',
+        color: purchaseYoyColors[i % purchaseYoyColors.length],
+        dataKey: `purchase_${year}`,
+      })),
+    ];
+    const sumRows = (rows, key) => (rows || []).reduce((sum, row) => sum + (Number(row?.[key]) || 0), 0);
+    const vendorRows = vendorPurchaseType === 'local'
+      ? (d.top_vendors_local || [])
+      : vendorPurchaseType === 'import'
+      ? (d.top_vendors_import || [])
+      : (d.top_vendors || []);
+    const barList = (rows, labelKey, valueKey, label, color) => (
+      <ResponsiveContainer width="100%" height={260}>
+        <BarChart data={(rows || []).map(r => ({...r, shortLabel: String(r[labelKey] || '-').slice(0, 34)}))} layout="vertical" margin={{top: 8, right: 18, left: 24, bottom: 8}}>
+          <CartesianGrid strokeDasharray="3 3" horizontal={true} stroke={darkMode?'#374151':'#E5E7EB'}/>
+          <XAxis type="number" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={12} tickFormatter={fmtM}/>
+          <YAxis type="category" dataKey="shortLabel" width={220} stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={12} tick={{fontSize: 12, textAnchor: 'end'}} tickMargin={8}/>
+          <Tooltip formatter={(v)=>[fmtCur(v), label]} labelFormatter={(_, payload)=>payload?.[0]?.payload?.[labelKey] || '-'} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
+          <Bar dataKey={valueKey} name={label} fill={color} radius={[0,6,6,0]} isAnimationActive={false}/>
+        </BarChart>
+      </ResponsiveContainer>
+    );
+
+    return (
+      <div className="space-y-5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
+          {[
+            { label:'Total PO', value: summaryLoading ? '...' : fmtNum(d.total_count || 0), sub: summaryLoading ? 'Loading completed records' : 'Delivery Complete records', icon:<FileText className="w-5 h-5"/> },
+            { label:'PO Amount', value: summaryLoading ? '...' : fmtCurShort(d.total_purchase || 0), sub: summaryLoading ? 'Loading completed amount' : fmtCur(d.total_purchase || 0), icon:<Coins className="w-5 h-5"/> },
+            { label:'Sales Amount', value: summaryLoading ? '...' : fmtCurShort(d.total_sales), sub: summaryLoading ? 'Loading completed amount' : fmtCur(d.total_sales), icon:<Wallet className="w-5 h-5"/> },
+            { label:'Margin', value: summaryLoading ? '...' : fmtCurShort(d.total_margin), sub: summaryLoading ? 'Loading margin' : (marginPct == null ? 'Avg margin -' : `Avg margin ${marginPct.toFixed(1)}%`), icon:<TrendingUp className="w-5 h-5"/> },
+            { label:'Total Pending Delivery', value: fmtNum(summaryPendingTotal ?? stats?.total_so_count), sub: 'Pending delivery records', icon:<Clock className="w-5 h-5"/>, goPending:true },
+          ].map((k,i)=>{
+            const Wrapper = k.goPending ? 'button' : 'div';
+            return <Wrapper key={i} type={k.goPending ? 'button' : undefined} onClick={k.goPending ? () => { setActivePage('all-so'); setSoPage(1); window.scrollTo({top:0}); } : undefined} className={`p-5 rounded-2xl text-left ${card} ${k.goPending ? 'cursor-pointer hover:border-blue-300' : ''}`}><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className={`text-sm font-medium ${txt2}`}>{k.label}</p><h3 className={`text-2xl font-bold mt-1 ${kpiValue}`}>{k.value}</h3><p className={`text-xs mt-1 ${txt2}`}>{k.sub}</p></div><div className={`p-2.5 rounded-xl ${neutralIcon}`}>{k.icon}</div></div></Wrapper>;
+          })}
+        </div>
+        {summaryLoading && (
+          <div className={`flex items-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold ${card} ${txt2}`}>
+            <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
+            Loading delivery completed summary...
+          </div>
+        )}
+        <div className={`p-5 rounded-2xl ${card}`}>
+          <h3 className={`text-base font-bold mb-1 ${txt}`}>Monthly Trend Delivery Complete</h3>
+          <p className={`text-xs mb-4 ${txt2}`}>{monthWindow.label} sales and purchase amount, with comparison purchase amount lines.</p>
+          <ResponsiveContainer width="100%" height={320}>
+            <ComposedChart data={completedTrendData} barGap={2} margin={{ top: 8, right: 20, left: 0, bottom: 4 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={darkMode?'#374151':'#E5E7EB'}/>
+              <XAxis dataKey="monthLabel" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10}/>
+              <YAxis stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10} tickFormatter={fmtM}/>
+              <Tooltip formatter={(v,n)=>[fmtCur(v), n]} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
+              <Legend wrapperStyle={{fontSize:12}} payload={completedTrendLegendPayload}/>
+              <Bar dataKey="purchase_amount" name="PO Amount" fill="#93C5FD" radius={[4,4,0,0]} isAnimationActive={false}/>
+              <Bar dataKey="sales_amount" name="Sales Amount" fill="#2563EB" radius={[4,4,0,0]} isAnimationActive={false}/>
+              {activePurchaseYoyYears.map((year, i) => (
+                <Line
+                  key={year}
+                  type="monotone"
+                  dataKey={`purchase_${year}`}
+                  name={`PO ${year}`}
+                  stroke={purchaseYoyColors[i % purchaseYoyColors.length]}
+                  strokeOpacity={0.34}
+                  strokeWidth={1.5}
+                  dot={{ r: 2, fill: purchaseYoyColors[i % purchaseYoyColors.length], opacity: 0.38 }}
+                  activeDot={{ r: 4, opacity: 0.55 }}
+                  isAnimationActive={false}
+                />
+              ))}
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+        <div className={`p-3 rounded-2xl ${card}`}>
+          <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+            <h3 className={`text-sm font-bold ${txt}`}>Gross Margin by Month</h3>
+            <span className={`text-xs font-semibold ${txt2}`}>{monthWindow.label}</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11px] leading-tight">
+              <thead className={tblHd}>
+                <tr>
+                  <th className={`px-2 py-0.5 text-left font-bold ${txt2}`}>Metric</th>
+                  {monthlyCompleted.map((m,i)=><th key={i} className={`px-1.5 py-0.5 text-center font-bold ${txt2}`}>{m.monthLabel}</th>)}
+                </tr>
+              </thead>
+              <tbody className={`divide-y ${tblDv}`}>
+                <tr className={trHov}><td className={`px-2 py-0.5 font-semibold ${txt}`}>Sales Amount</td>{monthlyCompleted.map((m,i)=><td key={i} className={`px-1.5 py-0.5 text-center ${kpiValue}`}>{m.sales_amount != null ? fmtCurShort(m.sales_amount) : '-'}</td>)}</tr>
+                <tr className={trHov}><td className={`px-2 py-0.5 font-semibold ${txt}`}>PO Amount</td>{monthlyCompleted.map((m,i)=><td key={i} className={`px-1.5 py-0.5 text-center ${kpiValue}`}>{m.purchase_amount != null ? fmtCurShort(m.purchase_amount) : '-'}</td>)}</tr>
+                <tr className={trHov}><td className={`px-2 py-0.5 font-semibold ${txt}`}>Gross Margin</td>{monthlyCompleted.map((m,i)=><td key={i} className={`px-1.5 py-0.5 text-center font-semibold ${m.margin != null ? (m.margin < 0 ? 'text-red-600' : 'text-green-600') : txt2}`}>{m.margin != null ? fmtCurShort(m.margin) : '-'}</td>)}</tr>
+                <tr className={trHov}><td className={`px-2 py-0.5 font-semibold ${txt}`}>Gross Margin %</td>{monthlyCompleted.map((m,i)=><td key={i} className={`px-1.5 py-0.5 text-center font-semibold ${m.margin_pct != null ? (m.margin < 0 ? 'text-red-600' : 'text-green-600') : txt2}`}>{m.margin_pct != null ? `${m.margin_pct.toFixed(1)}%` : '-'}</td>)}</tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+          <div className={`p-5 rounded-2xl ${card}`}>
+            <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className={`text-base font-bold ${txt}`}>Top 5 Vendor PO Amount</h3>
+                <p className={`text-xs ${txt2}`}>Total: {fmtCurShort(sumRows(vendorRows, 'purchase_amount'))}</p>
+              </div>
+              <select
+                value={vendorPurchaseType}
+                onChange={e => setVendorPurchaseType(e.target.value)}
+                className={`rounded-lg border px-2 py-1 text-xs font-semibold ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200 text-slate-700'}`}
+              >
+                <option value="all">All</option>
+                <option value="local">Local</option>
+                <option value="import">Import</option>
+              </select>
+            </div>
+            {barList(vendorRows, 'vendor', 'purchase_amount', 'PO Amount', '#2563EB')}
+          </div>
+          <div className={`p-5 rounded-2xl ${card}`}>
+            <h3 className={`text-base font-bold ${txt}`}>Top 5 Client Sales Amount</h3>
+            <p className={`text-xs mb-4 ${txt2}`}>Total: {fmtCurShort(sumRows(d.top_clients, 'sales_amount'))}</p>
+            {barList(d.top_clients, 'client', 'sales_amount', 'Sales Amount', '#14B8A6')}
+          </div>
+        </div>
+        {renderPendingDeliverySummary()}
+      </div>
+    );
+  };
+
+  const renderVendorControl = () => {
+    const totalPages = Math.max(1, Math.ceil(vendorControlTotal / vendorControlPerPage));
+    const applyVendorFilters = (vendors) => {
+      const unique = [...new Set((vendors || []).map(v => String(v || '').trim()).filter(Boolean))];
+      setVendorControlSelectedVendors(unique);
+      setVendorControlAppliedVendors(unique);
+      setVendorControlAppliedSearch('');
+      setVendorControlSearch('');
+      setVendorControlSuggestions([]);
+      setVendorControlSuggestOpen(false);
+      setVendorControlPage(1);
+      fetchVendorControl(1, vendorControlPerPage, '', false, unique);
+    };
+    const addVendorFilter = (vendor) => {
+      const value = String(vendor || '').trim();
+      if (!value) return;
+      applyVendorFilters([...vendorControlSelectedVendors, value]);
+    };
+    const removeVendorFilter = (vendor) => {
+      applyVendorFilters(vendorControlSelectedVendors.filter(v => v !== vendor));
+    };
+    const handleSearch = () => {
+      const q = vendorControlSearch.trim();
+      if (q) {
+        addVendorFilter(q);
+        return;
+      }
+      setVendorControlAppliedVendors(vendorControlSelectedVendors);
+      setVendorControlAppliedSearch('');
+      setVendorControlPage(1);
+      fetchVendorControl(1, vendorControlPerPage, '', false, vendorControlSelectedVendors);
+    };
+    const handleClear = () => {
+      setVendorControlSearch('');
+      setVendorControlAppliedSearch('');
+      setVendorControlSelectedVendors([]);
+      setVendorControlAppliedVendors([]);
+      setVendorControlSuggestions([]);
+      setVendorControlSuggestOpen(false);
+      setVendorControlPage(1);
+      fetchVendorControl(1, vendorControlPerPage, '', false, []);
+    };
+    const renderEditableVendorCell = (row, field, isPassword = false) => {
+      const editing = editingCell?.id === row.row_key && editingCell.field === `vendor_${field}`;
+      const visible = Boolean(vendorPasswordVisible[row.row_key]);
+      if (editing) {
+        return (
+          <input
+            type={isPassword && !visible ? 'password' : 'text'}
+            value={editValue || ''}
+            onChange={e => setEditValue(e.target.value)}
+            onBlur={() => updateVendorControlCell(row.row_key, field, editValue)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') updateVendorControlCell(row.row_key, field, editValue);
+              if (e.key === 'Escape') setEditingCell(null);
+            }}
+            className={`w-full h-9 px-2 rounded-lg border text-sm ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-blue-200 text-gray-900'}`}
+            autoFocus
+          />
+        );
+      }
+      const display = isPassword && !visible ? '********' : row[field];
+      return (
+        <div className="flex items-center gap-2 min-w-0">
+          <button
+            type="button"
+            onClick={() => { setEditingCell({ id: row.row_key, field: `vendor_${field}` }); setEditValue(row[field] || ''); }}
+            className="min-w-0 flex-1 text-left truncate text-blue-600 hover:underline font-semibold"
+            title={row[field] || ''}
+          >
+            {display || '-'}
+          </button>
+          {isPassword && (
+            <button
+              type="button"
+              onClick={() => setVendorPasswordVisible(prev => ({ ...prev, [row.row_key]: !prev[row.row_key] }))}
+              className={`flex-shrink-0 p-1.5 rounded-lg ${darkMode ? 'hover:bg-gray-700 text-gray-300' : 'hover:bg-slate-100 text-slate-500'}`}
+              title={visible ? 'Hide password' : 'Show password'}
+            >
+              {visible ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}
+            </button>
+          )}
+        </div>
+      );
+    };
+
+    return (
+      <div className={`${card} overflow-hidden`}>
+        <div className={`px-5 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+          <div>
+            <h2 className={`text-lg font-bold ${txt}`}>Vendor Control</h2>
+            <p className={`text-xs ${txt2}`}>Complete vendor login list from Google Sheet. Last update: {fmtDateTime(vendorControlLastUpdated)}</p>
+          </div>
+          <button
+            onClick={() => fetchVendorControl(vendorControlPage, vendorControlPerPage, vendorControlAppliedSearch, true, vendorControlAppliedVendors)}
+            className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-semibold ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}
+          >
+            <RotateCcw className="w-4 h-4"/>Refresh Sheet
+          </button>
+        </div>
+
+        <FilterPanel darkMode={darkMode}>
+          <div className="grid grid-cols-1 md:grid-cols-[minmax(260px,1fr)_110px_90px] gap-2 items-end">
+            <div className="min-w-0 relative">
+              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Vendor</label>
+              <input
+                ref={vendorControlSuggestFloat.triggerRef}
+                value={vendorControlSearch}
+                autoComplete="off"
+                onChange={e => {
+                  const next = e.target.value;
+                  setVendorControlSearch(next);
+                  setVendorControlSuggestOpen(next.trim().length >= 2);
+                }}
+                onFocus={() => setVendorControlSuggestOpen(vendorControlSearch.trim().length >= 2 && vendorControlSuggestions.length > 0)}
+                onBlur={() => setTimeout(() => setVendorControlSuggestOpen(false), 120)}
+                onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); setVendorControlSuggestOpen(false); handleSearch(); } }}
+                placeholder="Type vendor name or ID, then select/add..."
+                className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode?'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400':'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}
+              />
+              {vendorControlSuggestOpen && vendorControlSuggestions.length > 0 && (
+                <div
+                  style={vendorControlSuggestFloat.menuPos.style}
+                  className={`max-h-64 overflow-auto rounded-xl border shadow-xl ${darkMode ? 'bg-gray-800 border-gray-700 text-gray-100' : 'bg-white border-gray-200 text-gray-800'}`}
+                >
+                  {vendorControlSuggestions.map(name => (
+                    <button
+                      key={name}
+                      type="button"
+                      onMouseDown={e => e.preventDefault()}
+                      onClick={() => {
+                        addVendorFilter(name);
+                      }}
+                      className={`block w-full px-3 py-2 text-left text-sm font-semibold ${darkMode ? 'hover:bg-gray-700' : 'hover:bg-blue-50'}`}
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <button onClick={handleSearch} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm flex items-center justify-center gap-2">
+              <Search className="w-4 h-4"/>{vendorControlSearch.trim() ? 'Add' : 'Search'}
+            </button>
+            <button onClick={handleClear} className={`w-full h-10 px-3 py-2 rounded-xl text-sm font-medium shadow-sm ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>
+              Clear
+            </button>
+          </div>
+          {vendorControlSelectedVendors.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {vendorControlSelectedVendors.map(vendor => (
+                <span key={vendor} className={`inline-flex max-w-full items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold ${darkMode ? 'bg-blue-900/40 text-blue-100 border border-blue-800' : 'bg-blue-50 text-blue-700 border border-blue-200'}`}>
+                  <span className="max-w-[260px] truncate" title={vendor}>{vendor}</span>
+                  <button type="button" onClick={() => removeVendorFilter(vendor)} className={`rounded-full p-0.5 ${darkMode ? 'hover:bg-blue-800' : 'hover:bg-blue-100'}`} title="Remove vendor filter">
+                    <X className="w-3.5 h-3.5"/>
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+        </FilterPanel>
+
+        <DataTableScroll darkMode={darkMode}>
+          <table className="w-full text-sm min-w-[860px]">
+            <thead className={tblHd}>
+              <tr>
+                {['Vendor Name', 'Vendor ID', 'Password', 'Action'].map(label => (
+                  <th key={label} className={`px-3 py-3 text-center font-bold ${txt2}`}>{label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className={`divide-y ${tblDv}`}>
+              {vendorControlData.length === 0 ? (
+                <tr><td colSpan={4} className={`px-4 py-12 text-center ${txt2}`}><Building2 className="w-10 h-10 mx-auto mb-2 opacity-40"/>No complete vendor login data</td></tr>
+              ) : vendorControlData.map(row => (
+                <tr key={row.row_key} className={trHov}>
+                  <td className={`px-3 py-3 font-semibold ${txt}`}>{row.vendor_name}</td>
+                  <td className="px-3 py-3 min-w-[180px]">{renderEditableVendorCell(row, 'vendor_id')}</td>
+                  <td className="px-3 py-3 min-w-[220px]">{renderEditableVendorCell(row, 'password', true)}</td>
+                  <td className="px-3 py-3 text-center">
+                    <button
+                      type="button"
+                      onClick={() => openVendorLogin(row)}
+                      className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-bold shadow-sm"
+                    >
+                      <LinkIcon className="w-4 h-4"/>Login
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </DataTableScroll>
+
+        <PagePagination
+          darkMode={darkMode}
+          txt2={txt2}
+          page={vendorControlPage}
+          totalPages={totalPages}
+          total={vendorControlTotal}
+          perPage={vendorControlPerPage}
+          onPageChange={(p) => { setVendorControlPage(p); fetchVendorControl(p, vendorControlPerPage, vendorControlAppliedSearch, false, vendorControlAppliedVendors); }}
+          onPerPageChange={(next) => { setVendorControlPerPage(next); setVendorControlPage(1); fetchVendorControl(1, next, vendorControlAppliedSearch, false, vendorControlAppliedVendors); }}
+        />
+      </div>
+    );
+  };
+
+  const renderAllRegisteredItems = () => {
+    const totalPages = Math.max(1, Math.ceil(registeredItemsTotal / registeredItemsPerPage));
+    const columns = [
+      ['Product ID', 'prod_id'],
+      ['Category', 'category'],
+      ['PIC', 'pic'],
+      ['Product Name', 'prod_name'],
+      ['Specification', 'spec'],
+      ['Manufacturer Name', 'mfr_name'],
+      ['Vendor Name', 'vendor_name'],
+      ['Order Unit', 'odr_unit'],
+      ['HUB Handling Check', 'hub_handling_check'],
+      ['Tax Type', 'tax_type'],
+      ['Registration Date', 'registration_date'],
+      ['Product Registry PIC', 'product_registry_pic'],
+    ];
+
+    const handleClear = () => {
+      setRegisteredItemsSearch('');
+      setRegisteredItemsAppliedSearch('');
+      setRegisteredItemsProdIds([]);
+      setRegisteredItemsAppliedProdIds([]);
+      const emptyFilters = { mfr_names: [], vendor_names: [] };
+      setRegisteredItemsFilters(emptyFilters);
+      setRegisteredItemsPage(1);
+      fetchRegisteredItems(1, registeredItemsPerPage, '', [], emptyFilters);
+    };
+
+    const downloadRegisteredExcel = () => {
+      const p = new URLSearchParams();
+      if (registeredItemsAppliedSearch) p.append('search', registeredItemsAppliedSearch);
+      (registeredItemsAppliedProdIds || []).forEach(v => p.append('prod_id', v));
+      resolveFilter(registeredItemsFilters.mfr_names).forEach(v => p.append('mfr_name', v));
+      resolveFilter(registeredItemsFilters.vendor_names).forEach(v => p.append('vendor_name', v));
+      downloadBlob(`/api/export/all-registered-items?${p}`, `All_Registered_Items_${new Date().toISOString().slice(0,10)}.xlsx`, 'All Registered Items');
+    };
+
+    const fmtDateShort = (d) => {
+      if (!d) return '-';
+      try { return d.slice(0, 10); } catch { return d; }
+    };
+    const fmtProductId = (v) => {
+      if (v == null || v === '') return '-';
+      return String(v).replace(/\.0+$/, '');
+    };
+
+    return (
+      <div className={`rounded-2xl overflow-hidden ${card}`}>
+        <div className={`px-5 py-4 border-b ${darkMode ? 'border-gray-700' : 'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+          <div className="flex items-center gap-2 min-w-0">
+            <FileText className="w-5 h-5 text-blue-500 flex-shrink-0" />
+            <h2 className={`text-lg font-bold ${txt}`}>All Registered Items</h2>
+            <span className={`text-sm ${txt2}`}>({fmtNum(registeredItemsTotal)} records)</span>
+          </div>
+          <DownloadButton onClick={downloadRegisteredExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
+            <Download className="w-4 h-4"/>Download Excel
+          </DownloadButton>
+        </div>
+
+        <FilterPanel darkMode={darkMode}>
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-[minmax(240px,1fr)_170px_minmax(180px,1fr)_minmax(180px,1fr)_90px_110px] items-end">
+            <div className="min-w-0">
+              <RFQMultiSearch value={registeredItemsSearch} onChange={setRegisteredItemsSearch} onSearch={(next) => { setRegisteredItemsAppliedSearch(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, next, registeredItemsAppliedProdIds, registeredItemsFilters); }} darkMode={darkMode} txt2={txt2} label="Search" description="Enter Product ID, Product Name, Specification, Manufacturer, or Vendor per line. Results match any entered value." placeholder={'8381684\nBearing SKF\nVendor ABC'} />
+            </div>
+            <div className="min-w-0">
+              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Prod ID</label>
+              <SearchInput key={`registered-prod-id-${registeredItemsProdIds.join('|')}`} placeholder={'8381684\n8382076'} label="Prod ID" darkMode={darkMode} txt2={txt2} onSearch={(nums) => { setRegisteredItemsProdIds(nums); setRegisteredItemsAppliedProdIds(nums); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, nums, registeredItemsFilters); }} />
+            </div>
+            <MultiSelect label="Manufacturer Name" options={registeredItemsOptions.mfr_names || []} selected={registeredItemsFilters.mfr_names} onChange={v => { const next={...registeredItemsFilters, mfr_names:v}; setRegisteredItemsFilters(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, next); }} darkMode={darkMode} txt2={txt2} />
+            <MultiSelect label="Vendor Name" options={registeredItemsOptions.vendor_names || []} selected={registeredItemsFilters.vendor_names} onChange={v => { const next={...registeredItemsFilters, vendor_names:v}; setRegisteredItemsFilters(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, next); }} darkMode={darkMode} txt2={txt2} />
+            <button onClick={() => { setRegisteredItemsAppliedSearch(registeredItemsSearch); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsSearch, registeredItemsAppliedProdIds, registeredItemsFilters); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">Search</button>
+            <button onClick={handleClear} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
+          </div>
+        </FilterPanel>
+
+        <DataTableScroll darkMode={darkMode}>
+          <table className="freeze-table-all-registered-items w-full text-xs">
+            <colgroup>
+              <col style={{minWidth:'120px'}}/>
+              <col style={{minWidth:'140px'}}/>
+              <col style={{minWidth:'80px'}}/>
+              <col style={{minWidth:'160px'}}/>
+              <col style={{minWidth:'280px'}}/>
+              <col style={{minWidth:'180px'}}/>
+              <col style={{minWidth:'180px'}}/>
+              <col style={{minWidth:'80px'}}/>
+              <col style={{minWidth:'100px'}}/>
+              <col style={{minWidth:'100px'}}/>
+              <col style={{minWidth:'140px'}}/>
+              <col style={{minWidth:'160px'}}/>
+            </colgroup>
+            <thead className={tblHd}>
+              <tr>
+                {columns.map(([label], index) => (
+                  <th key={label} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{renderFreezeHeader('all-registered-items', index + 1, label)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className={`divide-y ${tblDv}`}>
+              {registeredItemsData.length === 0 ? (
+                <tr>
+                  <td colSpan={columns.length} className={`px-4 py-12 text-center ${txt2}`}>
+                    <Package className="w-10 h-10 mx-auto mb-2 opacity-40" />No registered item data
+                  </td>
+                </tr>
+              ) : registeredItemsData.map(row => (
+                <tr key={row.id} className={`${trHov} transition-colors`}>
+                  <td className="px-2 py-2 font-mono text-blue-600 whitespace-nowrap text-center">{fmtProductId(row.prod_id)}</td>
+                  <td className={`px-2 py-2 ${txt2}`} title={row.category}>{row.category || '-'}</td>
+                  <td className="px-2 py-2 text-center whitespace-nowrap">
+                    {row.pic ? (() => {
+                      const c = getPicColor(row.pic);
+                      return <span className={`px-1.5 py-0.5 rounded-full text-xs font-semibold ${c ? `${c.bg} ${c.text}` : 'bg-gray-100 text-gray-700'}`}>{row.pic}</span>;
+                    })() : <span className={txt2}>-</span>}
+                  </td>
+                  <td className={`px-2 py-2 max-w-[160px] truncate ${txt}`} title={row.prod_name}>{row.prod_name || '-'}</td>
+                  <td className={`px-2 py-2 max-w-[280px] truncate ${txt2}`} title={row.spec}>{row.spec || '-'}</td>
+                  <td className={`px-2 py-2 max-w-[180px] truncate ${txt2}`} title={row.mfr_name}>{row.mfr_name || '-'}</td>
+                  <td className={`px-2 py-2 max-w-[180px] truncate ${txt2}`} title={row.vendor_name}>{row.vendor_name || '-'}</td>
+                  <td className={`px-2 py-2 text-center whitespace-nowrap ${txt2}`}>{row.odr_unit || '-'}</td>
+                  <td className={`px-2 py-2 text-center whitespace-nowrap ${txt2}`}>{row.hub_handling_check || '-'}</td>
+                  <td className={`px-2 py-2 text-center whitespace-nowrap ${txt2}`}>{row.tax_type || '-'}</td>
+                  <td className={`px-2 py-2 whitespace-nowrap ${txt2}`}>{fmtDateShort(row.registration_date)}</td>
+                  <td className={`px-2 py-2 max-w-[160px] truncate ${txt2}`} title={row.product_registry_pic}>{row.product_registry_pic || '-'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </DataTableScroll>
+
+        <PagePagination
+          darkMode={darkMode}
+          txt2={txt2}
+          page={registeredItemsPage}
+          totalPages={totalPages}
+          total={registeredItemsTotal}
+          perPage={registeredItemsPerPage}
+          onPageChange={(p) => { setRegisteredItemsPage(p); fetchRegisteredItems(p, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, registeredItemsFilters); }}
+          onPerPageChange={(next) => { setRegisteredItemsPerPage(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, next, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, registeredItemsFilters); }}
+        />
+      </div>
+    );
+  };
+
+  const renderRFQ = () => {
+    const totalPages = Math.max(1, Math.ceil(rfqTotal / rfqPerPage));
+    const editableSet = new Set(rfqEditableFields || []);
+    const baseColumns = (rfqColumns.length ? rfqColumns : [
+      { field: 'check', label: 'Check' }, { field: 'sheet_status', label: 'Status' }, { field: 'days_left', label: 'Days Left' }, { field: 'no', label: 'No' }, { field: 'client_name', label: 'Nama Client' },
+      { field: 'rfq_date', label: 'RFQ Date' }, { field: 'closing_date', label: 'Closing Date' }, { field: 'sales_pic', label: 'Sales PIC' },
+      { field: 'category_name', label: 'Category Name' }, { field: 'purchase_pic', label: 'Purchase PIC' },
+      { field: 'rfq_code', label: 'No. RFQ / KODE' }, { field: 'item_name', label: 'Item Name' }, { field: 'detail_spec', label: 'Detail Spec' }, { field: 'brand_manufacturer', label: 'Brand/Manufaktur' },
+      { field: 'qty', label: 'Qty' }, { field: 'unit', label: 'Unit' }, { field: 'remark', label: 'Remark' },
+      { field: 'product_id', label: 'Product ID' }, { field: 'request_number', label: 'Request Number' },
+      { field: 'same_replacement', label: 'Same/Replacement' }, { field: 'vendor_name', label: 'Vendor Name' },
+      { field: 'unit_price_idr', label: 'Unit Price (IDR)' }, { field: 'amt_idr', label: 'Amt (IDR)' }, { field: 'quoted_item_name', label: 'Item Name' },
+      { field: 'quoted_spec', label: 'Spec' }, { field: 'quoted_brand', label: 'Brand' }, { field: 'quoted_unit', label: 'Unit' }, { field: 'moq', label: 'MOQ' },
+      { field: 'lead_time_days', label: 'Lead Time (Days)' }, { field: 'valid_period', label: 'Valid period' }, { field: 'photo_url', label: 'Photo URL (optional)' },
+      { field: 'remarks', label: 'Remarks' },
+    ]).filter(col => col.field !== 'category_id');
+    const similarityColumns = rfqSimilarityColumns.length ? rfqSimilarityColumns : [
+      { field: 'similar_prod_ids', label: 'Similar Product ID' },
+      { field: 'similar_prod_name', label: 'Similar Product Name' },
+      { field: 'similar_spec', label: 'Similar Specification' },
+      { field: 'similar_mfr_name', label: 'Similar Manufacturer' },
+      { field: 'similar_odr_unit', label: 'Similar Unit' },
+      { field: 'similar_score', label: '%Similarity' },
+    ];
+    const columns = rfqShowSimilarity ? [...baseColumns, ...similarityColumns] : baseColumns;
+    // Shift+click multi-select helpers for the RFQ table (same pattern as
+    // Import — see computeImportSelection for the canonical implementation).
+    const rfqEditableFieldsList = columns.map(col => col.field);
+    const rfqCellKey = (rowIndex, field) => `${rowIndex}|${field}`;
+    const computeRfqSelection = (anchor, target) => {
+      const startRow = Math.min(anchor.rowIndex, target.rowIndex);
+      const endRow = Math.max(anchor.rowIndex, target.rowIndex);
+      const startColIdx = Math.min(anchor.colIdx, target.colIdx);
+      const endColIdx = Math.max(anchor.colIdx, target.colIdx);
+      const result = new Set();
+      for (let r = startRow; r <= endRow; r += 1) {
+        for (let c = startColIdx; c <= endColIdx; c += 1) {
+          result.add(rfqCellKey(r, rfqEditableFieldsList[c]));
+        }
+      }
+      return result;
+    };
+    const rfqSourceStyleFields = new Set([
+      'check', 'sheet_status', 'days_left', 'no', 'client_name', 'rfq_date', 'closing_date', 'sales_pic',
+      'category_name', 'purchase_pic', 'rfq_code', 'item_name', 'detail_spec', 'brand_manufacturer', 'qty', 'unit', 'remark',
+      'similar_prod_ids', 'similar_prod_name', 'similar_spec', 'similar_mfr_name', 'similar_odr_unit', 'similar_score'
+    ]);
+    const colWidth = (field) => ({
+      check: 64, sheet_status: 90, days_left: 76, no: 70, client_name: 160, rfq_date: 110, closing_date: 110, sales_pic: 120,
+      rfq_code: 150, item_name: 180, detail_spec: 620, brand_manufacturer: 160, qty: 80, unit: 80, remark: 380,
+      category_id: 180, category_name: 150, product_id: 120, request_number: 150, purchase_pic: 120,
+      same_replacement: 92, vendor_name: 200, unit_price_idr: 130, amt_idr: 130, quoted_item_name: 180,
+      quoted_spec: 150, quoted_brand: 130, quoted_unit: 58, moq: 62, lead_time_days: 78,
+      valid_period: 82, photo_url: 92, remarks: 360, private_remarks_1: 220, private_remarks_2: 220,
+      similar_prod_ids: 150, similar_prod_name: 220, similar_spec: 280, similar_mfr_name: 140, similar_odr_unit: 78, similar_score: 96
+    }[field] || 140);
+    const colStyle = (field) => {
+      const width = `${colWidth(field)}px`;
+      return { width, minWidth: width, maxWidth: width };
+    };
+    const rfqTableWidth = columns.reduce((sum, col) => sum + colWidth(col.field), 0);
+    const linkInfo = (value) => {
+      const text = String(value || '').trim();
+      const match = text.match(/https?:\/\/[^\s]+/i);
+      if (!match) return null;
+      try {
+        const url = new URL(match[0]);
+        const host = url.hostname.replace(/^www\./, '').toLowerCase();
+        const known = [
+          ['shopee', 'Shopee'], ['tokopedia', 'Tokopedia'], ['lazada', 'Lazada'], ['blibli', 'Blibli'],
+          ['bukalapak', 'Bukalapak'], ['amazon', 'Amazon'], ['google', 'Google'], ['drive.google', 'Google Drive']
+        ];
+        const found = known.find(([key]) => host.includes(key));
+        return { url: match[0], label: found ? found[1] : host.split('.')[0].replace(/^./, c => c.toUpperCase()) };
+      } catch { return { url: match[0], label: 'Link' }; }
+    };
+    const renderValue = (value, extraClass = '') => {
+      const link = linkInfo(value);
+      if (link) {
+        return <a href={link.url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline font-semibold" title={String(value || '')}>{link.label}</a>;
+      }
+      const display = value === 0 || value ? value : '-';
+      return <span className={extraClass} title={String(value || '')}>{display}</span>;
+    };
+    const splitSimilarValues = (value, allowComma = false) => String(value || '')
+      .split(allowComma ? /\r?\n|,\s*/ : /\r?\n/)
+      .map(v => v.trim())
+      .filter(Boolean);
+    const renderSimilarLines = (value, className = '') => {
+      const lines = splitSimilarValues(value);
+      if (!lines.length) return <span>-</span>;
+      return <div className="flex flex-col gap-1">{lines.map((line, index) => (
+        <div key={`${line}-${index}`} className={`min-h-[22px] min-w-0 truncate ${className}`} title={line}>{line}</div>
+      ))}</div>;
+    };
+    const toDateInputValue = (value) => {
+      // Convert any date string the backend might send into the YYYY-MM-DD
+      // format that <input type="date"> requires. If conversion fails, return
+      // '' so the date picker opens blank (the user can then pick a fresh
+      // date). Returning the raw string (e.g. "2 Jun") used to make the date
+      // input render blank with no way to recover — the picker couldn't parse
+      // it AND couldn't be opened. Now we either normalize or empty out.
+      const raw = String(value || '').trim();
+      if (!raw) return '';
+      // Already ISO YYYY-MM-DD or YYYY/MM/DD
+      const ymd = raw.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+      if (ymd) return `${ymd[1]}-${String(ymd[2]).padStart(2, '0')}-${String(ymd[3]).padStart(2, '0')}`;
+      // DD/MM/YYYY (day first — only valid if the middle field is a month ≤ 12)
+      const dmy = raw.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+      if (dmy && Number(dmy[2]) <= 12) {
+        return `${dmy[3]}-${String(dmy[2]).padStart(2, '0')}-${String(dmy[1]).padStart(2, '0')}`;
+      }
+      // MM/DD/YYYY (US format — day field > 12 means it must be US format)
+      if (dmy && Number(dmy[1]) <= 12) {
+        return `${dmy[3]}-${String(dmy[1]).padStart(2, '0')}-${String(dmy[2]).padStart(2, '0')}`;
+      }
+      // Year-less formats from the source sheet: "2 Jun", "21 Sep", "25-May",
+      // "2 June", "Jun 2", "25-May". Assume current year; if that date has
+      // already passed, use next year. This mirrors the backend logic in
+      // import_date_from_value() so the picker shows the same date the
+      // backend would have normalized to.
+      const monthMap = {
+        jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+        jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+        january: 1, february: 2, march: 3, april: 4, june: 6,
+        july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
+      };
+      const yearlessPatterns = [
+        /^(\d{1,2})\s+([A-Za-z]+)$/,   // "2 Jun"
+        /^(\d{1,2})-([A-Za-z]+)$/,      // "25-May"
+        /^([A-Za-z]+)\s+(\d{1,2})$/,   // "Jun 2"
+        /^([A-Za-z]+)-(\d{1,2})$/,      // "Jun-2"
+      ];
+      for (const pat of yearlessPatterns) {
+        const m = raw.match(pat);
+        if (!m) continue;
+        let dayStr, monStr;
+        if (Number.isFinite(Number(m[1]))) {
+          dayStr = m[1]; monStr = m[2];
+        } else {
+          dayStr = m[2]; monStr = m[1];
+        }
+        const mon = monthMap[monStr.toLowerCase()];
+        if (!mon) continue;
+        const day = Number(dayStr);
+        if (!day || day > 31) continue;
+        const today = new Date();
+        let year = today.getFullYear();
+        let candidate = new Date(year, mon - 1, day);
+        const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+        if (candidate < todayMidnight) year += 1;
+        return `${year}-${String(mon).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      }
+      // Also handle "2 Jun 2026" and similar full-text formats via Date.parse.
+      // Only trust it if the result is a valid date — Date.parse is loose.
+      const parsed = Date.parse(raw);
+      if (!Number.isNaN(parsed)) {
+        const d = new Date(parsed);
+        if (!Number.isNaN(d.getTime())) {
+          return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        }
+      }
+      // Can't parse — return empty so the picker opens blank and the user
+      // can pick a fresh date, rather than showing a broken raw string.
+      return '';
+    };
+    const isRFQClosingPast = (value) => {
+      const raw = String(value || '').trim();
+      if (!raw) return false;
+      let d = null;
+      const m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (m) d = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+      else {
+        const parsed = new Date(raw);
+        if (!Number.isNaN(parsed.getTime())) d = parsed;
+      }
+      if (!d || Number.isNaN(d.getTime())) return false;
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      d.setHours(0, 0, 0, 0);
+      return d < today;
+    };
+    const handleClear = () => {
+      setRfqSearch('');
+      setRfqAppliedSearch('');
+      setRfqPicFilter('');
+      const nextFilters = { checks: [], clients: [], rfq_numbers: [], brands: [], purchase_pics: [], vendors: [] };
+      setRfqFilters(nextFilters);
+      setRfqPage(1);
+      fetchRFQData(1, rfqPerPage, '', false, nextFilters, '', rfqShowSimilarity);
+    };
+    const rfqParams = () => {
+      const p = new URLSearchParams();
+      if (rfqAppliedSearch) p.append('search', rfqAppliedSearch);
+      if (rfqPicFilter) p.append('pic', rfqPicFilter);
+      resolveFilter(rfqFilters.checks).forEach(v => p.append('check', v));
+      resolveFilter(rfqFilters.clients).forEach(v => p.append('client_name', v));
+      resolveFilter(rfqFilters.rfq_numbers).forEach(v => p.append('rfq_no', v));
+      resolveFilter(rfqFilters.brands).forEach(v => p.append('brand_manufacturer', v));
+      resolveFilter(rfqFilters.purchase_pics).forEach(v => p.append('purchase_pic', v));
+      resolveFilter(rfqFilters.vendors).forEach(v => p.append('vendor_name', v));
+      return p;
+    };
+    const downloadRFQTemplate = () => downloadBlob(`/api/rfq/template?${rfqParams()}`, `Template_RFQ_BatchUpload_${new Date().toISOString().slice(0,10)}.xlsx`, 'RFQ Batch Upload Template');
+    const downloadRFQExcel = () => downloadBlob(`/api/export/rfq?${rfqParams()}`, `RFQ_${new Date().toISOString().slice(0,10)}.xlsx`, 'RFQ Excel');
+    const handleRFQBatchUpload = async (e) => {
+      const files = Array.from(e.target.files || []);
+      if (!files.length) return;
+      e.target.value = '';
+      const fd = new FormData();
+      files.forEach(file => fd.append('file', file));
+      setUploadProgress({ label: files.length > 1 ? `RFQ Batch (${files.length} files)` : 'RFQ Batch', pct: 0 });
+      try {
+        const res = await api.post('/api/rfq/batch-upload', fd, {
+          onUploadProgress: (ev) => setUploadProgress({ label: files.length > 1 ? `RFQ Batch (${files.length} files)` : 'RFQ Batch', pct: Math.round(ev.loaded * 100 / (ev.total || ev.loaded)) })
+        });
+        const syncInfo = res.data?.sheet_sync;
+        if (syncInfo && syncInfo.synced === false) {
+          addToast(`RFQ batch updated locally but Sheet sync failed: ${syncInfo.reason || 'unknown error'}`, 'warning');
+        } else {
+          addToast(`RFQ batch: ${res.data.updated || 0} cells updated${res.data.sheet_updates ? `, ${res.data.sheet_updates} synced to Sheet` : ''}${res.data.not_found ? `, ${res.data.not_found} No not found` : ''}`, 'success');
+        }
+        fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter);
+      } catch (err) {
+        addToast(`Failed to upload RFQ batch: ${err.response?.data?.error || err.message}`, 'error');
+      } finally {
+        setUploadProgress(null);
+      }
+    };
+    const visibleRfqPicKpis = rfqPicKpis.filter(row => row.pic && row.pic.toLowerCase() !== 'unassigned' && row.pic.trim() !== '');
+    const totalPendingRFQ = visibleRfqPicKpis.reduce((sum, row) => sum + (Number(row.count) || 0), 0);
+    const rfqKpis = [{ pic: 'Total Pending RFQ', count: totalPendingRFQ, isTotal: true }, ...visibleRfqPicKpis];
+    const rfqKpiCols = Math.max(1, rfqKpis.length);
+    const editableColumns = columns.filter(col => editableSet.has(col.field));
+    const editableFieldOrder = editableColumns.map(col => col.field);
+    const applyRFQPaste = async (startRowIndex, startField, text) => {
+      const rows = String(text || '').replace(/\r/g, '').split('\n').filter((line, idx, arr) => line !== '' || idx < arr.length - 1);
+      if (!rows.length) return;
+      const startColIndex = editableFieldOrder.indexOf(startField);
+      if (startColIndex < 0) return;
+      const batchUpdates = [];
+      for (let r = 0; r < rows.length; r += 1) {
+        const targetRow = rfqData[startRowIndex + r];
+        if (!targetRow) break;
+        const values = rows[r].split('\t');
+        for (let c = 0; c < values.length; c += 1) {
+          const field = editableFieldOrder[startColIndex + c];
+          if (!field) break;
+          batchUpdates.push({ row_key: targetRow.row_key, field, value: values[c] });
+        }
+      }
+      if (batchUpdates.length && await updateRFQCellsBatch(batchUpdates)) {
+        addToast(`RFQ paste: ${batchUpdates.length} cells updated`, 'success');
+      }
+    };
+    const fillRFQRange = async (startRowIndex, field, endRowIndex) => {
+      if (endRowIndex === startRowIndex) return;
+      const source = rfqData[startRowIndex];
+      if (!source) return;
+      const value = source[field] ?? '';
+      const minRow = Math.max(0, Math.min(startRowIndex, endRowIndex));
+      const maxRow = Math.min(rfqData.length - 1, Math.max(startRowIndex, endRowIndex));
+      const batchUpdates = [];
+      for (let i = minRow; i <= maxRow; i += 1) {
+        if (i === startRowIndex || !rfqData[i]?.row_key) continue;
+        batchUpdates.push({ row_key: rfqData[i].row_key, field, value });
+      }
+      if (batchUpdates.length && await updateRFQCellsBatch(batchUpdates)) {
+        addToast(`RFQ drag-fill: ${batchUpdates.length} cells updated`, 'success');
+      }
+    };
+    const startRFQFill = (event, rowIndex, field) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const getTargetCell = (evt) => document.elementFromPoint(evt.clientX, evt.clientY)?.closest('[data-rfq-cell="true"]');
+      const updateRange = (evt) => {
+        const target = getTargetCell(evt);
+        const endRowIndex = Number(target?.getAttribute('data-row-index'));
+        const targetField = target?.getAttribute('data-field');
+        if (Number.isFinite(endRowIndex) && targetField === field) {
+          setRfqFillRange({
+            field,
+            startRow: rowIndex,
+            minRow: Math.min(rowIndex, endRowIndex),
+            maxRow: Math.max(rowIndex, endRowIndex),
+          });
+        }
+      };
+      const cleanup = () => {
+        document.body.classList.remove('rfq-fill-dragging');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        setRfqFillRange(null);
+      };
+      const onMove = (moveEvent) => updateRange(moveEvent);
+      const onUp = (upEvent) => {
+        const target = getTargetCell(upEvent);
+        const endRowIndex = Number(target?.getAttribute('data-row-index'));
+        const targetField = target?.getAttribute('data-field');
+        cleanup();
+        if (Number.isFinite(endRowIndex) && targetField === field) fillRFQRange(rowIndex, field, endRowIndex);
+      };
+      document.body.classList.add('rfq-fill-dragging');
+      setRfqFillRange({ field, startRow: rowIndex, minRow: rowIndex, maxRow: rowIndex });
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    };
+
+    return (
+      <div className={`rounded-2xl overflow-hidden ${card}`}>
+        <div className={`px-5 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+          <div className="flex items-center gap-2 min-w-0">
+            <Mail className="w-5 h-5 text-blue-500 flex-shrink-0" />
+            <h2 className={`text-lg font-bold ${txt}`}>RFQ</h2>
+            <span className={`text-sm ${txt2}`}>({fmtNum(rfqTotal)} records)</span>
+            {rfqLastUpdated && <span className={`text-xs ${txt2}`}>Last sync: {fmtDate(rfqLastUpdated)}</span>}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button onClick={downloadRFQTemplate} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
+              <Download className="w-4 h-4"/>Template
+            </button>
+            <label className="flex items-center gap-2 px-3 py-2.5 bg-slate-600 hover:bg-slate-700 text-white rounded-xl text-sm font-semibold shadow-sm cursor-pointer">
+              <FileSpreadsheet className="w-4 h-4"/>Batch Upload
+              <input type="file" accept=".xlsx,.xls" multiple onChange={handleRFQBatchUpload} className="hidden"/>
+            </label>
+            <DownloadButton onClick={downloadRFQExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
+              <Download className="w-4 h-4"/>Download Excel
+            </DownloadButton>
+            <button onClick={() => { const next = !rfqShowSimilarity; setRfqShowSimilarity(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter, next); }} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${rfqShowSimilarity ? 'bg-amber-100 text-amber-700 border border-amber-200 hover:bg-amber-200' : darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
+              {rfqShowSimilarity ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}{rfqShowSimilarity ? 'Hide Similarity' : 'Show Similarity'}
+            </button>
+            <button onClick={() => fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, true, rfqFilters, rfqPicFilter)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
+              <RotateCcw className="w-4 h-4"/>Refresh Sheet
+            </button>
+          </div>
+        </div>
+
+        <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
+          <div className="grid grid-flow-col gap-2" style={{ gridTemplateColumns: `repeat(${rfqKpiCols}, minmax(0, 1fr))` }}>
+            {rfqKpis.map((row) => {
+              const activePic = !row.isTotal && rfqPicFilter === row.pic;
+              const activePicColor = activePic ? getPicColor(row.pic) : null;
+              const applyRFQPicFilter = () => {
+                const nextPic = row.isTotal || activePic ? '' : row.pic;
+                const nextFilters = { ...rfqFilters, purchase_pics: nextPic ? [nextPic] : [] };
+                setRfqPicFilter(nextPic);
+                setRfqFilters(nextFilters);
+                setRfqPage(1);
+                fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, nextFilters, nextPic, rfqShowSimilarity);
+              };
+              return (
+                <button key={row.pic} type="button" onClick={applyRFQPicFilter} className={`min-w-0 p-3 rounded-xl text-left transition-all ${activePic ? (darkMode ? 'bg-amber-900/30 border border-amber-500 ring-2 ring-amber-400' : 'bg-amber-50 border border-amber-300 ring-2 ring-amber-200') : row.isTotal ? (darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200') : card} ${row.isTotal ? 'hover:border-slate-300' : 'hover:border-amber-300'}`}>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className={`text-xs font-semibold truncate ${activePic ? 'text-amber-700' : row.isTotal ? (darkMode ? 'text-gray-200' : 'text-gray-700') : txt2}`} title={row.pic}>{row.pic}</p>
+                      <h3 className={`text-xl font-bold leading-tight ${activePic ? 'text-amber-700' : row.isTotal ? (darkMode ? 'text-gray-100' : 'text-gray-800') : kpiValue}`}>{fmtNum(row.count)}</h3>
+                      <p className={`text-[11px] leading-tight whitespace-nowrap ${txt2}`}>No Prod/Price</p>
+                    </div>
+                    <div className={`p-1.5 rounded-lg flex-shrink-0 ${activePic ? 'bg-amber-100 text-amber-700' : row.isTotal ? (darkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-100 text-gray-600') : neutralIcon}`}>
+                      <Mail className="w-3.5 h-3.5" />
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <FilterPanel darkMode={darkMode}>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[minmax(160px,1fr)_105px_minmax(130px,0.95fr)_minmax(130px,0.95fr)_repeat(3,minmax(115px,0.9fr))_84px] items-end">
+            <div className="min-w-0">
+              <RFQMultiSearch
+                value={rfqSearch}
+                onChange={setRfqSearch}
+                onSearch={(searchValue) => {
+                  setRfqAppliedSearch(searchValue);
+                  setRfqPage(1);
+                  fetchRFQData(1, rfqPerPage, searchValue, false, rfqFilters, rfqPicFilter, rfqShowSimilarity);
+                }}
+                darkMode={darkMode}
+                txt2={txt2}
+              />
+            </div>
+            <div className="min-w-0">
+              <MultiSelect label="Check" options={rfqOptions.checks || []} selected={rfqFilters.checks}
+                onChange={v=>{ const next={...rfqFilters, checks:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="min-w-0">
+              <MultiSelect label="Nama Client" options={rfqOptions.clients || []} selected={rfqFilters.clients}
+                onChange={v=>{ const next={...rfqFilters, clients:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="min-w-0">
+              <MultiSelect label="No. RFQ" options={rfqOptions.rfq_numbers || []} selected={rfqFilters.rfq_numbers}
+                onChange={v=>{ const next={...rfqFilters, rfq_numbers:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="min-w-0">
+              <MultiSelect label="Brand/Manufaktur" options={rfqOptions.brands || []} selected={rfqFilters.brands}
+                onChange={v=>{ const next={...rfqFilters, brands:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="min-w-0">
+              <MultiSelect label="Purchase PIC" options={rfqOptions.purchase_pics || []} selected={rfqFilters.purchase_pics}
+                onChange={v=>{ const next={...rfqFilters, purchase_pics:v}; setRfqPicFilter(''); setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, '', rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="min-w-0">
+              <MultiSelect label="Vendor Name" options={rfqOptions.vendors || []} selected={rfqFilters.vendors}
+                onChange={v=>{ const next={...rfqFilters, vendors:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <button onClick={handleClear} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>
+              Clear
+            </button>
+          </div>
+        </FilterPanel>
+
+        <DataTableScroll darkMode={darkMode}>
+          <table className="freeze-table-rfq table-fixed text-xs border-collapse" style={{ width: `${rfqTableWidth}px`, minWidth: `${rfqTableWidth}px` }}>
+            <colgroup>{columns.map(col => <col key={col.field} style={colStyle(col.field)}/>)}</colgroup>
+            <thead className={tblHd}>
+              <tr>{columns.map((col, index) => {
+                const darkHeaderCols = ['check', 'sheet_status', 'days_left', 'no', 'client_name', 'rfq_date', 'closing_date', 'sales_pic', 'category_name', 'purchase_pic', 'rfq_code', 'item_name', 'detail_spec', 'brand_manufacturer', 'qty', 'unit', 'remark', 'similar_prod_ids', 'similar_prod_name', 'similar_spec', 'similar_mfr_name', 'similar_odr_unit', 'similar_score'];
+                const isDarkHeader = darkHeaderCols.includes(col.field);
+                return <th key={col.field} className={`px-2 py-2 text-center font-bold whitespace-nowrap border-r ${isDarkHeader ? 'bg-slate-200 text-slate-700' : darkMode ? 'bg-gray-800/60 border-gray-700 text-gray-200' : 'bg-slate-50 border-gray-200 text-gray-700'} ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>{renderFreezeHeader('rfq', index + 1, col.label)}</th>;
+              })}</tr>
+            </thead>
+            <tbody className={`divide-y ${tblDv}`}>
+              {rfqData.length === 0 ? (
+                <tr><td colSpan={columns.length} className={`px-4 py-12 text-center ${txt2}`}><Mail className="w-10 h-10 mx-auto mb-2 opacity-40"/>No RFQ data</td></tr>
+              ) : rfqData.map((row, rowIndex) => {
+                return (
+                <tr key={row.row_key} className={`${trHov} transition-colors${rfqPicFilter && rfqEditedRowKeys.has(row.row_key) ? ' ring-1 ring-inset ring-amber-400/60' : ''}`}>
+                  {columns.map((col) => {
+                    const field = col.field;
+                    const value = row[field] ?? '';
+                    const isEditable = editableSet.has(field);
+                    const isEditing = editingCell?.id === row.row_key && editingCell.field === `rfq_${field}`;
+                    if (field === 'check') {
+                      const checkValue = String(row.check || '').toLowerCase();
+                      if (checkValue === 'complete') {
+                        return <td key={field} className={`px-2 py-2 text-center border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'}`} title="Complete"><span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#20B71F]"><Check className="w-4 h-4 text-white stroke-[4]"/></span></td>;
+                      }
+                      if (checkValue === 'reject') {
+                        return <td key={field} className={`px-2 py-2 text-center border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'}`} title="Reject"><span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#EA0D0D]"><X className="w-4 h-4 text-white stroke-[4]"/></span></td>;
+                      }
+                      const closed = checkValue === 'closed' || (!row.product_id && isRFQClosingPast(row.closing_date));
+                      return <td key={field} className={`px-2 py-2 text-center border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'}`} title={closed ? 'Closed' : 'Open'}><span className={`inline-flex h-6 w-6 rounded-full border ${closed ? (darkMode ? 'bg-gray-500 border-gray-400' : 'bg-gray-300 border-gray-400') : darkMode ? 'bg-gray-700 border-gray-500' : 'bg-white border-gray-300'}`}/></td>;
+                    }
+                    if (field === 'days_left') {
+                      return <td key={field} className={`px-2 py-2 text-center border-r ${darkMode ? 'bg-gray-800/60 border-gray-700 text-gray-100' : 'bg-slate-50 border-gray-200 text-black'}`}>{row.days_left === 0 || row.days_left ? fmtNum(row.days_left) : '-'}</td>;
+                    }
+                    if (isEditable && isEditing) {
+                      const tall = ['quoted_spec', 'remarks', 'photo_url'].includes(field);
+                      const Control = tall ? 'textarea' : 'input';
+                      // Same pattern as Import: td shows the blue outer outline,
+                      // input/textarea/select inside has NO outline (data-no-focus-ring
+                      // + inline style + global CSS rule). This avoids the
+                      // double-blue-border bug.
+                      const rfqInputCls = `block w-full min-h-8 px-2 py-1 text-xs border-0 rounded-none ring-0 outline-none focus:outline-none focus:ring-0 focus-visible:outline-none shadow-none ${darkMode?'bg-gray-700 text-white':'bg-white text-gray-900'}`;
+                      const rfqInputStyle = { outline: 'none', outlineStyle: 'none', boxShadow: 'none', borderColor: 'transparent', borderWidth: 0 };
+                      const rfqTdCls = `relative p-0 align-top border-r outline outline-2 outline-blue-500 outline-offset-[-2px] ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`;
+                      if (['rfq_date', 'closing_date'].includes(field)) {
+                        return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={rfqTdCls}>
+                          <input
+                            type="date"
+                            data-no-focus-ring=""
+                            style={{ ...rfqInputStyle, WebkitAppearance: 'none', appearance: 'none' }}
+                            value={toDateInputValue(editValue)}
+                            className={`${rfqInputCls} px-1.5 appearance-none`}
+                            onChange={e => setEditValue(e.target.value)}
+                            onBlur={() => updateRFQCell(row.row_key, field, editValue)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                updateRFQCell(row.row_key, field, editValue);
+                              }
+                              if (e.key === 'Escape') setEditingCell(null);
+                            }}
+                            autoFocus
+                          />
+                        </td>;
+                      }
+                      if (field === 'same_replacement') {
+                        return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={rfqTdCls}>
+                          <select
+                            data-no-focus-ring=""
+                            style={rfqInputStyle}
+                            value={editValue}
+                            className={`${rfqInputCls} px-1.5`}
+                            onChange={e => { setEditValue(e.target.value); updateRFQCell(row.row_key, field, e.target.value); }}
+                            onBlur={() => setEditingCell(null)}
+                            onKeyDown={e => { if (e.key === 'Escape') setEditingCell(null); }}
+                            autoFocus
+                          >
+                            <option value=""></option>
+                            <option value="Same">Same</option>
+                            <option value="Replacement">Replacement</option>
+                          </select>
+                        </td>;
+                      }
+                      return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={rfqTdCls}>
+                        <Control
+                          data-no-focus-ring=""
+                          style={rfqInputStyle}
+                          value={editValue}
+                          rows={tall ? 3 : undefined}
+                          className={`${rfqInputCls} ${tall ? 'resize-y' : ''}`}
+                          onChange={e => setEditValue(e.target.value)}
+                          onBlur={() => updateRFQCell(row.row_key, field, editValue)}
+                          onPaste={e => {
+                            const text = e.clipboardData.getData('text/plain');
+                            if (text.includes('\t') || text.includes('\n')) {
+                              e.preventDefault();
+                              setEditingCell(null);
+                              applyRFQPaste(rowIndex, field, text);
+                            }
+                          }}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter' && !tall) {
+                              e.preventDefault();
+                              updateRFQCell(row.row_key, field, editValue);
+                            }
+                            if (e.key === 'Escape') setEditingCell(null);
+                          }}
+                          autoFocus
+                        />
+                      </td>;
+                    }
+                    if (isEditable) {
+                      const hasValue = value === 0 || value;
+                      const selected = rfqSelectedCell?.rowKey === row.row_key && rfqSelectedCell?.field === field;
+                      const rfqCellKeyStr = rfqCellKey(rowIndex, field);
+                      const inMultiSelection = rfqSelectedCells?.has(rfqCellKeyStr);
+                      const sourceStyle = rfqSourceStyleFields.has(field);
+                      const fillHighlighted = rfqFillRange?.field === field && rowIndex >= rfqFillRange.minRow && rowIndex <= rfqFillRange.maxRow && rowIndex !== rfqFillRange.startRow;
+                      return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field}
+                        tabIndex={0}
+                        onFocus={() => setRfqSelectedCell({ rowKey: row.row_key, field })}
+                        onClick={(e) => {
+                          setRfqSelectedCell({ rowKey: row.row_key, field });
+                          // Shift+click multi-select (Excel-like).
+                          const clickedColIdx = rfqEditableFieldsList.indexOf(field);
+                          if (e.shiftKey && rfqSelectionAnchor && clickedColIdx >= 0) {
+                            const newSelection = computeRfqSelection(rfqSelectionAnchor, { rowIndex, colIdx: clickedColIdx });
+                            setRfqSelectedCells(newSelection);
+                          } else {
+                            setRfqSelectionAnchor({ rowIndex, colIdx: clickedColIdx });
+                            setRfqSelectedCells(new Set([rfqCellKeyStr]));
+                            setEditingCell({ id: row.row_key, field: `rfq_${field}` });
+                            if (field === 'unit_price_idr') {
+                              setEditValue(String(value ?? '').replace(/[^0-9.-]/g, ''));
+                            } else {
+                              setEditValue(value ?? '');
+                            }
+                          }
+                        }}
+                        onPaste={e => { e.preventDefault(); applyRFQPaste(rowIndex, field, e.clipboardData.getData('text/plain')); }}
+                        className={`group relative px-2 py-1 align-top border-r cursor-pointer ${sourceStyle ? (darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200') : (darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200')} ${fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : inMultiSelection ? 'outline outline-2 outline-blue-500 outline-offset-[-2px] bg-blue-50/50' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${['qty','unit_price_idr','moq','lead_time_days'].includes(field) ? 'text-right font-semibold' : ''}`}>
+                        <div className={`min-h-7 min-w-0 truncate ${sourceStyle ? txt2 : 'text-blue-600'} ${field === 'photo_url' ? 'flex items-center gap-1 justify-center' : ''} ${field === 'purchase_pic' ? 'text-center' : ''}`}>
+                          {field === 'photo_url' && <LinkIcon className={`w-3.5 h-3.5 flex-shrink-0 ${hasValue ? 'text-blue-600' : 'text-blue-400'}`} />}
+                          {hasValue && field === 'purchase_pic' ? (() => {
+                            const c = getPicColor(value);
+                            return <span className={`inline-flex max-w-full truncate px-2 py-0.5 rounded-full text-[11px] font-semibold ${c ? `${c.bg} ${c.text}` : 'bg-gray-100 text-gray-700'}`}>{value}</span>;
+                          })() : hasValue ? renderValue(value, sourceStyle ? txt2 : 'text-blue-600') : <span>{field === 'photo_url' ? '' : '\u00a0'}</span>}
+                        </div>
+                        <button type="button" aria-label="Fill down" title="Drag to copy this value" onClick={e => e.stopPropagation()} onMouseDown={e => startRFQFill(e, rowIndex, field)} className="rfq-fill-handle absolute bottom-0 right-0 h-3 w-3 translate-x-1/2 translate-y-1/2 border border-blue-600 bg-blue-600 opacity-0 group-hover:opacity-100 focus:opacity-100" />
+                      </td>;
+                    }
+                    if (field === 'amt_idr') {
+                      return <td key={field} className={`px-2 py-1 align-top text-right font-semibold border-r ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'} ${txt2}`}>
+                        <div className="min-h-7 min-w-0 truncate">{renderValue(value)}</div>
+                      </td>;
+                    }
+                    if (field === 'similar_prod_ids') {
+                      const ids = splitSimilarValues(value, true);
+                      const noSimilar = ids.length === 1 && ids[0].toLowerCase() === 'no similar item';
+                      return <td key={field} className={`px-2 py-1 align-top border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'} ${txt2}`} title={String(value || '')}>
+                        {ids.length ? (
+                          <div className="flex flex-col gap-1">
+                            {ids.map(id => (
+                              <div key={id} className="flex items-center gap-1 min-w-0">
+                                <button
+                                  type="button"
+                                  disabled={noSimilar}
+                                  onClick={() => !noSimilar && setRfqSimilarAction(prev => (prev?.rowKey === row.row_key && prev?.productId === id ? null : { rowKey: row.row_key, productId: id }))}
+                                  className={`min-h-[22px] min-w-0 flex-1 truncate text-left ${noSimilar ? 'font-semibold text-slate-500 cursor-default' : 'font-mono text-blue-600 hover:underline'}`}
+                                  title={id}
+                                >{id}</button>
+                                {!row.product_id && !noSimilar && rfqSimilarAction?.rowKey === row.row_key && rfqSimilarAction?.productId === id && (
+                                  <button
+                                    type="button"
+                                    onClick={() => { setRfqSimilarAction(null); updateRFQCell(row.row_key, 'product_id', id); }}
+                                    className={`flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold ${darkMode ? 'bg-blue-900/50 text-blue-200 hover:bg-blue-800' : 'bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200'}`}
+                                  >
+                                    Use this ID
+                                  </button>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        ) : <span>-</span>}
+                      </td>;
+                    }
+                    if (['similar_prod_name', 'similar_spec', 'similar_mfr_name', 'similar_odr_unit'].includes(field)) {
+                      return <td key={field} className={`px-2 py-1 align-top border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'} ${txt2}`} title={String(value || '')}>
+                        {renderSimilarLines(value)}
+                      </td>;
+                    }
+                    if (field === 'similar_score') {
+                      const scores = splitSimilarValues(value, true).map(score => score ? `${String(score).replace(/%$/, '')}%` : '-');
+                      return <td key={field} className={`px-2 py-1 align-top text-right font-semibold border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'} ${txt2}`} title={String(value || '')}>
+                        {scores.length ? <div className="flex flex-col gap-1">{scores.map((score, index) => <div key={`${score}-${index}`} className="min-h-[22px]">{score}</div>)}</div> : '-'}
+                      </td>;
+                    }
+                    if (field === 'purchase_pic') {
+                      const c = getPicColor(value);
+                      return <td key={field} className={`px-2 py-2 text-center truncate border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'}`}>{value ? <span className={`inline-flex max-w-full truncate px-2 py-0.5 rounded-full text-[11px] font-semibold ${c ? `${c.bg} ${c.text}` : 'bg-gray-100 text-gray-700'}`}>{value}</span> : <span className={txt2}>-</span>}</td>;
+                    }
+                    const darkDataCols = ['sheet_status', 'no', 'client_name', 'rfq_date', 'closing_date', 'sales_pic', 'category_name', 'purchase_pic', 'rfq_code', 'item_name', 'detail_spec', 'brand_manufacturer', 'qty', 'unit', 'remark', 'similar_prod_ids', 'similar_prod_name', 'similar_spec', 'similar_mfr_name', 'similar_odr_unit', 'similar_score'];
+                    const isDarkDataCol = darkDataCols.includes(field);
+                    return <td key={field} className={`px-2 py-2 align-top border-r ${isDarkDataCol ? (darkMode ? 'bg-gray-800/60 border-gray-700 text-gray-100' : 'bg-slate-50 border-gray-200 text-black') : (darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-white border-gray-200')} ${['detail_spec','remark','category_name','similar_spec'].includes(field) ? '' : 'truncate'} ${['qty','amt_idr','similar_score'].includes(field) ? 'text-right font-semibold' : ''} ${isDarkDataCol ? '' : txt2}`}>
+                      {renderValue(value)}
+                    </td>;
+                  })}
+                </tr>
+              );})}
+            </tbody>
+          </table>
+        </DataTableScroll>
+
+        <PagePagination
+          darkMode={darkMode}
+          txt2={txt2}
+          page={rfqPage}
+          totalPages={totalPages}
+          total={rfqTotal}
+          perPage={rfqPerPage}
+          onPageChange={(p) => { setRfqPage(p); fetchRFQData(p, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter); }}
+          onPerPageChange={(next) => { setRfqPerPage(next); setRfqPage(1); fetchRFQData(1, next, rfqAppliedSearch, false, rfqFilters, rfqPicFilter); }}
+        />
+      </div>
+    );
+  };
+
+  const renderImport = () => {
+    const totalPages = Math.max(1, Math.ceil(importTotal / importPerPage));
+    const columns = importColumns || [];
+    const checklistFields = new Set(columns.filter(col => isImportChecklistColumn(col)).map(col => col.field));
+    const checklistCount = checklistFields.size;
+    const visibleColumns = showImportChecklist ? columns : columns.filter(col => !checklistFields.has(col.field));
+    const colWidth = (col) => {
+      if (col.field === 'days_left') return 64;
+      if (Number(col.width)) return Math.max(64, Math.min(Number(col.width), 360));
+      const label = String(col.label || '').toLowerCase();
+      if (isImportChecklistColumn(col)) return 82;
+      if (label.includes('spec') || label.includes('remark')) return 320;
+      if (label.includes('item name')) return 260;
+      if (label.includes('vendor')) return 190;
+      if (label.includes('status')) return 132;
+      if (label.includes('date') || label.includes('actual') || ['etd', 'eta'].includes(col.field)) return 120;
+      if (isImportHyperlinkColumn(col)) return 190;
+      return 126;
+    };
+    const tableWidth = Math.max(1100, visibleColumns.reduce((sum, col) => sum + colWidth(col), 0));
+    const handleVendorUpload = async (e) => {
+      const files = Array.from(e.target.files || []);
+      e.target.value = '';
+      if (!files.length) return;
+      const fd = new FormData();
+      files.forEach(file => fd.append('file', file));
+      try {
+        const res = await api.post('/api/import/vendors/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+        addToast(res.data?.message || 'Import vendors updated', 'success');
+        setImportPage(1);
+        fetchImportData(1, importPerPage, importAppliedSearch, true, importFilters, importReqDlvSort, importYupiPoSort);
+      } catch (err) {
+        addToast(`Failed to upload import vendors: ${err.response?.data?.error || err.message}`, 'error');
+      }
+    };
+    const startImportEdit = (row, col) => {
+      const key = `${row._row_key}:${col.field}`;
+      setImportEditingCell(key);
+      // For date fields, normalize the value to YYYY-MM-DD up front so the
+      // <input type="date"> picker can parse it and show the calendar with
+      // the correct day pre-selected. Without this, a value like "2 Jun"
+      // would make the picker open blank (the input can't parse it).
+      const isDateField = ['po_send_date', 'po_date_by_email', 'req_dlv_date', 'source_req_dlv_date', 'reschedule', 'etd', 'eta'].includes(col.field) || String(col.label || '').toLowerCase().includes('date');
+      const rawValue = String(row[col.field] ?? '');
+      setImportEditValue(isDateField ? toDateInputValue(rawValue) : rawValue);
+    };
+    const renderImportCell = (row, col) => {
+      const key = `${row._row_key}:${col.field}`;
+      const editing = importEditingCell === key;
+      const value = row[col.field] ?? '';
+
+      if (col.field === 'status' || col.type === 'status') {
+        const poSendDate = String(row.po_send_date || '').trim();
+        const isNewImport = !poSendDate;
+        const current = String(isNewImport ? 'NEW' : (value && String(value).toUpperCase() !== 'NEW' ? value : 'ON PROCESS')).toUpperCase();
+        if (isNewImport) {
+          return (
+            <span className={`inline-flex h-7 w-full items-center justify-center rounded-lg border px-2 text-[11px] font-extrabold tracking-wide ${importStatusClass('NEW', darkMode)}`}>
+              NEW
+            </span>
+          );
+        }
+        return (
+          <select
+            value={current}
+            onChange={(e) => updateImportCell(row._row_key, col.field, e.target.value)}
+            className={`w-full h-7 rounded-lg border px-2 py-0 text-[11px] font-bold outline-none cursor-pointer ${importStatusClass(current, darkMode)}`}
+          >
+            {(col.options || IMPORT_STATUS_OPTIONS).filter(opt => String(opt).toUpperCase() !== 'NEW').map(opt => <option key={opt} value={opt} style={importStatusOptionStyle(opt)}>{opt}</option>)}
+          </select>
+        );
+      }
+
+      if (isImportChecklistColumn(col)) {
+        const checked = importCheckboxChecked(value);
+        return (
+          <button
+            type="button"
+            onClick={() => updateImportCell(row._row_key, col.field, checked ? 'FALSE' : 'TRUE')}
+            className="flex w-full items-center justify-center py-1"
+            title={checked ? 'Checked' : 'Unchecked'}
+          >
+            {checked ? (
+              <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#20B71F]">
+                <Check className="w-4 h-4 text-white stroke-[4]" />
+              </span>
+            ) : (
+              <span className={`inline-flex h-6 w-6 rounded-full border ${darkMode ? 'bg-gray-700 border-gray-500' : 'bg-white border-gray-300'}`} />
+            )}
+          </button>
+        );
+      }
+
+      if (editing) {
+        const isLong = ['spec', 'remark_yupi', 'import_remarks', 'soft_copy_doc'].includes(col.field);
+        const isDateField = ['po_send_date', 'po_date_by_email', 'req_dlv_date', 'source_req_dlv_date', 'reschedule', 'etd', 'eta'].includes(col.field) || String(col.label || '').toLowerCase().includes('date');
+        // Input fills the td edge-to-edge with NO inner ring/outline — the td
+        // itself already shows the blue outer outline when editingCellNow is
+        // true (see the td className above). A second inner ring here would
+        // produce the double blue border the user reported.
+        //
+        // CRITICAL: we also pass inline `style={{ outline: 'none', boxShadow: 'none' }}`
+        // because Tailwind's `focus:outline-none` / `focus:ring-0` classes are
+        // NOT enough to suppress the browser's default focus ring on autoFocus
+        // inputs in Chrome/Safari/Edge. The inline style wins over the
+        // user-agent stylesheet, which is what actually kills the second blue
+        // border. The `data-no-focus-ring` attribute is also added so a CSS
+        // rule in <style> can target it as a backstop (see the global CSS
+        // block at the top of this file for `input[data-no-focus-ring]:focus`).
+        const inputCls = `block w-full min-h-8 px-2 py-1 text-xs border-0 rounded-none ring-0 outline-none focus:outline-none focus:ring-0 focus-visible:outline-none shadow-none ${darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`;
+        const inputStyle = { outline: 'none', outlineStyle: 'none', boxShadow: 'none', borderColor: 'transparent', borderWidth: 0 };
+        if (isDateField) {
+          return (
+            <input
+              type="date"
+              autoFocus
+              data-no-focus-ring=""
+              className={`${inputCls} appearance-none`}
+              style={{ ...inputStyle, WebkitAppearance: 'none', appearance: 'none' }}
+              value={toDateInputValue(importEditValue)}
+              onFocus={e => { try { e.currentTarget.showPicker?.(); } catch {} }}
+              onClick={e => { try { e.currentTarget.showPicker?.(); } catch {} }}
+              onChange={e => setImportEditValue(e.target.value)}
+              onBlur={e => updateImportCell(row._row_key, col.field, e.target.value)}
+              onPaste={e => {
+                const text = e.clipboardData.getData('text/plain');
+                if (text.includes('\t') || text.includes('\n')) {
+                  e.preventDefault();
+                  setImportEditingCell(null);
+                  const rowIndex = importData.findIndex(r => r._row_key === row._row_key);
+                  applyImportPaste(rowIndex, col.field, text);
+                }
+              }}
+              onKeyDown={e => {
+                if (e.key === 'Enter') updateImportCell(row._row_key, col.field, e.currentTarget.value);
+                if (e.key === 'Escape') setImportEditingCell(null);
+              }}
+            />
+          );
+        }
+        if (isLong) {
+          return (
+            <textarea
+              autoFocus
+              data-no-focus-ring=""
+              rows={3}
+              className={`${inputCls} resize-y min-h-[74px]`}
+              style={inputStyle}
+              value={importEditValue}
+              onChange={e => setImportEditValue(e.target.value)}
+              onBlur={() => updateImportCell(row._row_key, col.field, importEditValue)}
+              onPaste={e => {
+                const text = e.clipboardData.getData('text/plain');
+                if (text.includes('\t') || text.includes('\n')) {
+                  e.preventDefault();
+                  setImportEditingCell(null);
+                  const rowIndex = importData.findIndex(r => r._row_key === row._row_key);
+                  applyImportPaste(rowIndex, col.field, text);
+                }
+              }}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) updateImportCell(row._row_key, col.field, importEditValue);
+                if (e.key === 'Escape') setImportEditingCell(null);
+              }}
+            />
+          );
+        }
+        return (
+          <input
+            autoFocus
+            data-no-focus-ring=""
+            className={inputCls}
+            style={inputStyle}
+            value={importEditValue}
+            onChange={e => setImportEditValue(e.target.value)}
+            onBlur={() => updateImportCell(row._row_key, col.field, importEditValue)}
+            onPaste={e => {
+              const text = e.clipboardData.getData('text/plain');
+              if (text.includes('\t') || text.includes('\n')) {
+                e.preventDefault();
+                setImportEditingCell(null);
+                const rowIndex = importData.findIndex(r => r._row_key === row._row_key);
+                applyImportPaste(rowIndex, col.field, text);
+              }
+            }}
+            onKeyDown={e => {
+              if (e.key === 'Enter') updateImportCell(row._row_key, col.field, importEditValue);
+              if (e.key === 'Escape') setImportEditingCell(null);
+            }}
+          />
+        );
+      }
+
+      if (isImportHyperlinkColumn(col)) {
+        const directUrl = row[`${col.field}__url`] || row[`${col.field}_url`] || '';
+        const driveUrl = extractGDriveUrl(directUrl || value);
+        const label = String(value || '').replace(driveUrl, '').replace(/[|\n]+$/g, '').trim() || (driveUrl ? gDriveChipLabel(driveUrl) : '-');
+        // Single link element only — no separate gray edit button. The cell
+        // itself is clickable (td onClick → startImportEdit) so the user can
+        // still edit by clicking the cell area outside the link chip.
+        return (
+          <div className="flex items-center gap-1 w-full">
+            {driveUrl ? (
+              <a href={driveUrl} target="_blank" rel="noopener noreferrer" title={driveUrl} onClick={e => e.stopPropagation()}
+                 className={`flex min-w-0 max-w-full h-6 items-center gap-1 px-2 py-0 rounded-full text-[11px] font-medium truncate border ${darkMode ? 'bg-blue-900/40 text-blue-300 border-blue-800 hover:bg-blue-900/70' : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'}`}>
+                <LinkIcon className="w-3.5 h-3.5 flex-shrink-0" />
+                <span className="truncate">{label}</span>
+              </a>
+            ) : (
+              <button type="button" onClick={(e) => { e.stopPropagation(); startImportEdit(row, col); }} className="block min-w-0 truncate text-left hover:underline text-blue-600" title={String(value || '-')}>{label}</button>
+            )}
+          </div>
+        );
+      }
+
+      if (col.field === 'days_left') {
+        const dayValue = String(value || '').trim();
+        if (dayValue === '✅') {
+          return <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#20B71F] mx-auto" title="Delivered"><Check className="w-4 h-4 text-white stroke-[4]" /></span>;
+        }
+        if (dayValue === '❌') {
+          return <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#EA0D0D] mx-auto" title="Canceled"><X className="w-4 h-4 text-white stroke-[4]" /></span>;
+        }
+      }
+
+      if (col.field === 'arrival_check') {
+        const text = importDisplayValue(value);
+        return <span className={`inline-flex max-w-full h-6 items-center rounded-full border px-2 py-0 text-[11px] font-semibold truncate ${importArrivalClass(value, darkMode)}`} title={text}>{text}</span>;
+      }
+
+      const isFormula = isImportFormulaColumn(col);
+      const isCenter = ['days_left'].includes(col.field);
+      const isNumeric = !isCenter && (Boolean(col.number) || ['ord_qty', 'unit_price', 'amount', 'purchase_price', 'purchase_amount', 'lt_days'].includes(col.field));
+      const display = importDisplayValue(value);
+      const cellInnerClass = `${isCenter ? 'text-center tabular-nums font-bold' : isNumeric ? 'text-right tabular-nums font-semibold' : 'text-left'} ${isFormula ? (darkMode ? 'text-gray-200' : 'text-slate-700') : ''} block w-full truncate whitespace-nowrap leading-6`;
+      if (col.field === 'req_dlv_date' && String(row.reschedule || '').trim()) {
+        return (
+          <div className="group/req flex min-w-0 items-center gap-1">
+            <button type="button" className={`block min-w-0 flex-1 ${cellInnerClass} hover:underline decoration-dotted`} title={display} onClick={() => startImportEdit(row, col)}>{display}</button>
+            <button
+              type="button"
+              title={`Update Req Dlv Date to ${row.reschedule}`}
+              onClick={(e) => { e.stopPropagation(); updateImportCellsBatch([{ row_key: row._row_key, field: 'req_dlv_date', value: row.reschedule }, { row_key: row._row_key, field: 'reschedule', value: '' }]); }}
+              className="hidden group-hover/req:inline-flex flex-shrink-0 rounded-md bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold text-white hover:bg-amber-600"
+            >Update</button>
+          </div>
+        );
+      }
+      return <button type="button" className={`block w-full ${cellInnerClass} hover:underline decoration-dotted`} title={display} onClick={() => startImportEdit(row, col)}>{display}</button>;
+    };
+
+    const importEditableFields = visibleColumns.map(col => col.field);
+
+    // ── Shift+click multi-select (Excel-like) ─────────────────────────────
+    // Click a cell → set anchor + select just that cell.
+    // Shift+click another cell → select the rectangle from anchor to clicked
+    //   cell. Works across rows AND columns: e.g. anchor at (row 2, col C),
+    //   Shift+click (row 5, col E) selects rows 2–5 × columns C–E.
+    // Shift+click in the same column → selects a vertical range (rows only).
+    // Click without Shift → reset to single-cell selection.
+    const importCellKey = (rowIndex, field) => `${rowIndex}|${field}`;
+    const computeImportSelection = (anchor, target) => {
+      const startRow = Math.min(anchor.rowIndex, target.rowIndex);
+      const endRow = Math.max(anchor.rowIndex, target.rowIndex);
+      const startColIdx = Math.min(anchor.colIdx, target.colIdx);
+      const endColIdx = Math.max(anchor.colIdx, target.colIdx);
+      const result = new Set();
+      for (let r = startRow; r <= endRow; r += 1) {
+        for (let c = startColIdx; c <= endColIdx; c += 1) {
+          result.add(importCellKey(r, importEditableFields[c]));
+        }
+      }
+      return result;
+    };
+
+    const applyImportPaste = async (startRowIndex, startField, text) => {
+      const rows = String(text || '').replace(/\r/g, '').split('\n').filter((line, idx, arr) => line !== '' || idx < arr.length - 1);
+      if (!rows.length) return;
+      const startColIndex = importEditableFields.indexOf(startField);
+      if (startColIndex < 0) return;
+      const batchUpdates = [];
+      for (let r = 0; r < rows.length; r += 1) {
+        const targetRow = importData[startRowIndex + r];
+        if (!targetRow) break;
+        const values = rows[r].split('\t');
+        for (let c = 0; c < values.length; c += 1) {
+          const field = importEditableFields[startColIndex + c];
+          if (!field) break;
+          batchUpdates.push({ row_key: targetRow._row_key, field, value: values[c] });
+        }
+      }
+      if (batchUpdates.length && await updateImportCellsBatch(batchUpdates)) {
+        addToast(`Import paste: ${batchUpdates.length} cells updated`, 'success');
+      }
+    };
+    const fillImportRange = async (startRowIndex, startField, endRowIndex, endField) => {
+      // Determine drag direction: vertical (same column, different row) or
+      // horizontal (same row, different column). If the user dragged both,
+      // pick the dominant axis so the fill is predictable.
+      const startColIndex = importEditableFields.indexOf(startField);
+      const endColIndex = importEditableFields.indexOf(endField);
+      if (startColIndex < 0 || endColIndex < 0) return;
+      const rowDelta = Math.abs(endRowIndex - startRowIndex);
+      const colDelta = Math.abs(endColIndex - startColIndex);
+      const source = importData[startRowIndex];
+      if (!source) return;
+      const batchUpdates = [];
+      if (rowDelta >= colDelta) {
+        // Vertical fill (same as before): copy startField's value down/up
+        // across all rows from minRow to maxRow.
+        const value = source[startField] ?? '';
+        const minRow = Math.max(0, Math.min(startRowIndex, endRowIndex));
+        const maxRow = Math.min(importData.length - 1, Math.max(startRowIndex, endRowIndex));
+        for (let i = minRow; i <= maxRow; i += 1) {
+          if (i === startRowIndex || !importData[i]?._row_key) continue;
+          batchUpdates.push({ row_key: importData[i]._row_key, field: startField, value });
+        }
+      } else {
+        // Horizontal fill: copy startField's value left/right across all
+        // columns from minCol to maxCol on the SAME row. This includes
+        // checklist columns — the user can drag a check across SAP INPUT,
+        // BL/AWB, INVOICE, PL, HC, MSDS, COA, COO in one motion.
+        const value = source[startField] ?? '';
+        const minCol = Math.min(startColIndex, endColIndex);
+        const maxCol = Math.max(startColIndex, endColIndex);
+        for (let c = minCol; c <= maxCol; c += 1) {
+          if (c === startColIndex) continue;
+          const field = importEditableFields[c];
+          if (!field) continue;
+          batchUpdates.push({ row_key: source._row_key, field, value });
+        }
+      }
+      if (batchUpdates.length && await updateImportCellsBatch(batchUpdates)) {
+        addToast(`Import drag-fill: ${batchUpdates.length} cells updated`, 'success');
+      }
+    };
+    const startImportFill = (event, rowIndex, field) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const getTargetCell = (evt) => document.elementFromPoint(evt.clientX, evt.clientY)?.closest('[data-import-cell="true"]');
+      const updateRange = (evt) => {
+        const target = getTargetCell(evt);
+        if (!target) return;
+        const endRowIndex = Number(target.getAttribute('data-row-index'));
+        const endField = target.getAttribute('data-field');
+        if (!Number.isFinite(endRowIndex) || !endField) return;
+        // Determine direction based on which axis moved more — this gives
+        // the user intuitive "drag down to fill down, drag right to fill
+        // right" behavior without needing a separate handle.
+        const startColIndex = importEditableFields.indexOf(field);
+        const endColIndex = importEditableFields.indexOf(endField);
+        const rowDelta = Math.abs(endRowIndex - rowIndex);
+        const colDelta = Math.abs(endColIndex - startColIndex);
+        if (rowDelta >= colDelta) {
+          // Vertical: highlight same column, rows between start and end
+          if (endField === field) {
+            setImportFillRange({ startField: field, startRow: rowIndex, minRow: Math.min(rowIndex, endRowIndex), maxRow: Math.max(rowIndex, endRowIndex), direction: 'vertical' });
+          }
+        } else {
+          // Horizontal: highlight same row, columns between start and end
+          if (endRowIndex === rowIndex) {
+            setImportFillRange({ startField: field, startRow: rowIndex, minCol: Math.min(startColIndex, endColIndex), maxCol: Math.max(startColIndex, endColIndex), direction: 'horizontal' });
+          }
+        }
+      };
+      const cleanup = () => {
+        document.body.classList.remove('rfq-fill-dragging');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        setImportFillRange(null);
+      };
+      const onMove = (moveEvent) => updateRange(moveEvent);
+      const onUp = (upEvent) => {
+        const target = getTargetCell(upEvent);
+        if (!target) { cleanup(); return; }
+        const endRowIndex = Number(target.getAttribute('data-row-index'));
+        const endField = target.getAttribute('data-field');
+        cleanup();
+        if (!Number.isFinite(endRowIndex) || !endField) return;
+        if (endField === field && endRowIndex === rowIndex) return; // no drag
+        fillImportRange(rowIndex, field, endRowIndex, endField);
+      };
+      document.body.classList.add('rfq-fill-dragging');
+      setImportFillRange({ startField: field, startRow: rowIndex, minRow: rowIndex, maxRow: rowIndex, direction: 'vertical' });
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    };
+
+    return (
+      <div className={`rounded-2xl overflow-hidden ${card}`}>
+        <div className={`px-5 py-4 border-b ${darkMode ? 'border-gray-700' : 'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+          <div className="flex items-center gap-2 min-w-0">
+            <Ship className="w-5 h-5 text-blue-500 flex-shrink-0" />
+            <h2 className={`text-lg font-bold ${txt}`}>Import</h2>
+            <span className={`text-sm ${txt2}`}>({fmtNum(importTotal)} records)</span>
+            <span className={`text-xs ${txt2}`} title={`Vendor Import: ${fmtNum(importVendorCount)}`}>Last Copy: {fmtWibDateTime(importLastCopyAt)}</span>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {/* Vendor Import — single dropdown combining Template + Upload.
+                Keeps the header tidy and matches the "1 menu per logical
+                action" pattern used in other tables (RFQ, Item Registration). */}
+            <div className="relative">
+              <button
+                ref={importVendorDropdown.triggerRef}
+                type="button"
+                onClick={() => setImportVendorMenuOpen(v => !v)}
+                onBlur={() => setTimeout(() => setImportVendorMenuOpen(false), 150)}
+                className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}
+              >
+                <FileSpreadsheet className="w-4 h-4"/>Vendor Import
+                <svg className={`w-3 h-3 transition-transform ${importVendorMenuOpen ? 'rotate-180' : ''}`} viewBox="0 0 12 12" fill="none"><path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+              </button>
+              {importVendorMenuOpen && (
+                <div
+                  style={importVendorDropdown.menuPos.style}
+                  className={`rounded-xl border shadow-2xl overflow-hidden ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}
+                >
+                  <button
+                    type="button"
+                    onMouseDown={(e) => { e.preventDefault(); downloadBlob('/api/import/vendor-template', `Import_Vendor_Template_${new Date().toISOString().slice(0,10)}.xlsx`, 'Import Vendor Template'); setImportVendorMenuOpen(false); }}
+                    className={`flex items-center gap-2 w-full px-3 py-2.5 text-left text-sm font-medium ${darkMode ? 'text-gray-100 hover:bg-gray-700' : 'text-gray-700 hover:bg-blue-50'}`}
+                  >
+                    <Download className="w-4 h-4"/>Template Vendor
+                  </button>
+                  <label className={`flex items-center gap-2 w-full px-3 py-2.5 text-sm font-medium cursor-pointer ${darkMode ? 'text-gray-100 hover:bg-gray-700' : 'text-gray-700 hover:bg-blue-50'}`}>
+                    <FileSpreadsheet className="w-4 h-4"/>Upload Vendor Import
+                    <input type="file" accept=".xlsx,.xls,.csv" multiple onChange={(e) => { handleVendorUpload(e); setImportVendorMenuOpen(false); }} className="hidden"/>
+                  </label>
+                </div>
+              )}
+            </div>
+            {/* Copy Sheet — triggers a fresh sync from the live Import tracker sheet. */}
+            <button onClick={() => fetchImportData(importPage, importPerPage, importAppliedSearch, true, importFilters, importReqDlvSort, importYupiPoSort)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><RotateCcw className="w-4 h-4"/>Copy Sheet</button>
+            {/* Hide/Show Checklist — toggle visibility of the 8 checklist columns (SAP INPUT, BL/AWB, …, COO). */}
+            {checklistCount > 0 && (
+              <button onClick={() => setShowImportChecklist(v => !v)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
+                {showImportChecklist ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}
+                {showImportChecklist ? 'Hide Checklist' : 'Show Checklist'}
+              </button>
+            )}
+            {/* Download Excel — exports the current filtered+sorted view. */}
+            <DownloadButton onClick={downloadImportExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
+              <Download className="w-4 h-4"/>Download Excel
+            </DownloadButton>
+          </div>
+        </div>
+
+        <FilterPanel darkMode={darkMode}>
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-[120px_120px_minmax(220px,1fr)_minmax(150px,220px)_minmax(180px,260px)_100px_100px] items-end">
+            <div className="min-w-0">
+              <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ Req Dlv Date</label>
+              <select
+                className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                value={importReqDlvSort}
+                onChange={e=>{ const nextSort=e.target.value; setImportReqDlvSort(nextSort); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, importFilters, nextSort, importYupiPoSort); }}
+                title="Sort Req Dlv Date"
+              >
+                <option value="oldest">Oldest ↑</option>
+                <option value="newest">Newest ↓</option>
+              </select>
+            </div>
+            <div className="min-w-0">
+              <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ YUPI PO</label>
+              <select
+                className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                value={importYupiPoSort}
+                onChange={e=>{ const nextSort=e.target.value; setImportYupiPoSort(nextSort); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, importFilters, importReqDlvSort, nextSort); }}
+                title="Sort YUPI PO"
+              >
+                <option value="">Default</option>
+                <option value="asc">A-Z ↑</option>
+                <option value="desc">Z-A ↓</option>
+              </select>
+            </div>
+            <div className="min-w-0"><label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Import</label><input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/></div>
+            <div className="min-w-0">
+              <MultiSelect label="YUPI PO" options={importOptions.yupi_po || []} selected={importFilters.yupi_po}
+                onChange={v=>{ const next={...importFilters, yupi_po:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="min-w-0">
+              <MultiSelect label="Vendor Name" options={importOptions.vendors || []} selected={importFilters.vendors}
+                onChange={v=>{ const next={...importFilters, vendors:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <button onClick={()=>{ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">Search</button>
+            <button onClick={()=>{ const next={ yupi_po: [], vendors: [] }; const nextSort='newest'; const nextYupiSort=''; setImportSearch(''); setImportAppliedSearch(''); setImportFilters(next); setImportReqDlvSort(nextSort); setImportYupiPoSort(nextYupiSort); setImportPage(1); fetchImportData(1, importPerPage, '', false, next, nextSort, nextYupiSort); }} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
+          </div>
+        </FilterPanel>
+
+        <DataTableScroll darkMode={darkMode}>
+          <table className="freeze-table-import table-fixed text-xs border-collapse border" style={{ width: `${tableWidth}px`, minWidth: `${tableWidth}px` }}>
+            <colgroup>{visibleColumns.map(col => <col key={col.field} style={{ width: `${colWidth(col)}px` }} />)}</colgroup>
+            <thead className={tblHd}>
+              <tr>{visibleColumns.map((col, index) => (
+                <th key={col.field} className={`px-2 py-2 h-10 text-center align-middle font-bold border-r whitespace-pre-line leading-tight ${darkMode ? 'border-gray-700 text-gray-200' : 'border-gray-200 text-slate-700'}`} title={col.sheet_col ? `${col.sheet_col} - ${col.label}` : col.label}>{renderFreezeHeader('import', index + 1, col.label)}</th>
+              ))}</tr>
+            </thead>
+            <tbody className={`divide-y ${tblDv}`}>
+              {importData.length === 0 ? (
+                <tr><td colSpan={Math.max(1, visibleColumns.length)} className={`px-4 py-12 text-center ${txt2}`}><Ship className="w-10 h-10 mx-auto mb-2 opacity-40"/>No import data</td></tr>
+              ) : importData.map((row, rowIndex) => {
+                const hasReschedule = String(row.reschedule || '').trim();
+                return <tr key={row._row_key} className={`${trHov} ${hasReschedule ? (darkMode ? 'bg-amber-900/25 hover:bg-amber-900/35' : 'bg-amber-50 hover:bg-amber-100/70') : ''}`}>{visibleColumns.map(col => {
+                  const formula = isImportFormulaColumn(col);
+                  const selected = importSelectedCell?.rowKey === row._row_key && importSelectedCell?.field === col.field;
+                  // Multi-select highlight: if Shift+click selected a range,
+                  // highlight every cell in that range. Falls back to the
+                  // single-cell `selected` outline when no range is active.
+                  const cellKey = importCellKey(rowIndex, col.field);
+                  const inMultiSelection = importSelectedCells?.has(cellKey);
+                  // Fill highlight: support both vertical (down/up, same
+                  // column) and horizontal (left/right, same row) drag-fill.
+                  const colIdx = visibleColumns.findIndex(c => c.field === col.field);
+                  let fillHighlighted = false;
+                  if (importFillRange?.direction === 'vertical') {
+                    fillHighlighted = importFillRange.startField === col.field && rowIndex >= importFillRange.minRow && rowIndex <= importFillRange.maxRow && rowIndex !== importFillRange.startRow;
+                  } else if (importFillRange?.direction === 'horizontal') {
+                    fillHighlighted = importFillRange.startRow === rowIndex && colIdx >= importFillRange.minCol && colIdx <= importFillRange.maxCol && col.field !== importFillRange.startField;
+                  }
+                  const editingCellNow = importEditingCell === `${row._row_key}:${col.field}`;
+                  const directEdit = !(col.field === 'status' || col.type === 'status' || isImportChecklistColumn(col));
+                  return <td
+                    key={col.field}
+                    data-import-cell="true"
+                    data-row-index={rowIndex}
+                    data-field={col.field}
+                    tabIndex={0}
+                    onFocus={() => setImportSelectedCell({ rowKey: row._row_key, field: col.field })}
+                    onClick={(e) => {
+                      setImportSelectedCell({ rowKey: row._row_key, field: col.field });
+                      // Shift+click multi-select (Excel-like). Click without
+                      // Shift resets to single cell + new anchor. Shift+click
+                      // extends from the existing anchor to the clicked cell,
+                      // forming a rectangle that can span rows AND columns.
+                      const clickedColIdx = importEditableFields.indexOf(col.field);
+                      if (e.shiftKey && importSelectionAnchor && clickedColIdx >= 0) {
+                        const newSelection = computeImportSelection(importSelectionAnchor, { rowIndex, colIdx: clickedColIdx });
+                        setImportSelectedCells(newSelection);
+                      } else {
+                        setImportSelectionAnchor({ rowIndex, colIdx: clickedColIdx });
+                        setImportSelectedCells(new Set([cellKey]));
+                        if (directEdit && !editingCellNow && !e.target.closest('a,input,textarea,select,button')) startImportEdit(row, col);
+                      }
+                    }}
+                    onPaste={e => { e.preventDefault(); applyImportPaste(rowIndex, col.field, e.clipboardData.getData('text/plain')); }}
+                    className={`group relative h-8 max-h-8 ${editingCellNow ? 'p-0' : 'px-2 py-1'} align-middle border-r focus:outline-none cursor-pointer ${formula ? (darkMode ? 'bg-gray-800/50' : 'bg-slate-50/80') : ''} ${hasReschedule ? (darkMode ? 'bg-amber-900/20' : 'bg-amber-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${editingCellNow ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : inMultiSelection ? 'outline outline-2 outline-blue-500 outline-offset-[-2px] bg-blue-50/50' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${col.field === 'days_left' ? 'text-center' : ''} ${txt2}`}
+                  >
+                    {renderImportCell(row, col)}
+                    {/* Fill handle — bottom-right corner. Drag in any direction:
+                        down to fill the same column, right to fill the same row.
+                        The drag logic auto-detects the dominant axis. */}
+                    <button type="button" aria-label="Fill handle" title="Drag to copy value (down or right)" onClick={e => e.stopPropagation()} onMouseDown={e => startImportFill(e, rowIndex, col.field)} className="rfq-fill-handle absolute bottom-0 right-0 h-3 w-3 translate-x-1/2 translate-y-1/2 border border-blue-600 bg-blue-600 opacity-0 group-hover:opacity-100 focus:opacity-100" />
+                  </td>;
+                })}</tr>;
+              })}
+            </tbody>
+          </table>
+        </DataTableScroll>
+
+        <PagePagination darkMode={darkMode} txt2={txt2} page={importPage} totalPages={totalPages} total={importTotal} perPage={importPerPage} onPageChange={(p)=>{ setImportPage(p); fetchImportData(p, importPerPage, importAppliedSearch, false, importFilters, importReqDlvSort, importYupiPoSort); }} onPerPageChange={(next)=>{ setImportPerPage(next); setImportPage(1); fetchImportData(1, next, importAppliedSearch, false, importFilters, importReqDlvSort, importYupiPoSort); }} />
+      </div>
+    );
+  };
+  const renderItemRegistration = () => {
+    const fmtDateShort = (d) => {
+      if (!d) return '-';
+      try { return String(d).slice(0, 10); } catch { return d; }
+    };
+    const baseColumns = [
+      ['Proc. Status', 'proc_status'], ['Req. Date', 'req_date'], ['Client Nm.', 'client_name'], ['Category', 'category'], ['PIC', 'pic'],
+      ['Req. No', 'req_no'], ['Prod. ID', 'prod_id'], ['Prod. Nm.', 'prod_name'],
+      ['Spec.', 'spec'], ['Mfr. Nm.', 'mfr_name'], ['Unit', 'odr_unit'],
+      ['Prod. Price', 'prod_price'], ['Curr.', 'curr']
+    ];
+    const columns = [...baseColumns, ['Remarks', 'remarks']];
+    const statusClass = (status) => {
+      const s = String(status || '').toLowerCase();
+      if (s.includes('complete')) return 'bg-green-100 text-green-700 border-green-200';
+      if (s.includes('waiting')) return 'bg-slate-100 text-slate-700 border-slate-200';
+      if (s.includes('receive')) return 'bg-sky-100 text-sky-700 border-sky-200';
+      if (s.includes('process') || s.includes('proc')) return 'bg-blue-100 text-blue-700 border-blue-200';
+      if (s.includes('reject') || s.includes('cancel')) return 'bg-red-100 text-red-700 border-red-200';
+      return 'bg-gray-100 text-gray-700 border-gray-200';
+    };
+    const visibleItemRegPicKpis = itemRegMissingPicKpis.filter(row => row.pic && row.pic.toLowerCase() !== 'unassigned' && row.pic.trim() !== '');
+    const totalMissingProdId = visibleItemRegPicKpis.reduce((sum, row) => sum + (Number(row.count) || 0), 0);
+    const itemRegPicKpis = [
+      { pic: 'Total Pending Regist.', count: totalMissingProdId, sub: 'Items Pending', isTotal: true },
+      ...visibleItemRegPicKpis.map(row => ({ pic: row.pic, count: row.count, sub: 'Items Pending' }))
+    ];
+    const itemRegKpiCols = Math.max(1, itemRegPicKpis.length);
+    const colWidth = (key) => ({
+      proc_status: 150, req_date: 110, client_name: 180, category: 170, pic: 90, req_no: 150, prod_id: 110,
+      prod_name: 240, spec: 220, mfr_name: 150, odr_unit: 80,
+      prod_price: 120, curr: 70, remarks: 560
+    }[key] || 140);
+    const colStyle = (key) => {
+      const width = `${colWidth(key)}px`;
+      return { width, minWidth: width, maxWidth: width };
+    };
+    const itemRegTableWidth = columns.reduce((sum, [, key]) => sum + colWidth(key), 0);
+
+    return (
+      <div className={`rounded-2xl overflow-hidden ${card}`}>
+        <div className={`px-5 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+          <div className="flex items-center gap-2 min-w-0">
+            <Wrench className="w-5 h-5 text-blue-500 flex-shrink-0"/>
+            <h2 className={`text-lg font-bold ${txt}`}>Item Registration</h2>
+            <span className={`text-sm ${txt2}`}>({fmtNum(itemRegTotal)} records)</span>
+            {itemRegLastUpdated && <span className={`text-xs ${txt2}`}>Last update: {fmtDate(itemRegLastUpdated)}</span>}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button onClick={downloadItemRegistrationTemplate} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
+              <Download className="w-4 h-4"/>Template
+            </button>
+            <label className="flex items-center gap-2 px-3 py-2.5 bg-slate-600 hover:bg-slate-700 text-white rounded-xl text-sm font-semibold shadow-sm cursor-pointer">
+              <FileSpreadsheet className="w-4 h-4"/>Batch Upload
+              <input type="file" accept=".xlsx,.xls" onChange={handleItemRegistrationBatchUpload} className="hidden"/>
+            </label>
+            <DownloadButton onClick={downloadItemRegistrationExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
+              <Download className="w-4 h-4"/>Download Excel
+            </DownloadButton>
+          </div>
+        </div>
+
+        <div className={`px-5 py-3 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
+          <div className="grid grid-flow-col gap-2" style={{ gridTemplateColumns: `repeat(${itemRegKpiCols}, minmax(0, 1fr))` }}>
+            {itemRegPicKpis.map((row) => {
+              const activePic = !row.isTotal && itemRegPicHighlight === row.pic;
+              const applyItemRegPicFilter = () => {
+                const nextHighlight = row.isTotal || activePic ? '' : row.pic;
+                const nextFilters = { ...itemRegFilters, pics: nextHighlight ? [nextHighlight] : [] };
+                setItemRegPicHighlight(nextHighlight);
+                setItemRegFilters(nextFilters);
+                setItemRegPage(1);
+                fetchItemRegistration(1, itemRegPerPage, itemRegAppliedSearch, nextFilters, nextHighlight);
+              };
+              return (
+                <button key={row.pic} type="button" onClick={applyItemRegPicFilter} className={`min-w-0 p-3 rounded-xl text-left transition-all ${activePic ? (darkMode ? 'bg-amber-900/30 border border-amber-500 ring-2 ring-amber-400' : 'bg-amber-50 border border-amber-300 ring-2 ring-amber-200') : row.isTotal ? (darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200') : card} ${row.isTotal ? 'hover:border-slate-300' : 'hover:border-amber-300'}`}>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className={`text-xs font-semibold truncate ${activePic ? 'text-amber-700' : row.isTotal ? (darkMode ? 'text-gray-200' : 'text-gray-700') : txt2}`} title={row.pic}>{row.pic}</p>
+                      <h3 className={`text-xl font-bold leading-tight ${activePic ? 'text-amber-700' : row.isTotal ? (darkMode ? 'text-gray-100' : 'text-gray-800') : kpiValue}`}>{fmtNum(row.count)}</h3>
+                      <p className={`text-[11px] leading-tight whitespace-nowrap ${txt2}`}>{row.sub}</p>
+                    </div>
+                    <div className={`p-1.5 rounded-lg flex-shrink-0 ${activePic ? 'bg-amber-100 text-amber-700' : row.isTotal ? (darkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-100 text-gray-600') : neutralIcon}`}>
+                      <Package className="w-3.5 h-3.5" />
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <FilterPanel darkMode={darkMode}>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[170px_repeat(5,minmax(150px,1fr))_120px] items-end">
+            <div className="min-w-0">
+              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Req No.</label>
+              <SearchInput
+                key={`item-req-no-${itemRegSearch.join('|')}`}
+                placeholder={'REQ001\nREQ002'}
+                label="Req No."
+                darkMode={darkMode}
+                txt2={txt2}
+                onSearch={(nums) => {
+                  setItemRegSearch(nums);
+                  setItemRegAppliedSearch(nums);
+                  setItemRegPage(1);
+                  fetchItemRegistration(1, itemRegPerPage, nums, itemRegFilters);
+                }}
+              />
+            </div>
+            <div className="min-w-0">
+              <MultiSelect label="Proc. Status" options={itemRegOptions.proc_statuses} selected={itemRegFilters.proc_statuses}
+                onChange={v=>{ const next={...itemRegFilters, proc_statuses:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="min-w-0">
+              <MultiSelect label="Client Name" options={itemRegOptions.clients} selected={itemRegFilters.clients}
+                onChange={v=>{ const next={...itemRegFilters, clients:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="min-w-0">
+              <MultiSelect label="Category" options={itemRegOptions.categories} selected={itemRegFilters.categories}
+                onChange={v=>{ const next={...itemRegFilters, categories:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="min-w-0">
+              <MultiSelect label="PIC" options={itemRegOptions.pics} selected={itemRegFilters.pics}
+                onChange={v=>{ const next={...itemRegFilters, pics:v}; setItemRegPicHighlight(''); setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next,''); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="min-w-0">
+              <MultiSelect label="Mfr. Nm." options={itemRegOptions.mfr_names} selected={itemRegFilters.mfr_names}
+                onChange={v=>{ const next={...itemRegFilters, mfr_names:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <button onClick={() => { const next={ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] }; setItemRegSearch([]); setItemRegAppliedSearch([]); setItemRegPicHighlight(''); setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1, itemRegPerPage, [], next, ''); }}
+              className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
+          </div>
+        </FilterPanel>
+
+        <DataTableScroll darkMode={darkMode}>
+          <table className="freeze-table-item-registration table-fixed text-xs" style={{ width: `${itemRegTableWidth}px`, minWidth: `${itemRegTableWidth}px` }}>
+            <colgroup>{columns.map(([, key]) => <col key={key} style={colStyle(key)}/>)}</colgroup>
+            <thead className={tblHd}><tr>{columns.map(([label], index) => <th key={label} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{renderFreezeHeader('item-registration', index + 1, label)}</th>)}</tr></thead>
+            <tbody className={`divide-y ${tblDv}`}>
+              {itemRegData.length === 0 ? <tr><td colSpan={columns.length} className={`px-4 py-12 text-center ${txt2}`}><Wrench className="w-10 h-10 mx-auto mb-2 opacity-40"/>No Item Registration data</td></tr>
+              : itemRegData.map(row => {
+                return <tr key={row.id} className={`${trHov} transition-colors`}>
+                {columns.map(([, key]) => {
+                  const value = key === 'prod_price' ? fmtNum(row[key]) : key === 'req_date' ? fmtDateShort(row[key]) : (row[key] || '-');
+                  if (key === 'proc_status') return <td key={key} className="px-2 py-2"><span className={`inline-flex max-w-full items-center px-2 py-0.5 rounded-full border text-[11px] font-semibold leading-snug truncate ${statusClass(row[key])}`}>{value}</span></td>;
+                  if (key === 'pic') {
+                    const c = getPicColor(row.pic);
+                    return <td key={key} className="px-2 py-2 text-center truncate">{row.pic ? <span className={`inline-flex max-w-full truncate px-2 py-0.5 rounded-full text-[11px] font-semibold ${c ? `${c.bg} ${c.text}` : 'bg-gray-100 text-gray-700'}`}>{row.pic}</span> : <span className={txt2}>-</span>}</td>;
+                  }
+                  if (key === 'remarks') return <td key={key} className="px-2 py-2 truncate" title={row.remarks}>{editingCell?.id===row.id && editingCell.field==='item_remarks' ? (
+                    <input type="text" defaultValue={row.remarks}
+                      className={`w-full px-2 py-1 rounded text-xs border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                      onChange={e=>setEditValue(e.target.value)}
+                      onBlur={()=>updateItemRegistrationCell(row.id,'remarks',editValue)}
+                      onKeyDown={e=>{ if(e.key==='Enter') updateItemRegistrationCell(row.id,'remarks',editValue); if(e.key==='Escape') setEditingCell(null); }}
+                      autoFocus/>
+                  ) : (
+                    <span className="cursor-pointer text-blue-600 hover:underline" onClick={()=>{setEditingCell({id:row.id,field:'item_remarks'});setEditValue(row.remarks||'');}}>{row.remarks||'Add'}</span>
+                  )}</td>;
+                  return <td key={key} className={`px-2 py-2 ${['req_no','prod_name'].includes(key) ? '' : 'truncate'} ${key === 'prod_price' ? `text-right font-semibold ${kpiValue}` : txt2} ${['req_date','req_no','prod_id','prod_name','odr_unit','curr'].includes(key) ? 'whitespace-nowrap' : ''}`} title={row[key]}>{value}</td>;
+                })}
+              </tr>;})}
+            </tbody>
+          </table>
+        </DataTableScroll>
+
+        <PagePagination
+          darkMode={darkMode}
+          txt2={txt2}
+          page={itemRegPage}
+          totalPages={itemRegTotalPages}
+          total={itemRegTotal}
+          perPage={itemRegPerPage}
+          onPageChange={(p) => { setItemRegPage(p); fetchItemRegistration(p, itemRegPerPage, itemRegAppliedSearch, itemRegFilters); }}
+          onPerPageChange={(next) => { setItemRegPerPage(next); setItemRegPage(1); fetchItemRegistration(1, next, itemRegAppliedSearch, itemRegFilters); }}
+        />
+      </div>
+    );
+  };
+
+  const renderPendingDeliverySummary = () => {
+    const agingTotals = agingData.reduce((acc, v) => ({
+      less_30: acc.less_30 + (v.less_30 || 0),
+      days_30_90: acc.days_30_90 + (v.days_30_90 || 0),
+      days_90_180: acc.days_90_180 + (v.days_90_180 || 0),
+      more_180: acc.more_180 + (v.more_180 || 0),
+    }), { less_30:0, days_30_90:0, days_90_180:0, more_180:0 });
+    const pendingMonthly = (stats?.monthly_trend || []).map(m => ({...m, amount_idr: (m.amount || 0) * 1_000_000}));
+    const statusMonths = stats?.status_months || [];
+    const statusMonthlyRows = stats?.so_status_monthly || [];
+    const itemRegProcStatus = stats?.item_registration_proc_status || [];
+    const itemRegClients = stats?.item_registration_clients || [];
+    const pendingVendors = stats?.top_vendors || [];
+    const sumRows = (rows, key) => (rows || []).reduce((sum, row) => sum + (Number(row?.[key]) || 0), 0);
+    const pendingMonthlyTotal = sumRows(pendingMonthly, 'so_count');
+    const pendingMonthlyAmount = sumRows(pendingMonthly, 'amount') * 1_000_000;
+    const pendingVendorTotal = sumRows(pendingVendors, 'so_count');
+    const pendingVendorAmount = sumRows(pendingVendors, 'total_amount');
+    const pendingStatusTotal = sumRows(statusMonthlyRows, 'total');
+    const pendingStatusAmount = sumRows(statusMonthlyRows, 'amount');
+    const itemRegCategoryChart = (rows, title) => {
+      const sorted = [...(rows || [])]
+        .map(r => ({ name: r.name || '-', value: Number(r.value || 0) }))
+        .filter(r => r.value > 0)
+        .sort((a, b) => b.value - a.value);
+      const top = sorted.slice(0, 5);
+      const rest = sorted.slice(5);
+      const restValue = rest.reduce((sum, r) => sum + r.value, 0);
+      const data = restValue > 0 ? [...top, { name: `Others (${rest.length})`, value: restValue, isOthers: true }] : top;
+      const total = sumRows(data, 'value');
+      const pieColors = ['#2563EB', '#14B8A6', '#DC2626', '#60A5FA', '#5EEAD4', '#94A3B8'];
+      return (
+        <div className={`p-4 rounded-2xl ${card}`}>
+          <h3 className={`text-sm font-bold ${txt}`}>{title}</h3>
+          <p className={`text-xs mb-2 ${txt2}`}>Total: {fmtNum(total)} Req. No</p>
+          {data.length === 0 ? (
+            <div className={`h-[180px] flex items-center justify-center text-sm ${txt2}`}>No Item Registration data</div>
+          ) : (
+            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-center md:gap-8 xl:gap-10">
+              <div className="h-[190px] w-full min-w-0 md:w-[220px] md:flex-none">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart margin={{ top: 4, right: 4, bottom: 4, left: 4 }}>
+                    <Pie data={data} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={38} outerRadius={76} labelLine={false} label={renderPctLabel} isAnimationActive={false}>
+                      {data.map((_, i) => <Cell key={i} fill={pieColors[i % pieColors.length]} />)}
+                    </Pie>
+                    <Tooltip formatter={(v, n) => [`${fmtNum(v)} Req. No`, n]} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="w-full md:w-[250px] space-y-2">
+                {data.map((item, i) => (
+                  <div key={item.name} className="flex items-start gap-2 text-xs">
+                    <span className="mt-1 h-2.5 w-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: pieColors[i % pieColors.length] }} />
+                    <div className="min-w-0 flex-1">
+                      <p className={`font-semibold leading-snug break-words ${txt}`} title={item.name}>{item.name}</p>
+                      <p className={`leading-tight ${txt2}`}>{fmtNum(item.value)} | {total ? ((item.value / total) * 100).toFixed(1) : '0.0'}%</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+    const agingCards = [
+      { label:'0-30 Days', value: agingTotals.less_30, color:'#14B8A6' },
+      { label:'30-90 Days', value: agingTotals.days_30_90, color:'#2563EB' },
+      { label:'90-180 Days', value: agingTotals.days_90_180, color:'#FCA5A5' },
+      { label:'180+ Days', value: agingTotals.more_180, color:'#DC2626' },
+    ];
+    return (
+      <div className="space-y-4 mb-5">
+        <h3 className={`text-base font-bold ${txt} flex items-center gap-2`}>
+          <Calendar className="w-5 h-5 text-blue-600"/> Pending Delivery Aging
+        </h3>
+        <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+          {agingCards.map(cardItem => (
+            <button key={cardItem.label} onClick={() => openPendingDeliveryWithAging(cardItem.label.replace(' Days','').replace('+','+'))}
+              className={`text-left p-4 rounded-2xl border transition-all ${card} hover:border-slate-300`}>
+              <p className={`text-xs font-semibold ${txt2}`}>{cardItem.label}</p>
+              <div className="mt-1 flex items-end justify-between gap-3">
+                <h3 className={`text-2xl font-bold ${kpiValue}`}>{fmtNum(cardItem.value)}</h3>
+                <span className="h-3 w-3 rounded-full" style={{backgroundColor: cardItem.color}} />
+              </div>
+            </button>
+          ))}
+        </div>
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+          <div className={`xl:col-span-2 p-5 rounded-2xl ${card}`}>
+            <h3 className={`text-base font-bold ${txt}`}>Total Pending per Month</h3>
+            <p className={`text-xs mb-4 ${txt2}`}>Total: {fmtNum(pendingMonthlyTotal)} SO | {fmtCurShort(pendingMonthlyAmount)}</p>
+            <ResponsiveContainer width="100%" height={280}>
+              <ComposedChart data={pendingMonthly}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={darkMode?'#374151':'#E5E7EB'}/>
+                <XAxis dataKey="month" stroke={darkMode?'#9CA3AF':'#6B7280'} fontSize={10}/>
+                <YAxis yAxisId="left" stroke="#2563EB" fontSize={10}/>
+                <YAxis yAxisId="right" orientation="right" stroke="#14B8A6" fontSize={10} tickFormatter={(v)=>fmtCurShort(v*1_000_000)}/>
+                <Tooltip formatter={(v,name)=>name==='Pending SO'?[fmtNum(v),name]:[fmtCur(v*1_000_000),name]} contentStyle={{background:darkMode?'#1F2937':'#fff',border:'none',borderRadius:8,fontSize:12}}/>
+                <Legend wrapperStyle={{fontSize:12}}/>
+                <Bar yAxisId="left" dataKey="so_count" name="Pending SO" fill="#2563EB" radius={[5,5,0,0]} isAnimationActive={false}/>
+                <Line yAxisId="right" type="monotone" dataKey="amount" name="Total Sales Amount" stroke="#14B8A6" strokeOpacity={0.45} strokeWidth={1.5} dot={{r:2.5,fill:'#14B8A6',opacity:0.45}} activeDot={{r:4,opacity:0.65}} isAnimationActive={false}/>
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+          <div className={`p-5 rounded-2xl ${card}`}>
+            <h3 className={`text-base font-bold ${txt}`}>Top 5 Pending Vendor</h3>
+            <p className={`text-xs mb-4 ${txt2}`}>Total: {fmtNum(pendingVendorTotal)} SO | {fmtCurShort(pendingVendorAmount)}</p>
+            <div className="space-y-2">
+              {pendingVendors.map((v,i)=>(
+                <div key={v.vendor} className={`p-2.5 rounded-lg ${darkMode?'bg-gray-700':'bg-gray-100'}`}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className={`text-xs font-bold ${darkMode?'text-gray-400':'text-gray-500'}`}>#{i+1}</span>
+                      <p className={`text-sm font-semibold truncate ${darkMode?'text-white':'text-gray-900'}`} title={v.vendor}>{v.vendor}</p>
+                    </div>
+                    <span className={`text-sm font-bold whitespace-nowrap ${darkMode?'text-gray-100':'text-gray-900'}`}>{fmtCurShort(v.total_amount)}</span>
+                  </div>
+                  <p className={`text-xs mt-0.5 ${txt2}`}>{fmtNum(v.so_count)} SO</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className={`p-4 rounded-2xl ${card}`}>
+          <h3 className={`text-base font-bold ${txt}`}>Pending Delivery - Status Distribution</h3>
+          <p className={`text-xs mb-2 ${txt2}`}>Total: {fmtNum(pendingStatusTotal)} SO | {fmtCurShort(pendingStatusAmount)}</p>
+          {(() => {
+            const monthLabel = (m) => {
+              try {
+                const [y, mo] = m.split('-');
+                return format(new Date(parseInt(y), parseInt(mo) - 1, 1), 'MMM yy');
+              } catch {
+                return m;
+              }
+            };
+            const maxCell = Math.max(
+              1,
+              ...statusMonthlyRows.flatMap(s => statusMonths.map(m => s.monthly?.[m] || 0))
+            );
+            const totalByMonth = statusMonths.reduce((acc, m) => {
+              acc[m] = statusMonthlyRows.reduce((sum, s) => sum + (s.monthly?.[m] || 0), 0);
+              return acc;
+            }, {});
+            const grandTotal = statusMonthlyRows.reduce((sum, s) => sum + (s.total || 0), 0);
+            const grandAmount = statusMonthlyRows.reduce((sum, s) => sum + (s.amount || 0), 0);
+            const heatStyle = (value) => {
+              if (!value) {
+                return {
+                  backgroundColor: darkMode ? 'rgba(59,130,246,0.08)' : 'rgba(219,234,254,0.35)',
+                  color: darkMode ? '#64748B' : '#94A3B8'
+                };
+              }
+              const logVal = Math.log1p(value);
+              const logMax = Math.log1p(maxCell);
+              const intensity = Math.max(0.08, Math.min(1, Math.pow(logVal / logMax, 0.9)));
+              const lightness = darkMode ? 24 + intensity * 30 : 97 - intensity * 48;
+              return {
+                backgroundColor: `hsl(217, 88%, ${lightness}%)`,
+                color: intensity > 0.55 ? '#FFFFFF' : darkMode ? '#DBEAFE' : '#1E3A8A'
+              };
+            };
+            const statusDetailUrl = (status, month) => {
+              const p = new URLSearchParams();
+              if (status) p.append('status', status);
+              if (month) p.append('month', month);
+              return appendDateQuery(`/api/dashboard/status-detail?${p}`);
+            };
+            const openStatusDetail = (status, month, titlePrefix = 'Pending Status') => {
+              const label = status ? `${titlePrefix}: ${status}` : titlePrefix;
+              openModal(month ? `${label} - ${month}` : label, statusDetailUrl(status, month));
+            };
+            return (
+              <div className="overflow-x-auto">
+                <table className="w-full text-[11px] leading-tight" style={{minWidth: statusMonths.length > 4 ? `${200 + statusMonths.length * 62 + 190}px` : undefined}}>
+                  <thead className={tblHd}>
+                    <tr>
+                      <th className={`px-2 py-1 text-left font-bold whitespace-nowrap sticky left-0 z-10 ${txt2} ${darkMode?'bg-gray-700':'bg-[#f6f6f4]'}`}>Status</th>
+                      {statusMonths.map(m => (
+                        <th key={m} className={`px-1.5 py-1 text-center font-bold whitespace-nowrap ${txt2}`}>{monthLabel(m)}</th>
+                      ))}
+                      <th className={`px-1.5 py-1 text-center font-bold whitespace-nowrap ${txt2}`}>Total</th>
+                      <th className={`px-1.5 py-1 text-center font-bold whitespace-nowrap ${txt2}`}>%</th>
+                      <th className={`px-1.5 py-1 text-center font-bold whitespace-nowrap ${txt2}`}>Sales Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody className={`divide-y ${tblDv}`}>
+                    {statusMonthlyRows.map(s => {
+                      const percentage = grandTotal > 0 ? ((s.total / grandTotal) * 100).toFixed(1) : '0.0';
+                      return (
+                        <tr key={s.name} className={trHov}>
+                          <td className={`px-2 py-0.5 font-semibold whitespace-nowrap sticky left-0 z-10 ${txt} ${darkMode?'bg-gray-800':'bg-white'}`}>
+                            {s.name}
+                          </td>
+                          {statusMonths.map(m => {
+                            const value = s.monthly?.[m] || 0;
+                            return (
+                              <td key={m} className="px-1 py-0.5 text-center font-bold rounded-sm" style={heatStyle(value)}>
+                                {value ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => openStatusDetail(s.name, m)}
+                                    className="w-full font-bold underline-offset-2 hover:underline cursor-pointer"
+                                  >
+                                    {fmtNum(value)}
+                                  </button>
+                                ) : ''}
+                              </td>
+                            );
+                          })}
+                          <td className="px-1.5 py-0.5 text-right font-bold text-blue-600">
+                            <button type="button" onClick={() => openStatusDetail(s.name, null)} className="font-bold hover:underline cursor-pointer">
+                              {fmtNum(s.total)}
+                            </button>
+                          </td>
+                          <td className={`px-1.5 py-0.5 text-right ${txt2}`}>{percentage}%</td>
+                          <td className={`px-1.5 py-0.5 text-right whitespace-nowrap ${kpiValue}`}>{fmtCurShort(s.amount)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot className={`${tblHd} font-bold`}>
+                    <tr>
+                      <td className={`px-2 py-0.5 sticky left-0 z-10 ${txt} ${darkMode?'bg-gray-700':'bg-[#f6f6f4]'}`}>TOTAL</td>
+                      {statusMonths.map(m => (
+                        <td key={m} className="px-1 py-0.5 text-center text-blue-600">
+                          {totalByMonth[m] ? (
+                            <button type="button" onClick={() => openStatusDetail(null, m, 'All Pending Status')} className="font-bold hover:underline cursor-pointer">
+                              {fmtNum(totalByMonth[m])}
+                            </button>
+                          ) : ''}
+                        </td>
+                      ))}
+                      <td className="px-1.5 py-0.5 text-right text-blue-600">
+                        <button type="button" onClick={() => openStatusDetail(null, null, 'All Pending Status')} className="font-bold hover:underline cursor-pointer">
+                          {fmtNum(grandTotal)}
+                        </button>
+                      </td>
+                      <td className={`px-1.5 py-0.5 text-right ${txt2}`}>100%</td>
+                      <td className={`px-1.5 py-0.5 text-right whitespace-nowrap ${kpiValue}`}>{fmtCurShort(grandAmount)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            );
+          })()}
+        </div>
+        <div className="space-y-3">
+          <h3 className={`text-base font-bold ${txt} flex items-center gap-2`}>
+            <Wrench className="w-5 h-5 text-blue-600"/> Pending Item Registration
+          </h3>
+           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            {itemRegCategoryChart(itemRegProcStatus, 'Proc. Status')}
+            {itemRegCategoryChart(itemRegClients, 'Client Nm.')}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderPendingDeliveryKpis = () => {
+    const agingTotals = agingData.reduce((acc, v) => ({
+      less_30: acc.less_30 + (v.less_30 || 0),
+      days_30_90: acc.days_30_90 + (v.days_30_90 || 0),
+      days_90_180: acc.days_90_180 + (v.days_90_180 || 0),
+      more_180: acc.more_180 + (v.more_180 || 0),
+    }), { less_30: 0, days_30_90: 0, days_90_180: 0, more_180: 0 });
+
+    const agingCards = [
+      { label: '0-30 Days', filter: '0-30', value: agingTotals.less_30, color: '#10B981' },
+      { label: '30-90 Days', filter: '30-90', value: agingTotals.days_30_90, color: '#0EA5E9' },
+      { label: '90-180 Days', filter: '90-180', value: agingTotals.days_90_180, color: '#F43F5E' },
+      { label: '180+ Days', filter: '180+', value: agingTotals.more_180, color: '#EF4444' },
+    ];
+
+    // Use pic_aggregations from backend (aggregated from ALL filtered data, not just current page)
+    // Filter out Unassigned entries
+    const picKpis = (picAggregations || [])
+      .filter(p => p.pic && p.pic !== 'Unassigned')
+      .map(p => ({
+        pic: p.pic,
+        count: p.count || 0,
+        amount: p.amount || 0
+      }));
+    const totalPendingCount = soTotal;
+    const totalPendingAmount = soSubtotalAmount;
+    const pendingKpis = [
+      { pic: 'Total Pending', count: totalPendingCount, amount: totalPendingAmount, isTotal: true },
+      ...picKpis
+    ];
+    const pendingKpiCols = Math.max(1, pendingKpis.length);
+
+    return (
+      <div className="mb-5">
+        {pendingKpis.length > 0 ? (
+          <div className="grid grid-flow-col gap-2" style={{ gridTemplateColumns: `repeat(${pendingKpiCols}, minmax(0, 1fr))` }}>
+            {pendingKpis.map((p) => {
+              const activePic = !p.isTotal && pendingPicHighlight === p.pic;
+              const applyPicKpiFilter = () => {
+                const nextHighlight = p.isTotal || activePic ? '' : p.pic;
+                const nextFilters = { ...soFilters };
+                setPendingPicHighlight(nextHighlight);
+                setSoFilters(nextFilters);
+                setSoPage(1);
+                fetchSOData(nextFilters, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter, soSortOrder, nextHighlight);
+              };
+              return (
+              <button key={p.pic} type="button" onClick={applyPicKpiFilter} className={`min-w-0 p-3 rounded-xl text-left transition-all ${activePic ? (darkMode ? 'bg-amber-900/30 border border-amber-500 ring-2 ring-amber-400' : 'bg-amber-50 border border-amber-300 ring-2 ring-amber-200') : p.isTotal ? (darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200') : card} ${p.isTotal ? 'hover:border-slate-300' : 'hover:border-amber-300'}`}>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className={`text-xs font-semibold truncate ${activePic ? 'text-amber-700' : p.isTotal ? (darkMode ? 'text-gray-200' : 'text-gray-700') : txt2}`} title={p.pic}>{p.pic}</p>
+                    <h3 className={`text-xl font-bold leading-tight ${activePic ? 'text-amber-700' : p.isTotal ? (darkMode ? 'text-gray-100' : 'text-gray-800') : kpiValue}`}>{fmtNum(p.count)}</h3>
+                    <p className={`text-[11px] leading-tight whitespace-nowrap ${txt2}`}>{fmtCurShort(p.amount)}</p>
+                  </div>
+                  <div className={`p-1.5 rounded-lg flex-shrink-0 ${activePic ? 'bg-amber-100 text-amber-700' : p.isTotal ? (darkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-100 text-gray-600') : neutralIcon}`}>
+                    <Package className="w-3.5 h-3.5" />
+                  </div>
+                </div>
+              </button>
+            );})}
+          </div>
+        ) : (
+          <div className={`py-6 text-center text-sm rounded-2xl ${card} ${txt2}`}>No pending PIC data</div>
+        )}
+      </div>
+    );
+  };
+
+  const renderAllSO = () => (
+    <div>
+      {renderPendingDeliveryKpis()}
+      <div className={`p-4 rounded-2xl shadow mb-5 ${card}`}>
+        <div className="flex flex-wrap justify-between items-center gap-3 mb-3">
+          <div>
+            <h2 className={`text-xl font-bold ${txt} flex items-center gap-2`}><Clock className="w-5 h-5 text-blue-500 flex-shrink-0"/>Detail Pending Delivery</h2>
+            <p className={`text-sm ${txt2}`}>{fmtNum(soTotal)} total records — page {soPage} of {soTotalPages}</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <DownloadButton onClick={downloadSOTemplate} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
+              <Download className="w-4 h-4"/>Template
+            </DownloadButton>
+            <label className="flex items-center gap-2 px-3 py-2.5 bg-slate-600 hover:bg-slate-700 text-white rounded-xl text-sm font-semibold shadow-sm cursor-pointer">
+              <FileSpreadsheet className="w-4 h-4"/>Batch Upload
+              <input type="file" accept=".xlsx,.xls" onChange={handleBatchUpload} className="hidden"/>
+            </label>
+            <DownloadButton onClick={downloadSOExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
+              <Download className="w-4 h-4"/>Download Excel
+            </DownloadButton>
+          </div>
+        </div>
+        {/* PIC upload feedback */}
+        {picUploadMsg && (
+          <div className={`mb-3 px-4 py-2 rounded-lg text-sm font-medium flex items-center justify-between gap-2 ${picUploadMsg.startsWith('✅') ? (darkMode?'bg-green-900/40 text-green-300':'bg-green-50 text-green-700') : picUploadMsg.startsWith('❌') ? (darkMode?'bg-red-900/40 text-red-300':'bg-red-50 text-red-700') : (darkMode?'bg-blue-900/40 text-blue-300':'bg-blue-50 text-blue-700')}`}>
+            <span>{picUploadMsg}</span>
+            <button onClick={()=>setPicUploadMsg('')} className="opacity-60 hover:opacity-100 font-bold text-lg leading-none">×</button>
+          </div>
+        )}
+        <div className="mb-2 flex flex-wrap gap-2 items-center">
+          <span className={`text-xs font-medium ${txt2}`}>Filter by Aging:</span>
+          {AGING_LABELS.map(label => {
+            const active = soFilters.aging.includes(label);
+            return (
+              <button key={label} onClick={()=>toggleAgingFilter(label)}
+                className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${active?'text-white border-transparent':'border-gray-200 text-gray-400 bg-gray-100'}`}
+                style={active ? {backgroundColor: AGING_COLORS[label], borderColor: AGING_COLORS[label]} : {}}>
+                {label} working days
+              </button>
+            );
+          })}
+          {soFilters.aging.length > 0 && (
+            <button onClick={()=>setSoFilters(f=>({...f,aging:[]}))}
+              className={`px-2 py-1 rounded text-xs ${txt2} hover:text-red-500`}>Reset Aging</button>
+          )}
+        </div>
+
+        {/* Multi-select filters */}
+        <FilterPanel darkMode={darkMode} className="mx-0 my-3">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[105px_150px_repeat(6,minmax(105px,1fr))_105px] items-end">
+            <div className="min-w-0">
+              <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ SO Date</label>
+              <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                value={soSortOrder} onChange={e=>{ setSoSortOrder(e.target.value); setSoPage(1); }} title="Sort SO Date">
+                <option value="oldest">Oldest ↑</option>
+                <option value="newest">Newest ↓</option>
+              </select>
+            </div>
+            <div className="min-w-0">
+              <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Search SO Item</label>
+              <SearchInput
+                label="SO Item"
+                placeholder={"e.g.\n1234-10\n1234-20"}
+                onSearch={(nums) => {
+                  setSoSearchNums(nums);
+                  setSoPage(1);
+                  fetchSOData(soFilters, 1, soPerPage, nums, soMarginFilter, soDateFilter);
+                }}
+                darkMode={darkMode} txt2={txt2}
+              />
+            </div>
+            <div className="min-w-0">
+              <MultiSelect label="PIC" options={soFilterOptions.pics || []}
+                selected={soFilters.pics} onChange={v=>{
+                  const next = {...soFilters, pics: v};
+                  setPendingPicHighlight('');
+                  setSoFilters(next); setSoPage(1);
+                  fetchSOData(next, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter, soSortOrder, '');
+                }}
+                darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="min-w-0">
+              <MultiSelect label="SO Status" options={soFilterOptions.statuses}
+                selected={soFilters.statuses} onChange={v=>{
+                  const next = {...soFilters, statuses: v};
+                  setSoFilters(next); setSoPage(1);
+                  fetchSOData(next, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+                }}
+                darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="min-w-0">
+              <MultiSelect label="Operation Unit" options={soFilterOptions.op_units}
+                selected={soFilters.op_units} onChange={v=>{
+                  const next = {...soFilters, op_units: v};
+                  setSoFilters(next); setSoPage(1);
+                  fetchSOData(next, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+                }}
+                darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="min-w-0">
+              <MultiSelect label="Vendor Name" options={soFilterOptions.vendors}
+                selected={soFilters.vendors} onChange={v=>{
+                  const next = {...soFilters, vendors: v};
+                  setSoFilters(next); setSoPage(1);
+                  fetchSOData(next, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+                }}
+                darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="min-w-0">
+              <MultiSelect label="Manufacturer Name" options={soFilterOptions.manufacturers || []}
+                selected={soFilters.manufacturers} onChange={v=>{
+                  const next = {...soFilters, manufacturers: v};
+                  setSoFilters(next); setSoPage(1);
+                  fetchSOData(next, 1, soPerPage, soSearchNums, soMarginFilter, soDateFilter);
+                }}
+                darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="min-w-0">
+              <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Margin</label>
+              <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                value={soMarginFilter} onChange={e=>{
+                  const next = e.target.value;
+                  setSoMarginFilter(next); setSoPage(1);
+                  fetchSOData(soFilters, 1, soPerPage, soSearchNums, next, soDateFilter);
+                }}>
+                <option value="all">All</option>
+                <option value="positive">≥ 0</option>
+                <option value="negative">Below 0</option>
+              </select>
+            </div>
+            <div className="min-w-0">
+              <label className={`block text-xs font-medium mb-0.5 ${txt2} opacity-0`}>.</label>
+              <button onClick={()=>{
+                const f={op_units:[],vendors:[],manufacturers:[],statuses:[],aging:[],pics:[]};
+                setSoFilters(f); setPendingPicHighlight(''); setSoSearchNums([]); setSoMarginFilter('all'); setSoPage(1);
+                fetchSOData(f,1,soPerPage,[],'all',soDateFilter,soSortOrder,'');
+              }}
+                className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
+            </div>
+          </div>
+          {/* Active filter tags */}
+          {(soSearchNums.length + filterValues(soFilters.op_units).length + filterValues(soFilters.vendors).length + filterValues(soFilters.manufacturers).length + filterValues(soFilters.statuses).length + filterValues(soFilters.pics).length) > 0 && (
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {soSearchNums.map(v=>(
+                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-xs">
+                  SO: {v}<button onClick={()=>{ const next=soSearchNums.filter(x=>x!==v); setSoSearchNums(next); setSoPage(1); fetchSOData(soFilters,1,soPerPage,next,soMarginFilter,soDateFilter); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                </span>
+              ))}
+              {filterValues(soFilters.op_units).map(v=>(
+                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">
+                  {v}<button onClick={()=>{ const next={...soFilters,op_units:filterValues(soFilters.op_units).filter(x=>x!==v)}; setSoFilters(next); setSoPage(1); fetchSOData(next,1,soPerPage,soSearchNums,soMarginFilter,soDateFilter); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                </span>
+              ))}
+              {filterValues(soFilters.vendors).map(v=>(
+                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">
+                  {v}<button onClick={()=>{ const next={...soFilters,vendors:filterValues(soFilters.vendors).filter(x=>x!==v)}; setSoFilters(next); setSoPage(1); fetchSOData(next,1,soPerPage,soSearchNums,soMarginFilter,soDateFilter); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                </span>
+              ))}
+              {filterValues(soFilters.manufacturers).map(v=>(
+                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-cyan-100 text-cyan-700 rounded-full text-xs">
+                  Mfr: {v}<button onClick={()=>{ const next={...soFilters,manufacturers:filterValues(soFilters.manufacturers).filter(x=>x!==v)}; setSoFilters(next); setSoPage(1); fetchSOData(next,1,soPerPage,soSearchNums,soMarginFilter,soDateFilter); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                </span>
+              ))}
+              {filterValues(soFilters.statuses).map(v=>(
+                <span key={v} className="flex items-center gap-1 px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs">
+                  {v}<button onClick={()=>{ const next={...soFilters,statuses:filterValues(soFilters.statuses).filter(x=>x!==v)}; setSoFilters(next); setSoPage(1); fetchSOData(next,1,soPerPage,soSearchNums,soMarginFilter,soDateFilter); }} className="hover:text-red-600"><X className="w-3 h-3"/></button>
+                </span>
+              ))}
+              {filterValues(soFilters.pics).map(v=>{
+                const c = getPicColor(v);
+                return (
+                  <span key={v} className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${c ? c.bg+' '+c.text : 'bg-gray-100 text-gray-700'}`}>
+                    PIC: {v}<button onClick={()=>{ const nextPics=filterValues(soFilters.pics).filter(x=>x!==v); const next={...soFilters,pics:nextPics}; setPendingPicHighlight(''); setSoFilters(next); setSoPage(1); fetchSOData(next,1,soPerPage,soSearchNums,soMarginFilter,soDateFilter,soSortOrder,''); }} className="hover:text-red-600 ml-0.5"><X className="w-3 h-3"/></button>
+                  </span>
+                );
+              })}
+            </div>
+          )}
+        </FilterPanel>
+
+        {/* Detail Pending Delivery table follows the downloadable Excel layout. */}
+        <DataTableScroll darkMode={darkMode} className="rounded-lg border border-gray-200">
+          <table className="freeze-table-pending-delivery w-full text-sm">
+            <colgroup>
+              <col style={{minWidth:'76px', width:'76px', maxWidth:'76px'}}/>
+              <col style={{minWidth:'60px'}}/>
+              <col style={{minWidth:'110px'}}/>
+              <col style={{minWidth:'100px'}}/>
+              <col style={{minWidth:'100px'}}/>
+              <col style={{minWidth:'170px', width:'170px', maxWidth:'170px'}}/>
+              <col style={{minWidth:'120px'}}/>
+              <col style={{minWidth:'80px'}}/>
+              <col style={{minWidth:'100px'}}/>
+              <col style={{minWidth:'180px'}}/>
+              <col style={{minWidth:'260px'}}/>
+              <col style={{minWidth:'140px'}}/>
+              <col style={{minWidth:'100px'}}/>
+              <col style={{minWidth:'90px'}}/>
+              <col style={{minWidth:'140px'}}/>
+              <col style={{minWidth:'100px'}}/>
+              <col style={{minWidth:'160px'}}/>
+              <col style={{minWidth:'80px'}}/>
+              <col style={{minWidth:'140px'}}/>
+              <col style={{minWidth:'140px'}}/>
+              <col style={{minWidth:'130px'}}/>
+              <col style={{minWidth:'130px'}}/>
+              <col style={{minWidth:'100px'}}/>
+              <col style={{minWidth:'90px'}}/>
+              <col style={{minWidth:'200px'}}/>
+              <col style={{minWidth:'100px'}}/>
+              <col style={{minWidth:'560px'}}/>
+            </colgroup>
+            <thead className={tblHd}>
+              <tr>
+                {['Aging','Day','SO Create Date','SO Item','PO No.','SO Status','Category','PIC','Product ID','Product Name','Specification','Manufacturer Name','SO Quantity','Sales Unit','Operation Unit Name','Vendor ID','Vendor Name','Currency','Sales Price (Exclude Tax)','Sales Amount (Exclude Tax)','Purchasing Currency','Purchasing Price','Margin','%Margin','Delivery Memo','Plan Date','Remarks'].map((h, index)=>(
+                  <th key={h} className={`px-3 py-2.5 text-center font-bold ${txt2}`}>{renderFreezeHeader('pending-delivery', index + 1, h)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className={`divide-y ${tblDv}`}>
+              {(() => {
+                if (sortedSOData.length === 0) return (
+                <tr><td colSpan={27} className={`px-4 py-10 text-center ${txt2}`}>
+                    <FileText className="w-10 h-10 mx-auto mb-2 opacity-40"/>No data
+                  </td></tr>
+                );
+                return sortedSOData.map((so) => {
+                const isDeliveryCompleted = so.so_status === 'Delivery Completed';
+                const poAmount = Number(so.purchasing_amount) || ((Number(so.purchasing_price) || 0) * (Number(so.so_qty) || 0));
+                const margin = (so.sales_amount || 0) - poAmount;
+                const marginPct = poAmount !== 0 ? (margin / poAmount) * 100 : null;
+                const workingDays = Number.isFinite(Number(so.aging_days)) ? Number(so.aging_days) : workingDaysUntilToday(so.so_create_date);
+                const marginColor = margin < 0 ? 'text-red-600 font-semibold' : margin > 0 ? 'text-green-600 font-semibold' : txt2;
+                return (
+                <tr key={so.id} className={`${trHov} transition-colors`}>
+                  <td className="px-2 py-2 text-center whitespace-nowrap">
+                    {!isDeliveryCompleted && so.aging_label && so.aging_label !== 'No Date' ? (
+                      <span className="px-2 py-0.5 rounded-full text-xs font-bold text-white"
+                        style={{backgroundColor: AGING_COLORS[so.aging_label] || '#6B7280'}}>
+                        {so.aging_label}
+                      </span>
+                    ) : null}
+                  </td>
+                  <td className={`px-3 py-2 text-center whitespace-nowrap ${workingDays !== null && workingDays > 180 ? 'text-red-600 font-bold' : workingDays !== null && workingDays > 30 ? 'text-slate-700 font-semibold' : 'text-green-600 font-semibold'}`}>
+                    {workingDays !== null ? workingDays : '-'}
+                  </td>
+                  <td className={`px-3 py-2 text-center text-xs ${txt2} whitespace-nowrap`}>{so.so_create_date||'-'}</td>
+                  <td className="px-3 py-2 text-blue-600 font-medium whitespace-nowrap">{so.so_item}</td>
+                  <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{so.svo_po || '-'}</td>
+                  <td className="px-3 py-2 w-[170px] max-w-[170px] whitespace-nowrap">
+                    <span title={so.so_status || '-'} className={`inline-block max-w-[150px] truncate align-middle px-2 py-0.5 rounded-full text-xs font-medium ${
+                      so.so_status==='Delivery Completed'?'bg-green-100 text-green-700':
+                      so.so_status==='SO Cancel'?'bg-red-100 text-red-700':'bg-blue-100 text-blue-700'}`}>
+                      {so.so_status||'-'}
+                    </span>
+                  </td>
+                  <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{so.category_name || '-'}</td>
+                  <td className={`px-3 py-2 whitespace-nowrap`}>
+                    {so.pic_name ? (
+                      (() => { const c = getPicColor(so.pic_name); return (
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${c.bg} ${c.text}`}>{so.pic_name}</span>
+                      ); })()
+                    ) : <span className={`text-xs ${txt2}`}>-</span>}
+                  </td>
+                  <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{so.product_id || '-'}</td>
+                  <td className={`px-3 py-2 max-w-[180px] truncate ${txt2}`} title={so.product_name}>{so.product_name || '-'}</td>
+                  <td className={`px-3 py-2 max-w-[260px] truncate ${txt2}`} title={so.specification}>{so.specification || '-'}</td>
+                  <td className={`px-3 py-2 max-w-[180px] truncate ${txt2}`} title={so.manufacturer_name}>{so.manufacturer_name || '-'}</td>
+                  <td className={`px-3 py-2 text-right ${txt2}`}>{fmtNum(so.so_qty)}</td>
+                  <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{so.sales_unit || '-'}</td>
+                  <td className={`px-3 py-2 min-w-[180px] truncate ${txt2}`} title={so.operation_unit_name}>{so.operation_unit_name || '-'}</td>
+                  <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{so.vendor_id || '-'}</td>
+                  <td className={`px-3 py-2 max-w-[160px] truncate ${txt2}`} title={so.vendor_name}>{so.vendor_name || '-'}</td>
+                  <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{so.currency || '-'}</td>
+                  <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${txt}`}>{fmtCur(so.sales_price)}</td>
+                  <td className={`px-3 py-2 text-center font-bold whitespace-nowrap min-w-[130px] ${kpiValue}`}>{fmtCur(so.sales_amount)}</td>
+                  <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{so.purchasing_currency || '-'}</td>
+                  <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${txt}`}>{fmtCur(so.purchasing_price)}</td>
+                  <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${marginColor}`}>{fmtCur(margin)}</td>
+                  <td className={`px-3 py-2 text-right whitespace-nowrap ${marginColor}`}>
+                    {marginPct !== null ? `${marginPct.toFixed(1)}%` : '-'}
+                  </td>
+                  <td className={`px-3 py-2 max-w-[200px] truncate ${txt2}`} title={so.delivery_memo}>{so.delivery_memo || '-'}</td>
+                  <td className="px-3 py-2 text-center">
+                    {editingCell?.id===so.id && editingCell.field==='delivery_plan_date' ? (
+                      <div className="flex items-center gap-1">
+                        <input type="date" defaultValue={so.delivery_plan_date}
+                          className={`px-2 py-1 rounded text-xs border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                          onChange={e=>setEditValue(e.target.value)}
+                          onKeyDown={e=>{
+                            if(e.key==='Enter'){e.preventDefault();updateSOCell(so.id,'delivery_plan_date',editValue);}
+                            if(e.key==='Escape'){e.preventDefault();setEditingCell(null);}
+                          }}
+                          autoFocus/>
+                        <button onMouseDown={e=>{e.preventDefault();updateSOCell(so.id,'delivery_plan_date',editValue);}}
+                          className="text-green-500 hover:text-green-700 p-0.5 text-xs font-bold">✓</button>
+                        <button onMouseDown={e=>{e.preventDefault();setEditingCell(null);}}
+                          className="text-red-400 hover:text-red-600 p-0.5"><X className="w-3.5 h-3.5"/></button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-center gap-1 group">
+                        <span className="cursor-pointer text-blue-600 hover:underline text-xs whitespace-nowrap"
+                          onClick={()=>{setEditingCell({id:so.id,field:'delivery_plan_date'});setEditValue(so.delivery_plan_date||'');}}>
+                          {so.delivery_plan_date||'Set'}
+                        </span>
+                        {so.delivery_plan_date && (
+                          <button onClick={e=>{e.stopPropagation();updateSOCell(so.id,'delivery_plan_date','');}}
+                            className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-600 transition-all p-0.5"><X className="w-3 h-3"/></button>
+                        )}
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 min-w-[560px]">
+                    {editingCell?.id===so.id && editingCell.field==='remarks' ? (
+                      <input type="text" defaultValue={so.remarks}
+                        className={`w-full px-2 py-1 rounded text-xs border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
+                        onChange={e=>setEditValue(e.target.value)}
+                        onBlur={()=>updateSOCell(so.id,'remarks',editValue)}
+                        onKeyDown={e=>e.key==='Enter'&&updateSOCell(so.id,'remarks',editValue)}
+                        autoFocus/>
+                    ) : (
+                      <span className="cursor-pointer text-xs text-blue-600 hover:underline"
+                        onClick={()=>{setEditingCell({id:so.id,field:'remarks'});setEditValue(so.remarks||'');}}>
+                        {so.remarks||'Add'}
+                      </span>
+                    )}
+                  </td>
+                </tr>
+                );
+              })
+              })()}
+            </tbody>
+          </table>
+        </DataTableScroll>
+
+        <PagePagination
+          darkMode={darkMode}
+          txt2={txt2}
+          page={soPage}
+          totalPages={soTotalPages}
+          total={soTotal}
+          perPage={soPerPage}
+          onPageChange={(p) => { setSoPage(p); fetchSOData(soFilters, p, soPerPage, soSearchNums, soMarginFilter, soDateFilter); }}
+          onPerPageChange={(next) => { setSoPerPage(next); setSoPage(1); fetchSOData(soFilters, 1, next, soSearchNums, soMarginFilter, soDateFilter); }}
+        />
+      </div>
+
+    </div>
+  );
+
+  // ══════════════════════════════════════════════════════════════
+  // MAIN RENDER
+  // ══════════════════════════════════════════════════════════════
+  return (
+    <div className={`min-h-screen font-sans ${darkMode?'bg-gray-900':'bg-[#edf2f1]'} ${darkMode?'':'text-[#1f2937]'}`} style={{fontFamily: "'Inter', 'Plus Jakarta Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"}}>
+    <style>{`
+        /* Suppress chart/card entry animations (they slow down the UI on re-render)
+           but ALLOW spinner, pulse, and slide-in used by loading indicators.
+           We define the keyframes here so they survive Tailwind's purge in prod. */
+        *, *::before, *::after {
+          transition: none !important;
+          scroll-behavior: auto !important;
+        }
+        /* Kill recharts / radix / general UI entry animations */
+        .recharts-wrapper *, [data-radix-popper-content-wrapper] * {
+          animation: none !important;
+        }
+        /* ── Kill browser default focus ring on editable table cells ──
+           When a user clicks a cell to edit, the <td> shows a blue outline
+           (the "outer" border the user wants). The <input>/<textarea> inside
+           the td would ALSO show the browser's default focus ring (the
+           "inner" border), producing the double-blue-border bug. This rule
+           kills the inner focus ring on any element tagged with
+           data-no-focus-ring, in every state (:focus, :focus-visible,
+           :focus-within) so Chrome/Safari/Edge can't sneak it back in. */
+        [data-no-focus-ring], [data-no-focus-ring]:focus, [data-no-focus-ring]:focus-visible,
+        [data-no-focus-ring]:focus-within, [data-no-focus-ring]:active {
+          outline: none !important;
+          outline-style: none !important;
+          outline-width: 0 !important;
+          box-shadow: none !important;
+          border-color: transparent !important;
+        }
+        /* ── Loading animation keyframes (must be explicit for Tailwind purge) ── */
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to   { transform: rotate(360deg); }
+        }
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50%       { opacity: 0.4; }
+        }
+        @keyframes slide-in {
+          from { opacity: 0; transform: translateX(24px); }
+          to   { opacity: 1; transform: translateX(0); }
+        }
+        /* ── Apply animations to specific loading classes ── */
+        .animate-spin {
+          animation: spin 0.75s linear infinite !important;
+        }
+        .animate-pulse {
+          animation: pulse 1.8s ease-in-out infinite !important;
+        }
+        .animate-slide-in {
+          animation: slide-in 0.22s ease-out !important;
+        }
+        /* Global: all buttons, links, selects, labels with checkboxes → pointer cursor */
+        button, [role="button"], select, label[for], a,
+        input[type="checkbox"], input[type="radio"] {
+          cursor: pointer !important;
+        }
+        button:disabled { cursor: not-allowed !important; opacity: 0.5; }
+        .rfq-fill-handle { cursor: crosshair !important; }
+        body.rfq-fill-dragging, body.rfq-fill-dragging * { cursor: crosshair !important; }
+        .freeze-table-import td, .freeze-table-import th { box-shadow: inset 0 -1px 0 rgba(148, 163, 184, 0.22), inset -1px 0 0 rgba(148, 163, 184, 0.22); }
+        .freeze-table-import tbody tr { height: 32px; }
+        .freeze-table-import td > * { max-height: 28px; }
+        .freeze-table-import input, .freeze-table-import textarea, .freeze-table-import select {
+          outline: none !important;
+          box-shadow: none !important;
+        }
+        .freeze-table-import input:focus, .freeze-table-import textarea:focus, .freeze-table-import select:focus {
+          outline: none !important;
+          box-shadow: inset 0 0 0 2px #3b82f6 !important;
+        }
+        .freeze-table-import input[type="date"] {
+          -webkit-appearance: none !important;
+          appearance: none !important;
+        }
+        .backdrop-blur-sm, .backdrop-blur-xl {
+          backdrop-filter: none !important;
+          -webkit-backdrop-filter: none !important;
+        }
+        .reference-card {
+          border-radius: 24px;
+          box-shadow: 0 18px 45px rgba(15, 23, 42, 0.06);
+        }
+        .data-table-page table {
+          border-collapse: collapse;
+        }
+        .data-table-page table th,
+        .data-table-page table td {
+          border-right: 1px solid rgba(148, 163, 184, 0.28);
+        }
+        .data-table-scroll thead th {
+          position: relative !important;
+          z-index: 56;
+          box-shadow: 0 1px 0 rgba(148, 163, 184, 0.28);
+          background-clip: padding-box;
+        }
+        .window-sticky-table-header {
+          border-top: 1px solid rgba(148, 163, 184, 0.32);
+          border-left: 1px solid rgba(148, 163, 184, 0.32);
+          border-right: 1px solid rgba(148, 163, 184, 0.32);
+          box-shadow: 0 8px 18px rgba(15, 23, 42, 0.16);
+        }
+        .window-sticky-table-header table {
+          border-collapse: collapse !important;
+          font-size: 0.75rem !important;
+          line-height: 1rem !important;
+        }
+        .window-sticky-table-header thead th {
+          box-shadow: inset 0 -1px 0 rgba(148, 163, 184, 0.28), inset -1px 0 0 rgba(148, 163, 184, 0.28) !important;
+          white-space: normal !important;
+          overflow-wrap: anywhere;
+          word-break: normal;
+          line-height: 1.15;
+          vertical-align: middle;
+        }
+        .window-sticky-table-header .freeze-header {
+          min-height: 2rem;
+          height: auto;
+          padding-right: 1.25rem;
+          align-items: center;
+        }
+        .window-sticky-table-header .freeze-header-label {
+          white-space: normal !important;
+          overflow-wrap: anywhere;
+          word-break: normal;
+          line-height: 1.15;
+        }
+        .window-sticky-table-header button,
+        .window-sticky-table-header select,
+        .window-sticky-table-header input {
+          pointer-events: none !important;
+        }
+        .data-table-scroll-frame {
+          border: 1px solid rgba(148, 163, 184, 0.32);
+          border-radius: 10px;
+          background: ${darkMode ? '#111827' : '#ffffff'};
+          min-height: 220px;
+          overflow-x: auto !important;
+          overflow-y: visible !important;
+        }
+        .floating-table-scrollbar {
+          position: fixed;
+          bottom: 12px;
+          height: 24px;
+          overflow-x: auto;
+          overflow-y: hidden;
+          z-index: 90;
+          opacity: 0.72;
+          border-radius: 999px;
+          background: rgba(148, 163, 184, 0.18);
+        }
+        .floating-table-scrollbar-dark {
+          background: rgba(255, 255, 255, 0.10);
+        }
+        .floating-table-scrollbar::-webkit-scrollbar {
+          height: 22px;
+        }
+        .floating-table-scrollbar::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        .floating-table-scrollbar::-webkit-scrollbar-thumb {
+          border-radius: 999px;
+          background: rgba(71, 85, 105, 0.52);
+          border: 4px solid transparent;
+          background-clip: padding-box;
+        }
+        .floating-table-scrollbar-dark::-webkit-scrollbar-thumb {
+          background: rgba(226, 232, 240, 0.52);
+          border: 4px solid transparent;
+          background-clip: padding-box;
+        }
+        .data-table-page table th {
+          white-space: normal !important;
+          overflow-wrap: anywhere;
+          word-break: normal;
+          line-height: 1.15;
+          vertical-align: middle;
+        }
+        .data-table-page .freeze-header-label {
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: normal;
+          word-break: normal;
+          overflow-wrap: normal;
+          hyphens: none;
+        }
+        .data-table-page .freeze-header button {
+          pointer-events: auto;
+        }
+        .data-table-page-dark table th,
+        .data-table-page-dark table td {
+          border-right-color: rgba(75, 85, 99, 0.85);
+        }
+        .data-table-page table th:last-child,
+        .data-table-page table td:last-child {
+          border-right: 0;
+        }
+        ${frozenColumnCss}
+      `}</style>
+
+      <div className="fixed top-5 right-5 z-[100] flex flex-col gap-2">
+        {toasts.map(t=><Toast key={t.id} message={t.message} type={t.type} onClose={()=>removeToast(t.id)}/>)}
+      </div>
+
+      {/* Download progress toast */}
+      {downloadToast && <DownloadToast message={downloadToast.message} />}
+
+      {/* Sidebar */}
+      <aside
+        onMouseEnter={() => setSidebarExpanded(true)}
+        onMouseLeave={() => setSidebarExpanded(false)}
+        onFocusCapture={() => setSidebarExpanded(true)}
+        onBlurCapture={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setSidebarExpanded(false); }}
+        className={`fixed left-0 top-0 h-full ${sidebarExpanded?'lg:w-60':'lg:w-16'} w-16 flex flex-col items-stretch py-5 shadow-[0_8px_24px_rgba(15,23,42,0.08)] z-40 overflow-hidden transition-[width,background-color,border-color] duration-200 ease-out ${darkMode?'bg-gray-800 border-r border-gray-700':'bg-white/95 border-r border-gray-200/80 backdrop-blur-xl'}`}
+      >
+        <nav className={`flex-1 flex flex-col gap-2 w-full ${sidebarExpanded?'lg:px-3':'lg:px-2'} px-2 pt-0`}>
+          <a href={PAGE_PATHS.dashboard} onClick={(e)=>openPage(e, 'dashboard')}
+            className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='dashboard'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="Summary">
+            <BarChart3 className="w-5 h-5 flex-shrink-0"/>
+            <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-40 opacity-100':'max-w-0 opacity-0'}`}>Summary</span>
+          </a>
+          <a href={PAGE_PATHS['all-so']} data-tour="open-so-nav" onClick={(e)=>openPage(e, 'all-so', () => setSoPage(1))}
+            className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='all-so'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="Pending Delivery">
+            <Clock className="w-5 h-5 flex-shrink-0"/>
+            <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-40 opacity-100':'max-w-0 opacity-0'}`}>Pending Delivery</span>
+          </a>
+          <a href={PAGE_PATHS['item-registration']} onClick={(e)=>openPage(e, 'item-registration', () => setItemRegPage(1))}
+            className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='item-registration'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="Item Registration">
+            <Wrench className="w-5 h-5 flex-shrink-0"/>
+            <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-44 opacity-100':'max-w-0 opacity-0'}`}>Item Registration</span>
+          </a>
+          <a href={PAGE_PATHS.rfq} onClick={(e)=>openPage(e, 'rfq', () => setRfqPage(1))}
+            className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='rfq'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="RFQ">
+            <Mail className="w-5 h-5 flex-shrink-0"/>
+            <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-44 opacity-100':'max-w-0 opacity-0'}`}>RFQ</span>
+          </a>
+          <a href={PAGE_PATHS.import} onClick={(e)=>openPage(e, 'import', () => setImportPage(1))}
+            className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='import'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="Import">
+            <Ship className="w-5 h-5 flex-shrink-0"/>
+            <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-44 opacity-100':'max-w-0 opacity-0'}`}>Import</span>
+          </a>
+          <a href={PAGE_PATHS['vendor-control']} onClick={(e)=>openPage(e, 'vendor-control', () => setVendorControlPage(1))}
+            className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='vendor-control'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="Vendor Control">
+            <Building2 className="w-5 h-5 flex-shrink-0"/>
+            <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-44 opacity-100':'max-w-0 opacity-0'}`}>Vendor Control</span>
+          </a>
+          <a href={PAGE_PATHS['all-registered-items']} onClick={(e)=>openPage(e, 'all-registered-items', () => setRegisteredItemsPage(1))}
+            className={`p-3 rounded-xl flex items-center gap-3 justify-start transition-all whitespace-nowrap ${activePage==='all-registered-items'?'bg-slate-600 text-white shadow-sm':darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`} title="All Registered Items">
+            <FileText className="w-5 h-5 flex-shrink-0"/>
+            <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-44 opacity-100':'max-w-0 opacity-0'}`}>All Registered Items</span>
+          </a>
+        </nav>
+        <div className={`flex flex-col gap-2 w-full ${sidebarExpanded?'lg:px-3':'lg:px-2'} px-2`}>
+          <button onClick={()=>setDarkMode(d=>!d)} className={`p-3 rounded-xl transition-all flex items-center gap-3 justify-start whitespace-nowrap ${darkMode?'text-gray-300 hover:bg-gray-700':'text-gray-600 hover:bg-[#f4f4f2]'}`}>
+            {darkMode?<Sun className="w-5 h-5 flex-shrink-0"/>:<Moon className="w-5 h-5 flex-shrink-0"/>}
+            <span className={`hidden lg:inline overflow-hidden text-sm font-semibold transition-all duration-200 ${sidebarExpanded?'max-w-40 opacity-100':'max-w-0 opacity-0'}`}>{darkMode?'Light Mode':'Dark Mode'}</span>
+          </button>
+        </div>
+      </aside>
+
+      {/* Main */}
+      <main className={`ml-16 ${sidebarExpanded?'lg:ml-60':'lg:ml-16'} p-4 lg:p-6 transition-[margin-left] duration-200 ease-out`}>
+        <div className={`${darkMode?'bg-gray-900 border-gray-800':'bg-[#fbfbfa] border-gray-200/70'} ${activePage === 'dashboard' ? '' : darkMode ? 'data-table-page data-table-page-dark' : 'data-table-page'} min-h-[calc(100vh-32px)] lg:min-h-[calc(100vh-48px)] rounded-2xl border shadow-[0_12px_36px_rgba(15,23,42,0.07)] p-4 lg:p-6`}>
+        <header className="mb-7 flex flex-wrap justify-between items-center gap-4">
+          <div data-tour="page-title">
+            <h1 className={`text-[28px] leading-tight font-bold tracking-[-0.02em] ${txt}`}>
+              Serveone <span className="text-[#2563EB]">Dashboard</span>
+            </h1>
+            <p className={`mt-0.5 text-sm ${txt2}`}>
+              {activePage==='dashboard'?'Purchase Orders & Sales Orders Summary'
+               :activePage==='all-so'?'Pending Delivery monitoring and detail records'
+               :activePage==='item-registration'?'Product Registration Status data'
+               :activePage==='rfq'?'Sales Submit-RFQ live data and quotation updates'
+               :activePage==='import'?'Import shipment and vendor import tracking'
+               :activePage==='vendor-control'?'Vendor account access and credential control'
+               :activePage==='all-registered-items'?'All registered product master data'
+               :'Manage Pending Delivery records'}
+            </p>
+          </div>
+          <div className="flex flex-col items-end gap-1">
+            <div className="flex flex-wrap gap-2 justify-end">
+              <div className="relative" ref={uploadDropdownRef}>
+              <button
+                data-tour="manual-update"
+                onClick={() => setShowUploadDropdown(v => !v)}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-xl shadow-sm transition-all bg-blue-600 hover:bg-blue-700 text-white"
+              >
+                <Upload className="w-4 h-4"/>
+                <span className="text-sm font-medium">Manual Update</span>
+                <ChevronDown className={`w-4 h-4 transition-transform ${showUploadDropdown ? 'rotate-180' : ''}`}/>
+              </button>
+              {showUploadDropdown && (
+                <div className={`absolute right-0 mt-2 z-50 rounded-xl shadow-2xl border min-w-[280px] overflow-hidden ${darkMode?'bg-gray-800 border-gray-700 text-white':'bg-white border-gray-200'}`}>
+                  <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-blue-50'}`}>
+                    <Upload className="w-4 h-4 text-blue-500"/>
+                    <span className={`text-sm font-medium ${txt}`}>Upload SO - Search Client Odr</span>
+                    <input type="file" accept=".xlsx,.xls" multiple onChange={e=>{handleUpload(e,'scor'); setShowUploadDropdown(false);}} className="hidden"/>
+                  </label>
+                  <div className={`${darkMode?'border-t border-gray-700':'border-t border-gray-100'}`}></div>
+                  <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-blue-50'}`}>
+                    <Upload className="w-4 h-4 text-blue-500"/>
+                    <div>
+                      <span className={`text-sm font-medium ${txt}`}>Upload Item Registration</span>
+                      <p className={`text-xs ${txt2}`}>Upload SAP Process Pur. Info. Reg. only</p>
+                    </div>
+                    <input type="file" accept=".xlsx,.xls" multiple onChange={e=>{handleUploadItemRegistration(e); setShowUploadDropdown(false);}} className="hidden"/>
+                  </label>
+                  <div className={`${darkMode?'border-t border-gray-700':'border-t border-gray-100'}`}></div>
+                  <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-sky-50'}`}>
+                    <Upload className="w-4 h-4 text-sky-500"/>
+                    <div>
+                      <span className={`text-sm font-medium ${txt}`}>Upload Prod ID (SAP)</span>
+                      <p className={`text-xs ${txt2}`}>Update Product ID to category mapping</p>
+                    </div>
+                    <input type="file" accept=".xlsx,.xls" multiple onChange={e=>{handleUploadProductID(e); setShowUploadDropdown(false);}} className="hidden"/>
+                  </label>
+                  <div className={`${darkMode?'border-t border-gray-700':'border-t border-gray-100'}`}></div>
+                  <button type="button" onClick={()=>{ downloadMasterPICTemplate(); setShowUploadDropdown(false); }} className={`w-full flex items-center gap-2 px-4 py-3 text-left transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-indigo-50'}`}>
+                    <Download className="w-4 h-4 text-indigo-500"/>
+                    <div>
+                      <span className={`text-sm font-medium ${txt}`}>Master PIC Update Template</span>
+                      <p className={`text-xs ${txt2}`}>Category Name, PIC, Update New PIC</p>
+                    </div>
+                  </button>
+                  <div className={`${darkMode?'border-t border-gray-700':'border-t border-gray-100'}`}></div>
+                  <label className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-all ${darkMode?'hover:bg-gray-700':'hover:bg-indigo-50'}`}>
+                    <Upload className="w-4 h-4 text-indigo-500"/>
+                    <div>
+                      <span className={`text-sm font-medium ${txt}`}>Update PIC</span>
+                      <p className={`text-xs ${txt2}`}>Update PIC by Category Name</p>
+                    </div>
+                    <input type="file" accept=".xlsx,.xls" multiple onChange={e=>{handleUpdatePIC(e); setShowUploadDropdown(false);}} className="hidden"/>
+                  </label>
+                </div>
+              )}
+              </div>
+
+            </div>
+            <div className={`max-w-full text-right text-xs ${txt2}`}>
+              <span className="font-semibold">Updates:</span>{' '}
+              <span
+                title={(() => {
+                  const base = `Last Update SO: ${fmtDateTime(stats?.last_updated_smro)}`;
+                  const updatedToday = stats?.so_updated_months_today;
+                  const updateDate = stats?.so_updated_months_today_date;
+
+                  if (!updatedToday || !Object.keys(updatedToday).length) {
+                    return `${base}\n\nSO months updated today${updateDate ? ` (${updateDate})` : ''}: None`;
+                  }
+
+                  const MONTHS_FULL = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+                  const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+                  const lines = Object.entries(updatedToday)
+                    .sort(([a], [b]) => Number(a) - Number(b))
+                    .map(([yr, months]) => {
+                      const uniqueMonths = [...new Set(months || [])];
+                      if (uniqueMonths.length === 12) return `${yr}: All month`;
+
+                      const shorts = uniqueMonths
+                        .map(month => {
+                          const monthIndex = MONTHS_FULL.indexOf(month);
+                          return monthIndex >= 0 ? MONTHS_SHORT[monthIndex] : month;
+                        })
+                        .filter(Boolean);
+
+                      return `${yr}: ${shorts.join(', ')}`;
+                    });
+
+                  return `${base}\n\nSO months updated today${updateDate ? ` (${updateDate})` : ''}:\n${lines.join('\n')}`;
+                })()}
+                className="cursor-help"
+              >SO {fmtUpdateShort(stats?.last_updated_smro)}</span>
+              <span className="mx-1.5 opacity-50">·</span>
+              <span title={`Last Update Regist.: ${fmtDateTime(stats?.last_updated_item_registration)}`}>Reg {fmtUpdateShort(stats?.last_updated_item_registration)}</span>
+              <span className="mx-1.5 opacity-50">·</span>
+              <span title={`Last Update Prod ID: ${fmtDateTime(picDbStatus?.last_product_id_upload)}`}>Prod ID {fmtUpdateShort(picDbStatus?.last_product_id_upload)}</span>
+              {rfqLastUpdated && (<>
+                <span className="mx-1.5 opacity-50">·</span>
+                <span title={`Last Update RFQ: ${fmtDateTime(rfqLastUpdated)}`}>RFQ {fmtUpdateShort(rfqLastUpdated)}</span>
+              </>)}
+            </div>
+          </div>
+        </header>
+
+        {renderGlobalSlicer()}
+
+        {activePage==='dashboard' ? renderDashboardOverview()
+          : activePage==='item-registration' ? renderItemRegistration()
+          : activePage==='rfq' ? renderRFQ()
+          : activePage==='import' ? renderImport()
+          : activePage==='vendor-control' ? renderVendorControl()
+          : activePage==='all-registered-items' ? renderAllRegisteredItems()
+          : renderAllSO()}
+        </div>
+      </main>
+
+      {modal && <SOModal title={modal.title} data={modal.data} darkMode={darkMode} onClose={()=>setModal(null)} onUpdateCell={updateSOCell}/>} 
+
+      {marginDetailModal && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={()=>setMarginDetailModal(null)}>
+          <div className={`rounded-2xl overflow-hidden shadow-2xl w-full max-w-5xl max-h-[85vh] flex flex-col ${darkMode?'bg-gray-800 text-white':'bg-white'}`} onClick={e=>e.stopPropagation()}>
+            <div className={`flex justify-between items-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
+              <h3 className="font-bold text-lg">Margin Detail — {marginDetailModal.category}
+                <span className={`text-sm font-normal ml-2 ${txt2}`}>({fmtNum(marginDetailModal.data?.length)} records)</span>
+              </h3>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => downloadStyledExcel({ columns: MARGIN_DETAIL_COLUMNS, rows: marginDetailModal.data || [], filename: `Margin Detail - ${marginDetailModal.category}`, sheetName: 'Margin Detail' })}
+                  className="flex items-center gap-1 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm"
+                >
+                  <FileSpreadsheet className="w-4 h-4"/>Excel
+                </button>
+                <button onClick={()=>setMarginDetailModal(null)} className={`p-1.5 rounded-lg ${darkMode?'hover:bg-gray-700':'hover:bg-gray-100'}`}><X className="w-5 h-5"/></button>
+              </div>
+            </div>
+            <div className="overflow-auto flex-1 rounded-b-2xl">
+              <table className="w-full text-xs">
+                <thead className={`sticky top-0 ${darkMode?'bg-gray-700':'bg-blue-50'}`}>
+                  <tr>{['SO Item','Product','Vendor','Sales','Purchase','Margin','%','Date'].map(h=>(
+                    <th key={h} className={`px-3 py-2 text-center font-bold ${darkMode?'text-gray-200':'text-gray-700'}`}>{h}</th>
+                  ))}</tr>
+                </thead>
+                <tbody className={`divide-y ${darkMode?'divide-gray-700':'divide-gray-100'}`}>
+                  {(marginDetailModal.data||[]).map((t,i)=>(
+                    <tr key={i} className={darkMode?'hover:bg-gray-700':'hover:bg-blue-50'}>
+                      <td className="px-3 py-2 text-blue-600 font-medium whitespace-nowrap">{t.so_item||'-'}</td>
+                      <td className={`px-3 py-2 max-w-[160px] truncate ${txt}`}>{t.product||'-'}</td>
+                      <td className={`px-3 py-2 max-w-[120px] truncate ${txt2}`}>{t.vendor||'-'}</td>
+                      <td className="px-3 py-2 text-right text-blue-600 whitespace-nowrap">{fmtCur(t.sales_amount)}</td>
+                      <td className="px-3 py-2 text-right text-slate-700 whitespace-nowrap">{fmtCur(t.purchase_amount)}</td>
+                      <td className={`px-3 py-2 text-right font-bold whitespace-nowrap ${t.margin<0?'text-red-600':t.margin>0?'text-green-600':'text-gray-400'}`}>{fmtCur(t.margin)}</td>
+                      <td className={`px-3 py-2 text-right whitespace-nowrap ${t.margin<0?'text-red-500':t.margin>0?'text-green-500':'text-gray-400'}`}>{t.margin_pct!=null?`${t.margin_pct}%`:'—'}</td>
+                      <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{t.date?fmtDate(t.date):'-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Full-page loading overlay ────────────────────────────────────────
+          Dashboard: only waits for the lightweight KPI stats. The heavier
+          completed summary has its own inline loader so first paint is faster.
+          Other pages: only on first visit when the page data array is still
+          empty AND a fetch is in-flight — prevents overlay flashing on every
+          filter / pagination change after initial load.                     */}
+      {(() => {
+        const PAGE_LABELS = {
+          dashboard: 'Dashboard',
+          'all-so': 'Pending Delivery',
+          'item-registration': 'Item Registration',
+          rfq: 'RFQ',
+          import: 'Import',
+          'vendor-control': 'Vendor Control',
+          'all-registered-items': 'Registered Items',
+        };
+
+        // Dashboard: unblock the page as soon as the lightweight KPI stats are ready.
+        // Completed summary keeps its own section-level loader, so the whole page
+        // no longer stays covered while the heavier margin analytics are loading.
+        const isDashboardLoading = activePage === 'dashboard' && (initialPageLoading || pageLoading || stats === null);
+
+        // Other pages: only show when the page has never loaded data yet
+        // (data array is still empty) AND a fetch is actively in-flight.
+        // This prevents the overlay from re-appearing on pagination / filter.
+        const isOtherPageFirstLoad = activePage !== 'dashboard' && pageLoading && (() => {
+          if (activePage === 'all-so')               return allSOData.length === 0;
+          if (activePage === 'item-registration')    return itemRegData.length === 0;
+          if (activePage === 'rfq')                  return rfqData.length === 0;
+          if (activePage === 'import')               return importData.length === 0;
+          if (activePage === 'vendor-control')       return vendorControlData.length === 0;
+          if (activePage === 'all-registered-items') return registeredItemsData.length === 0;
+          return false;
+        })();
+
+        // Show the same loading popup on every page while its data request is running.
+        // Dashboard still waits only for lightweight KPI stats, while table pages use
+        // pageLoading from their own fetch function, so users get clear feedback when
+        // changing page, pagination, filter, or search.
+        const isOtherPageLoading = activePage !== 'dashboard' && pageLoading;
+        const shouldShow = isDashboardLoading || isOtherPageLoading;
+        if (!shouldShow) return null;
+        const pageLabel = PAGE_LABELS[activePage] || 'Data';
+        return (
+          <div className="fixed inset-0 bg-black/50 z-[9999] flex items-center justify-center backdrop-blur-sm">
+            <div className={`${darkMode?'bg-gray-800':'bg-white'} p-8 rounded-2xl shadow-2xl flex flex-col items-center gap-5 w-80 text-center`}>
+              <div className="relative w-16 h-16">
+                <div className="w-16 h-16 border-4 border-blue-200 rounded-full"/>
+                <div className="absolute inset-0 w-16 h-16 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"/>
+              </div>
+              <div>
+                <p className={`font-bold text-lg mb-1 ${darkMode?'text-white':'text-gray-900'}`}>Memuat {pageLabel}</p>
+                <p className={`text-sm ${darkMode?'text-gray-400':'text-gray-500'}`}>Sedang mengambil data dari server…</p>
+                <p className={`text-xs mt-2 ${darkMode?'text-gray-500':'text-gray-400'}`}>Mohon tunggu sebentar</p>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {uploadProgress && (
+        <div className="fixed inset-0 bg-black/60 z-[10000] flex items-center justify-center backdrop-blur-sm">
+          <div className={`${darkMode?'bg-gray-800':'bg-white'} p-8 rounded-2xl shadow-2xl flex flex-col items-center gap-4 w-80`}>
+            <div className="w-14 h-14 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"/>
+            <div className="w-full text-center">
+              <p className={`font-bold text-lg mb-1 ${txt}`}>Uploading {uploadProgress.label}...</p>
+              <p className={`text-xs mb-3 ${txt2}`}>Please wait, do not close the browser</p>
+              <div className={`w-full rounded-full h-3 ${darkMode?'bg-gray-700':'bg-gray-200'}`}>
+                <div className="bg-gradient-to-r from-blue-600 to-blue-400 h-3 rounded-full transition-all duration-300" style={{width:`${uploadProgress.pct}%`}}/>
+              </div>
+              <p className="text-blue-600 font-semibold mt-2">{uploadProgress.pct}%</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+};
+
+export default App;
