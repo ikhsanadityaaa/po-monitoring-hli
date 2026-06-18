@@ -19,6 +19,16 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+# ─── APScheduler for daily auto copy-sheet at 07:00 WIB ─────────────────────
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from apscheduler.triggers.cron import CronTrigger
+    _APSCHEDULER_AVAILABLE = True
+except ImportError:
+    _APSCHEDULER_AVAILABLE = False
+    print('[scheduler] APScheduler not installed – auto copy-sheet disabled. '
+          'Install with: pip install apscheduler')
+
 app = Flask(__name__)
 
 # ─── Indonesian Public Holidays (auto-generated, year-flexible) ───────────
@@ -2209,53 +2219,83 @@ def import_row_payload(row, columns):
 def import_row_identity_payload(row):
     """Stable Import identity for Copy Sheet.
 
-    The dashboard no longer syncs user edits back to source sheets. Copy Sheet
-    should only add source rows that do not already exist in the dashboard.
-    `YUPI PO` is the business key, but one YUPI PO can contain several item
-    lines, so the line identity is YUPI PO + Item Yupi when available, with a
-    fallback to item detail fields. Sheet row is used only as a last resort.
-    """
-    po_yupi = import_nonblank(row.get('po_yupi')) or import_nonblank(row.get('yupi_po'))
-    item_yupi = import_nonblank(row.get('item_yupi'))
-    if po_yupi:
-        line_key = item_yupi or '|'.join([
-            import_nonblank(row.get('item_name')),
-            import_nonblank(row.get('spec')),
-            import_nonblank(row.get('ord_qty')),
-            import_nonblank(row.get('unit_price')),
-            import_nonblank(row.get('so')),
-        ]).strip('|')
-        if not line_key:
-            line_key = f"row:{row.get('_source_key') or ''}:{row.get('_sheet_row') or ''}"
-        return {
-            'po_yupi': po_yupi.strip().upper(),
-            'line': line_key.strip().upper(),
-        }
+    Identity hierarchy (PO YUPI adalah nomor final, PO Sementara hanya sementara):
+      Tier 1 — PO YUPI + Item Yupi   → uid_primary  (dipakai setelah PO YUPI terisi)
+      Tier 2 — PO Sementara + Item Yupi → uid_secondary (dipakai sebelum PO YUPI ada)
 
-    # Rows that do not yet have YUPI PO still need a stable key, but this is a
-    # fallback only. It prevents blank-PO rows from collapsing into one record.
+    Kedua uid disimpan supaya saat PO Sementara digantikan PO YUPI, row yang sama
+    bisa ditemukan dan di-update alih-alih membuat row duplikat baru.
+    """
+    po_yupi = (import_nonblank(row.get('po_yupi')) or
+               import_nonblank(row.get('yupi_po')) or '').strip().upper()
+    item_yupi = (import_nonblank(row.get('item_yupi')) or '').strip().upper()
+    po_sementara = (import_nonblank(row.get('po_sementara')) or '').strip().upper()
+
+    if po_yupi and item_yupi:
+        return {'po_yupi': po_yupi, 'item_yupi': item_yupi}
+    if po_yupi:
+        return {'po_yupi': po_yupi, 'item_yupi': item_yupi or '(none)'}
+    if po_sementara and item_yupi:
+        return {'po_sementara': po_sementara, 'item_yupi': item_yupi}
+    if po_sementara:
+        return {'po_sementara': po_sementara, 'item_yupi': item_yupi or '(none)'}
+    # Last resort: source + sheet row (tidak ideal tapi mencegah collision antar row kosong)
     return {
         'source': clean(row.get('_source_key')) or '',
         'sheet_row': str(row.get('_sheet_row') or ''),
-        'po_sementara': import_nonblank(row.get('po_sementara')).strip().upper(),
-        'item_yupi': import_nonblank(row.get('item_yupi')).strip().upper(),
-        'item_name': import_nonblank(row.get('item_name')).strip().upper(),
     }
 
 
-def import_row_source_uid(row, columns):
-    payload = import_row_identity_payload(row)
+def import_row_identity_secondary(row):
+    """Return the po_sementara-based fallback key for a row, or None.
+
+    Digunakan sebagai secondary lookup saat row di DB dibuat sebelum PO YUPI tersedia.
+    Saat Copy Sheet menemukan row baru dengan PO YUPI, ia bisa match ke row lama
+    menggunakan PO Sementara + Item Yupi dari data yang tersimpan.
+    """
+    po_sementara = (import_nonblank(row.get('po_sementara')) or '').strip().upper()
+    item_yupi = (import_nonblank(row.get('item_yupi')) or '').strip().upper()
+    if not po_sementara:
+        return None
+    return {
+        'po_sementara': po_sementara,
+        'item_yupi': item_yupi or '(none)',
+    }
+
+
+def _identity_to_uid(payload):
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
     return hashlib.sha1(raw.encode('utf-8')).hexdigest()
 
-def merge_import_existing_payload(existing_payload, sheet_payload):
-    """Merge fresh source rows with existing dashboard edits.
 
-    Previous builds preserved every old Import value if it was non-empty. That
-    kept stale '-' placeholders in source-driven columns like YUPI PO and Req Dlv
-    Date, so Copy Sheet could not repair the data even when the source sheets had
-    correct values. Source-managed fields now prefer fresh source values when
-    present. Dashboard-local fields still preserve the user's own input.
+def import_row_source_uid(row, columns):
+    """Return the canonical (primary) source_uid for a row."""
+    return _identity_to_uid(import_row_identity_payload(row))
+
+
+def import_row_secondary_uid(row):
+    """Return the secondary (po_sementara-based) uid, or None."""
+    sec = import_row_identity_secondary(row)
+    return _identity_to_uid(sec) if sec else None
+
+def merge_import_existing_payload(existing_payload, sheet_payload):
+    """Merge fresh source-sheet values with existing dashboard edits.
+
+    Upsert rules per field category:
+
+    SOURCE_MANAGED fields (po_yupi, item_yupi, po_sementara, req_dlv_date,
+    vendor_name, ord_qty, unit_price, amount, spec, …):
+      • Non-blank source value   → always wins (upserted from sheet)
+      • Blank/placeholder source → preserve existing DB value (do not overwrite
+        a filled field with emptiness just because the sheet row has a gap)
+
+    LOCAL / user-editable fields (status, etd, eta, po_send_date, import_remarks,
+    checklist ticks, soft_copy_doc, …):
+      • Never overwritten by Copy Sheet — always keep what the user typed/ticked
+
+    Formula fields (days_left, arrival_check, purchase_amount, lt_days):
+      • Recomputed by apply_import_formula_columns() from the merged base values
+        so they are always consistent with the latest source + user data.
     """
     merged = dict(sheet_payload or {})
     existing_payload = existing_payload or {}
@@ -2265,17 +2305,18 @@ def merge_import_existing_payload(existing_payload, sheet_payload):
         new_value = merged.get(field)
 
         if field in IMPORT_SOURCE_MANAGED_FIELDS:
-            # Fresh non-placeholder source value wins. Preserve existing only if
-            # the source is blank/missing and the existing dashboard value is a
-            # real user value, not '-'.
+            # Non-blank source value always wins — this is the upsert step.
+            # If the source sent a real value (not '-', not empty), write it through
+            # regardless of what was stored before.
             if not import_blankish(new_value):
-                continue
+                continue          # keep new_value already in merged
+            # Source is blank/missing: fall back to existing DB value so we
+            # never erase a previously filled field with an empty source cell.
             if not import_blankish(old_value):
                 merged[field] = old_value
             continue
 
-        # For dashboard-local/status/checklist/link fields, preserve the value
-        # typed in the dashboard as long as it is not blank/placeholder.
+        # User-local fields: always keep what the user typed/ticked.
         if not import_blankish(old_value):
             merged[field] = old_value
 
@@ -2526,19 +2567,27 @@ def sync_import_sheet_to_dashboard():
     # Ordered + matched by position so repeated duplicate identities (rare,
     # e.g. two lines with no Item Yupi and identical item details) stay paired
     # with the same dashboard row across runs instead of drifting.
-    existing_by_uid = {}
+    existing_by_uid = {}        # primary uid  → list[row]
+    existing_by_sec_uid = {}    # secondary uid → list[row]  (po_sementara-based, pre-PO YUPI rows)
     existing_row_keys = set()
     for existing_row in existing_rows:
         existing_row_keys.add(existing_row.row_key)
+        try:
+            existing_payload = json.loads(existing_row.data_json or '{}')
+        except (TypeError, json.JSONDecodeError):
+            existing_payload = {}
+
+        # Determine/recalculate primary uid
         uid = existing_row.source_uid
         if not uid:
-            try:
-                existing_payload = json.loads(existing_row.data_json or '{}')
-            except (TypeError, json.JSONDecodeError):
-                existing_payload = {}
             uid = import_row_source_uid(existing_payload, columns) if existing_payload else None
         if uid:
             existing_by_uid.setdefault(uid, []).append(existing_row)
+
+        # Secondary uid: PO Sementara + Item Yupi (for rows created before PO YUPI arrived)
+        sec_uid = import_row_secondary_uid(existing_payload)
+        if sec_uid and sec_uid != uid:
+            existing_by_sec_uid.setdefault(sec_uid, []).append(existing_row)
 
     now = datetime.utcnow()
     added = 0
@@ -2554,21 +2603,56 @@ def sync_import_sheet_to_dashboard():
         suffix = duplicate_counts[source_uid]
 
         candidates = existing_by_uid.get(source_uid) or []
-        used = consumed_per_uid.get(source_uid, 0)
+        used_key = source_uid
+
+        # Fallback: row may have been created when PO YUPI was still blank,
+        # so it was keyed by PO Sementara + Item Yupi (secondary uid).
+        # Now that PO YUPI is available, match via secondary uid and upgrade.
+        if not candidates:
+            sec_uid_new = import_row_secondary_uid(sheet_payload)
+            if sec_uid_new:
+                candidates = existing_by_sec_uid.get(sec_uid_new) or []
+                if candidates:
+                    used_key = sec_uid_new  # use secondary key for consumed tracking
+
+        used = consumed_per_uid.get(used_key, 0)
         target_row = candidates[used] if used < len(candidates) else None
 
         if target_row is not None:
-            consumed_per_uid[source_uid] = used + 1
+            consumed_per_uid[used_key] = used + 1
             try:
                 existing_payload = json.loads(target_row.data_json or '{}')
             except (TypeError, json.JSONDecodeError):
                 existing_payload = {}
 
             merged_payload = merge_import_existing_payload(existing_payload, sheet_payload)
-            old_json = json.dumps(existing_payload, ensure_ascii=False, sort_keys=True)
-            new_json = json.dumps(merged_payload, ensure_ascii=False, sort_keys=True)
-            if new_json != old_json:
-                target_row.data_json = new_json
+
+            # Compare source-managed fields only — these are the fields that should
+            # be upserted whenever the source sheet has a new/changed value.
+            # Formula columns (days_left, arrival_check, etc.) are excluded from
+            # the diff because they are always recomputed from the base fields.
+            # User-local fields (status, etd, eta, checklist, remarks) are never
+            # replaced by Copy Sheet, so they are also excluded from the diff.
+            def _source_diff(old, new):
+                for f in IMPORT_SOURCE_MANAGED_FIELDS:
+                    old_v = (old.get(f) or '').strip()
+                    new_v = (new.get(f) or '').strip()
+                    # Only flag as changed when source has a non-blank value that
+                    # differs from what is stored — blank source values are ignored
+                    # so Copy Sheet never overwrites a filled field with emptiness.
+                    if new_v and new_v != old_v:
+                        return True
+                return False
+
+            source_changed = _source_diff(existing_payload, merged_payload)
+            # Also catch changes in local edits that may have been merged in
+            # (e.g. status auto-set to NEW after po_send_date cleared).
+            full_old = json.dumps(existing_payload, ensure_ascii=False, sort_keys=True)
+            full_new = json.dumps(merged_payload,  ensure_ascii=False, sort_keys=True)
+            any_change = source_changed or (full_old != full_new)
+
+            if any_change:
+                target_row.data_json = full_new
                 target_row.updated_at = now
                 updated += 1
             else:
@@ -2578,8 +2662,11 @@ def sync_import_sheet_to_dashboard():
             target_row.vendor_name = sheet_row.get('_vendor_name') or target_row.vendor_name
             target_row.source_key = sheet_row.get('_source_key') or target_row.source_key
             target_row.source_label = sheet_row.get('_source_label') or target_row.source_label
-            if not target_row.source_uid:
-                target_row.source_uid = source_uid
+            # Upgrade source_uid to primary (PO YUPI-based) so next run uses primary index directly.
+            # This is the key step that prevents duplicates when PO Sementara → PO YUPI transition happens.
+            target_row.source_uid = source_uid
+            # Register in primary index so the same uid won't spawn another row this run
+            existing_by_uid.setdefault(source_uid, [target_row])
             continue
 
         # No existing dashboard row for this YUPI PO + item line yet: insert.
@@ -2607,6 +2694,12 @@ def sync_import_sheet_to_dashboard():
         consumed_per_uid[source_uid] = consumed_per_uid.get(source_uid, 0) + 1
 
     db.session.commit()
+    # ── persist timestamp so UI can show "Last Copy: date time" ──────────
+    try:
+        wib_now = datetime.utcnow() + timedelta(hours=7)
+        import_meta_set('last_copy_at', wib_now.strftime('%Y-%m-%d %H:%M'))
+    except Exception:
+        pass
     clear_runtime_caches()
     return {
         'added': added,
@@ -8585,6 +8678,9 @@ def get_import_data():
         page_items = filtered_items[(page - 1) * per_page: page * per_page]
         rows = [import_dashboard_row_to_dict(item['row'], columns) for item in page_items]
 
+        # Read last_copy_at from meta for header display
+        last_copy_at = import_meta_get('last_copy_at') or ''
+
         return jsonify({
             'data': rows,
             'columns': columns,
@@ -8592,6 +8688,7 @@ def get_import_data():
             'page': page,
             'per_page': per_page,
             'vendor_count': vendor_count,
+            'last_copy_at': last_copy_at,
             'filters': {
                 'yupi_po': yupi_options,
                 'vendors': vendor_options,
@@ -8605,6 +8702,92 @@ def get_import_data():
         db.session.rollback()
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/import/debug-source', methods=['GET'])
+def import_debug_source():
+    """Diagnostic only: show header detection, column map, and a few raw rows
+    for one Import source sheet, optionally filtered to one vendor.
+
+    Usage examples:
+      /api/import/debug-source?source=source_1&vendor=CURT GEORGI GMBH & CO
+      /api/import/debug-source?source=source_2&vendor=GNT Singapore Pte Ltd
+
+    This makes it possible to see whether yupi_po / req_dlv_date are blank
+    because the live source sheet really has no value for that row, or
+    because header/column detection is mapping them to the wrong column.
+    """
+    try:
+        source_key = clean(request.args.get('source')) or 'source_1'
+        vendor_filter = clean(request.args.get('vendor')) or ''
+        source = next((s for s in IMPORT_SOURCE_SHEETS if s['key'] == source_key), None)
+        if not source:
+            return jsonify({
+                'error': f"Unknown source key '{source_key}'",
+                'available_sources': [s['key'] for s in IMPORT_SOURCE_SHEETS],
+            }), 400
+
+        columns = import_layout_columns()
+        mapping_columns = import_all_mapping_columns(columns)
+        sheet_title, header_df = import_source_header_preview(source, force=True)
+        if header_df.empty:
+            return jsonify({
+                'error': 'Could not read a usable header preview for this source (empty result).',
+                'sheet_title_tried': sheet_title,
+                'spreadsheet_id': source['spreadsheet_id'],
+            }), 500
+
+        header_idx = import_detect_header_row(header_df)
+        kind = import_source_kind_from_header(header_df, header_idx)
+        source_map = import_source_column_map(header_df, mapping_columns)
+        header_row_values = [clean(v) for v in header_df.iloc[header_idx].tolist()] if len(header_df) else []
+
+        source_map_letters = {}
+        for field, idx in source_map.items():
+            try:
+                source_map_letters[field] = column_letter_from_index(idx + 1)
+            except Exception:
+                source_map_letters[field] = f'(idx {idx})'
+
+        if vendor_filter:
+            vendor_set = {vendor_filter.strip().lower()}
+        else:
+            filter_vendors, _ = import_vendor_filter_names()
+            vendor_set = {v.strip().lower() for v in filter_vendors}
+
+        sample_rows = import_source_rows_fast(source, columns, vendor_set)[:5]
+        sample_out = []
+        for row in sample_rows:
+            sample_out.append({
+                'sheet_row': row.get('_sheet_row'),
+                'vendor_name_detected': row.get('_vendor_name'),
+                'po_yupi': row.get('po_yupi'),
+                'yupi_po': row.get('yupi_po'),
+                'po_sementara': row.get('po_sementara'),
+                'req_dlv_date': row.get('req_dlv_date'),
+                'po_date_by_email': row.get('po_date_by_email'),
+                'etd': row.get('etd'),
+                'eta': row.get('eta'),
+                'so': row.get('so'),
+                'group': row.get('group'),
+                'item_name': row.get('item_name'),
+            })
+
+        return jsonify({
+            'source_key': source['key'],
+            'spreadsheet_id': source['spreadsheet_id'],
+            'sheet_title_used': sheet_title,
+            'detected_header_row_1based': header_idx + 1,
+            'detected_kind': kind or '(none -> common fallback letters used)',
+            'header_row_raw_values': header_row_values,
+            'column_map_field_to_letter': source_map_letters,
+            'vendor_filter_used': sorted(vendor_set),
+            'matched_row_count': len(sample_rows),
+            'sample_rows': sample_out,
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/import/cell', methods=['PUT'])
 def update_import_cell():
@@ -8647,6 +8830,108 @@ def update_import_cell():
         db.session.rollback()
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e), 'sheet_sync': {'synced': False, 'reason': str(e)}}), 500
+
+
+@app.route('/api/import/export', methods=['GET'])
+def export_import_data():
+    """Download the currently displayed Import table as an Excel file.
+    Applies the same YUPI PO and vendor filters as /api/import/data.
+    """
+    try:
+        search = clean(request.args.get('search')) or ''
+        selected_yupi_po_raw = [clean(v) for v in request.args.getlist('yupi_po') if clean(v)]
+        selected_vendors_raw = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
+        none_yupi_po = any(v == '__NONE_PLACEHOLDER__' for v in selected_yupi_po_raw)
+        none_vendor = any(v == '__NONE_PLACEHOLDER__' for v in selected_vendors_raw)
+        selected_yupi_po = {v.strip().lower() for v in selected_yupi_po_raw if v != '__NONE_PLACEHOLDER__'}
+        selected_vendors = {v.strip().lower() for v in selected_vendors_raw if v != '__NONE_PLACEHOLDER__'}
+
+        columns = import_layout_columns()
+        q = ImportDashboardRow.query.filter(ImportDashboardRow.source_key != 'import_tracker')
+        if search:
+            terms = [t.strip().lower() for t in re.split(r'[\n,]+', search) if t.strip()]
+            for term in terms:
+                pattern = f'%{term}%'
+                q = q.filter(db.or_(
+                    ImportDashboardRow.row_key.ilike(pattern),
+                    ImportDashboardRow.source_label.ilike(pattern),
+                    ImportDashboardRow.vendor_name.ilike(pattern),
+                    ImportDashboardRow.data_json.ilike(pattern),
+                ))
+
+        candidate_rows = q.order_by(
+            ImportDashboardRow.first_seen_at.desc(),
+            ImportDashboardRow.id.desc(),
+        ).all()
+
+        filtered = []
+        for row in candidate_rows:
+            try:
+                data = json.loads(row.data_json or '{}')
+            except (TypeError, json.JSONDecodeError):
+                data = {}
+            data = apply_import_formula_columns(dict(data))
+            yupi = import_nonblank(data.get('yupi_po')) or import_nonblank(data.get('po_yupi'))
+            vendor = import_nonblank(data.get('vendor_name')) or import_nonblank(data.get('vendor')) or import_nonblank(row.vendor_name)
+            if none_yupi_po or none_vendor:
+                continue
+            if selected_yupi_po and str(yupi or '').strip().lower() not in selected_yupi_po:
+                continue
+            if selected_vendors and str(vendor or '').strip().lower() not in selected_vendors:
+                continue
+            filtered.append((row, data))
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'Import Dashboard'
+
+        # Build header row from column definitions
+        visible_cols = [col for col in columns if not col.get('source_only')]
+        header_labels = [col.get('label', col.get('field', '')).replace('\n', ' ') for col in visible_cols]
+        ws.append(header_labels)
+
+        # Style header
+        header_fill = PatternFill(start_color='1E3A5F', end_color='1E3A5F', fill_type='solid')
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = Font(bold=True, color='FFFFFF')
+            cell.alignment = Alignment(horizontal='center', wrap_text=True)
+        ws.row_dimensions[1].height = 32
+
+        # Set column widths from definition
+        for i, col in enumerate(visible_cols, 1):
+            width = min(max((col.get('width', 120)) / 7, 8), 50)
+            ws.column_dimensions[get_column_letter(i)].width = width
+
+        # Data rows
+        alt_fill = PatternFill(start_color='F0F4FF', end_color='F0F4FF', fill_type='solid')
+        for row_idx, (db_row, data) in enumerate(filtered, 2):
+            row_vals = []
+            for col in visible_cols:
+                field = col.get('field', '')
+                val = data.get(field, '')
+                if col.get('checkbox'):
+                    val = 'YES' if import_truthy_checkbox_value(val) else ''
+                row_vals.append(val if val is not None else '')
+            ws.append(row_vals)
+            if row_idx % 2 == 0:
+                for cell in ws[row_idx]:
+                    cell.fill = alt_fill
+
+        ws.freeze_panes = 'A2'
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        filename = f"Import_Dashboard_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        return send_file(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=filename,
+        )
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/import/cells', methods=['PUT'])
@@ -8698,6 +8983,99 @@ def update_import_cells_batch():
         db.session.rollback()
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e), 'sheet_sync': {'synced': False, 'reason': str(e)}}), 500
+
+@app.route('/api/import/cleanup', methods=['POST'])
+def import_cleanup_duplicates():
+    """Remove duplicate ImportDashboardRow entries that share the same business key
+    (PO Sementara + Item Yupi), keeping only the most recently updated one.
+    This fixes rows created by old backend logic before the upsert was working correctly.
+    """
+    try:
+        columns = import_layout_columns()
+        all_rows = ImportDashboardRow.query.filter(
+            ImportDashboardRow.source_key != 'import_tracker'
+        ).order_by(ImportDashboardRow.updated_at.desc(), ImportDashboardRow.id.desc()).all()
+
+        # Group by canonical business key: prefer YUPI PO + item, else po_sementara
+        groups = {}
+        for row in all_rows:
+            try:
+                data = json.loads(row.data_json or '{}')
+            except (TypeError, json.JSONDecodeError):
+                data = {}
+            po_yupi = import_nonblank(data.get('po_yupi')) or import_nonblank(data.get('yupi_po'))
+            item_yupi = import_nonblank(data.get('item_yupi'))
+            po_sementara = import_nonblank(data.get('po_sementara'))
+
+            # Use same hierarchy as import_row_identity_payload:
+            # Primary = PO YUPI + Item Yupi, Secondary = PO Sementara + Item Yupi
+            # For cleanup, group by primary key only (ignore po_sementara as biz_key
+            # because a row with PO YUPI and a row with only PO Sementara for the
+            # SAME order are the SAME business row and should be merged)
+            if po_yupi and item_yupi:
+                biz_key = f"poyupi:{po_yupi.strip().upper()}|item:{item_yupi.strip().upper()}"
+            elif po_yupi:
+                biz_key = f"poyupi:{po_yupi.strip().upper()}|item:(none)"
+            elif po_sementara and item_yupi:
+                # Rows that share PO Sementara + Item Yupi should be grouped —
+                # they are the same order line before PO YUPI was assigned
+                biz_key = f"posem:{po_sementara.strip().upper()}|item:{item_yupi.strip().upper()}"
+            elif po_sementara:
+                biz_key = f"posem:{po_sementara.strip().upper()}|item:(none)"
+            else:
+                continue  # no key = skip
+
+            if biz_key not in groups:
+                groups[biz_key] = []
+            groups[biz_key].append(row)
+
+        deleted = 0
+        merged = 0
+        for biz_key, rows in groups.items():
+            if len(rows) <= 1:
+                continue
+            # Keep the one with the most recent updated_at or highest id; merge local edits
+            winner = rows[0]  # already sorted desc by updated_at, id
+            # Collect best values across all duplicates (preserve non-blank local edits)
+            winner_data = {}
+            try:
+                winner_data = json.loads(winner.data_json or '{}')
+            except Exception:
+                pass
+
+            for dup in rows[1:]:
+                try:
+                    dup_data = json.loads(dup.data_json or '{}')
+                except Exception:
+                    dup_data = {}
+                # Preserve non-blank user-local fields from older duplicates
+                for field in IMPORT_LOCAL_EDIT_FIELDS:
+                    if field in IMPORT_SOURCE_MANAGED_FIELDS:
+                        continue
+                    if import_blankish(winner_data.get(field)) and not import_blankish(dup_data.get(field)):
+                        winner_data[field] = dup_data[field]
+
+            winner.data_json = json.dumps(apply_import_formula_columns(winner_data), ensure_ascii=False)
+            winner.updated_at = datetime.utcnow()
+            merged += 1
+
+            for dup in rows[1:]:
+                db.session.delete(dup)
+                deleted += 1
+
+        db.session.commit()
+        clear_runtime_caches()
+        return jsonify({
+            'success': True,
+            'deleted': deleted,
+            'merged': merged,
+            'message': f'{deleted} baris duplikat dihapus, {merged} baris dipertahankan dengan data tergabung.',
+        })
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/import/vendor-template', methods=['GET'])
 def download_import_vendor_template():
@@ -9377,6 +9755,63 @@ def serve_frontend(path):
 warm_dashboard_stats_cache_async()
 warm_completed_summary_cache_async()
 warm_rfq_dashboard_cache_async()
+
+# ─── Daily auto copy-sheet at 07:00 WIB (00:00 UTC) ─────────────────────────
+_SCHEDULER_STARTED = False
+
+def _auto_copy_sheet_job():
+    """Background job: run Copy Sheet automatically every day at 07:00 WIB."""
+    try:
+        with app.app_context():
+            print(f'[scheduler] Auto copy-sheet started at {datetime.utcnow().isoformat()} UTC')
+            result = sync_import_sheet_to_dashboard()
+            print(f'[scheduler] Auto copy-sheet done: added={result.get("added")}, '
+                  f'updated={result.get("updated")}, seen={result.get("seen")}')
+    except Exception as exc:
+        print(f'[scheduler] Auto copy-sheet error: {exc}')
+
+
+def start_auto_copy_scheduler():
+    global _SCHEDULER_STARTED
+    if _SCHEDULER_STARTED:
+        return
+    if not _APSCHEDULER_AVAILABLE:
+        print('[scheduler] APScheduler not available – skipping daily auto copy-sheet.')
+        return
+    if os.environ.get('PO_MONITOR_DISABLE_SCHEDULER') == '1':
+        print('[scheduler] Daily scheduler disabled via PO_MONITOR_DISABLE_SCHEDULER=1')
+        return
+    try:
+        scheduler = BackgroundScheduler(timezone='Asia/Jakarta')
+        # Run at 07:00 WIB (Asia/Jakarta) every day
+        scheduler.add_job(
+            _auto_copy_sheet_job,
+            trigger=CronTrigger(hour=7, minute=0, timezone='Asia/Jakarta'),
+            id='auto_copy_sheet',
+            name='Daily Import Copy Sheet at 07:00 WIB',
+            replace_existing=True,
+        )
+        scheduler.start()
+        _SCHEDULER_STARTED = True
+        print('[scheduler] Daily auto copy-sheet scheduled at 07:00 WIB (Asia/Jakarta).')
+    except Exception as exc:
+        print(f'[scheduler] Failed to start scheduler: {exc}')
+
+
+start_auto_copy_scheduler()
+
+
+@app.route('/api/import/scheduler-status', methods=['GET'])
+def import_scheduler_status():
+    """Return whether the auto copy-sheet scheduler is running."""
+    return jsonify({
+        'scheduler_available': _APSCHEDULER_AVAILABLE,
+        'scheduler_started': _SCHEDULER_STARTED,
+        'schedule': '07:00 WIB (Asia/Jakarta) daily',
+        'disable_env': 'PO_MONITOR_DISABLE_SCHEDULER=1',
+        'last_copy_at': import_meta_get('last_copy_at') or '',
+    })
+
 
 if __name__ == '__main__':
     load_similarity_cache()
