@@ -1507,6 +1507,9 @@ const App = () => {
   const [rfqOptions, setRfqOptions] = useState({ checks: [], clients: [], rfq_numbers: [], brands: [], purchase_pics: [], vendors: [] });
   const [rfqSelectedCell, setRfqSelectedCell] = useState(null);
   const [rfqFillRange, setRfqFillRange] = useState(null);
+  // Multi-select state for Shift+click in the RFQ table (same pattern as Import).
+  const [rfqSelectedCells, setRfqSelectedCells] = useState(null);
+  const [rfqSelectionAnchor, setRfqSelectionAnchor] = useState(null);
   const [rfqSimilarAction, setRfqSimilarAction] = useState(null);
   const [rfqLastUpdated, setRfqLastUpdated] = useState(null);
 
@@ -1525,6 +1528,14 @@ const App = () => {
   const [showImportChecklist, setShowImportChecklist] = useState(false);
   const [importSelectedCell, setImportSelectedCell] = useState(null);
   const [importFillRange, setImportFillRange] = useState(null);
+  // Multi-select state for Shift+click (Excel-like). Stores a Set of
+  // "{rowKey}|{field}" strings so we can select arbitrary rectangles of
+  // cells. Anchor stores the first cell clicked so Shift+click extends from
+  // there. Same-column multi-select (clicking multiple rows in one column)
+  // is supported by checking if the Shift-clicked cell shares the field.
+  const [importSelectedCells, setImportSelectedCells] = useState(null); // Set or null
+  const [importSelectionAnchor, setImportSelectionAnchor] = useState(null); // {rowIndex, field}
+  const [importVendorMenuOpen, setImportVendorMenuOpen] = useState(false);
   const [importFilters, setImportFilters] = useState({ yupi_po: [], vendors: [] });
   const [importOptions, setImportOptions] = useState({ yupi_po: [], vendors: [] });
   const [importReqDlvSort, setImportReqDlvSort] = useState('newest');
@@ -3757,6 +3768,23 @@ const App = () => {
       { field: 'similar_score', label: '%Similarity' },
     ];
     const columns = rfqShowSimilarity ? [...baseColumns, ...similarityColumns] : baseColumns;
+    // Shift+click multi-select helpers for the RFQ table (same pattern as
+    // Import — see computeImportSelection for the canonical implementation).
+    const rfqEditableFieldsList = columns.map(col => col.field);
+    const rfqCellKey = (rowIndex, field) => `${rowIndex}|${field}`;
+    const computeRfqSelection = (anchor, target) => {
+      const startRow = Math.min(anchor.rowIndex, target.rowIndex);
+      const endRow = Math.max(anchor.rowIndex, target.rowIndex);
+      const startColIdx = Math.min(anchor.colIdx, target.colIdx);
+      const endColIdx = Math.max(anchor.colIdx, target.colIdx);
+      const result = new Set();
+      for (let r = startRow; r <= endRow; r += 1) {
+        for (let c = startColIdx; c <= endColIdx; c += 1) {
+          result.add(rfqCellKey(r, rfqEditableFieldsList[c]));
+        }
+      }
+      return result;
+    };
     const rfqSourceStyleFields = new Set([
       'check', 'sheet_status', 'days_left', 'no', 'client_name', 'rfq_date', 'closing_date', 'sales_pic',
       'category_name', 'purchase_pic', 'rfq_code', 'item_name', 'detail_spec', 'brand_manufacturer', 'qty', 'unit', 'remark',
@@ -4230,22 +4258,33 @@ const App = () => {
                     if (isEditable) {
                       const hasValue = value === 0 || value;
                       const selected = rfqSelectedCell?.rowKey === row.row_key && rfqSelectedCell?.field === field;
+                      const rfqCellKeyStr = rfqCellKey(rowIndex, field);
+                      const inMultiSelection = rfqSelectedCells?.has(rfqCellKeyStr);
                       const sourceStyle = rfqSourceStyleFields.has(field);
                       const fillHighlighted = rfqFillRange?.field === field && rowIndex >= rfqFillRange.minRow && rowIndex <= rfqFillRange.maxRow && rowIndex !== rfqFillRange.startRow;
                       return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field}
                         tabIndex={0}
                         onFocus={() => setRfqSelectedCell({ rowKey: row.row_key, field })}
-                        onClick={() => {
+                        onClick={(e) => {
                           setRfqSelectedCell({ rowKey: row.row_key, field });
-                          setEditingCell({ id: row.row_key, field: `rfq_${field}` });
-                          if (field === 'unit_price_idr') {
-                            setEditValue(String(value ?? '').replace(/[^0-9.-]/g, ''));
+                          // Shift+click multi-select (Excel-like).
+                          const clickedColIdx = rfqEditableFieldsList.indexOf(field);
+                          if (e.shiftKey && rfqSelectionAnchor && clickedColIdx >= 0) {
+                            const newSelection = computeRfqSelection(rfqSelectionAnchor, { rowIndex, colIdx: clickedColIdx });
+                            setRfqSelectedCells(newSelection);
                           } else {
-                            setEditValue(value ?? '');
+                            setRfqSelectionAnchor({ rowIndex, colIdx: clickedColIdx });
+                            setRfqSelectedCells(new Set([rfqCellKeyStr]));
+                            setEditingCell({ id: row.row_key, field: `rfq_${field}` });
+                            if (field === 'unit_price_idr') {
+                              setEditValue(String(value ?? '').replace(/[^0-9.-]/g, ''));
+                            } else {
+                              setEditValue(value ?? '');
+                            }
                           }
                         }}
                         onPaste={e => { e.preventDefault(); applyRFQPaste(rowIndex, field, e.clipboardData.getData('text/plain')); }}
-                        className={`group relative px-2 py-1 align-top border-r cursor-pointer ${sourceStyle ? (darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200') : (darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200')} ${fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${['qty','unit_price_idr','moq','lead_time_days'].includes(field) ? 'text-right font-semibold' : ''}`}>
+                        className={`group relative px-2 py-1 align-top border-r cursor-pointer ${sourceStyle ? (darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200') : (darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200')} ${fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : inMultiSelection ? 'outline outline-2 outline-blue-500 outline-offset-[-2px] bg-blue-50/50' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${['qty','unit_price_idr','moq','lead_time_days'].includes(field) ? 'text-right font-semibold' : ''}`}>
                         <div className={`min-h-7 min-w-0 truncate ${sourceStyle ? txt2 : 'text-blue-600'} ${field === 'photo_url' ? 'flex items-center gap-1 justify-center' : ''} ${field === 'purchase_pic' ? 'text-center' : ''}`}>
                           {field === 'photo_url' && <LinkIcon className={`w-3.5 h-3.5 flex-shrink-0 ${hasValue ? 'text-blue-600' : 'text-blue-400'}`} />}
                           {hasValue && field === 'purchase_pic' ? (() => {
@@ -4569,6 +4608,29 @@ const App = () => {
     };
 
     const importEditableFields = visibleColumns.map(col => col.field);
+
+    // ── Shift+click multi-select (Excel-like) ─────────────────────────────
+    // Click a cell → set anchor + select just that cell.
+    // Shift+click another cell → select the rectangle from anchor to clicked
+    //   cell. Works across rows AND columns: e.g. anchor at (row 2, col C),
+    //   Shift+click (row 5, col E) selects rows 2–5 × columns C–E.
+    // Shift+click in the same column → selects a vertical range (rows only).
+    // Click without Shift → reset to single-cell selection.
+    const importCellKey = (rowIndex, field) => `${rowIndex}|${field}`;
+    const computeImportSelection = (anchor, target) => {
+      const startRow = Math.min(anchor.rowIndex, target.rowIndex);
+      const endRow = Math.max(anchor.rowIndex, target.rowIndex);
+      const startColIdx = Math.min(anchor.colIdx, target.colIdx);
+      const endColIdx = Math.max(anchor.colIdx, target.colIdx);
+      const result = new Set();
+      for (let r = startRow; r <= endRow; r += 1) {
+        for (let c = startColIdx; c <= endColIdx; c += 1) {
+          result.add(importCellKey(r, importEditableFields[c]));
+        }
+      }
+      return result;
+    };
+
     const applyImportPaste = async (startRowIndex, startField, text) => {
       const rows = String(text || '').replace(/\r/g, '').split('\n').filter((line, idx, arr) => line !== '' || idx < arr.length - 1);
       if (!rows.length) return;
@@ -4691,22 +4753,49 @@ const App = () => {
             <span className={`text-sm ${txt2}`}>({fmtNum(importTotal)} records)</span>
             <span className={`text-xs ${txt2}`} title={`Vendor Import: ${fmtNum(importVendorCount)}`}>Last Copy: {fmtWibDateTime(importLastCopyAt)}</span>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <DownloadButton onClick={() => downloadBlob('/api/import/vendor-template', `Import_Vendor_Template_${new Date().toISOString().slice(0,10)}.xlsx`, 'Import Vendor Template')} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><Download className="w-4 h-4"/>Template Vendor</DownloadButton>
-            <label className="flex items-center gap-2 px-3 py-2.5 bg-slate-600 hover:bg-slate-700 text-white rounded-xl text-sm font-semibold shadow-sm cursor-pointer"><FileSpreadsheet className="w-4 h-4"/>Upload Vendor Import<input type="file" accept=".xlsx,.xls,.csv" multiple onChange={handleVendorUpload} className="hidden"/></label>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {/* Vendor Import — single dropdown combining Template + Upload.
+                Keeps the header tidy and matches the "1 menu per logical
+                action" pattern used in other tables (RFQ, Item Registration). */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setImportVendorMenuOpen(v => !v)}
+                onBlur={() => setTimeout(() => setImportVendorMenuOpen(false), 150)}
+                className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}
+              >
+                <FileSpreadsheet className="w-4 h-4"/>Vendor Import
+                <svg className={`w-3 h-3 transition-transform ${importVendorMenuOpen ? 'rotate-180' : ''}`} viewBox="0 0 12 12" fill="none"><path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+              </button>
+              {importVendorMenuOpen && (
+                <div className={`absolute right-0 top-full mt-1 z-50 w-56 rounded-xl border shadow-2xl overflow-hidden ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
+                  <button
+                    type="button"
+                    onMouseDown={(e) => { e.preventDefault(); downloadBlob('/api/import/vendor-template', `Import_Vendor_Template_${new Date().toISOString().slice(0,10)}.xlsx`, 'Import Vendor Template'); setImportVendorMenuOpen(false); }}
+                    className={`flex items-center gap-2 w-full px-3 py-2.5 text-left text-sm font-medium ${darkMode ? 'text-gray-100 hover:bg-gray-700' : 'text-gray-700 hover:bg-blue-50'}`}
+                  >
+                    <Download className="w-4 h-4"/>Template Vendor
+                  </button>
+                  <label className={`flex items-center gap-2 w-full px-3 py-2.5 text-sm font-medium cursor-pointer ${darkMode ? 'text-gray-100 hover:bg-gray-700' : 'text-gray-700 hover:bg-blue-50'}`}>
+                    <FileSpreadsheet className="w-4 h-4"/>Upload Vendor Import
+                    <input type="file" accept=".xlsx,.xls,.csv" multiple onChange={(e) => { handleVendorUpload(e); setImportVendorMenuOpen(false); }} className="hidden"/>
+                  </label>
+                </div>
+              )}
+            </div>
+            {/* Copy Sheet — triggers a fresh sync from the live Import tracker sheet. */}
             <button onClick={() => fetchImportData(importPage, importPerPage, importAppliedSearch, true, importFilters, importReqDlvSort, importYupiPoSort)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><RotateCcw className="w-4 h-4"/>Copy Sheet</button>
-            <DownloadButton onClick={downloadImportExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
-              <Download className="w-4 h-4"/>Download Excel
-            </DownloadButton>
-            <button onClick={cleanupImportDuplicates} title="Gabungkan baris yang punya PO YUPI/PO Sementara + Item Yupi sama, hapus sisanya" className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-amber-300 hover:bg-gray-600' : 'bg-white text-amber-700 hover:bg-amber-50 border border-gray-200'}`}>
-              <Trash2 className="w-4 h-4"/>Bersihkan Duplikat
-            </button>
+            {/* Hide/Show Checklist — toggle visibility of the 8 checklist columns (SAP INPUT, BL/AWB, …, COO). */}
             {checklistCount > 0 && (
               <button onClick={() => setShowImportChecklist(v => !v)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
                 {showImportChecklist ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}
                 {showImportChecklist ? 'Hide Checklist' : 'Show Checklist'}
               </button>
             )}
+            {/* Download Excel — exports the current filtered+sorted view. */}
+            <DownloadButton onClick={downloadImportExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
+              <Download className="w-4 h-4"/>Download Excel
+            </DownloadButton>
           </div>
         </div>
 
@@ -4767,6 +4856,11 @@ const App = () => {
                 return <tr key={row._row_key} className={`${trHov} ${hasReschedule ? (darkMode ? 'bg-amber-900/25 hover:bg-amber-900/35' : 'bg-amber-50 hover:bg-amber-100/70') : ''}`}>{visibleColumns.map(col => {
                   const formula = isImportFormulaColumn(col);
                   const selected = importSelectedCell?.rowKey === row._row_key && importSelectedCell?.field === col.field;
+                  // Multi-select highlight: if Shift+click selected a range,
+                  // highlight every cell in that range. Falls back to the
+                  // single-cell `selected` outline when no range is active.
+                  const cellKey = importCellKey(rowIndex, col.field);
+                  const inMultiSelection = importSelectedCells?.has(cellKey);
                   // Fill highlight: support both vertical (down/up, same
                   // column) and horizontal (left/right, same row) drag-fill.
                   const colIdx = visibleColumns.findIndex(c => c.field === col.field);
@@ -4787,10 +4881,22 @@ const App = () => {
                     onFocus={() => setImportSelectedCell({ rowKey: row._row_key, field: col.field })}
                     onClick={(e) => {
                       setImportSelectedCell({ rowKey: row._row_key, field: col.field });
-                      if (directEdit && !editingCellNow && !e.target.closest('a,input,textarea,select,button')) startImportEdit(row, col);
+                      // Shift+click multi-select (Excel-like). Click without
+                      // Shift resets to single cell + new anchor. Shift+click
+                      // extends from the existing anchor to the clicked cell,
+                      // forming a rectangle that can span rows AND columns.
+                      const clickedColIdx = importEditableFields.indexOf(col.field);
+                      if (e.shiftKey && importSelectionAnchor && clickedColIdx >= 0) {
+                        const newSelection = computeImportSelection(importSelectionAnchor, { rowIndex, colIdx: clickedColIdx });
+                        setImportSelectedCells(newSelection);
+                      } else {
+                        setImportSelectionAnchor({ rowIndex, colIdx: clickedColIdx });
+                        setImportSelectedCells(new Set([cellKey]));
+                        if (directEdit && !editingCellNow && !e.target.closest('a,input,textarea,select,button')) startImportEdit(row, col);
+                      }
                     }}
                     onPaste={e => { e.preventDefault(); applyImportPaste(rowIndex, col.field, e.clipboardData.getData('text/plain')); }}
-                    className={`group relative h-8 max-h-8 ${editingCellNow ? 'p-0' : 'px-2 py-1'} align-middle border-r focus:outline-none cursor-pointer ${formula ? (darkMode ? 'bg-gray-800/50' : 'bg-slate-50/80') : ''} ${hasReschedule ? (darkMode ? 'bg-amber-900/20' : 'bg-amber-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${editingCellNow ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${col.field === 'days_left' ? 'text-center' : ''} ${txt2}`}
+                    className={`group relative h-8 max-h-8 ${editingCellNow ? 'p-0' : 'px-2 py-1'} align-middle border-r focus:outline-none cursor-pointer ${formula ? (darkMode ? 'bg-gray-800/50' : 'bg-slate-50/80') : ''} ${hasReschedule ? (darkMode ? 'bg-amber-900/20' : 'bg-amber-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${editingCellNow ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : inMultiSelection ? 'outline outline-2 outline-blue-500 outline-offset-[-2px] bg-blue-50/50' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${col.field === 'days_left' ? 'text-center' : ''} ${txt2}`}
                   >
                     {renderImportCell(row, col)}
                     {/* Fill handle — bottom-right corner. Drag in any direction:
