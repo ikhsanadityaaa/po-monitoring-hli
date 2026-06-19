@@ -1176,7 +1176,10 @@ const DataTableScroll = ({ children, className = '', darkMode }) => {
       mirror.style.display = 'none';
       mirror.style.position = 'fixed';
       mirror.style.top = '0px';
-      mirror.style.overflow = 'hidden';
+      // 'clip' crops visually like 'hidden' but does NOT create a new scroll
+      // container — which means position:sticky inside the mirror header can
+      // still work correctly for pinned/frozen columns.
+      mirror.style.overflow = 'clip';
       mirror.style.pointerEvents = 'none';
       mirror.style.zIndex = '130';
       mirror.style.boxSizing = 'border-box';
@@ -1219,11 +1222,22 @@ const DataTableScroll = ({ children, className = '', darkMode }) => {
         clone.style.maxWidth = `${width}px`;
         clone.style.height = `${Math.max(1, rect.height)}px`;
         clone.style.boxSizing = 'border-box';
-        clone.style.position = 'relative';
-        clone.style.left = 'auto';
-        clone.style.zIndex = '1';
         clone.style.backgroundClip = 'padding-box';
+        // Preserve sticky positioning for pinned/frozen columns — do NOT
+        // override with 'relative'/'auto' or the pin will not stick in the
+        // floating mirror header.
         const thStyles = window.getComputedStyle(th);
+        if (thStyles.position === 'sticky') {
+          clone.style.position = 'sticky';
+          clone.style.left = thStyles.left;
+          clone.style.zIndex = '45';
+          clone.style.background = thStyles.backgroundColor || clone.style.background;
+          clone.style.boxShadow = thStyles.boxShadow;
+        } else {
+          clone.style.position = 'relative';
+          clone.style.left = 'auto';
+          clone.style.zIndex = '1';
+        }
         clone.style.fontSize = thStyles.fontSize;
         clone.style.fontWeight = thStyles.fontWeight;
         clone.style.lineHeight = thStyles.lineHeight;
@@ -4495,22 +4509,20 @@ const App = () => {
     // columns (SO, PO Sementara, Item Name, Spec, Qty, prices, ...) carry
     // `group_per_item: true` from the backend and are never merged.
     const isImportGroupColumn = (col) => !col.group_per_item;
-    // Rows are grouped by yupi_po: consecutive rows sharing the same non-blank
-    // yupi_po belong to one visual PO group. All "group" columns (STATUS,
-    // Days Left, PO Send Date, Site, Vendor, Req Dlv Date, ETD, ETA, Arrival
-    // Check, Import Remarks, checklist cols, …) are merged across the group.
-    // Per-item columns (item_name, spec, qty, etc. — those with group_per_item
-    // from the backend) render independently on each row. Blank yupi_po rows
-    // are never merged and always stand alone.
+    // Consecutive rows are merged into one visual group when every group
+    // column has the same value AND there's at least one non-blank group
+    // value tying them together (purely-blank rows never merge, so newly
+    // added/blank rows don't accidentally swallow into the row above).
+    // Recomputed from `importData` on every render, so adding or removing
+    // rows automatically reshapes the groups — no stored "group id" needed.
     const importRowSpans = (() => {
+      const groupCols = columns.filter(isImportGroupColumn).map(c => c.field);
       const spans = new Array(importData.length).fill(null);
       let groupStart = 0;
-      const yupiKey = (row) => String(row?.yupi_po ?? row?.po_yupi ?? '').trim();
+      const sameGroup = (a, b) => groupCols.every(f => String(a?.[f] ?? '').trim() === String(b?.[f] ?? '').trim());
+      const hasAnyGroupValue = (row) => groupCols.some(f => String(row?.[f] ?? '').trim() !== '');
       for (let i = 1; i <= importData.length; i++) {
-        const startKey = yupiKey(importData[groupStart]);
-        const continues = i < importData.length
-          && startKey !== ''
-          && yupiKey(importData[i]) === startKey;
+        const continues = i < importData.length && hasAnyGroupValue(importData[i]) && sameGroup(importData[i], importData[groupStart]);
         if (!continues) {
           spans[groupStart] = i - groupStart;
           groupStart = i;
