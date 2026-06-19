@@ -24,6 +24,7 @@ const DASHBOARD_SUMMARY_CACHE_PREFIX = 'po-monitoring:dashboard-summary:';
 const DASHBOARD_STATS_CACHE_KEY = 'po-monitoring:dashboard-stats';
 const DASHBOARD_AGING_CACHE_KEY = 'po-monitoring:dashboard-aging';
 const DASHBOARD_PENDING_TOTAL_CACHE_KEY = 'po-monitoring:dashboard-pending-total';
+const PIC_DB_STATUS_CACHE_KEY = 'po-monitoring:pic-db-status';
 const DASHBOARD_CACHE_KEY_ALL = '__all__';
 // Cache TTL: keeps Dashboard instant on reload, while uploads still clear it explicitly.
 // localStorage is used instead of sessionStorage so refresh / browser reopen does not
@@ -94,6 +95,13 @@ const clearDashboardSummaryCache = () => {
 // ─── Stats & aging persistent cache ───────────────────────────────────────
 const readStatsCache = (key) => readCachePayload(key);
 const writeStatsCache = (key, data) => writeCachePayload(key, data);
+
+// ─── PIC DB status persistent cache ───────────────────────────────────────
+// Keeps "Prod ID" / "PIC" timestamps visible in the header even if a fetch
+// fails (e.g. transient CORS / cold-start error from the backend), instead
+// of silently falling back to '-' forever for that session.
+const readPicDbStatusCache = () => readCachePayload(PIC_DB_STATUS_CACHE_KEY);
+const writePicDbStatusCache = (data) => writeCachePayload(PIC_DB_STATUS_CACHE_KEY, data);
 
 const clearStatsCache = () => {
   storageRemoveWhere((key) => (
@@ -1666,7 +1674,7 @@ const App = () => {
   const [completedLoading, setCompletedLoading] = useState(false);
   const [completedLoaded, setCompletedLoaded] = useState(false);
   const [marginDetailModal, setMarginDetailModal] = useState(null); // {category, data}
-  const [picDbStatus, setPicDbStatus] = useState(null); // {product_id_count, master_pic_count, last_product_id_upload, last_pic_update}
+  const [picDbStatus, setPicDbStatus] = useState(() => readPicDbStatusCache()); // {product_id_count, master_pic_count, last_product_id_upload, last_pic_update}
   const [picUploadMsg, setPicUploadMsg] = useState(''); // feedback message for PIC uploads
 
   // Dynamic color palette for PIC badges — each unique name gets a consistent color
@@ -1858,10 +1866,25 @@ const App = () => {
     if (!hasStatsCache) {
       setLoading(true);
       setInitialPageLoading(true);
-      try {
-        // First paint waits only for the KPI/status payload. Aging is fetched below in the background.
-        const sRes = await api.get(`/api/dashboard/stats${qs}`);
-        if (!isCurrent()) return;
+      // Retry with short backoff before giving up. /api/dashboard/stats is the
+      // heaviest endpoint on the dashboard (several SQL aggregate queries), so
+      // it's the most likely one to time out on a cold/slow PythonAnywhere
+      // worker — which is why "SO"/"Reg" in the header can go blank while the
+      // lighter /api/master-pic/status (Prod ID) still succeeds.
+      let sRes = null;
+      let lastErr = null;
+      for (let attempt = 0; attempt <= 2; attempt++) {
+        try {
+          sRes = await api.get(`/api/dashboard/stats${qs}`);
+          lastErr = null;
+          break;
+        } catch (e) {
+          lastErr = e;
+          if (attempt < 2) await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
+        }
+      }
+      if (!isCurrent()) return;
+      if (sRes) {
         const nextStats = sRes.data || {};
         const nextPending = { total: Number(nextStats.total_so_count) || 0 };
         setStats(nextStats);
@@ -1869,17 +1892,19 @@ const App = () => {
         setDashboardFilterOptions(nextStats?.filters || { clients: [], pics: [] });
         writeStatsCache(statsCacheKey, nextStats);
         writeStatsCache(pendingCacheKey, nextPending);
-      } catch (e) {
-        if (isCurrent()) {
-          addToast(`Error: ${e.response?.data?.error || e.message}`, 'error');
-          setCompletedLoading(false);
-        }
+      } else {
+        // All retries failed: keep whatever stats we already have (e.g. from
+        // an older cache entry that just expired) instead of blanking the
+        // "Updates" timestamps in the header to '-'.
+        addToast(`Error: ${lastErr?.response?.data?.error || lastErr?.message}`, 'error');
+        setCompletedLoading(false);
+        setLoading(false);
+        setInitialPageLoading(false);
         return;
-      } finally {
-        if (isCurrent()) {
-          setLoading(false);
-          setInitialPageLoading(false);
-        }
+      }
+      if (isCurrent()) {
+        setLoading(false);
+        setInitialPageLoading(false);
       }
     } else {
       setLoading(false);
@@ -2360,11 +2385,20 @@ const App = () => {
     }
   };
 
-  const fetchPicDbStatus = async () => {
+  const fetchPicDbStatus = async (retryCount = 0) => {
     try {
       const res = await api.get('/api/master-pic/status');
       setPicDbStatus(res.data);
-    } catch {}
+      writePicDbStatusCache(res.data);
+    } catch (err) {
+      // Transient failures (cold-start, CORS hiccup on the free-tier backend
+      // waking up, etc.) shouldn't blank out the header. Retry once after a
+      // short delay; if it still fails, just keep whatever we last had
+      // (from cache or a previous successful fetch) instead of resetting it.
+      if (retryCount < 2) {
+        setTimeout(() => fetchPicDbStatus(retryCount + 1), 1500 * (retryCount + 1));
+      }
+    }
   };
 
   const handleUploadProductID = async (e) => {
