@@ -4006,18 +4006,10 @@ def get_item_registration_data():
         if cached is not None:
             return jsonify(cached)
 
-        ensure_default_item_registration_loaded()
-        try:
-            total_rows = db.session.query(func.count(ItemRegistration.id)).scalar() or 0
-            distinct_req = db.session.query(func.count(func.distinct(ItemRegistration.req_no))).filter(
-                ItemRegistration.req_no.isnot(None), func.trim(ItemRegistration.req_no) != ''
-            ).scalar() or 0
-            if total_rows > distinct_req:
-                cleanup_item_registration_duplicates_only()
-                db.session.commit()
-                clear_runtime_caches()
-        except Exception:
-            db.session.rollback()
+        # Fungsi ensure_default_item_registration_loaded() sudah dikosongkan
+        # agar tidak membaca Excel besar, dan proses cleanup duplicate
+        # dihapus dari sini agar tidak bikin loading lambat.
+        
         page = int(request.args.get('page', 1))
         per_page = int(request.args.get('per_page', 10))
         search = request.args.get('search', '').strip()
@@ -4031,6 +4023,7 @@ def get_item_registration_data():
         kpi_pic = (request.args.get('kpi_pic') or '').strip()
         proc_statuses = [s.strip() for s in request.args.getlist('proc_status') if s.strip()]
         mfr_names = [s.strip() for s in request.args.getlist('mfr_name') if s.strip()]
+        
         q = apply_item_registration_visible_status_filter(
             apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to)
         )
@@ -4058,85 +4051,66 @@ def get_item_registration_data():
                 ItemRegistration.remarks.ilike(pattern),
             ))
 
-        kpi_q = q
-
-        missing_q = apply_item_registration_kpi_status_filter(kpi_q).filter(
+        missing_q = apply_item_registration_kpi_status_filter(q).filter(
             db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-')
         )
-        missing_prod_rows = missing_q.all()
+        missing_rows_db = missing_q.with_entities(
+            ItemRegistration.pic, 
+            ItemRegistration.client_name, 
+            func.count(ItemRegistration.id)
+        ).group_by(ItemRegistration.pic, ItemRegistration.client_name).all()
+        
         missing_by_pic = {}
-        for r in missing_prod_rows:
-            pic = resolve_item_registration_pic(r)
-            if not pic or pic == 'Unassigned':
-                continue
-            missing_by_pic[pic] = missing_by_pic.get(pic, 0) + 1
-        missing_prod_id_by_pic = [
-            {'pic': pic, 'count': count}
-            for pic, count in [(row['pic'], row['count']) for row in sort_pic_kpis([{'pic': pic, 'count': count} for pic, count in missing_by_pic.items()])]
-        ]
+        for pic_val, client_val, count in missing_rows_db:
+            pic = canonical_pending_pic(clean(pic_val), client_val)
+            if pic and pic != 'Unassigned':
+                missing_by_pic[pic] = missing_by_pic.get(pic, 0) + count
+        missing_prod_id_by_pic = [{'pic': pic, 'count': count} for pic, count in sorted(missing_by_pic.items(), key=lambda item: (-item[1], item[0]))]
 
         q = apply_item_registration_pic_filter(q, pics)
-
         if kpi_pic:
             q = apply_item_registration_pic_filter(q, [kpi_pic])
             q = q.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-'))
 
         total = q.count()
         rows = q.order_by(ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()).offset((page-1)*per_page).limit(per_page).all()
-        def item_reg_option_query(exclude_field=None):
-            oq = apply_item_registration_visible_status_filter(
-                apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to)
-            )
-            if clients:
-                oq = oq.filter(ItemRegistration.client_name.in_(clients))
-            oq = apply_item_registration_pic_filter(oq, global_pics)
-            if req_numbers:
-                oq = oq.filter(ItemRegistration.req_no.in_(req_numbers))
-            if search:
-                pattern = f'%{search}%'
-                oq = oq.filter(db.or_(
-                    ItemRegistration.req_no.ilike(pattern),
-                    ItemRegistration.prod_id.ilike(pattern),
-                    ItemRegistration.prod_name.ilike(pattern),
-                    ItemRegistration.vendor_name.ilike(pattern),
-                    ItemRegistration.mfr_name.ilike(pattern),
-                    ItemRegistration.remarks.ilike(pattern),
-                ))
-            if exclude_field != 'clients' and item_clients:
-                oq = oq.filter(ItemRegistration.client_name.in_(item_clients))
-            if exclude_field != 'categories' and categories:
-                oq = oq.filter(ItemRegistration.category.in_(categories))
-            if exclude_field != 'proc_statuses' and proc_statuses:
-                oq = oq.filter(ItemRegistration.proc_status.in_(proc_statuses))
-            if exclude_field != 'mfr_names' and mfr_names:
-                oq = oq.filter(ItemRegistration.mfr_name.in_(mfr_names))
-            if exclude_field != 'pics':
-                oq = apply_item_registration_pic_filter(oq, pics)
-            if kpi_pic:
-                if exclude_field != 'pics':
-                    oq = apply_item_registration_pic_filter(oq, [kpi_pic])
-                oq = oq.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-'))
-            return oq
+        
+        option_q = apply_item_registration_visible_status_filter(
+            apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to)
+        )
+        if clients:
+            option_q = option_q.filter(ItemRegistration.client_name.in_(clients))
+        option_q = apply_item_registration_pic_filter(option_q, global_pics)
+        if req_numbers:
+            option_q = option_q.filter(ItemRegistration.req_no.in_(req_numbers))
+        if search:
+            pattern = f'%{search}%'
+            option_q = option_q.filter(db.or_(
+                ItemRegistration.req_no.ilike(pattern),
+                ItemRegistration.prod_id.ilike(pattern),
+                ItemRegistration.prod_name.ilike(pattern),
+                ItemRegistration.vendor_name.ilike(pattern),
+                ItemRegistration.mfr_name.ilike(pattern),
+                ItemRegistration.remarks.ilike(pattern),
+            ))
 
-        def distinct_item_reg_options(exclude_field, column):
-            return sorted({
-                value for (value,) in item_reg_option_query(exclude_field).with_entities(column).distinct().all()
-                if value
-            })
+        def distinct_options(query, column):
+            return sorted({clean(value) for (value,) in query.with_entities(column).distinct().all() if clean(value)})
 
-        all_clients = distinct_item_reg_options('clients', ItemRegistration.client_name)
-        all_categories = distinct_item_reg_options('categories', ItemRegistration.category)
-        all_proc_statuses = distinct_item_reg_options('proc_statuses', ItemRegistration.proc_status)
-        all_mfr_names = distinct_item_reg_options('mfr_names', ItemRegistration.mfr_name)
-        pic_option_rows = item_reg_option_query('pics').with_entities(
-            ItemRegistration.category_id,
-            ItemRegistration.category,
-            ItemRegistration.pic,
-            ItemRegistration.client_name,
-        ).all()
-        all_pics = sorted({resolve_item_registration_pic(r) for r in pic_option_rows if resolve_item_registration_pic(r) != 'Unassigned'})
+        all_clients = distinct_options(option_q, ItemRegistration.client_name)
+        all_categories = distinct_options(option_q, ItemRegistration.category)
+        all_proc_statuses = distinct_options(option_q, ItemRegistration.proc_status)
+        all_mfr_names = distinct_options(option_q, ItemRegistration.mfr_name)
+        
+        pic_option_rows = option_q.with_entities(ItemRegistration.pic, ItemRegistration.client_name).distinct().all()
+        all_pics = set()
+        for pic_val, client_val in pic_option_rows:
+            resolved = canonical_pending_pic(clean(pic_val), client_val)
+            if resolved != 'Unassigned':
+                all_pics.add(resolved)
+        all_pics = sorted(list(all_pics))
+
         last_upload = db.session.query(func.max(UploadLog.uploaded_at)).filter(UploadLog.file_type == 'ITEM_REG').scalar()
-
         response_rows = [item_registration_dict(r, include_similarity=False) for r in rows]
 
         payload = {
@@ -4157,8 +4131,6 @@ def get_item_registration_data():
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
-
-
 
 @app.route('/api/upload/item-registration-json', methods=['POST'])
 @app.route('/api/upload/item-registration', methods=['POST'])
