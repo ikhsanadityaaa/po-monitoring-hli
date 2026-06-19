@@ -2545,12 +2545,9 @@ def import_item_registration_dataframe(df, filename='Item Registration'):
     return {'processed': len(incoming), 'added': added, 'updated': updated, 'removed_duplicates': removed_duplicates, 'keys': list(incoming.keys())}
 
 def ensure_default_item_registration_loaded():
-    if db.session.query(func.count(ItemRegistration.id)).scalar(): return
-    default_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'Process+Pur.+Info.+Reg._20260526143511.xlsx')
-    if not os.path.exists(default_path): return
-    df = pd.read_excel(default_path, engine='openpyxl')
-    import_item_registration_dataframe(df, os.path.basename(default_path))
-    db.session.commit()
+    # Disabled: Membaca file Excel besar saat page load menyebabkan loading 10+ detik.
+    # Data Item Registration harus di-upload manual via tombol Upload.
+    return
 
 def df_val(row, col): return row.get(col) if col else None
 
