@@ -26,6 +26,9 @@ const DASHBOARD_AGING_CACHE_KEY = 'po-monitoring:dashboard-aging';
 const DASHBOARD_PENDING_TOTAL_CACHE_KEY = 'po-monitoring:dashboard-pending-total';
 const PIC_DB_STATUS_CACHE_KEY = 'po-monitoring:pic-db-status';
 const DASHBOARD_CACHE_KEY_ALL = '__all__';
+// Cache TTL: keeps Dashboard instant on reload, while uploads still clear it explicitly.
+// localStorage is used instead of sessionStorage so refresh / browser reopen does not
+// force PythonAnywhere to recalculate the heavy KPI + Delivery Completed summary.
 const DASHBOARD_CACHE_TTL_MS = 30 * 60 * 1000;
 
 const storageGet = (key) => {
@@ -89,9 +92,14 @@ const clearDashboardSummaryCache = () => {
   storageRemoveWhere((key) => key.startsWith(DASHBOARD_SUMMARY_CACHE_PREFIX));
 };
 
+// ─── Stats & aging persistent cache ───────────────────────────────────────
 const readStatsCache = (key) => readCachePayload(key);
 const writeStatsCache = (key, data) => writeCachePayload(key, data);
 
+// ─── PIC DB status persistent cache ───────────────────────────────────────
+// Keeps "Prod ID" / "PIC" timestamps visible in the header even if a fetch
+// fails (e.g. transient CORS / cold-start error from the backend), instead
+// of silently falling back to '-' forever for that session.
 const readPicDbStatusCache = () => readCachePayload(PIC_DB_STATUS_CACHE_KEY);
 const writePicDbStatusCache = (data) => writeCachePayload(PIC_DB_STATUS_CACHE_KEY, data);
 
@@ -161,6 +169,7 @@ const getDateFilterBounds = (filter) => {
   return { date_from: localISODate(start), date_to: localISODate(end) };
 };
 
+// ─── Excluded from PO without SO calculation ──────────────────────────
 const EXCLUDED_OP_UNITS = new Set(['ACM ENERGY SOLUTIONS (CONSUMABLE)']);
 
 const renderPctLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent }) => {
@@ -196,7 +205,11 @@ const fmtDateTime = (d) => {
     return d || '-';
   }
 };
-
+// Backend stores last_copy_at as a plain 'YYYY-MM-DD HH:MM' string already in
+// WIB (Asia/Jakarta) local time. Do NOT pass it through new Date(...) — browsers
+// would interpret a timezone-less string as the browser's own local time, which
+// silently shifts the displayed hour for any user outside WIB. Format it as text
+// directly so "Last Copy" always shows the real WIB timestamp the backend wrote.
 const fmtWibDateTime = (raw) => {
   if (!raw) return '-';
   const m = String(raw).trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
@@ -372,51 +385,6 @@ const importDisplayValue = (value) => {
   return String(value);
 };
 
-// Custom Layout for Import Table based on user's Excel
-const IMPORT_LAYOUT = [
-  { field: 'status', label: 'Status', mergeable: true },
-  { field: 'days_left', label: 'Days Left', mergeable: true },
-  { field: 'po_send_date', label: 'PO Send Date', mergeable: true },
-  { field: 'site', label: 'Site', mergeable: true },
-  { field: 'yupi_po', label: 'YUPI PO', mergeable: true },
-  { field: 'vendor', label: 'Vendor', mergeable: true },
-  { field: 'req_dlv_date', label: 'Req. Dlv. Date', mergeable: true },
-  { field: 'etd', label: 'ETD', mergeable: true },
-  { field: 'eta', label: 'ETA', mergeable: true },
-  { field: 'arrival_check', label: 'Arrival Check', mergeable: true },
-  { field: 'import_remarks', label: 'Import Remarks', mergeable: true },
-  { field: 'group', label: 'Group', mergeable: true },
-  { field: 'po_date_by_email', label: 'PO Date (By Email)', mergeable: true },
-  { field: 'so', label: 'SO' },
-  { field: 'po_sementara', label: 'PO Sementara' },
-  { field: 'item_yupi', label: 'Item Yupi' },
-  { field: 'item_name', label: 'Item Name' },
-  { field: 'spec', label: 'Spec' },
-  { field: 'remark_yupi', label: 'Remark Yupi', mergeable: true },
-  { field: 'ord_qty', label: 'Ord. Qty' },
-  { field: 'unit', label: 'Unit' },
-  { field: 'unit_price', label: 'Unit Price' },
-  { field: 'amount', label: 'Amount' },
-  { field: 'purchase_price', label: 'Purchase Price' },
-  { field: 'currency', label: 'Currency' },
-  { field: 'purchase_amount', label: 'Purchase Amount' },
-  { field: 'reschedule', label: 'Reschedule', mergeable: true },
-  { field: 'lt_days', label: 'LT (Days)', mergeable: true },
-  { field: 'incoterm', label: 'Incoterm', mergeable: true },
-  { field: 'forwarder', label: 'Forwarder', mergeable: true },
-  { field: 'bl_number', label: 'BL Number', mergeable: true },
-  { field: 'inv_no', label: 'Inv No', mergeable: true },
-  { field: 'non_ski', label: 'Non-SKI', mergeable: true },
-  { field: 'sap_input', label: 'SAP Input', mergeable: true, checkbox: true },
-  { field: 'bl_awb', label: 'BL / AWB', mergeable: true, checkbox: true },
-  { field: 'invoice', label: 'Invoice', mergeable: true, checkbox: true },
-  { field: 'pl', label: 'PL', mergeable: true, checkbox: true },
-  { field: 'hc', label: 'HC', mergeable: true, checkbox: true },
-  { field: 'msds', label: 'MSDS', mergeable: true, checkbox: true },
-  { field: 'coa', label: 'COA', mergeable: true, checkbox: true },
-  { field: 'coo', label: 'COO', mergeable: true, checkbox: true },
-  { field: 'soft_copy_doc', label: 'Soft Copy Doc', mergeable: true, hyperlink: true },
-];
 
 const DownloadToast = ({ message, onClose }) => {
   return (
@@ -439,6 +407,7 @@ const Toast = ({ message, type, onClose }) => {
   );
 };
 
+// ─── Download Button with press animation ─────────────────────────────────
 const DownloadButton = ({ onClick, className, children, disabled }) => {
   const handleClick = () => {
     onClick && onClick();
@@ -464,6 +433,7 @@ const SOModal = ({ title, data, onClose, darkMode, onUpdateCell }) => {
   const pages = Math.ceil((safeData.length || 0) / PER);
   const rows = safeData.slice((dlPage-1)*PER, dlPage*PER);
 
+  // Determine if SO Item column exists in data (show SO Number only when SO Item is absent)
   const hasSoItem = safeData.some(s => s.so_item);
   const columns = [
     { header: 'SO Item', value: s => s.so_item || '', width: 18 },
@@ -585,6 +555,21 @@ const SOModal = ({ title, data, onClose, darkMode, onUpdateCell }) => {
   );
 };
 
+// ─── Reusable floating-dropdown hook ──────────────────────────────────────
+// Returns a ref (attach to the trigger button) and a `menuPos` object to
+// pass as `style` on the floating menu. The menu uses `position: fixed` so
+// it escapes any `overflow-hidden` ancestor (e.g. the rounded card wrapper
+// around every table). The position is recomputed on scroll/resize and the
+// menu flips above the trigger when there isn't enough space below.
+//
+// Usage:
+//   const { triggerRef, menuPos } = useFloatingDropdown(open);
+//   <button ref={triggerRef} onClick={...}>Open</button>
+//   {open && (
+//     <div style={menuPos.style} className="fixed z-[180] ...">
+//       ...menu content...
+//     </div>
+//   )}
 const useFloatingDropdown = (open, minWidth = 320, maxWidth = 520, menuHeight = 300) => {
   const triggerRef = useRef(null);
   const [menuPos, setMenuPos] = useState({ top: 0, left: 0, width: minWidth, style: {} });
@@ -624,6 +609,7 @@ const useFloatingDropdown = (open, minWidth = 320, maxWidth = 520, menuHeight = 
   return { triggerRef, menuPos };
 };
 
+// ─── MultiSelect dropdown — Excel-style (all checked by default) ─────────
 const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, hideLabel = false }) => {
   const [open, setOpen] = useState(false);
   const [draftSelected, setDraftSelected] = useState([]);
@@ -872,10 +858,13 @@ const MultiSelect = ({ label, options, selected, onChange, darkMode, txt2, hideL
   );
 };
 
+// ─── Search Input for SO / PO numbers ─────────────────────────────────────
 const SearchInput = ({ placeholder, onSearch, darkMode, txt2, label }) => {
   const [open, setOpen] = useState(false);
   const [value, setValue] = useState('');
   const ref = useRef(null);
+  // Floating dropdown — escapes `overflow-hidden` parents so the search
+  // panel is never clipped by the table card border.
   const float = useFloatingDropdown(open, 256, 320, 260);
 
   useEffect(() => {
@@ -944,6 +933,7 @@ const SearchInput = ({ placeholder, onSearch, darkMode, txt2, label }) => {
   );
 };
 
+// ─── Multiline search dropdown ────────────────────────────────────────────
 const RFQMultiSearch = ({
   value,
   onChange,
@@ -956,6 +946,7 @@ const RFQMultiSearch = ({
 }) => {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
+  // Floating dropdown — escapes `overflow-hidden` parents.
   const float = useFloatingDropdown(open, 360, 440, 320);
 
   useEffect(() => {
@@ -1327,6 +1318,7 @@ const DataTableScroll = ({ children, className = '', darkMode }) => {
   );
 };
 
+// ─── SO Status Pie ─────────────────────────────────────────────────────────
 const StatusPie = ({ data, darkMode }) => {
   const [etcHover, setEtcHover] = useState(false);
   const [etcPos, setEtcPos] = useState({x:0, y:0});
@@ -1382,13 +1374,18 @@ const StatusPie = ({ data, darkMode }) => {
 };
 
 
+// ─── Date Range Filter ────────────────────────────────────────────────────
 const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = 'Filter SO Create Date', compact = false }) => {
-  const [mode, setMode] = useState(value?.mode || 'all');
+  const [mode, setMode] = useState(value?.mode || 'all'); // all | today | week | month | year | range
   const [startDate, setStartDate] = useState(value?.start || '');
   const [endDate, setEndDate] = useState(value?.end || '');
   const [rangeOpen, setRangeOpen] = useState(false);
+  // Floating dropdown for the Custom Date Range picker — escapes
+  // `overflow-hidden` parents so the date inputs are never clipped.
   const rangeFloat = useFloatingDropdown(mode === 'range' && rangeOpen, 360, 440, 120);
 
+  // Keep internal state in sync when the controlled `value` changes externally
+  // (e.g. user changes filter on another page that shares the same global state).
   useEffect(() => {
     if (!value) return;
     setMode(value.mode || 'all');
@@ -1413,6 +1410,10 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
         ? { mode: 'range', start: value.start || '', end: value.end || '' }
         : { mode: value.mode };
 
+    // Only notify the parent when the user actually changed the filter.
+    // Without this guard, mounting the filter emits a new `{ mode: 'all' }`
+    // object, which re-fetches Delivery Completed, hides the page behind the
+    // loading state, remounts the filter, and creates a fast blank/loading loop.
     if (JSON.stringify(next) !== JSON.stringify(current)) {
       onFilter(next);
     }
@@ -1448,6 +1449,7 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
         <Calendar className="w-4 h-4 text-blue-500 flex-shrink-0"/>
         <span className={`text-sm font-semibold ${txt} flex-shrink-0`}>{label}:</span>
       </div>
+      {/* Mode selector */}
       <div className="relative flex w-full flex-wrap items-start gap-1.5">
         {[
           ['all','All'], ['today','Today'], ['week','This Week'],
@@ -1504,6 +1506,9 @@ const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = '
   );
 };
 
+// ═══════════════════════════════════════════════════════════════════
+// MAIN APP
+// ═══════════════════════════════════════════════════════════════════
 const App = () => {
   const location = useLocation();
   const navigate = useNavigate();
@@ -1534,24 +1539,27 @@ const App = () => {
   const [agingData, setAgingData] = useState(() => readStatsCache(dashboardAgingCacheKey()) || []);
   const [allSOData, setAllSOData] = useState([]);
   const [approvalSOData, setApprovalSOData] = useState([]);
-  const [picAggregations, setPicAggregations] = useState([]);
+  const [picAggregations, setPicAggregations] = useState([]); // PIC aggregations from backend (all filtered data)
   const [soTotal, setSoTotal] = useState(0);
   const [soSubtotalAmount, setSoSubtotalAmount] = useState(0);
   const [soFilterOptions, setSoFilterOptions] = useState({ op_units: [], vendors: [], manufacturers: [], statuses: [], pics: [] });
 
+  // SO filters
   const [soFilters, setSoFilters] = useState({ op_units: [], vendors: [], manufacturers: [], statuses: [], aging: [], pics: [] });
-  const [soSearchNums, setSoSearchNums] = useState([]);
-  const [soMarginFilter, setSoMarginFilter] = useState('all');
-  const [soSortOrder, setSoSortOrder] = useState('oldest');
+  const [soSearchNums, setSoSearchNums] = useState([]); // search SO Item
+  const [soMarginFilter, setSoMarginFilter] = useState('all'); // 'all' | 'positive' | 'negative'
+  const [soSortOrder, setSoSortOrder] = useState('oldest'); // 'oldest' | 'newest'
   const [soPage, setSoPage] = useState(1);
   const [soPerPage, setSoPerPage] = useState(10);
   const [pendingPicHighlight, setPendingPicHighlight] = useState('');
 
+  // SO Approval Status filters (same as Open SO except Vendor Name)
   const [approvalFilters, setApprovalFilters] = useState({ op_units: [], statuses: [], aging: [] });
   const [approvalSearchNums, setApprovalSearchNums] = useState([]);
   const [approvalPage, setApprovalPage] = useState(1);
   const [approvalPerPage, setApprovalPerPage] = useState(10);
 
+  // Item Registration
   const [itemRegData, setItemRegData] = useState([]);
   const [itemRegTotal, setItemRegTotal] = useState(0);
   const [itemRegPage, setItemRegPage] = useState(1);
@@ -1564,6 +1572,7 @@ const App = () => {
   const [itemRegMissingPicKpis, setItemRegMissingPicKpis] = useState([]);
   const [itemRegPicHighlight, setItemRegPicHighlight] = useState('');
 
+  // RFQ
   const [rfqData, setRfqData] = useState([]);
   const [rfqTotal, setRfqTotal] = useState(0);
   const [rfqPage, setRfqPage] = useState(1);
@@ -1580,11 +1589,13 @@ const App = () => {
   const [rfqOptions, setRfqOptions] = useState({ checks: [], clients: [], rfq_numbers: [], brands: [], purchase_pics: [], vendors: [] });
   const [rfqSelectedCell, setRfqSelectedCell] = useState(null);
   const [rfqFillRange, setRfqFillRange] = useState(null);
+  // Multi-select state for Shift+click in the RFQ table (same pattern as Import).
   const [rfqSelectedCells, setRfqSelectedCells] = useState(null);
   const [rfqSelectionAnchor, setRfqSelectionAnchor] = useState(null);
   const [rfqSimilarAction, setRfqSimilarAction] = useState(null);
   const [rfqLastUpdated, setRfqLastUpdated] = useState(null);
 
+  // Import
   const [importData, setImportData] = useState([]);
   const [importColumns, setImportColumns] = useState([]);
   const [importTotal, setImportTotal] = useState(0);
@@ -1599,9 +1610,17 @@ const App = () => {
   const [showImportChecklist, setShowImportChecklist] = useState(false);
   const [importSelectedCell, setImportSelectedCell] = useState(null);
   const [importFillRange, setImportFillRange] = useState(null);
-  const [importSelectedCells, setImportSelectedCells] = useState(null);
-  const [importSelectionAnchor, setImportSelectionAnchor] = useState(null);
+  // Multi-select state for Shift+click (Excel-like). Stores a Set of
+  // "{rowKey}|{field}" strings so we can select arbitrary rectangles of
+  // cells. Anchor stores the first cell clicked so Shift+click extends from
+  // there. Same-column multi-select (clicking multiple rows in one column)
+  // is supported by checking if the Shift-clicked cell shares the field.
+  const [importSelectedCells, setImportSelectedCells] = useState(null); // Set or null
+  const [importSelectionAnchor, setImportSelectionAnchor] = useState(null); // {rowIndex, field}
   const [importVendorMenuOpen, setImportVendorMenuOpen] = useState(false);
+  // Floating dropdown for the Vendor Import menu. Uses `position: fixed` so
+  // the menu escapes the table card's `overflow-hidden` and is never clipped
+  // or covered by the table/filter below.
   const importVendorDropdown = useFloatingDropdown(importVendorMenuOpen, 224, 280, 200);
   const [importFilters, setImportFilters] = useState({ yupi_po: [], vendors: [] });
   const [importOptions, setImportOptions] = useState({ yupi_po: [], vendors: [] });
@@ -1610,6 +1629,7 @@ const App = () => {
   const [rfqEditedRowKeys, setRfqEditedRowKeys] = useState(new Set());
   const rfqDashboardOnlyFields = new Set(['private_remarks_1', 'private_remarks_2']);
 
+  // All Registered Items
   const [registeredItemsData, setRegisteredItemsData] = useState([]);
   const [registeredItemsTotal, setRegisteredItemsTotal] = useState(0);
   const [registeredItemsPage, setRegisteredItemsPage] = useState(1);
@@ -1621,6 +1641,7 @@ const App = () => {
   const [registeredItemsFilters, setRegisteredItemsFilters] = useState({ mfr_names: [], vendor_names: [] });
   const [registeredItemsOptions, setRegisteredItemsOptions] = useState({ mfr_names: [], vendor_names: [] });
 
+  // Vendor Control
   const [vendorControlData, setVendorControlData] = useState([]);
   const [vendorControlTotal, setVendorControlTotal] = useState(0);
   const [vendorControlPage, setVendorControlPage] = useState(1);
@@ -1631,6 +1652,8 @@ const App = () => {
   const [vendorControlAppliedVendors, setVendorControlAppliedVendors] = useState([]);
   const [vendorControlSuggestions, setVendorControlSuggestions] = useState([]);
   const [vendorControlSuggestOpen, setVendorControlSuggestOpen] = useState(false);
+  // Floating dropdown for the vendor search suggestion list — escapes
+  // `overflow-hidden` parents so suggestions are never clipped.
   const vendorControlSuggestFloat = useFloatingDropdown(vendorControlSuggestOpen && vendorControlSuggestions.length > 0, 360, 520, 280);
   const [vendorControlLastUpdated, setVendorControlLastUpdated] = useState(null);
   const [vendorPasswordVisible, setVendorPasswordVisible] = useState({});
@@ -1650,10 +1673,11 @@ const App = () => {
   const [vendorPurchaseType, setVendorPurchaseType] = useState('all');
   const [completedLoading, setCompletedLoading] = useState(false);
   const [completedLoaded, setCompletedLoaded] = useState(false);
-  const [marginDetailModal, setMarginDetailModal] = useState(null);
-  const [picDbStatus, setPicDbStatus] = useState(() => readPicDbStatusCache());
-  const [picUploadMsg, setPicUploadMsg] = useState('');
+  const [marginDetailModal, setMarginDetailModal] = useState(null); // {category, data}
+  const [picDbStatus, setPicDbStatus] = useState(() => readPicDbStatusCache()); // {product_id_count, master_pic_count, last_product_id_upload, last_pic_update}
+  const [picUploadMsg, setPicUploadMsg] = useState(''); // feedback message for PIC uploads
 
+  // Dynamic color palette for PIC badges — each unique name gets a consistent color
   const PIC_COLORS = [
     { bg: 'bg-indigo-100',  text: 'text-indigo-700'  },
     { bg: 'bg-emerald-100', text: 'text-emerald-700' },
@@ -1741,6 +1765,7 @@ const App = () => {
       }
     `)
     .join('\n'), [frozenColumns]);
+  // ── Global SO Create Date filter (shared across Dashboard / All SO / Delivery Completed)
   const [globalDateFilter, setGlobalDateFilter] = useState({ mode: 'all' });
   const [globalClientFilter, setGlobalClientFilter] = useState([]);
   const [globalPicFilter, setGlobalPicFilter] = useState([]);
@@ -1748,12 +1773,15 @@ const App = () => {
     const cachedStats = readStatsCache(dashboardStatsCacheKey());
     return cachedStats?.filters || { clients: [], pics: [] };
   });
+  // Aliases kept so existing references continue to compile.
   const dashDateFilter      = globalDateFilter;
   const setDashDateFilter   = setGlobalDateFilter;
   const soDateFilter        = globalDateFilter;
   const setSODateFilter     = setGlobalDateFilter;
   const completedDateFilter = globalDateFilter;
   const setCompletedDateFilter = setGlobalDateFilter;
+
+  // Click-outside handlers
 
   useEffect(() => {
     const handler = (e) => { if (uploadDropdownRef.current && !uploadDropdownRef.current.contains(e.target)) setShowUploadDropdown(false); };
@@ -1787,6 +1815,7 @@ const App = () => {
 
     const completedParams = new URLSearchParams();
     params.forEach((value, key) => completedParams.append(key, value));
+    // Dashboard uses a lightweight SQL-aggregated payload. Drilldown details stay lazy.
     completedParams.set('mode', 'dashboard');
 
     const summaryUrl = (summaryParams) => {
@@ -1823,6 +1852,7 @@ const App = () => {
     setCompletedData(hasSummaryCache ? cachedCompleted : null);
     setDashboardMarginData(hasSummaryCache ? cachedCompleted : null);
 
+    // If the light Dashboard and completed chart are already cached, do not touch PythonAnywhere.
     if (hasStatsCache && hasAgingCache && hasSummaryCache) {
       setLoading(false);
       setInitialPageLoading(false);
@@ -1830,11 +1860,17 @@ const App = () => {
       return;
     }
 
+    // Ping is intentionally DB-free in the backend now, so it only wakes the worker.
     api.get('/api/ping').catch(() => {});
 
     if (!hasStatsCache) {
       setLoading(true);
       setInitialPageLoading(true);
+      // Retry with short backoff before giving up. /api/dashboard/stats is the
+      // heaviest endpoint on the dashboard (several SQL aggregate queries), so
+      // it's the most likely one to time out on a cold/slow PythonAnywhere
+      // worker — which is why "SO"/"Reg" in the header can go blank while the
+      // lighter /api/master-pic/status (Prod ID) still succeeds.
       let sRes = null;
       let lastErr = null;
       for (let attempt = 0; attempt <= 2; attempt++) {
@@ -1857,6 +1893,9 @@ const App = () => {
         writeStatsCache(statsCacheKey, nextStats);
         writeStatsCache(pendingCacheKey, nextPending);
       } else {
+        // All retries failed: keep whatever stats we already have (e.g. from
+        // an older cache entry that just expired) instead of blanking the
+        // "Updates" timestamps in the header to '-'.
         addToast(`Error: ${lastErr?.response?.data?.error || lastErr?.message}`, 'error');
         setCompletedLoading(false);
         setLoading(false);
@@ -1890,6 +1929,8 @@ const App = () => {
       return;
     }
 
+    // Delay the heavier completed chart until the Dashboard has painted.
+    // requestIdleCallback keeps page switches/table loads from being blocked by summary processing.
     await new Promise((resolve) => {
       if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
         const timeout = window.setTimeout(resolve, 1800);
@@ -1923,6 +1964,7 @@ const App = () => {
     }
   }, [addToast, activePage, globalDateFilter, globalClientFilter, globalPicFilter]);
 
+  // Helper: filter array of objects by date field using a DateRangeFilter config
   const applyDateFilter = useCallback((arr, dateField, filter) => {
     if (!filter || filter.mode === 'all') return arr;
     const bounds = getDateFilterBounds(filter);
@@ -1936,6 +1978,7 @@ const App = () => {
     });
   }, []);
 
+  // Helper: build date query params for backend
   const dateFilterParams = (filter) => {
     if (!filter || filter.mode === 'all') return {};
     if (filter.mode === 'range') return { date_from: filter.start || '', date_to: filter.end || '' };
@@ -1965,9 +2008,10 @@ const App = () => {
     }
   };
 
+  // Helper: resolve filter array
   const resolveFilter = (val) => {
-    if (val === '__NONE__') return ['__NONE_PLACEHOLDER__'];
-    if (!Array.isArray(val) || val.length === 0) return [];
+    if (val === '__NONE__') return ['__NONE_PLACEHOLDER__']; // backend will return 0 rows
+    if (!Array.isArray(val) || val.length === 0) return []; // empty = no filter = all
     return val;
   };
   const filterValues = (val) => Array.isArray(val) ? val : [];
@@ -2107,7 +2151,7 @@ const App = () => {
       if (reqDlvSort) params.append('req_dlv_sort', reqDlvSort);
       if (yupiPoSort) params.append('yupi_po_sort', yupiPoSort);
       resolveFilter(filters?.yupi_po).forEach(v => params.append('yupi_po', v));
-      resolveFilter(filters?.vendors).forEach(v => params.append('vendor', v));
+      resolveFilter(filters?.vendors).forEach(v => params.append('vendor_name', v));
       const res = await api.get(`/api/import/data?${params}`);
       setImportData(Array.isArray(res.data.data) ? res.data.data : []);
       setImportColumns(Array.isArray(res.data.columns) ? res.data.columns : []);
@@ -2221,6 +2265,8 @@ const App = () => {
       fetchDashboard(globalDateFilter);
       return;
     }
+    // Invalidate any Dashboard request that is still waiting for summary so it
+    // cannot keep the global loading overlay alive after the user changes page.
     dashboardRequestSeq.current += 1;
     setCompletedLoading(false);
     setLoading(false);
@@ -2314,6 +2360,9 @@ const App = () => {
         onUploadProgress: (ev) => setUploadProgress({ label, pct: Math.round(ev.loaded*100/(ev.total||ev.loaded)) })
       });
       setUploadProgress(null);
+      // Combine success message and SO Specification/Product ID diagnostics
+      // into a single toast so the success and diagnostic don't get the same
+      // Date.now() ID and trample each other.
       const diag = res.data.diagnostics;
       let toastMsg = `✅ ${res.data.message}`;
       let toastKind = 'success';
@@ -2342,6 +2391,10 @@ const App = () => {
       setPicDbStatus(res.data);
       writePicDbStatusCache(res.data);
     } catch (err) {
+      // Transient failures (cold-start, CORS hiccup on the free-tier backend
+      // waking up, etc.) shouldn't blank out the header. Retry once after a
+      // short delay; if it still fails, just keep whatever we last had
+      // (from cache or a previous successful fetch) instead of resetting it.
       if (retryCount < 2) {
         setTimeout(() => fetchPicDbStatus(retryCount + 1), 1500 * (retryCount + 1));
       }
@@ -3241,6 +3294,8 @@ const App = () => {
     const marginD = dashboardMarginData || {};
     const summaryLoading = completedLoading || !completedLoaded;
     
+    // Create month buckets from the global SO Create Date filter. KPI remains
+    // all-data when filter is All; monthly chart/table defaults to current year.
     const currentYear = new Date().getFullYear();
     const monthlyDataMap = {};
     (marginD.monthly_trend || []).forEach(m => {
@@ -3542,10 +3597,9 @@ const App = () => {
     };
 
     return (
-<div className={
-{card} overflow-hidden`}>\n <div className={`px-5 py-4 border-b
-{darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3}>
-            <div>
+      <div className={`${card} overflow-hidden`}>
+        <div className={`px-5 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
+          <div>
             <h2 className={`text-lg font-bold ${txt}`}>Vendor Control</h2>
             <p className={`text-xs ${txt2}`}>Complete vendor login list from Google Sheet. Last update: {fmtDateTime(vendorControlLastUpdated)}</p>
           </div>
@@ -3808,6 +3862,8 @@ const App = () => {
     );
   };
 
+  // Utility: convert any date string to YYYY-MM-DD for <input type="date">.
+  // Defined at component scope so both renderRFQ and renderImport can use it.
   const toDateInputValue = (value) => {
     const raw = String(value || '').trim();
     if (!raw) return '';
@@ -3884,6 +3940,8 @@ const App = () => {
       { field: 'similar_score', label: '%Similarity' },
     ];
     const columns = rfqShowSimilarity ? [...baseColumns, ...similarityColumns] : baseColumns;
+    // Shift+click multi-select helpers for the RFQ table (same pattern as
+    // Import — see computeImportSelection for the canonical implementation).
     const rfqEditableFieldsList = columns.map(col => col.field);
     const rfqCellKey = (rowIndex, field) => `${rowIndex}|${field}`;
     const computeRfqSelection = (anchor, target) => {
@@ -4237,6 +4295,10 @@ const App = () => {
                     if (isEditable && isEditing) {
                       const tall = ['quoted_spec', 'remarks', 'photo_url'].includes(field);
                       const Control = tall ? 'textarea' : 'input';
+                      // Same pattern as Import: td shows the blue outer outline,
+                      // input/textarea/select inside has NO outline (data-no-focus-ring
+                      // + inline style + global CSS rule). This avoids the
+                      // double-blue-border bug.
                       const rfqInputCls = `block w-full min-h-8 px-2 py-1 text-xs border-0 rounded-none ring-0 outline-none focus:outline-none focus:ring-0 focus-visible:outline-none shadow-none ${darkMode?'bg-gray-700 text-white':'bg-white text-gray-900'}`;
                       const rfqInputStyle = { outline: 'none', outlineStyle: 'none', boxShadow: 'none', borderColor: 'transparent', borderWidth: 0 };
                       const rfqTdCls = `relative p-0 align-top border-r outline outline-2 outline-blue-500 outline-offset-[-2px] ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`;
@@ -4318,6 +4380,7 @@ const App = () => {
                         onFocus={() => setRfqSelectedCell({ rowKey: row.row_key, field })}
                         onClick={(e) => {
                           setRfqSelectedCell({ rowKey: row.row_key, field });
+                          // Shift+click multi-select (Excel-like).
                           const clickedColIdx = rfqEditableFieldsList.indexOf(field);
                           if (e.shiftKey && rfqSelectionAnchor && clickedColIdx >= 0) {
                             const newSelection = computeRfqSelection(rfqSelectionAnchor, { rowIndex, colIdx: clickedColIdx });
@@ -4426,28 +4489,57 @@ const App = () => {
     const columns = importColumns || [];
     const checklistFields = new Set(columns.filter(col => isImportChecklistColumn(col)).map(col => col.field));
     const checklistCount = checklistFields.size;
-    // Use the custom IMPORT_LAYOUT defined at the top of the file
-    const visibleColumns = IMPORT_LAYOUT.filter(col => showImportChecklist || !checklistFields.has(col.field));
-    
+    const visibleColumns = showImportChecklist ? columns : columns.filter(col => !checklistFields.has(col.field));
+    // A "group" column repeats the same value for every item that belongs to
+    // the same PO (Status, Vendor, dates, checklist docs, ...). Per-item
+    // columns (SO, PO Sementara, Item Name, Spec, Qty, prices, ...) carry
+    // `group_per_item: true` from the backend and are never merged.
+    const isImportGroupColumn = (col) => !col.group_per_item;
+    // Consecutive rows are merged into one visual group when every group
+    // column has the same value AND there's at least one non-blank group
+    // value tying them together (purely-blank rows never merge, so newly
+    // added/blank rows don't accidentally swallow into the row above).
+    // Recomputed from `importData` on every render, so adding or removing
+    // rows automatically reshapes the groups — no stored "group id" needed.
+    const importRowSpans = (() => {
+      const groupCols = columns.filter(isImportGroupColumn).map(c => c.field);
+      const spans = new Array(importData.length).fill(null);
+      let groupStart = 0;
+      const sameGroup = (a, b) => groupCols.every(f => String(a?.[f] ?? '').trim() === String(b?.[f] ?? '').trim());
+      const hasAnyGroupValue = (row) => groupCols.some(f => String(row?.[f] ?? '').trim() !== '');
+      for (let i = 1; i <= importData.length; i++) {
+        const continues = i < importData.length && hasAnyGroupValue(importData[i]) && sameGroup(importData[i], importData[groupStart]);
+        if (!continues) {
+          spans[groupStart] = i - groupStart;
+          groupStart = i;
+        }
+      }
+      return spans;
+    })();
+    // For every row, which row index "owns" the merged group cell (i.e. the
+    // row whose <td> actually renders, with rowSpan covering the rest).
+    const importGroupStartIndexFor = (() => {
+      const owners = new Array(importData.length).fill(0);
+      let currentStart = 0;
+      for (let i = 0; i < importData.length; i++) {
+        if (importRowSpans[i] != null) currentStart = i;
+        owners[i] = currentStart;
+      }
+      return owners;
+    })();
     const colWidth = (col) => {
       if (col.field === 'days_left') return 64;
-      if (col.field === 'so' || col.field === 'po_sementara' || col.field === 'item_yupi') return 120;
-      if (col.field === 'po_send_date' || col.field === 'req_dlv_date' || col.field === 'po_date_by_email' || col.field === 'etd' || col.field === 'eta' || col.field === 'reschedule') return 110;
-      if (col.field === 'status') return 110;
-      if (col.field === 'site') return 60;
-      if (col.field === 'yupi_po') return 100;
-      if (col.field === 'vendor' || col.field === 'forwarder') return 140;
-      if (col.field === 'arrival_check') return 120;
-      if (col.field === 'import_remarks' || col.field === 'spec' || col.field === 'remark_yupi') return 240;
-      if (col.field === 'group' || col.field === 'incoterm') return 80;
-      if (col.field === 'bl_number' || col.field === 'inv_no') return 120;
-      if (col.field === 'lt_days' || col.field === 'non_ski') return 70;
-      if (col.field === 'soft_copy_doc') return 140;
-      if (isImportChecklistColumn(col)) return 70;
-      if (col.field === 'item_name') return 200;
-      return 100;
+      if (Number(col.width)) return Math.max(64, Math.min(Number(col.width), 360));
+      const label = String(col.label || '').toLowerCase();
+      if (isImportChecklistColumn(col)) return 82;
+      if (label.includes('spec') || label.includes('remark')) return 320;
+      if (label.includes('item name')) return 260;
+      if (label.includes('vendor')) return 190;
+      if (label.includes('status')) return 132;
+      if (label.includes('date') || label.includes('actual') || ['etd', 'eta'].includes(col.field)) return 120;
+      if (isImportHyperlinkColumn(col)) return 190;
+      return 126;
     };
-    
     const tableWidth = Math.max(1100, visibleColumns.reduce((sum, col) => sum + colWidth(col), 0));
     const handleVendorUpload = async (e) => {
       const files = Array.from(e.target.files || []);
@@ -4467,6 +4559,10 @@ const App = () => {
     const startImportEdit = (row, col) => {
       const key = `${row._row_key}:${col.field}`;
       setImportEditingCell(key);
+      // For date fields, normalize the value to YYYY-MM-DD up front so the
+      // <input type="date"> picker can parse it and show the calendar with
+      // the correct day pre-selected. Without this, a value like "2 Jun"
+      // would make the picker open blank (the input can't parse it).
       const isDateField = ['po_send_date', 'po_date_by_email', 'req_dlv_date', 'source_req_dlv_date', 'reschedule', 'etd', 'eta'].includes(col.field) || String(col.label || '').toLowerCase().includes('date');
       const rawValue = String(row[col.field] ?? '');
       setImportEditValue(isDateField ? toDateInputValue(rawValue) : rawValue);
@@ -4521,8 +4617,22 @@ const App = () => {
       if (editing) {
         const isLong = ['spec', 'remark_yupi', 'import_remarks', 'soft_copy_doc'].includes(col.field);
         const isDateField = ['po_send_date', 'po_date_by_email', 'req_dlv_date', 'source_req_dlv_date', 'reschedule', 'etd', 'eta'].includes(col.field) || String(col.label || '').toLowerCase().includes('date');
+        // Input fills the td edge-to-edge with NO inner ring/outline — the td
+        // itself already shows the blue outer outline when editingCellNow is
+        // true (see the td className above). A second inner ring here would
+        // produce the double blue border the user reported.
+        //
+        // CRITICAL: we also pass inline `style={{ outline: 'none', boxShadow: 'none' }}`
+        // because Tailwind's `focus:outline-none` / `focus:ring-0` classes are
+        // NOT enough to suppress the browser's default focus ring on autoFocus
+        // inputs in Chrome/Safari/Edge. The inline style wins over the
+        // user-agent stylesheet, which is what actually kills the second blue
+        // border. The `data-no-focus-ring` attribute is also added so a CSS
+        // rule in <style> can target it as a backstop (see the global CSS
+        // block at the top of this file for `input[data-no-focus-ring]:focus`).
         const inputCls = `block w-full min-h-8 px-2 py-1 text-xs border-0 rounded-none ring-0 outline-none focus:outline-none focus:ring-0 focus-visible:outline-none shadow-none ${darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`;
         const inputStyle = { outline: 'none', outlineStyle: 'none', boxShadow: 'none', borderColor: 'transparent', borderWidth: 0 };
+        // Date input: clean style without box-shadow/appearance suppression — these break the native calendar picker.
         const dateInputCls = `block w-full min-h-8 px-2 py-1 text-xs rounded-none outline-none focus:outline-none ${darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`;
         const dateInputStyle = { outline: 'none', outlineStyle: 'none', borderColor: 'transparent', borderWidth: 0 };
         if (isDateField) {
@@ -4610,6 +4720,9 @@ const App = () => {
         const directUrl = row[`${col.field}__url`] || row[`${col.field}_url`] || '';
         const driveUrl = extractGDriveUrl(directUrl || value);
         const label = String(value || '').replace(driveUrl, '').replace(/[|\n]+$/g, '').trim() || (driveUrl ? gDriveChipLabel(driveUrl) : '-');
+        // Single link element only — no separate gray edit button. The cell
+        // itself is clickable (td onClick → startImportEdit) so the user can
+        // still edit by clicking the cell area outside the link chip.
         return (
           <div className="flex items-center gap-1 w-full">
             {driveUrl ? (
@@ -4663,6 +4776,13 @@ const App = () => {
 
     const importEditableFields = visibleColumns.map(col => col.field);
 
+    // ── Shift+click multi-select (Excel-like) ─────────────────────────────
+    // Click a cell → set anchor + select just that cell.
+    // Shift+click another cell → select the rectangle from anchor to clicked
+    //   cell. Works across rows AND columns: e.g. anchor at (row 2, col C),
+    //   Shift+click (row 5, col E) selects rows 2–5 × columns C–E.
+    // Shift+click in the same column → selects a vertical range (rows only).
+    // Click without Shift → reset to single-cell selection.
     const importCellKey = (rowIndex, field) => `${rowIndex}|${field}`;
     const computeImportSelection = (anchor, target) => {
       const startRow = Math.min(anchor.rowIndex, target.rowIndex);
@@ -4698,8 +4818,10 @@ const App = () => {
         addToast(`Import paste: ${batchUpdates.length} cells updated`, 'success');
       }
     };
-    
     const fillImportRange = async (startRowIndex, startField, endRowIndex, endField) => {
+      // Determine drag direction: vertical (same column, different row) or
+      // horizontal (same row, different column). If the user dragged both,
+      // pick the dominant axis so the fill is predictable.
       const startColIndex = importEditableFields.indexOf(startField);
       const endColIndex = importEditableFields.indexOf(endField);
       if (startColIndex < 0 || endColIndex < 0) return;
@@ -4709,6 +4831,8 @@ const App = () => {
       if (!source) return;
       const batchUpdates = [];
       if (rowDelta >= colDelta) {
+        // Vertical fill (same as before): copy startField's value down/up
+        // across all rows from minRow to maxRow.
         const value = source[startField] ?? '';
         const minRow = Math.max(0, Math.min(startRowIndex, endRowIndex));
         const maxRow = Math.min(importData.length - 1, Math.max(startRowIndex, endRowIndex));
@@ -4717,6 +4841,10 @@ const App = () => {
           batchUpdates.push({ row_key: importData[i]._row_key, field: startField, value });
         }
       } else {
+        // Horizontal fill: copy startField's value left/right across all
+        // columns from minCol to maxCol on the SAME row. This includes
+        // checklist columns — the user can drag a check across SAP INPUT,
+        // BL/AWB, INVOICE, PL, HC, MSDS, COA, COO in one motion.
         const value = source[startField] ?? '';
         const minCol = Math.min(startColIndex, endColIndex);
         const maxCol = Math.max(startColIndex, endColIndex);
@@ -4731,7 +4859,6 @@ const App = () => {
         addToast(`Import drag-fill: ${batchUpdates.length} cells updated`, 'success');
       }
     };
-    
     const startImportFill = (event, rowIndex, field) => {
       event.preventDefault();
       event.stopPropagation();
@@ -4742,15 +4869,20 @@ const App = () => {
         const endRowIndex = Number(target.getAttribute('data-row-index'));
         const endField = target.getAttribute('data-field');
         if (!Number.isFinite(endRowIndex) || !endField) return;
+        // Determine direction based on which axis moved more — this gives
+        // the user intuitive "drag down to fill down, drag right to fill
+        // right" behavior without needing a separate handle.
         const startColIndex = importEditableFields.indexOf(field);
         const endColIndex = importEditableFields.indexOf(endField);
         const rowDelta = Math.abs(endRowIndex - rowIndex);
         const colDelta = Math.abs(endColIndex - startColIndex);
         if (rowDelta >= colDelta) {
+          // Vertical: highlight same column, rows between start and end
           if (endField === field) {
             setImportFillRange({ startField: field, startRow: rowIndex, minRow: Math.min(rowIndex, endRowIndex), maxRow: Math.max(rowIndex, endRowIndex), direction: 'vertical' });
           }
         } else {
+          // Horizontal: highlight same row, columns between start and end
           if (endRowIndex === rowIndex) {
             setImportFillRange({ startField: field, startRow: rowIndex, minCol: Math.min(startColIndex, endColIndex), maxCol: Math.max(startColIndex, endColIndex), direction: 'horizontal' });
           }
@@ -4779,48 +4911,6 @@ const App = () => {
       document.addEventListener('mouseup', onUp);
     };
 
-    // Grouping logic for mergeable columns
-    const importRowGroups = useMemo(() => {
-      if (!importData || importData.length === 0) return [];
-      const groups = [];
-      let currentGroup = null;
-      for (let i = 0; i < importData.length; i++) {
-        const row = importData[i];
-        const groupKey = row.yupi_po || row.po_sementara || row._row_key;
-        if (!currentGroup || currentGroup.key !== groupKey) {
-          currentGroup = {
-            key: groupKey,
-            startRow: i,
-            rowCount: 1,
-            data: row,
-          };
-          groups.push(currentGroup);
-        } else {
-          currentGroup.rowCount++;
-        }
-      }
-      return groups;
-    }, [importData]);
-
-    const getRowSpan = (rowIndex, field) => {
-      const group = importRowGroups.find(g => g.startRow === rowIndex);
-      if (!group || !group.data) return 1;
-      const colDef = IMPORT_LAYOUT.find(c => c.field === field);
-      if (!colDef || !colDef.mergeable) return 1;
-      
-      // Check if the value is the same as the first row of the group
-      // If it's empty or different, don't merge
-      const firstRowValue = group.data[field];
-      const currentValue = importData[rowIndex][field];
-      if (firstRowValue !== currentValue) return 1;
-      
-      return group.rowCount;
-    };
-
-    const isRowStartOfGroup = (rowIndex) => {
-      return importRowGroups.some(g => g.startRow === rowIndex);
-    };
-
     return (
       <div className={`rounded-2xl overflow-hidden ${card}`}>
         <div className={`px-5 py-4 border-b ${darkMode ? 'border-gray-700' : 'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
@@ -4831,6 +4921,9 @@ const App = () => {
             <span className={`text-xs ${txt2}`} title={`Vendor Import: ${fmtNum(importVendorCount)}`}>Last Copy: {fmtWibDateTime(importLastCopyAt)}</span>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
+            {/* Vendor Import — single dropdown combining Template + Upload.
+                Keeps the header tidy and matches the "1 menu per logical
+                action" pattern used in other tables (RFQ, Item Registration). */}
             <div className="relative">
               <button
                 ref={importVendorDropdown.triggerRef}
@@ -4861,17 +4954,20 @@ const App = () => {
                 </div>
               )}
             </div>
+            {/* Copy Sheet — triggers a fresh sync from the live Import tracker sheet. */}
             <button onClick={() => fetchImportData(importPage, importPerPage, importAppliedSearch, true, importFilters, importReqDlvSort, importYupiPoSort)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><RotateCcw className="w-4 h-4"/>Copy Sheet</button>
+            {/* Hide/Show Checklist — toggle visibility of the 8 checklist columns (SAP INPUT, BL/AWB, …, COO). */}
             {checklistCount > 0 && (
               <button onClick={() => setShowImportChecklist(v => !v)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
                 {showImportChecklist ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}
                 {showImportChecklist ? 'Hide Checklist' : 'Show Checklist'}
               </button>
             )}
-            {/* Tombol Print PO */}
-            <a href="https://serveone.streamlit.app/" target="_blank" rel="noopener noreferrer" className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-emerald-700 text-white hover:bg-emerald-600' : 'bg-emerald-600 text-white hover:bg-emerald-700'}`}>
+            {/* Print PO — opens the Serveone PO printing tool in a new tab. */}
+            <a href="https://serveone.streamlit.app/" target="_blank" rel="noopener noreferrer" className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
               <Printer className="w-4 h-4"/>Print PO
             </a>
+            {/* Download Excel — exports the current filtered+sorted view. */}
             <DownloadButton onClick={downloadImportExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
               <Download className="w-4 h-4"/>Download Excel
             </DownloadButton>
@@ -4910,7 +5006,6 @@ const App = () => {
               <MultiSelect label="YUPI PO" options={importOptions.yupi_po || []} selected={importFilters.yupi_po}
                 onChange={v=>{ const next={...importFilters, yupi_po:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            {/* Filter Vendor Name diganti menjadi Vendor, memfilter kolom 'vendor' */}
             <div className="min-w-0">
               <MultiSelect label="Vendor" options={importOptions.vendors || []} selected={importFilters.vendors}
                 onChange={v=>{ const next={...importFilters, vendors:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }} darkMode={darkMode} txt2={txt2}/>
@@ -4925,7 +5020,7 @@ const App = () => {
             <colgroup>{visibleColumns.map(col => <col key={col.field} style={{ width: `${colWidth(col)}px` }} />)}</colgroup>
             <thead className={tblHd}>
               <tr>{visibleColumns.map((col, index) => (
-                <th key={col.field} className={`px-2 py-2 h-10 text-center align-middle font-bold border-r whitespace-pre-line leading-tight ${darkMode ? 'border-gray-700 text-gray-200' : 'border-gray-200 text-slate-700'}`} title={col.label}>{renderFreezeHeader('import', index + 1, col.label)}</th>
+                <th key={col.field} className={`px-2 py-2 h-10 text-center align-middle font-bold border-r whitespace-pre-line leading-tight ${darkMode ? 'border-gray-700 text-gray-200' : 'border-gray-200 text-slate-700'}`} title={col.sheet_col ? `${col.sheet_col} - ${col.label}` : col.label}>{renderFreezeHeader('import', index + 1, col.label)}</th>
               ))}</tr>
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
@@ -4934,52 +5029,66 @@ const App = () => {
               ) : importData.map((row, rowIndex) => {
                 const hasReschedule = String(row.reschedule || '').trim();
                 return <tr key={row._row_key} className={`${trHov} ${hasReschedule ? (darkMode ? 'bg-amber-900/25 hover:bg-amber-900/35' : 'bg-amber-50 hover:bg-amber-100/70') : ''}`}>{visibleColumns.map(col => {
+                  const isGroupCol = isImportGroupColumn(col);
+                  const groupStartRow = importGroupStartIndexFor[rowIndex];
+                  // Group columns only render their <td> on the group's first
+                  // row, with rowSpan covering the rest — the merged cell.
+                  // Every other row in the group skips rendering this column
+                  // entirely (no empty <td>, exactly like the merged Excel cell).
+                  if (isGroupCol && groupStartRow !== rowIndex) return null;
+                  const ownerRow = isGroupCol ? importData[groupStartRow] : row;
+                  const ownerRowIndex = isGroupCol ? groupStartRow : rowIndex;
+                  const rowSpan = isGroupCol ? (importRowSpans[groupStartRow] || 1) : 1;
                   const formula = isImportFormulaColumn(col);
-                  const selected = importSelectedCell?.rowKey === row._row_key && importSelectedCell?.field === col.field;
-                  const cellKey = importCellKey(rowIndex, col.field);
+                  const selected = importSelectedCell?.rowKey === ownerRow._row_key && importSelectedCell?.field === col.field;
+                  // Multi-select highlight: if Shift+click selected a range,
+                  // highlight every cell in that range. Falls back to the
+                  // single-cell `selected` outline when no range is active.
+                  const cellKey = importCellKey(ownerRowIndex, col.field);
                   const inMultiSelection = importSelectedCells?.has(cellKey);
+                  // Fill highlight: support both vertical (down/up, same
+                  // column) and horizontal (left/right, same row) drag-fill.
                   const colIdx = visibleColumns.findIndex(c => c.field === col.field);
                   let fillHighlighted = false;
                   if (importFillRange?.direction === 'vertical') {
-                    fillHighlighted = importFillRange.startField === col.field && rowIndex >= importFillRange.minRow && rowIndex <= importFillRange.maxRow && rowIndex !== importFillRange.startRow;
+                    fillHighlighted = importFillRange.startField === col.field && ownerRowIndex >= importFillRange.minRow && ownerRowIndex <= importFillRange.maxRow && ownerRowIndex !== importFillRange.startRow;
                   } else if (importFillRange?.direction === 'horizontal') {
-                    fillHighlighted = importFillRange.startRow === rowIndex && colIdx >= importFillRange.minCol && colIdx <= importFillRange.maxCol && col.field !== importFillRange.startField;
+                    fillHighlighted = importFillRange.startRow === ownerRowIndex && colIdx >= importFillRange.minCol && colIdx <= importFillRange.maxCol && col.field !== importFillRange.startField;
                   }
-                  const editingCellNow = importEditingCell === `${row._row_key}:${col.field}`;
+                  const editingCellNow = importEditingCell === `${ownerRow._row_key}:${col.field}`;
                   const directEdit = !(col.field === 'status' || col.type === 'status' || isImportChecklistColumn(col));
-                  
-                  // RowSpan Logic for Mergeable Columns
-                  const rowSpan = getRowSpan(rowIndex, col.field);
-                  if (rowSpan > 1 && rowIndex !== importData.length - 1) {
-                    // Skip rendering if not the first row of the group
-                    if (!isRowStartOfGroup(rowIndex)) return null;
-                  }
-
                   return <td
                     key={col.field}
-                    data-import-cell="true"
-                    data-row-index={rowIndex}
-                    data-field={col.field}
                     rowSpan={rowSpan > 1 ? rowSpan : undefined}
+                    data-import-cell="true"
+                    data-row-index={ownerRowIndex}
+                    data-field={col.field}
                     tabIndex={0}
-                    onFocus={() => setImportSelectedCell({ rowKey: row._row_key, field: col.field })}
+                    onFocus={() => setImportSelectedCell({ rowKey: ownerRow._row_key, field: col.field })}
                     onClick={(e) => {
-                      setImportSelectedCell({ rowKey: row._row_key, field: col.field });
+                      setImportSelectedCell({ rowKey: ownerRow._row_key, field: col.field });
+                      // Shift+click multi-select (Excel-like). Click without
+                      // Shift resets to single cell + new anchor. Shift+click
+                      // extends from the existing anchor to the clicked cell,
+                      // forming a rectangle that can span rows AND columns.
                       const clickedColIdx = importEditableFields.indexOf(col.field);
                       if (e.shiftKey && importSelectionAnchor && clickedColIdx >= 0) {
-                        const newSelection = computeImportSelection(importSelectionAnchor, { rowIndex, colIdx: clickedColIdx });
+                        const newSelection = computeImportSelection(importSelectionAnchor, { rowIndex: ownerRowIndex, colIdx: clickedColIdx });
                         setImportSelectedCells(newSelection);
                       } else {
-                        setImportSelectionAnchor({ rowIndex, colIdx: clickedColIdx });
+                        setImportSelectionAnchor({ rowIndex: ownerRowIndex, colIdx: clickedColIdx });
                         setImportSelectedCells(new Set([cellKey]));
-                        if (directEdit && !editingCellNow && !e.target.closest('a,input,textarea,select,button')) startImportEdit(row, col);
+                        if (directEdit && !editingCellNow && !e.target.closest('a,input,textarea,select,button')) startImportEdit(ownerRow, col);
                       }
                     }}
-                    onPaste={e => { e.preventDefault(); applyImportPaste(rowIndex, col.field, e.clipboardData.getData('text/plain')); }}
+                    onPaste={e => { e.preventDefault(); applyImportPaste(ownerRowIndex, col.field, e.clipboardData.getData('text/plain')); }}
                     className={`group relative h-8 max-h-8 ${editingCellNow ? 'p-0' : 'px-2 py-1'} align-middle border-r focus:outline-none cursor-pointer ${formula ? (darkMode ? 'bg-gray-800/50' : 'bg-slate-50/80') : ''} ${hasReschedule ? (darkMode ? 'bg-amber-900/20' : 'bg-amber-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${editingCellNow ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : inMultiSelection ? 'outline outline-2 outline-blue-500 outline-offset-[-2px] bg-blue-50/50' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${col.field === 'days_left' ? 'text-center' : ''} ${txt2}`}
                   >
-                    {renderImportCell(row, col)}
-                    <button type="button" aria-label="Fill handle" title="Drag to copy value (down or right)" onClick={e => e.stopPropagation()} onMouseDown={e => startImportFill(e, rowIndex, col.field)} className="rfq-fill-handle absolute bottom-0 right-0 h-3 w-3 translate-x-1/2 translate-y-1/2 border border-blue-600 bg-blue-600 opacity-0 group-hover:opacity-100 focus:opacity-100" />
+                    {renderImportCell(ownerRow, col)}
+                    {/* Fill handle — bottom-right corner. Drag in any direction:
+                        down to fill the same column, right to fill the same row.
+                        The drag logic auto-detects the dominant axis. */}
+                    <button type="button" aria-label="Fill handle" title="Drag to copy value (down or right)" onClick={e => e.stopPropagation()} onMouseDown={e => startImportFill(e, ownerRowIndex, col.field)} className="rfq-fill-handle absolute bottom-0 right-0 h-3 w-3 translate-x-1/2 translate-y-1/2 border border-blue-600 bg-blue-600 opacity-0 group-hover:opacity-100 focus:opacity-100" />
                   </td>;
                 })}</tr>;
               })}
@@ -4991,8 +5100,7 @@ const App = () => {
       </div>
     );
   };
-  
-  /  const renderItemRegistration = () => {
+  const renderItemRegistration = () => {
     const fmtDateShort = (d) => {
       if (!d) return '-';
       try { return String(d).slice(0, 10); } catch { return d; }
@@ -5448,6 +5556,8 @@ const App = () => {
       { label: '180+ Days', filter: '180+', value: agingTotals.more_180, color: '#EF4444' },
     ];
 
+    // Use pic_aggregations from backend (aggregated from ALL filtered data, not just current page)
+    // Filter out Unassigned entries
     const picKpis = (picAggregations || [])
       .filter(p => p.pic && p.pic !== 'Unassigned')
       .map(p => ({
@@ -5521,6 +5631,7 @@ const App = () => {
             </DownloadButton>
           </div>
         </div>
+        {/* PIC upload feedback */}
         {picUploadMsg && (
           <div className={`mb-3 px-4 py-2 rounded-lg text-sm font-medium flex items-center justify-between gap-2 ${picUploadMsg.startsWith('✅') ? (darkMode?'bg-green-900/40 text-green-300':'bg-green-50 text-green-700') : picUploadMsg.startsWith('❌') ? (darkMode?'bg-red-900/40 text-red-300':'bg-red-50 text-red-700') : (darkMode?'bg-blue-900/40 text-blue-300':'bg-blue-50 text-blue-700')}`}>
             <span>{picUploadMsg}</span>
@@ -5545,6 +5656,7 @@ const App = () => {
           )}
         </div>
 
+        {/* Multi-select filters */}
         <FilterPanel darkMode={darkMode} className="mx-0 my-3">
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[105px_150px_repeat(6,minmax(105px,1fr))_105px] items-end">
             <div className="min-w-0">
@@ -5637,6 +5749,7 @@ const App = () => {
                 className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
             </div>
           </div>
+          {/* Active filter tags */}
           {(soSearchNums.length + filterValues(soFilters.op_units).length + filterValues(soFilters.vendors).length + filterValues(soFilters.manufacturers).length + filterValues(soFilters.statuses).length + filterValues(soFilters.pics).length) > 0 && (
             <div className="mt-3 flex flex-wrap gap-1.5">
               {soSearchNums.map(v=>(
@@ -5676,6 +5789,7 @@ const App = () => {
           )}
         </FilterPanel>
 
+        {/* Detail Pending Delivery table follows the downloadable Excel layout. */}
         <DataTableScroll darkMode={darkMode} className="rounded-lg border border-gray-200">
           <table className="freeze-table-pending-delivery w-full text-sm">
             <colgroup>
@@ -5851,13 +5965,25 @@ const App = () => {
   return (
     <div className={`min-h-screen font-sans ${darkMode?'bg-gray-900':'bg-[#edf2f1]'} ${darkMode?'':'text-[#1f2937]'}`} style={{fontFamily: "'Inter', 'Plus Jakarta Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"}}>
     <style>{`
+        /* Suppress chart/card entry animations (they slow down the UI on re-render)
+           but ALLOW spinner, pulse, and slide-in used by loading indicators.
+           We define the keyframes here so they survive Tailwind's purge in prod. */
         *, *::before, *::after {
           transition: none !important;
           scroll-behavior: auto !important;
         }
+        /* Kill recharts / radix / general UI entry animations */
         .recharts-wrapper *, [data-radix-popper-content-wrapper] * {
           animation: none !important;
         }
+        /* ── Kill browser default focus ring on editable table cells ──
+           When a user clicks a cell to edit, the <td> shows a blue outline
+           (the "outer" border the user wants). The <input>/<textarea> inside
+           the td would ALSO show the browser's default focus ring (the
+           "inner" border), producing the double-blue-border bug. This rule
+           kills the inner focus ring on any element tagged with
+           data-no-focus-ring, in every state (:focus, :focus-visible,
+           :focus-within) so Chrome/Safari/Edge can't sneak it back in. */
         [data-no-focus-ring], [data-no-focus-ring]:focus, [data-no-focus-ring]:focus-visible,
         [data-no-focus-ring]:focus-within, [data-no-focus-ring]:active {
           outline: none !important;
@@ -5865,11 +5991,13 @@ const App = () => {
           outline-width: 0 !important;
           box-shadow: none !important;
         }
+        /* date inputs must NOT have box-shadow or border suppressed — browser needs these for native picker */
         input[type="date"][data-no-focus-ring], input[type="date"][data-no-focus-ring]:focus,
         input[type="date"][data-no-focus-ring]:focus-visible {
           box-shadow: unset;
           border-color: unset;
         }
+        /* ── Loading animation keyframes (must be explicit for Tailwind purge) ── */
         @keyframes spin {
           from { transform: rotate(0deg); }
           to   { transform: rotate(360deg); }
@@ -5882,6 +6010,7 @@ const App = () => {
           from { opacity: 0; transform: translateX(24px); }
           to   { opacity: 1; transform: translateX(0); }
         }
+        /* ── Apply animations to specific loading classes ── */
         .animate-spin {
           animation: spin 0.75s linear infinite !important;
         }
@@ -5891,6 +6020,7 @@ const App = () => {
         .animate-slide-in {
           animation: slide-in 0.22s ease-out !important;
         }
+        /* Global: all buttons, links, selects, labels with checkboxes → pointer cursor */
         button, [role="button"], select, label[for], a,
         input[type="checkbox"], input[type="radio"] {
           cursor: pointer !important;
@@ -5900,6 +6030,7 @@ const App = () => {
         body.rfq-fill-dragging, body.rfq-fill-dragging * { cursor: crosshair !important; }
         .freeze-table-import td, .freeze-table-import th { box-shadow: inset 0 -1px 0 rgba(148, 163, 184, 0.22), inset -1px 0 0 rgba(148, 163, 184, 0.22); }
         .freeze-table-import tbody tr { height: 32px; }
+        /* max-height only on non-date cells — date picker popup needs unrestricted height */
         .freeze-table-import td > *:not(input[type="date"]) { max-height: 28px; }
         .freeze-table-import input, .freeze-table-import textarea, .freeze-table-import select {
           outline: none !important;
@@ -5911,6 +6042,7 @@ const App = () => {
           outline: none !important;
           box-shadow: inset 0 0 0 2px #3b82f6 !important;
         }
+        /* date input: no box-shadow override so browser can render picker normally */
         .freeze-table-import input[type="date"] {
           box-shadow: none !important;
         }
@@ -6047,8 +6179,10 @@ const App = () => {
         {toasts.map(t=><Toast key={t.id} message={t.message} type={t.type} onClose={()=>removeToast(t.id)}/>)}
       </div>
 
+      {/* Download progress toast */}
       {downloadToast && <DownloadToast message={downloadToast.message} />}
 
+      {/* Sidebar */}
       <aside
         onMouseEnter={() => setSidebarExpanded(true)}
         onMouseLeave={() => setSidebarExpanded(false)}
@@ -6101,6 +6235,7 @@ const App = () => {
         </div>
       </aside>
 
+      {/* Main */}
       <main className={`ml-16 ${sidebarExpanded?'lg:ml-60':'lg:ml-16'} p-4 lg:p-6 transition-[margin-left] duration-200 ease-out`}>
         <div className={`${darkMode?'bg-gray-900 border-gray-800':'bg-[#fbfbfa] border-gray-200/70'} ${activePage === 'dashboard' ? '' : darkMode ? 'data-table-page data-table-page-dark' : 'data-table-page'} min-h-[calc(100vh-32px)] lg:min-h-[calc(100vh-48px)] rounded-2xl border shadow-[0_12px_36px_rgba(15,23,42,0.07)] p-4 lg:p-6`}>
         <header className="mb-7 flex flex-wrap justify-between items-center gap-4">
@@ -6283,6 +6418,12 @@ const App = () => {
         </div>
       )}
 
+      {/* ── Full-page loading overlay ────────────────────────────────────────
+          Dashboard: only waits for the lightweight KPI stats. The heavier
+          completed summary has its own inline loader so first paint is faster.
+          Other pages: only on first visit when the page data array is still
+          empty AND a fetch is in-flight — prevents overlay flashing on every
+          filter / pagination change after initial load.                     */}
       {(() => {
         const PAGE_LABELS = {
           dashboard: 'Dashboard',
@@ -6294,8 +6435,14 @@ const App = () => {
           'all-registered-items': 'Registered Items',
         };
 
+        // Dashboard: unblock the page as soon as the lightweight KPI stats are ready.
+        // Completed summary keeps its own section-level loader, so the whole page
+        // no longer stays covered while the heavier margin analytics are loading.
         const isDashboardLoading = activePage === 'dashboard' && (initialPageLoading || pageLoading || stats === null);
 
+        // Other pages: only show when the page has never loaded data yet
+        // (data array is still empty) AND a fetch is actively in-flight.
+        // This prevents the overlay from re-appearing on pagination / filter.
         const isOtherPageFirstLoad = activePage !== 'dashboard' && pageLoading && (() => {
           if (activePage === 'all-so')               return allSOData.length === 0;
           if (activePage === 'item-registration')    return itemRegData.length === 0;
@@ -6306,6 +6453,10 @@ const App = () => {
           return false;
         })();
 
+        // Show the same loading popup on every page while its data request is running.
+        // Dashboard still waits only for lightweight KPI stats, while table pages use
+        // pageLoading from their own fetch function, so users get clear feedback when
+        // changing page, pagination, filter, or search.
         const isOtherPageLoading = activePage !== 'dashboard' && pageLoading;
         const shouldShow = isDashboardLoading || isOtherPageLoading;
         if (!shouldShow) return null;
