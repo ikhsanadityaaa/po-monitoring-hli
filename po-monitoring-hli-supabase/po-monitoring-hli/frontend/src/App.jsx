@@ -1176,10 +1176,7 @@ const DataTableScroll = ({ children, className = '', darkMode }) => {
       mirror.style.display = 'none';
       mirror.style.position = 'fixed';
       mirror.style.top = '0px';
-      // 'clip' crops visually like 'hidden' but does NOT create a new scroll
-      // container — which means position:sticky inside the mirror header can
-      // still work correctly for pinned/frozen columns.
-      mirror.style.overflow = 'clip';
+      mirror.style.overflow = 'hidden';
       mirror.style.pointerEvents = 'none';
       mirror.style.zIndex = '130';
       mirror.style.boxSizing = 'border-box';
@@ -1212,6 +1209,13 @@ const DataTableScroll = ({ children, className = '', darkMode }) => {
 
       const originalThs = Array.from(thead.querySelectorAll('th'));
       const mirrorThs = Array.from(mirrorTable.querySelectorAll('th'));
+      // We intentionally do NOT use position:sticky inside the mirror because
+      // the mirror is a fixed overlay with no horizontal scroll context.
+      // Pinned columns are detected via computed position:'sticky' on the
+      // original <th>. Their clone gets a counter-translateX that cancels out
+      // the table-level translateX so the clone stays visually "stuck" while
+      // all other columns scroll normally with the table transform.
+      const scrollLeft = frame.scrollLeft;
       originalThs.forEach((th, idx) => {
         const clone = mirrorThs[idx];
         if (!clone) return;
@@ -1223,20 +1227,20 @@ const DataTableScroll = ({ children, className = '', darkMode }) => {
         clone.style.height = `${Math.max(1, rect.height)}px`;
         clone.style.boxSizing = 'border-box';
         clone.style.backgroundClip = 'padding-box';
-        // Preserve sticky positioning for pinned/frozen columns — do NOT
-        // override with 'relative'/'auto' or the pin will not stick in the
-        // floating mirror header.
+        clone.style.position = 'relative';
+        clone.style.left = 'auto';
+        clone.style.zIndex = '1';
+        clone.style.transform = '';
         const thStyles = window.getComputedStyle(th);
         if (thStyles.position === 'sticky') {
-          clone.style.position = 'sticky';
-          clone.style.left = thStyles.left;
+          // Counter-translate: the table shifts by -scrollLeft, so shift this
+          // clone back by +scrollLeft so it stays at its pinned left offset.
+          clone.style.transform = `translateX(${scrollLeft}px)`;
           clone.style.zIndex = '45';
-          clone.style.background = thStyles.backgroundColor || clone.style.background;
+          clone.style.background = thStyles.backgroundColor || (darkMode ? '#374151' : '#e2e8f0');
           clone.style.boxShadow = thStyles.boxShadow;
         } else {
-          clone.style.position = 'relative';
-          clone.style.left = 'auto';
-          clone.style.zIndex = '1';
+          clone.style.background = thStyles.backgroundColor;
         }
         clone.style.fontSize = thStyles.fontSize;
         clone.style.fontWeight = thStyles.fontWeight;
@@ -1252,7 +1256,7 @@ const DataTableScroll = ({ children, className = '', darkMode }) => {
 
       const tableRect = table.getBoundingClientRect();
       mirrorTable.style.width = `${Math.max(frame.scrollWidth, tableRect.width)}px`;
-      mirrorTable.style.transform = `translateX(${-frame.scrollLeft}px)`;
+      mirrorTable.style.transform = `translateX(${-scrollLeft}px)`;
     };
 
     const applyHeaderLock = () => {
@@ -1719,12 +1723,13 @@ const App = () => {
   const getFrozenIndex = (value) => (typeof value === 'object' && value ? value.index : value);
   const getFreezeLeft = (event) => {
     const headerCell = event?.currentTarget?.closest?.('th');
-    const scrollBox = event?.currentTarget?.closest?.('.overflow-x-auto');
+    // DataTableScroll uses class 'data-table-scroll-frame', not 'overflow-x-auto'
+    const scrollBox = event?.currentTarget?.closest?.('.data-table-scroll-frame');
     if (!headerCell || !scrollBox) return 0;
     const headerRect = headerCell.getBoundingClientRect();
     const scrollRect = scrollBox.getBoundingClientRect();
     const maxLeft = Math.max(0, scrollBox.clientWidth - headerRect.width);
-    return Math.max(0, Math.min(Math.round(headerRect.left - scrollRect.left), maxLeft));
+    return Math.max(0, Math.min(Math.round(headerRect.left - scrollRect.left + scrollBox.scrollLeft), maxLeft));
   };
   const toggleFrozenColumn = useCallback((tableKey, colIndex, event) => {
     const left = getFreezeLeft(event);
