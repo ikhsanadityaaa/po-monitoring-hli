@@ -1564,7 +1564,12 @@ def sync_import_sheet_to_dashboard():
     except:
         import traceback; traceback.print_exc()
         return {'added': 0, 'updated': 0, 'seen': 0, 'sheet_rows': 0, 'vendor_count': vendor_count, 'vendor_filter_count': 0, 'vendor_filter_source': 'none', 'purged_legacy': purged_legacy, 'copy_only': True, 'columns': columns, 'error': 'Failed to read the live Import tracker sheet.', 'source_sheet_url': f'https://docs.google.com/spreadsheets/d/{IMPORT_LAYOUT_SHEET_ID}/edit#gid={IMPORT_LAYOUT_GID}'}
-    existing_rows = ImportDashboardRow.query.filter(ImportDashboardRow.source_key == IMPORT_LAYOUT_SOURCE_KEY).order_by(ImportDashboardRow.id.asc()).all()
+    existing_rows = ImportDashboardRow.query.filter(
+        db.or_(
+            ImportDashboardRow.source_key == IMPORT_LAYOUT_SOURCE_KEY,
+            ImportDashboardRow.source_key == 'import_tracker'
+        )
+    ).order_by(ImportDashboardRow.id.asc()).all()
     existing_by_uid = {}
     existing_by_sec_uid = {}
     existing_row_keys = set()
@@ -4174,8 +4179,7 @@ def export_item_registration():
     try:
         ensure_default_item_registration_loaded()
         refresh_item_registration_mappings()
-        rows = apply_item_registration_request_filters(ItemRegistration.query).order_by(ItemRegistration.uploaded_at.desc(), ItemRegistration.id
-        .asc()).all()
+        rows = apply_item_registration_request_filters(ItemRegistration.query).order_by(ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()).all()
 
         wb = Workbook()
         ws = wb.active
@@ -5494,7 +5498,8 @@ def get_import_data():
         req_dlv_sort = str(clean(request.args.get('req_dlv_sort')) or '').lower() or 'newest'
         if req_dlv_sort not in ('oldest', 'newest'):
             req_dlv_sort = 'newest'
-        yupi_po_sort = str(clean(request.args.get('yupi_po_sort')) or '').lower()
+                yupi_po_sort_val = clean(request.args.get('yupi_po_sort'))
+        yupi_po_sort = str(yupi_po_sort_val).lower() if yupi_po_sort_val else ''
         if yupi_po_sort not in ('asc', 'desc'):
             yupi_po_sort = ''
         none_yupi_po = any(v == '__NONE_PLACEHOLDER__' for v in selected_yupi_po)
@@ -5558,6 +5563,11 @@ def get_import_data():
             try:
                 if d is None or pd.isna(d):
                     return (1, 0)
+                # Konversi ke date Python murni untuk hindari error NaT pandas
+                if isinstance(d, datetime):
+                    d = d.date()
+                elif hasattr(d, 'to_pydatetime'):
+                    d = d.to_pydatetime().date()
                 ordinal = d.toordinal()
             except Exception:
                 return (1, 0)
