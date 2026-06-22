@@ -2840,6 +2840,15 @@ const App = () => {
   };
 
   useEffect(() => { fetchPicDbStatus(); }, []);
+  // Always fetch dashboard stats on mount (regardless of active page) so the
+  // "Updates:" timestamps in the header are populated and consistent across
+  // ALL pages — not just the Summary page.
+  useEffect(() => {
+    // One-time fetch on mount if stats cache is empty/expired.
+    const cached = readStatsCache(dashboardStatsCacheKey());
+    if (!cached) fetchDashboard(globalDateFilter);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   useEffect(() => {
     if (activePage === 'dashboard') {
       fetchDashboard(globalDateFilter);
