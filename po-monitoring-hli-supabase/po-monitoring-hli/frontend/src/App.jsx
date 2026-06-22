@@ -5184,20 +5184,21 @@ const App = () => {
         const poSendDate = String(row.po_send_date || '').trim();
         const isNewImport = !poSendDate;
         const current = String(isNewImport ? 'NEW' : (value && String(value).toUpperCase() !== 'NEW' ? value : 'ON PROCESS')).toUpperCase();
-        if (isNewImport) {
-          return (
-            <span className={`inline-flex h-7 w-full items-center justify-center rounded-lg border px-2 text-[11px] font-extrabold tracking-wide ${importStatusClass('NEW', darkMode)}`}>
-              NEW
-            </span>
-          );
-        }
+        // Always render a <select> dropdown — even for NEW status — so the
+        // user can change it. Previously NEW was a static <span> badge with
+        // no way to advance the status. Now NEW appears as the selected
+        // option, and the user can pick ON PROCESS / ON DELIVERY / etc.
         return (
           <select
             value={current}
             onChange={(e) => updateImportCell(row._row_key, col.field, e.target.value)}
             className={`w-full h-7 rounded-lg border px-2 py-0 text-[11px] font-bold outline-none cursor-pointer ${importStatusClass(current, darkMode)}`}
           >
-            {(col.options || IMPORT_STATUS_OPTIONS).filter(opt => String(opt).toUpperCase() !== 'NEW').map(opt => <option key={opt} value={opt} style={importStatusOptionStyle(opt)}>{opt}</option>)}
+            {/* Include NEW as a selectable option so the user can see the
+                current value AND optionally revert to NEW (rare, but
+                possible if a PO Send Date was entered by mistake). */}
+            <option value="NEW" style={importStatusOptionStyle('NEW')}>NEW</option>
+            {IMPORT_STATUS_OPTIONS.filter(opt => String(opt).toUpperCase() !== 'NEW').map(opt => <option key={opt} value={opt} style={importStatusOptionStyle(opt)}>{opt}</option>)}
           </select>
         );
       }
