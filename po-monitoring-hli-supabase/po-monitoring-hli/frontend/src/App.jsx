@@ -5561,7 +5561,7 @@ const App = () => {
             <colgroup>{visibleColumns.map(col => <col key={col.field} style={{ width: `${colWidth(col)}px` }} />)}</colgroup>
             <thead className={tblHd}>
               <tr>{visibleColumns.map((col, index) => (
-                <th key={col.field} className={`px-2 py-2 h-10 text-center align-middle font-bold border-r whitespace-pre-line leading-tight ${darkMode ? 'border-gray-700 text-gray-200' : 'border-gray-200 text-slate-700'}`} title={col.sheet_col ? `${col.sheet_col} - ${col.label}` : col.label}>{renderFreezeHeader('import', index + 1, col.label)}</th>
+                <th key={col.field} className={`px-2 py-2 min-h-10 text-center align-middle font-bold border-r whitespace-pre-line leading-tight ${darkMode ? 'border-gray-700 text-gray-200' : 'border-gray-200 text-slate-700'}`} title={col.sheet_col ? `${col.sheet_col} - ${col.label}` : col.label}>{renderFreezeHeader('import', index + 1, col.label)}</th>
               ))}</tr>
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
@@ -5623,7 +5623,7 @@ const App = () => {
                       }
                     }}
                     onPaste={e => { e.preventDefault(); applyImportPaste(ownerRowIndex, col.field, e.clipboardData.getData('text/plain')); }}
-                    className={`group relative h-8 max-h-8 ${editingCellNow ? 'p-0' : 'px-2 py-1'} align-middle border-r focus:outline-none cursor-pointer ${formula ? (darkMode ? 'bg-gray-800/50' : 'bg-slate-50/80') : ''} ${hasReschedule ? (darkMode ? 'bg-amber-900/20' : 'bg-amber-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${editingCellNow ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : inMultiSelection ? 'outline outline-2 outline-blue-500 outline-offset-[-2px] bg-blue-50/50' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${col.field === 'days_left' ? 'text-center' : ''} ${txt2}`}
+                    className={`group relative ${rowSpan > 1 ? 'h-full' : 'h-8 max-h-8'} ${editingCellNow ? 'p-0' : 'px-2 py-1'} align-middle border-r focus:outline-none cursor-pointer ${formula ? (darkMode ? 'bg-gray-800/50' : 'bg-slate-50/80') : ''} ${hasReschedule ? (darkMode ? 'bg-amber-900/20' : 'bg-amber-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${editingCellNow ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : inMultiSelection ? 'outline outline-2 outline-blue-500 outline-offset-[-2px] bg-blue-50/50' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${col.field === 'days_left' ? 'text-center' : ''} ${txt2}`}
                   >
                     {renderImportCell(ownerRow, col)}
                     {/* Fill handle — bottom-right corner. Drag in any direction:
@@ -6620,10 +6620,11 @@ const App = () => {
         button:disabled { cursor: not-allowed !important; opacity: 0.5; }
         .rfq-fill-handle { cursor: crosshair !important; }
         body.rfq-fill-dragging, body.rfq-fill-dragging * { cursor: crosshair !important; }
-        .freeze-table-import td, .freeze-table-import th { box-shadow: inset 0 -1px 0 rgba(148, 163, 184, 0.22), inset -1px 0 0 rgba(148, 163, 184, 0.22); }
         .freeze-table-import tbody tr { height: 32px; }
-        /* max-height only on non-date cells — date picker popup needs unrestricted height */
-        .freeze-table-import td > *:not(input[type="date"]) { max-height: 28px; }
+        /* max-height only on non-date, non-merged cells — date picker popup needs
+           unrestricted height, and rowSpan (merged) cells need to grow to fill
+           their full spanned height instead of clipping their content to one row. */
+        .freeze-table-import td:not([rowspan]) > *:not(input[type="date"]) { max-height: 28px; }
         .freeze-table-import input, .freeze-table-import textarea, .freeze-table-import select {
           outline: none !important;
           box-shadow: none !important;
