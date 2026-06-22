@@ -5533,6 +5533,8 @@ def get_import_data():
         selected_vendors = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
         # NEW: status filter (NEW / ON PROCESS / ON DELIVERY / DELIVERED / CANCELED)
         selected_statuses = [clean(v) for v in request.args.getlist('status') if clean(v)]
+        # NEW: days_left color filter (red / yellow / green / today)
+        days_left_filter = (clean(request.args.get('days_left')) or '').lower()
         req_dlv_sort = str(clean(request.args.get('req_dlv_sort')) or '').lower() or 'newest'
         if req_dlv_sort not in ('oldest', 'newest'):
             req_dlv_sort = 'newest'
@@ -5596,6 +5598,29 @@ def get_import_data():
             if ignore != 'status' and selected_status_set:
                 row_status = str((item.get('data') or {}).get('status') or '').strip().upper()
                 if row_status not in selected_status_set:
+                    return False
+            # NEW: days_left color filter. days_left is computed by
+            # apply_import_formula_columns. Values: '✅', '❌', '', or a number
+            # string (can be negative). Color zones match the frontend:
+            #   red    → <= 7 or negative
+            #   yellow → 8–29
+            #   green  → >= 30
+            #   today  → exactly 0
+            if ignore != 'days_left' and days_left_filter:
+                raw = str((item.get('data') or {}).get('days_left') or '').strip()
+                if raw in ('✅', '❌', '', '-'):
+                    return False  # icon/empty rows don't match any color zone
+                try:
+                    dl = int(float(raw))
+                except (ValueError, TypeError):
+                    return False
+                if days_left_filter == 'red' and not (dl < 0 or dl <= 7):
+                    return False
+                if days_left_filter == 'yellow' and not (8 <= dl <= 29):
+                    return False
+                if days_left_filter == 'green' and not (dl >= 30):
+                    return False
+                if days_left_filter == 'today' and dl != 0:
                     return False
             return True
 
@@ -5781,6 +5806,7 @@ def export_import_data():
         selected_yupi_po_raw = [clean(v) for v in request.args.getlist('yupi_po') if clean(v)]
         selected_vendors_raw = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
         selected_statuses_raw = [clean(v) for v in request.args.getlist('status') if clean(v)]
+        days_left_filter = (clean(request.args.get('days_left')) or '').lower()
         none_yupi_po = any(v == '__NONE_PLACEHOLDER__' for v in selected_yupi_po_raw)
         none_vendor = any(v == '__NONE_PLACEHOLDER__' for v in selected_vendors_raw)
         selected_yupi_po = {v.strip().lower() for v in selected_yupi_po_raw if v != '__NONE_PLACEHOLDER__'}
@@ -5825,6 +5851,23 @@ def export_import_data():
             # Status filter (case-insensitive, exact match)
             if selected_status_set and str(data.get('status') or '').strip().upper() not in selected_status_set:
                 continue
+            # Days Left color filter
+            if days_left_filter:
+                raw_dl = str(data.get('days_left') or '').strip()
+                if raw_dl in ('✅', '❌', '', '-'):
+                    continue
+                try:
+                    dl = int(float(raw_dl))
+                except (ValueError, TypeError):
+                    continue
+                if days_left_filter == 'red' and not (dl < 0 or dl <= 7):
+                    continue
+                if days_left_filter == 'yellow' and not (8 <= dl <= 29):
+                    continue
+                if days_left_filter == 'green' and not (dl >= 30):
+                    continue
+                if days_left_filter == 'today' and dl != 0:
+                    continue
             filtered.append((row, data))
 
         wb = Workbook()
