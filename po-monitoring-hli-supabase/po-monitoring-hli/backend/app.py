@@ -495,6 +495,15 @@ def raw_purchase_amount(s):
     if raw == 0 and s.purchasing_price: raw = float(s.purchasing_price) * float(s.so_qty or 0)
     return raw
 
+def is_purchase_valid(s):
+    """Margin is only valid when purchase price/amount is present AND positive.
+    Empty, zero, or negative purchase → margin = None (invalid for KPIs).
+    Used across the entire dashboard to keep margin KPIs accurate."""
+    try:
+        return raw_purchase_amount(s) > 0
+    except Exception:
+        return False
+
 def purchase_amount_idr(s, allow_persist=False):
     cached = getattr(s, 'purchasing_amount_idr', None)
     cur = (s.purchasing_currency or 'IDR').strip().upper()
@@ -3006,10 +3015,13 @@ def get_all_so():
             (func.coalesce(SOData.purchasing_amount, 0) != 0, func.coalesce(SOData.purchasing_amount, 0)),
             else_=func.coalesce(SOData.purchasing_price, 0) * func.coalesce(SOData.so_qty, 0)
         )
+        # Only consider rows with valid (positive) purchase amount — empty/
+        # zero/negative purchase → margin is invalid, excluded from filter.
+        valid_purchase_filter = (raw_purchase_expr > 0)
         if margin_filter == 'negative':
-            q = q.filter(func.coalesce(SOData.sales_amount, 0) < raw_purchase_expr)
+            q = q.filter(valid_purchase_filter, func.coalesce(SOData.sales_amount, 0) < raw_purchase_expr)
         elif margin_filter == 'positive':
-            q = q.filter(func.coalesce(SOData.sales_amount, 0) >= raw_purchase_expr)
+            q = q.filter(valid_purchase_filter, func.coalesce(SOData.sales_amount, 0) >= raw_purchase_expr)
 
         so_list_fields = (
             SOData.id, SOData.so_number, SOData.so_item, SOData.so_status,
@@ -3600,10 +3612,12 @@ def download_so_batch_template():
         if margin_filter in ('positive', 'negative'):
             prefetch_convertible_exchange_rates(all_sos)
             def calc_margin(s):
-                po_amt = convert_to_idr((s.purchasing_amount or 0) or (s.purchasing_price or 0) * (s.so_qty or 0), s.purchasing_currency, s.so_create_date, cache_only=True)
+                raw_po = (s.purchasing_amount or 0) or (s.purchasing_price or 0) * (s.so_qty or 0)
+                if raw_po <= 0: return None  # invalid purchase → no margin
+                po_amt = convert_to_idr(raw_po, s.purchasing_currency, s.so_create_date, cache_only=True)
                 return float(s.sales_amount or 0) - po_amt
-            if margin_filter == 'negative': all_sos = [s for s in all_sos if calc_margin(s) < 0]
-            else: all_sos = [s for s in all_sos if calc_margin(s) >= 0]
+            if margin_filter == 'negative': all_sos = [s for s in all_sos if (lambda m: m is not None and m < 0)(calc_margin(s))]
+            else: all_sos = [s for s in all_sos if (lambda m: m is not None and m >= 0)(calc_margin(s))]
         if kpi_pic: all_sos = [s for s in all_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) == kpi_pic]
         wb = Workbook(); ws = wb.active; ws.title = "SO Batch Upload"
         headers = ['SO Item', 'Delivery Plan Date', 'Remarks']
@@ -3699,9 +3713,11 @@ def export_all_so():
         if aging_list: sos = [s for s in sos if get_aging_label(workdays_since(s.so_create_date, today)) in aging_list]
         if margin_filter in ('positive', 'negative'):
             def calc_margin(s):
-                po_amt = raw_purchase_amount(s); return float(s.sales_amount or 0) - po_amt
-            if margin_filter == 'negative': sos = [s for s in sos if calc_margin(s) < 0]
-            else: sos = [s for s in sos if calc_margin(s) >= 0]
+                po_amt = raw_purchase_amount(s)
+                if po_amt <= 0: return None  # invalid purchase → no margin
+                return float(s.sales_amount or 0) - po_amt
+            if margin_filter == 'negative': sos = [s for s in sos if (lambda m: m is not None and m < 0)(calc_margin(s))]
+            else: sos = [s for s in sos if (lambda m: m is not None and m >= 0)(calc_margin(s))]
         if kpi_pic: sos = [s for s in sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) == kpi_pic]
         wb = Workbook(); ws = wb.active; ws.title = "SO List"
         headers = ['Aging', 'Day', 'SO Create Date', 'SO Item', 'PO No.', 'SO Status', 'Category', 'PIC', 'Product ID', 'Product Name', 'Specification', 'Manufacturer Name', 'SO Quantity', 'Sales Unit', 'Operation Unit Name', 'Vendor ID', 'Vendor Name', 'Currency', 'Sales Price(Exclude Tax)', 'Sales Amount(Exclude Tax)', 'Purchasing Currency', 'Purchasing Price', 'Margin', '%Margin', 'Delivery Memo', 'Plan Date', 'Remarks']
@@ -3712,8 +3728,11 @@ def export_all_so():
             day = workdays_since(s.so_create_date, today)
             po_amount = raw_purchase_amount(s)
             sales_amount = float(s.sales_amount or 0)
-            margin = sales_amount - po_amount
-            margin_pct = (margin / po_amount * 100) if po_amount else None
+            # Margin valid only when purchase is present AND positive.
+            # Empty/zero/negative purchase → margin = None.
+            purchase_valid = is_purchase_valid(s)
+            margin = (sales_amount - po_amount) if purchase_valid else None
+            margin_pct = (margin / po_amount * 100) if (purchase_valid and po_amount) else None
             ws.append([
                 get_aging_label(day), day if day is not None else '', s.so_create_date.isoformat() if s.so_create_date else '', s.so_item or '', s.matched_po_number or '', s.so_status or '',
                 product_category_level1(s.product_id), canonical_pending_pic(s.pic_name, s.operation_unit_name), s.product_id or '', s.product_name or '', s.specification or '', s.manufacturer_name or '',
@@ -3772,8 +3791,12 @@ def completed_summary():
                 else_=0.0
             )
             sales_expr = func.coalesce(SOData.sales_amount, 0.0)
+            # Margin valid only when purchase is present AND positive (not empty/zero/negative).
+            # has_purchase_expr: purchase amount/price exists and is non-zero
+            # purchase_positive_expr: the computed purchase amount is > 0
             has_purchase_expr = db.or_(db.and_(SOData.purchasing_amount.isnot(None), SOData.purchasing_amount != 0), db.and_(SOData.purchasing_price.isnot(None), SOData.purchasing_price != 0))
-            margin_expr = case((has_purchase_expr, sales_expr - purchase_expr), else_=None)
+            purchase_positive_expr = (purchase_expr > 0)
+            margin_expr = case((db.and_(has_purchase_expr, purchase_positive_expr), sales_expr - purchase_expr), else_=None)
             sum_purchase_expr = func.coalesce(func.sum(purchase_expr), 0.0)
             sum_sales_expr = func.coalesce(func.sum(sales_expr), 0.0)
             sum_margin_expr = func.coalesce(func.sum(func.coalesce(margin_expr, 0.0)), 0.0)
@@ -3858,8 +3881,10 @@ def completed_summary():
         enriched = []
         for s in rows:
             po_amt = po_amt_of(s); sales = float(s.sales_amount or 0)
-            has_purchase_data = ((s.purchasing_amount is not None and s.purchasing_amount != 0) or (s.purchasing_price is not None and s.purchasing_price != 0))
-            margin = (sales - po_amt) if has_purchase_data else None
+            # Margin valid only when purchase is present AND positive (not
+            # empty/zero/negative). Invalid purchase → margin = None.
+            has_purchase_data = ((s.purchasing_amount is not None and s.purchasing_amount > 0) or (s.purchasing_price is not None and s.purchasing_price > 0))
+            margin = (sales - po_amt) if (has_purchase_data and po_amt > 0) else None
             enriched.append((s, po_amt, sales, margin))
         monthly = {}
         for s, po_amt, sales, _m in enriched:
@@ -3981,8 +4006,9 @@ def completed_margin_detail():
         result = []
         for s in rows:
             po_amt = get_po_amt(s)
-            has_purchase_data = ((s.purchasing_amount is not None and s.purchasing_amount != 0) or (s.purchasing_price is not None and s.purchasing_price != 0))
-            m = (float(s.sales_amount or 0) - po_amt) if has_purchase_data else None
+            # Margin valid only when purchase is present AND positive.
+            has_purchase_data = ((s.purchasing_amount is not None and s.purchasing_amount > 0) or (s.purchasing_price is not None and s.purchasing_price > 0))
+            m = (float(s.sales_amount or 0) - po_amt) if (has_purchase_data and po_amt > 0) else None
             if m is None and category in ('positive', 'negative'): continue
             if category == 'positive' and (m is None or m <= 0): continue
             elif category == 'negative' and (m is None or m >= 0): continue
@@ -6467,16 +6493,20 @@ def get_pic_kpi():
             po_price = float(s.purchasing_price or 0)
             qty = float(s.so_qty or 0)
             po_amount = po_price * qty
-            margin = sales - po_amount
-            
+            # Margin valid only when purchase price is positive (not empty/
+            # zero/negative). Invalid purchase → margin = None, excluded
+            # from KPI totals and counts.
+            purchase_valid = po_price > 0 and po_amount > 0
+            margin = (sales - po_amount) if purchase_valid else None
+
             pic_map[pic]['total_sales'] += sales
-            pic_map[pic]['total_purchase'] += po_amount
-            pic_map[pic]['total_margin'] += margin
-            
-            if margin > 0:
-                pic_map[pic]['positive_margin_count'] += 1
-            elif margin < 0:
-                pic_map[pic]['negative_margin_count'] += 1
+            pic_map[pic]['total_purchase'] += po_amount if purchase_valid else 0
+            if margin is not None:
+                pic_map[pic]['total_margin'] += margin
+                if margin > 0:
+                    pic_map[pic]['positive_margin_count'] += 1
+                elif margin < 0:
+                    pic_map[pic]['negative_margin_count'] += 1
         
         result = sorted(pic_map.values(), key=lambda x: x['so_count'], reverse=True)
         
