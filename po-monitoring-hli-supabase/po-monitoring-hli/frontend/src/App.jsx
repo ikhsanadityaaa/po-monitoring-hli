@@ -1796,7 +1796,7 @@ const App = () => {
     yupi_po: savedImportFilters.yupi_po || [],
     vendors: savedImportFilters.vendors || [],
     statuses: savedImportFilters.statuses || [],
-    daysLeft: savedImportFilters.daysLeft || '',
+    daysLeft: savedImportFilters.daysLeft || [],
   }));
   const [importOptions, setImportOptions] = useState(() => ({
     yupi_po: [],
@@ -2668,7 +2668,7 @@ const App = () => {
       resolveFilter(filters?.yupi_po).forEach(v => params.append('yupi_po', v));
       resolveFilter(filters?.vendors).forEach(v => params.append('vendor_name', v));
       resolveFilter(filters?.statuses).forEach(v => params.append('status', v));
-      if (filters?.daysLeft) params.append('days_left', filters.daysLeft);
+      resolveFilter(filters?.daysLeft).forEach(v => params.append('days_left', v));
       const res = await api.get(`/api/import/data?${params}`);
       setImportData(Array.isArray(res.data.data) ? res.data.data : []);
       setImportColumns(Array.isArray(res.data.columns) ? res.data.columns : []);
@@ -3143,7 +3143,7 @@ const App = () => {
     resolveFilter(importFilters?.yupi_po).forEach(v => p.append('yupi_po', v));
     resolveFilter(importFilters?.vendors).forEach(v => p.append('vendor_name', v));
     resolveFilter(importFilters?.statuses).forEach(v => p.append('status', v));
-    if (importFilters?.daysLeft) p.append('days_left', importFilters.daysLeft);
+    resolveFilter(importFilters?.daysLeft).forEach(v => p.append('days_left', v));
     downloadBlob(`/api/import/export?${p}`, `Import_Dashboard_${new Date().toISOString().slice(0,10)}.xlsx`, 'Import Dashboard Excel');
   };
 
@@ -5652,8 +5652,8 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="grid grid-cols-1 gap-2 md:grid-cols-[120px_120px_minmax(220px,1fr)_minmax(140px,200px)_minmax(140px,180px)_minmax(150px,220px)_minmax(150px,220px)_minmax(180px,260px)_90px_100px] items-end">
-            <div className="min-w-0">
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="min-w-[110px] flex-shrink-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ Req Dlv Date</label>
               <select
                 className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
@@ -5665,7 +5665,7 @@ const App = () => {
                 <option value="newest">Newest ↓</option>
               </select>
             </div>
-            <div className="min-w-0">
+            <div className="min-w-[110px] flex-shrink-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ YUPI PO</label>
               <select
                 className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
@@ -5678,41 +5678,51 @@ const App = () => {
                 <option value="desc">Z-A ↓</option>
               </select>
             </div>
-            <div className="min-w-0"><label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Import</label><input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/></div>
-            <div className="min-w-0">
-              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Status</label>
+            <div className="min-w-[180px] flex-1"><label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Import</label><input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/></div>
+            <div className="min-w-[130px] flex-shrink-0">
               <MultiSelect
-                label=""
+                label="Status"
                 options={importOptions.statuses || ['NEW', ...IMPORT_STATUS_OPTIONS]}
                 selected={importFilters.statuses || []}
                 onChange={v=>{ const next={...importFilters, statuses:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }}
                 darkMode={darkMode} txt2={txt2}
               />
             </div>
-            <div className="min-w-0">
-              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Days Left</label>
-              <select
-                value={importFilters.daysLeft || ''}
-                onChange={e=>{ const next={...importFilters, daysLeft:e.target.value}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }}
-                className={`w-full h-10 px-3 rounded-xl border text-sm ${darkMode ? 'bg-gray-700 border-gray-600 text-gray-100' : 'bg-white border-gray-300 text-gray-700'} focus:outline-none focus:ring-2 focus:ring-blue-500`}
-              >
-                <option value="">All</option>
-                <option value="red">🔴 Red (≤7 / overdue)</option>
-                <option value="yellow">🟡 Yellow (8–29)</option>
-                <option value="green">🟢 Green (≥30)</option>
-                <option value="today">⬛ Today (0)</option>
-              </select>
+            <div className="min-w-[140px] flex-shrink-0">
+              <MultiSelect
+                label="Days Left"
+                options={['Red (≤7 / overdue)', 'Yellow (8–29)', 'Green (≥30)', 'Today (0)']}
+                selected={(importFilters.daysLeft || []).map(v => ({
+                  red: 'Red (≤7 / overdue)',
+                  yellow: 'Yellow (8–29)',
+                  green: 'Green (≥30)',
+                  today: 'Today (0)',
+                }[v] || v)).filter(Boolean)}
+                onChange={v => {
+                  const mapping = {
+                    'Red (≤7 / overdue)': 'red',
+                    'Yellow (8–29)': 'yellow',
+                    'Green (≥30)': 'green',
+                    'Today (0)': 'today',
+                  };
+                  const next = { ...importFilters, daysLeft: v.map(label => mapping[label] || label) };
+                  setImportFilters(next);
+                  setImportPage(1);
+                  fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort);
+                }}
+                darkMode={darkMode} txt2={txt2}
+              />
             </div>
-            <div className="min-w-0">
+            <div className="min-w-[130px] flex-shrink-0">
               <MultiSelect label="YUPI PO" options={importOptions.yupi_po || []} selected={importFilters.yupi_po}
                 onChange={v=>{ const next={...importFilters, yupi_po:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="min-w-0">
+            <div className="min-w-[130px] flex-shrink-0">
               <MultiSelect label="Vendor" options={importOptions.vendors || []} selected={importFilters.vendors}
                 onChange={v=>{ const next={...importFilters, vendors:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <button onClick={()=>{ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">Search</button>
-            <button onClick={()=>{ const next={ yupi_po: [], vendors: [], statuses: [], daysLeft: '' }; const nextSort='oldest'; const nextYupiSort=''; setImportSearch(''); setImportAppliedSearch(''); setImportFilters(next); setImportReqDlvSort(nextSort); setImportYupiPoSort(nextYupiSort); setImportPage(1); fetchImportData(1, importPerPage, '', false, next, nextSort, nextYupiSort); }} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
+            <button onClick={()=>{ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); }} className="h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm flex-shrink-0">Search</button>
+            <button onClick={()=>{ const next={ yupi_po: [], vendors: [], statuses: [], daysLeft: [] }; const nextSort='oldest'; const nextYupiSort=''; setImportSearch(''); setImportAppliedSearch(''); setImportFilters(next); setImportReqDlvSort(nextSort); setImportYupiPoSort(nextYupiSort); setImportPage(1); fetchImportData(1, importPerPage, '', false, next, nextSort, nextYupiSort); }} className={`h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap flex-shrink-0 ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
         </FilterPanel>
 
@@ -5796,7 +5806,7 @@ const App = () => {
                       }
                     }}
                     onPaste={e => { e.preventDefault(); applyImportPaste(ownerRowIndex, col.field, e.clipboardData.getData('text/plain')); }}
-                    className={`group relative h-8 max-h-8 ${editingCellNow ? 'is-editing p-0' : 'px-2 py-1'} align-middle border-r focus:outline-none cursor-pointer ${hasReschedule ? (darkMode ? 'bg-amber-900/20' : 'bg-amber-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${col.blue_text ? (darkMode ? 'text-blue-300' : 'text-blue-600') : ''} ${editingCellNow ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : inMultiSelection ? 'outline outline-2 outline-blue-500 outline-offset-[-2px] bg-blue-50/50' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${col.field === 'days_left' ? 'text-center' : ''} ${txt2}`}
+                    className={`group relative h-8 max-h-8 ${editingCellNow ? 'is-editing p-0' : 'px-2 py-1'} align-middle border-r focus:outline-none cursor-pointer ${hasReschedule ? (darkMode ? 'bg-amber-900/20' : 'bg-amber-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${col.blue_text ? (darkMode ? 'text-blue-300' : 'text-blue-600') : ''} ${col.bold_text ? 'font-bold' : ''} ${editingCellNow ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : inMultiSelection ? 'outline outline-2 outline-blue-500 outline-offset-[-2px] bg-blue-50/50' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${col.field === 'days_left' ? 'text-center' : ''} ${txt2}`}
                   >
                     {renderImportCell(ownerRow, col)}
                     {/* Fill handle — bottom-right corner. Drag in any direction:
