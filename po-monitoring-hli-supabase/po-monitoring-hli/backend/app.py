@@ -851,12 +851,16 @@ IMPORT_REFERENCE_VISIBLE_COLUMNS = [
     {'sheet_col': 'AG', 'source_sheet_col': 'U',  'field': 'purchase_price',      'label': 'PURCHASE PRICE',         'width': 128, 'number': True, 'group_per_item': True},
     {'sheet_col': 'AH', 'source_sheet_col': 'V',  'field': 'currency',            'label': 'CURRENCY',               'width': 92,  'group_per_item': True},
     {'sheet_col': 'AJ', 'source_sheet_col': 'X',  'field': 'purchase_amount',     'label': 'PURCHASE\nAMOUNT',       'width': 132, 'formula': True, 'number': True, 'group_per_item': True},
-    {'sheet_col': 'CU', 'field': 'lt_days',             'label': 'LT (Days)',              'width': 94,  'formula': True, 'number': True, 'group_per_item': True},
-    {'sheet_col': 'CV', 'field': 'incoterm',            'label': 'Incoterm',               'width': 98,  'group_per_item': True},
-    {'sheet_col': 'CW', 'field': 'forwarder',           'label': 'Forwarder',              'width': 150, 'group_per_item': True},
-    {'sheet_col': 'CX', 'field': 'bl_number',           'label': 'BL Number',              'width': 150, 'group_per_item': True},
-    {'sheet_col': 'CY', 'field': 'inv_no',              'label': 'Inv No',                 'width': 135, 'group_per_item': True},
-    {'sheet_col': 'CZ', 'field': 'non_ski',             'label': 'NON-SKI',                'width': 90,  'group_per_item': True},
+    # LT (Days), Incoterm, Forwarder, BL Number, Inv No, NON-SKI are now
+    # GROUP columns (no group_per_item flag) so they merge across rows
+    # with the same YUPI PO + Req Dlv Date. These shipment-level fields
+    # are shared by all items in the same delivery group.
+    {'sheet_col': 'CU', 'field': 'lt_days',             'label': 'LT (Days)',              'width': 94,  'formula': True, 'number': True},
+    {'sheet_col': 'CV', 'field': 'incoterm',            'label': 'Incoterm',               'width': 98},
+    {'sheet_col': 'CW', 'field': 'forwarder',           'label': 'Forwarder',              'width': 150},
+    {'sheet_col': 'CX', 'field': 'bl_number',           'label': 'BL Number',              'width': 150},
+    {'sheet_col': 'CY', 'field': 'inv_no',              'label': 'Inv No',                 'width': 135},
+    {'sheet_col': 'CZ', 'field': 'non_ski',             'label': 'NON-SKI',                'width': 90},
     {'sheet_col': 'DA', 'field': 'sap_input',           'label': 'SAP INPUT',              'width': 86,  'checkbox': True},
     {'sheet_col': 'DB', 'field': 'bl_awb',              'label': 'BL / AWB',               'width': 86,  'checkbox': True},
     {'sheet_col': 'DC', 'field': 'invoice',             'label': 'INVOICE',                'width': 86,  'checkbox': True},
