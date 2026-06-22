@@ -822,9 +822,9 @@ IMPORT_SOURCE_ONLY_COLUMNS = [
 IMPORT_SYNC_FIELD_ALIASES = {'yupi_po': 'po_yupi', 'req_dlv_date': 'source_req_dlv_date'}
 
 IMPORT_REFERENCE_VISIBLE_COLUMNS = [
-    {'sheet_col': 'A',  'field': 'status',              'label': 'STATUS',                 'width': 132, 'type': 'status', 'group_per_item': True},
+    {'sheet_col': 'A',  'field': 'status',              'label': 'STATUS',                 'width': 132, 'type': 'status'},
     {'sheet_col': 'B',  'field': 'days_left',           'label': 'Days Left',              'width': 80,  'formula': True},
-    {'sheet_col': 'C',  'field': 'po_send_date',         'label': 'PO Send Date',          'width': 124, 'local': True},
+    {'sheet_col': 'C',  'field': 'po_send_date',         'label': 'PO Send Date',          'width': 124, 'local': True, 'group_per_item': False},
     {'sheet_col': 'D',  'source_sheet_col': 'B',  'field': 'site',                'label': 'Site',                   'width': 78,  'formula': True},
     {'sheet_col': 'E',  'source_sheet_col': 'F',  'field': 'yupi_po',             'label': 'YUPI PO',                'width': 118},
     {'sheet_col': 'F',  'source_sheet_col': 'Q',  'field': 'vendor',              'label': 'Vendor',                 'width': 190, 'formula': True},
