@@ -1796,6 +1796,7 @@ const App = () => {
     yupi_po: savedImportFilters.yupi_po || [],
     vendors: savedImportFilters.vendors || [],
     statuses: savedImportFilters.statuses || [],
+    daysLeft: savedImportFilters.daysLeft || '',
   }));
   const [importOptions, setImportOptions] = useState(() => ({
     yupi_po: [],
@@ -1995,7 +1996,11 @@ const App = () => {
           aria-label={active ? `Unfreeze ${label}` : `Freeze ${label}`}
           title={active ? `Unfreeze ${label}` : `Freeze ${label}`}
           onClick={(e) => { e.stopPropagation(); toggleFrozenColumn(tableKey, colIndex); }}
-          className={`absolute right-0 top-1/2 inline-flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-md border opacity-0 shadow-sm transition-all group-hover:opacity-100 group-focus-within:opacity-100 ${active ? 'border-amber-300 bg-amber-100 text-amber-700' : darkMode ? 'border-gray-600 bg-gray-700/90 text-gray-300 hover:bg-gray-600' : 'border-slate-200 bg-white/95 text-slate-500 hover:bg-slate-100'}`}
+          // When pinned (active), the pin button is ALWAYS visible (opacity-100)
+          // so the user can see which columns are frozen and click to unpin.
+          // When NOT pinned, the button only appears on hover/focus to keep
+          // the header tidy.
+          className={`absolute right-0 top-1/2 inline-flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-md border shadow-sm transition-all ${active ? 'opacity-100 border-amber-300 bg-amber-100 text-amber-700' : `opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 ${darkMode ? 'border-gray-600 bg-gray-700/90 text-gray-300 hover:bg-gray-600' : 'border-slate-200 bg-white/95 text-slate-500 hover:bg-slate-100'}`}`}
         >
           {active ? <PinOff className="h-3 w-3" /> : <Pin className="h-3 w-3" />}
         </button>
@@ -2038,24 +2043,21 @@ const App = () => {
             z-index: 25;
             box-shadow: 10px 0 14px -14px rgba(15, 23, 42, 0.55);
             background-clip: padding-box;
-            /* Default opaque backgrounds (light mode). Overridden below for
-               dark mode. These MUST be !important to override any Tailwind
-               bg-* utility applied to <thead>, <tr>, or the cell itself. */
-            background-color: #ffffff !important;
+            /* Use inherit for tbody td so the pinned cell picks up the
+               zebra-stripe color from its parent tr. This preserves the
+               alternating row colors across the frozen pane. The thead th
+               gets a solid color below. */
+            background-color: inherit !important;
           }
           .freeze-table-${tableKey} thead th[data-col-index="${idx}"] {
             z-index: 60;
             background-color: #e2e8f0 !important;
           }
-          .freeze-table-${tableKey} tfoot td[data-col-index="${idx}"] {
-            background-color: #f1f5f9 !important;
-          }
-          /* Dark mode overrides — scoped to .data-table-page-dark wrapper. */
-          .data-table-page-dark .freeze-table-${tableKey} td[data-col-index="${idx}"] {
-            background-color: #1f2937 !important;
-          }
           .data-table-page-dark .freeze-table-${tableKey} thead th[data-col-index="${idx}"] {
             background-color: #374151 !important;
+          }
+          .freeze-table-${tableKey} tfoot td[data-col-index="${idx}"] {
+            background-color: #f1f5f9 !important;
           }
           .data-table-page-dark .freeze-table-${tableKey} tfoot td[data-col-index="${idx}"] {
             background-color: #111827 !important;
@@ -2105,7 +2107,7 @@ const App = () => {
       page: importPage, perPage: importPerPage,
       search: importSearch, appliedSearch: importAppliedSearch,
       yupi_po: importFilters.yupi_po, vendors: importFilters.vendors,
-      statuses: importFilters.statuses,
+      statuses: importFilters.statuses, daysLeft: importFilters.daysLeft,
       reqDlvSort: importReqDlvSort, yupiPoSort: importYupiPoSort,
     });
   }, [importPage, importPerPage, importSearch, importAppliedSearch, importFilters, importReqDlvSort, importYupiPoSort]);
@@ -2666,6 +2668,7 @@ const App = () => {
       resolveFilter(filters?.yupi_po).forEach(v => params.append('yupi_po', v));
       resolveFilter(filters?.vendors).forEach(v => params.append('vendor_name', v));
       resolveFilter(filters?.statuses).forEach(v => params.append('status', v));
+      if (filters?.daysLeft) params.append('days_left', filters.daysLeft);
       const res = await api.get(`/api/import/data?${params}`);
       setImportData(Array.isArray(res.data.data) ? res.data.data : []);
       setImportColumns(Array.isArray(res.data.columns) ? res.data.columns : []);
@@ -3140,6 +3143,7 @@ const App = () => {
     resolveFilter(importFilters?.yupi_po).forEach(v => p.append('yupi_po', v));
     resolveFilter(importFilters?.vendors).forEach(v => p.append('vendor_name', v));
     resolveFilter(importFilters?.statuses).forEach(v => p.append('status', v));
+    if (importFilters?.daysLeft) p.append('days_left', importFilters.daysLeft);
     downloadBlob(`/api/import/export?${p}`, `Import_Dashboard_${new Date().toISOString().slice(0,10)}.xlsx`, 'Import Dashboard Excel');
   };
 
@@ -5648,7 +5652,7 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="grid grid-cols-1 gap-2 md:grid-cols-[120px_120px_minmax(220px,1fr)_minmax(150px,220px)_minmax(150px,220px)_minmax(180px,260px)_100px_100px] items-end">
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-[120px_120px_minmax(220px,1fr)_minmax(140px,200px)_minmax(140px,180px)_minmax(150px,220px)_minmax(150px,220px)_minmax(180px,260px)_90px_100px] items-end">
             <div className="min-w-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ Req Dlv Date</label>
               <select
@@ -5686,6 +5690,20 @@ const App = () => {
               />
             </div>
             <div className="min-w-0">
+              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Days Left</label>
+              <select
+                value={importFilters.daysLeft || ''}
+                onChange={e=>{ const next={...importFilters, daysLeft:e.target.value}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }}
+                className={`w-full h-10 px-3 rounded-xl border text-sm ${darkMode ? 'bg-gray-700 border-gray-600 text-gray-100' : 'bg-white border-gray-300 text-gray-700'} focus:outline-none focus:ring-2 focus:ring-blue-500`}
+              >
+                <option value="">All</option>
+                <option value="red">🔴 Red (≤7 / overdue)</option>
+                <option value="yellow">🟡 Yellow (8–29)</option>
+                <option value="green">🟢 Green (≥30)</option>
+                <option value="today">⬛ Today (0)</option>
+              </select>
+            </div>
+            <div className="min-w-0">
               <MultiSelect label="YUPI PO" options={importOptions.yupi_po || []} selected={importFilters.yupi_po}
                 onChange={v=>{ const next={...importFilters, yupi_po:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }} darkMode={darkMode} txt2={txt2}/>
             </div>
@@ -5694,7 +5712,7 @@ const App = () => {
                 onChange={v=>{ const next={...importFilters, vendors:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }} darkMode={darkMode} txt2={txt2}/>
             </div>
             <button onClick={()=>{ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">Search</button>
-            <button onClick={()=>{ const next={ yupi_po: [], vendors: [], statuses: [] }; const nextSort='newest'; const nextYupiSort=''; setImportSearch(''); setImportAppliedSearch(''); setImportFilters(next); setImportReqDlvSort(nextSort); setImportYupiPoSort(nextYupiSort); setImportPage(1); fetchImportData(1, importPerPage, '', false, next, nextSort, nextYupiSort); }} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
+            <button onClick={()=>{ const next={ yupi_po: [], vendors: [], statuses: [], daysLeft: '' }; const nextSort='newest'; const nextYupiSort=''; setImportSearch(''); setImportAppliedSearch(''); setImportFilters(next); setImportReqDlvSort(nextSort); setImportYupiPoSort(nextYupiSort); setImportPage(1); fetchImportData(1, importPerPage, '', false, next, nextSort, nextYupiSort); }} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
         </FilterPanel>
 
