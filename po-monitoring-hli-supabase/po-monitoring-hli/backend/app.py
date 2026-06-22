@@ -832,7 +832,7 @@ IMPORT_REFERENCE_VISIBLE_COLUMNS = [
     {'sheet_col': 'H',  'field': 'etd',                 'label': 'ETD',                    'width': 116, 'blue_text': True},
     {'sheet_col': 'I',  'field': 'eta',                 'label': 'ETA',                    'width': 116, 'blue_text': True},
     {'sheet_col': 'J',  'field': 'arrival_check',       'label': 'Arrival Check',          'width': 154, 'formula': True, 'blue_text': True},
-    {'sheet_col': 'K',  'field': 'import_remarks',      'label': 'Import Remarks',         'width': 220, 'blue_text': True},
+    {'sheet_col': 'K',  'field': 'import_remarks',      'label': 'Import Remarks',         'width': 220, 'blue_text': True, 'bold_text': True},
     # ── Shipment-level group columns (moved here per user request) ───────────
     # These are GROUP columns (no group_per_item flag) so they merge across
     # rows with the same YUPI PO + Req Dlv Date. Blue text applies from
@@ -842,6 +842,8 @@ IMPORT_REFERENCE_VISIBLE_COLUMNS = [
     {'sheet_col': 'CW', 'field': 'forwarder',           'label': 'Forwarder',              'width': 150, 'blue_text': True},
     {'sheet_col': 'CX', 'field': 'bl_number',           'label': 'BL Number',              'width': 150, 'blue_text': True},
     {'sheet_col': 'CY', 'field': 'inv_no',              'label': 'Inv No',                 'width': 135, 'blue_text': True},
+    # SOFT COPY DOC moved here (right after Inv No) per user request.
+    {'sheet_col': 'DI', 'field': 'soft_copy_doc',       'label': 'SOFT COPY DOC',          'width': 190, 'hyperlink': True},
     {'sheet_col': 'CZ', 'field': 'non_ski',             'label': 'NON-SKI',                'width': 90},
     # ── Per-item columns (group_per_item=True → never merged across rows) ──────
     {'sheet_col': 'L',                            'field': 'so',                  'label': 'SO',                     'width': 140, 'group_per_item': True},
@@ -869,7 +871,6 @@ IMPORT_REFERENCE_VISIBLE_COLUMNS = [
     {'sheet_col': 'DF', 'field': 'msds',                'label': 'MSDS',                   'width': 82,  'checkbox': True},
     {'sheet_col': 'DG', 'field': 'coa',                 'label': 'COA',                    'width': 76,  'checkbox': True},
     {'sheet_col': 'DH', 'field': 'coo',                 'label': 'COO',                    'width': 76,  'checkbox': True},
-    {'sheet_col': 'DI', 'field': 'soft_copy_doc',       'label': 'SOFT COPY DOC',          'width': 190, 'hyperlink': True},
 ]
 
 IMPORT_COLUMN_ALIASES = {
@@ -965,6 +966,7 @@ def import_layout_columns(force=False):
         item['local'] = bool(item.get('local') or item.get('field') in IMPORT_DASHBOARD_LOCAL_FIELDS)
         item['group_per_item'] = bool(item.get('group_per_item', False))
         item['blue_text'] = bool(item.get('blue_text', False))
+        item['bold_text'] = bool(item.get('bold_text', False))
         if item.get('field') == 'status': item['options'] = IMPORT_STATUS_OPTIONS
         columns.append(item)
     return columns
@@ -5535,8 +5537,9 @@ def get_import_data():
         selected_vendors = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
         # NEW: status filter (NEW / ON PROCESS / ON DELIVERY / DELIVERED / CANCELED)
         selected_statuses = [clean(v) for v in request.args.getlist('status') if clean(v)]
-        # NEW: days_left color filter (red / yellow / green / today)
-        days_left_filter = (clean(request.args.get('days_left')) or '').lower()
+        # NEW: days_left color filter (red / yellow / green / today) — supports
+        # multiple values via getlist so the user can filter by 2+ zones.
+        selected_days_left = [clean(v).lower() for v in request.args.getlist('days_left') if clean(v)]
         req_dlv_sort = str(clean(request.args.get('req_dlv_sort')) or '').lower() or 'oldest'
         if req_dlv_sort not in ('oldest', 'newest'):
             req_dlv_sort = 'oldest'
@@ -5608,7 +5611,9 @@ def get_import_data():
             #   yellow → 8–29
             #   green  → >= 30
             #   today  → exactly 0
-            if ignore != 'days_left' and days_left_filter:
+            # Supports MULTIPLE zones — row passes if it matches ANY selected
+            # zone. empty selected_days_left → no filter.
+            if ignore != 'days_left' and selected_days_left:
                 raw = str((item.get('data') or {}).get('days_left') or '').strip()
                 if raw in ('✅', '❌', '', '-'):
                     return False  # icon/empty rows don't match any color zone
@@ -5616,13 +5621,17 @@ def get_import_data():
                     dl = int(float(raw))
                 except (ValueError, TypeError):
                     return False
-                if days_left_filter == 'red' and not (dl < 0 or dl <= 7):
-                    return False
-                if days_left_filter == 'yellow' and not (8 <= dl <= 29):
-                    return False
-                if days_left_filter == 'green' and not (dl >= 30):
-                    return False
-                if days_left_filter == 'today' and dl != 0:
+                matched = False
+                for zone in selected_days_left:
+                    if zone == 'red' and (dl < 0 or dl <= 7):
+                        matched = True; break
+                    if zone == 'yellow' and 8 <= dl <= 29:
+                        matched = True; break
+                    if zone == 'green' and dl >= 30:
+                        matched = True; break
+                    if zone == 'today' and dl == 0:
+                        matched = True; break
+                if not matched:
                     return False
             return True
 
@@ -5808,7 +5817,7 @@ def export_import_data():
         selected_yupi_po_raw = [clean(v) for v in request.args.getlist('yupi_po') if clean(v)]
         selected_vendors_raw = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
         selected_statuses_raw = [clean(v) for v in request.args.getlist('status') if clean(v)]
-        days_left_filter = (clean(request.args.get('days_left')) or '').lower()
+        selected_days_left = [clean(v).lower() for v in request.args.getlist('days_left') if clean(v)]
         none_yupi_po = any(v == '__NONE_PLACEHOLDER__' for v in selected_yupi_po_raw)
         none_vendor = any(v == '__NONE_PLACEHOLDER__' for v in selected_vendors_raw)
         selected_yupi_po = {v.strip().lower() for v in selected_yupi_po_raw if v != '__NONE_PLACEHOLDER__'}
@@ -5853,8 +5862,9 @@ def export_import_data():
             # Status filter (case-insensitive, exact match)
             if selected_status_set and str(data.get('status') or '').strip().upper() not in selected_status_set:
                 continue
-            # Days Left color filter
-            if days_left_filter:
+            # Days Left color filter (supports multiple zones — row passes if
+            # it matches ANY selected zone)
+            if selected_days_left:
                 raw_dl = str(data.get('days_left') or '').strip()
                 if raw_dl in ('✅', '❌', '', '-'):
                     continue
@@ -5862,13 +5872,17 @@ def export_import_data():
                     dl = int(float(raw_dl))
                 except (ValueError, TypeError):
                     continue
-                if days_left_filter == 'red' and not (dl < 0 or dl <= 7):
-                    continue
-                if days_left_filter == 'yellow' and not (8 <= dl <= 29):
-                    continue
-                if days_left_filter == 'green' and not (dl >= 30):
-                    continue
-                if days_left_filter == 'today' and dl != 0:
+                matched = False
+                for zone in selected_days_left:
+                    if zone == 'red' and (dl < 0 or dl <= 7):
+                        matched = True; break
+                    if zone == 'yellow' and 8 <= dl <= 29:
+                        matched = True; break
+                    if zone == 'green' and dl >= 30:
+                        matched = True; break
+                    if zone == 'today' and dl == 0:
+                        matched = True; break
+                if not matched:
                     continue
             filtered.append((row, data))
 
