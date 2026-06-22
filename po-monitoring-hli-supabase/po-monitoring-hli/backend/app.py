@@ -841,10 +841,11 @@ IMPORT_REFERENCE_VISIBLE_COLUMNS = [
     {'sheet_col': 'CV', 'field': 'incoterm',            'label': 'Incoterm',               'width': 98,  'blue_text': True},
     {'sheet_col': 'CW', 'field': 'forwarder',           'label': 'Forwarder',              'width': 150, 'blue_text': True},
     {'sheet_col': 'CX', 'field': 'bl_number',           'label': 'BL Number',              'width': 150, 'blue_text': True},
-    {'sheet_col': 'CY', 'field': 'inv_no',              'label': 'Inv No',                 'width': 135, 'blue_text': True},
-    # SOFT COPY DOC moved here (right after Inv No) per user request.
+    {'sheet_col': 'CY', 'field': 'inv_no',              'label': 'Invoice No',             'width': 135, 'blue_text': True},
+    # SAP INPUT moved here (right after Invoice No) per user request.
+    {'sheet_col': 'DA', 'field': 'sap_input',           'label': 'SAP INPUT',              'width': 86,  'checkbox': True},
+    # SOFT COPY DOC moved here (right after SAP INPUT) per user request.
     {'sheet_col': 'DI', 'field': 'soft_copy_doc',       'label': 'SOFT COPY DOC',          'width': 190, 'hyperlink': True},
-    {'sheet_col': 'CZ', 'field': 'non_ski',             'label': 'NON-SKI',                'width': 90},
     # ── Per-item columns (group_per_item=True → never merged across rows) ──────
     {'sheet_col': 'L',                            'field': 'so',                  'label': 'SO',                     'width': 140, 'group_per_item': True},
     {'sheet_col': 'M',  'source_sheet_col': 'A',  'field': 'group',               'label': 'GROUP',                  'width': 116, 'group_per_item': True},
@@ -863,7 +864,6 @@ IMPORT_REFERENCE_VISIBLE_COLUMNS = [
     {'sheet_col': 'AG', 'source_sheet_col': 'U',  'field': 'purchase_price',      'label': 'PURCHASE PRICE',         'width': 128, 'number': True, 'group_per_item': True},
     {'sheet_col': 'AH', 'source_sheet_col': 'V',  'field': 'currency',            'label': 'CURRENCY',               'width': 92,  'group_per_item': True},
     {'sheet_col': 'AJ', 'source_sheet_col': 'X',  'field': 'purchase_amount',     'label': 'PURCHASE\nAMOUNT',       'width': 132, 'formula': True, 'number': True, 'group_per_item': True},
-    {'sheet_col': 'DA', 'field': 'sap_input',           'label': 'SAP INPUT',              'width': 86,  'checkbox': True},
     {'sheet_col': 'DB', 'field': 'bl_awb',              'label': 'BL / AWB',               'width': 86,  'checkbox': True},
     {'sheet_col': 'DC', 'field': 'invoice',             'label': 'INVOICE',                'width': 86,  'checkbox': True},
     {'sheet_col': 'DD', 'field': 'pl',                  'label': 'PL',                     'width': 74,  'checkbox': True},
@@ -871,6 +871,10 @@ IMPORT_REFERENCE_VISIBLE_COLUMNS = [
     {'sheet_col': 'DF', 'field': 'msds',                'label': 'MSDS',                   'width': 82,  'checkbox': True},
     {'sheet_col': 'DG', 'field': 'coa',                 'label': 'COA',                    'width': 76,  'checkbox': True},
     {'sheet_col': 'DH', 'field': 'coo',                 'label': 'COO',                    'width': 76,  'checkbox': True},
+    # NON-SKI moved to rightmost column. It's part of the checklist group
+    # (hidden by default, toggled via Show Checklist). Rendered as Yes/No
+    # dropdown in the frontend instead of the green/gray circle toggle.
+    {'sheet_col': 'CZ', 'field': 'non_ski',             'label': 'NON-SKI',                'width': 90,  'checkbox': True, 'yes_no': True},
 ]
 
 IMPORT_COLUMN_ALIASES = {
@@ -967,6 +971,7 @@ def import_layout_columns(force=False):
         item['group_per_item'] = bool(item.get('group_per_item', False))
         item['blue_text'] = bool(item.get('blue_text', False))
         item['bold_text'] = bool(item.get('bold_text', False))
+        item['yes_no'] = bool(item.get('yes_no', False))
         if item.get('field') == 'status': item['options'] = IMPORT_STATUS_OPTIONS
         columns.append(item)
     return columns
