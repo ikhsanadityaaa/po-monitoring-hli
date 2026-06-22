@@ -1803,7 +1803,7 @@ const App = () => {
     vendors: [],
     statuses: ['NEW', ...IMPORT_STATUS_OPTIONS],
   }));
-  const [importReqDlvSort, setImportReqDlvSort] = useState(() => savedImportFilters.reqDlvSort || 'newest');
+  const [importReqDlvSort, setImportReqDlvSort] = useState(() => savedImportFilters.reqDlvSort || 'oldest');
   const [importYupiPoSort, setImportYupiPoSort] = useState(() => savedImportFilters.yupiPoSort || '');
   const [rfqEditedRowKeys, setRfqEditedRowKeys] = useState(new Set());
   const rfqDashboardOnlyFields = new Set(['private_remarks_1', 'private_remarks_2']);
@@ -5712,7 +5712,7 @@ const App = () => {
                 onChange={v=>{ const next={...importFilters, vendors:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }} darkMode={darkMode} txt2={txt2}/>
             </div>
             <button onClick={()=>{ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">Search</button>
-            <button onClick={()=>{ const next={ yupi_po: [], vendors: [], statuses: [], daysLeft: '' }; const nextSort='newest'; const nextYupiSort=''; setImportSearch(''); setImportAppliedSearch(''); setImportFilters(next); setImportReqDlvSort(nextSort); setImportYupiPoSort(nextYupiSort); setImportPage(1); fetchImportData(1, importPerPage, '', false, next, nextSort, nextYupiSort); }} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
+            <button onClick={()=>{ const next={ yupi_po: [], vendors: [], statuses: [], daysLeft: '' }; const nextSort='oldest'; const nextYupiSort=''; setImportSearch(''); setImportAppliedSearch(''); setImportFilters(next); setImportReqDlvSort(nextSort); setImportYupiPoSort(nextYupiSort); setImportPage(1); fetchImportData(1, importPerPage, '', false, next, nextSort, nextYupiSort); }} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
         </FilterPanel>
 
@@ -5796,7 +5796,7 @@ const App = () => {
                       }
                     }}
                     onPaste={e => { e.preventDefault(); applyImportPaste(ownerRowIndex, col.field, e.clipboardData.getData('text/plain')); }}
-                    className={`group relative h-8 max-h-8 ${editingCellNow ? 'is-editing p-0' : 'px-2 py-1'} align-middle border-r focus:outline-none cursor-pointer ${hasReschedule ? (darkMode ? 'bg-amber-900/20' : 'bg-amber-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${editingCellNow ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : inMultiSelection ? 'outline outline-2 outline-blue-500 outline-offset-[-2px] bg-blue-50/50' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${col.field === 'days_left' ? 'text-center' : ''} ${txt2}`}
+                    className={`group relative h-8 max-h-8 ${editingCellNow ? 'is-editing p-0' : 'px-2 py-1'} align-middle border-r focus:outline-none cursor-pointer ${hasReschedule ? (darkMode ? 'bg-amber-900/20' : 'bg-amber-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${col.blue_text ? (darkMode ? 'text-blue-300' : 'text-blue-600') : ''} ${editingCellNow ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : inMultiSelection ? 'outline outline-2 outline-blue-500 outline-offset-[-2px] bg-blue-50/50' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${col.field === 'days_left' ? 'text-center' : ''} ${txt2}`}
                   >
                     {renderImportCell(ownerRow, col)}
                     {/* Fill handle — bottom-right corner. Drag in any direction:
