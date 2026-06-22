@@ -2271,7 +2271,7 @@ def _product_id_columns(df):
         'product_status': find_column(df, ['Product Status', 'Prod. Status', 'Prod Status']),
         'specification': find_column(df, ['Specification', 'Spec.', 'Spec']),
         'manufacturer_name': find_column(df, ['Manufacturer Name', 'Mfr. Nm.', 'Mfr. Nm', 'Maker Nm.']),
-        'vendor_name': find_column(df, ['Vendor Name', 'Vendor Nm.', 'Vendor Nm', 'Supplier Name', 'Supplier']),
+        'vendor_name': find_column(df, ['Vendor Name', 'Vendor Nm.', 'Vendor Nm', 'Vendor', 'Vendor (Name)', 'Supplier Name', 'Supplier Nm.', 'Supplier Nm', 'Supplier']),
         'order_unit': find_column(df, ['Order Unit', 'Odr. Unit', 'Odr. Unit.']),
         'hub_handling_check': find_column(df, ['HUB Handling Check', 'HUB Handling Chk.', 'HUB Handling Chk']),
         'tax_type': find_column(df, ['Purchasing Price Tax Type', 'Tax Type', 'Tax Type.', 'Tax']),
@@ -4300,7 +4300,8 @@ def upload_product_id():
             ('product_id', 'Product ID'), ('category_id', 'Category ID'),
             ('category_name', 'Category Name'), ('product_name', 'Product Name'),
             ('product_status', 'Product Status'), ('specification', 'Specification'),
-            ('manufacturer_name', 'Manufacturer Name'), ('order_unit', 'Order Unit'),
+            ('manufacturer_name', 'Manufacturer Name'), ('vendor_name', 'Vendor Name'),
+            ('order_unit', 'Order Unit'),
             ('hub_handling_check', 'HUB Handling Check'), ('tax_type', 'Tax Type'),
             ('registration_date', 'Registration Date'), ('product_registry_pic', 'Product Registry PIC')
         ]
@@ -6027,7 +6028,15 @@ def apply_all_registered_items_filters(q, args, exclude_fields=None):
     date_filter = args.get('date_filter', 'all')
     date_from = args.get('date_from', '')
     date_to = args.get('date_to', '')
-    pic_name = (args.get('pic_name', '') or '').strip()
+    # NOTE: `pic_name` is intentionally NOT applied here as a SQL filter.
+    # The "PIC" shown in the table is the RESOLVED pic (looked up from
+    # MasterPIC by category_id or category_name), not the raw
+    # `product_registry_pic` column. Filtering by SQL on the raw column would
+    # give wrong results. PIC filtering is done in Python after resolution
+    # (see get_all_registered_items / export_all_registered_items). To support
+    # `exclude_fields={'pic_name'}` semantics for the option-builder queries,
+    # we simply accept the key here as a no-op.
+    # pic_name = (args.get('pic_name', '') or '').strip()
     mfr_names = [clean(v) for v in args.getlist('mfr_name') if clean(v)]
     vendor_names = [clean(v) for v in args.getlist('vendor_name') if clean(v)]
 
@@ -6048,8 +6057,6 @@ def apply_all_registered_items_filters(q, args, exclude_fields=None):
             if date_to:
                 q = q.filter(ProductIDDB.registration_date <= date_to)
 
-    if pic_name:
-        q = q.filter(ProductIDDB.product_registry_pic.ilike(f'%{pic_name}%'))
     if prod_ids:
         q = q.filter(ProductIDDB.product_id.in_(prod_ids))
     if 'mfr_name' not in exclude_fields and mfr_names:
@@ -6075,14 +6082,31 @@ def apply_all_registered_items_filters(q, args, exclude_fields=None):
     return q
 
 
-def serialize_registered_product(row, pic_map=None):
+def serialize_registered_product(row, pic_map=None, pic_by_name=None):
+    """Serialize a ProductIDDB row for the All Registered Items API.
+
+    PIC resolution mirrors Item Registration / Pending Delivery:
+    1. Try category_id lookup (MasterPIC.category_id == row.category_id)
+    2. Fall back to category_name lookup (MasterPIC.category_name == source_category_level1(row.category_name))
+    This double lookup is required because some ProductIDDB rows don't have a
+    category_id that matches any MasterPIC entry, but their category_name
+    still matches a MasterPIC row.
+    """
     pic_map = pic_map or {}
+    pic_by_name = pic_by_name or {}
     cat_id = normalize_category_id(row.category_id)
+    # Try by ID first, then by category name (level-1 only).
+    pic = pic_map.get(cat_id)
+    if not pic:
+        cat_name_norm = normalize_category_name(row.category_name)
+        if cat_name_norm:
+            pic = pic_by_name.get(cat_name_norm)
     return {
         'id': row.id,
         'prod_id': clean_product_id(row.product_id),
+        'category_id': cat_id or '',
         'category': source_category_level1(row.category_name),
-        'pic': pic_map.get(cat_id) or '',
+        'pic': pic or '',
         'prod_name': row.product_name or '',
         'spec': row.specification or '',
         'mfr_name': row.manufacturer_name or '',
@@ -6113,9 +6137,51 @@ def get_all_registered_items():
         per_page = int(request.args.get('per_page', 10))
         q = apply_all_registered_items_filters(base_all_registered_items_query(), request.args)
         total = q.count()
+
+        # Build BOTH PIC lookup maps (by category_id and by normalized category
+        # name) so we can resolve PIC for rows whose category_id doesn't have
+        # a direct MasterPIC match but whose category_name does. Mirrors
+        # `_lookup_pic_by_category` used by Item Registration.
+        by_id, by_name = master_pic_maps()
+        pic_map = by_id
+        pic_by_name = by_name
+
         rows = q.order_by(ProductIDDB.registration_date.desc(), ProductIDDB.product_id.asc()).offset((page-1)*per_page).limit(per_page).all()
-        pic_map = {normalize_category_id(m.category_id): m.pic_name for m in db.session.query(MasterPIC).all()}
-        data = [serialize_registered_product(row, pic_map) for row in rows]
+        data = [serialize_registered_product(row, pic_map, pic_by_name) for row in rows]
+
+        # If user filtered by PIC, we must filter the *resolved* PIC (not the
+        # raw product_registry_pic column). The resolver runs in Python, so we
+        # need to re-resolve every candidate row and keep only matching ones.
+        # This is a paginated re-query: fetch a larger candidate pool, filter,
+        # then slice — acceptable because the table size is modest and the
+        # filter is rare.
+        pic_filter = (request.args.get('pic_name', '') or '').strip()
+        if pic_filter:
+            # Re-query WITHOUT pagination to get the full filtered set, then
+            # paginate in Python so the resolved PIC filter actually narrows
+            # the result instead of just slicing an unfiltered page.
+            all_rows = q.order_by(ProductIDDB.registration_date.desc(), ProductIDDB.product_id.asc()).all()
+            all_data = [serialize_registered_product(r, pic_map, pic_by_name) for r in all_rows]
+            data = [d for d in all_data if d.get('pic') == pic_filter]
+            total = len(data)
+            start = (page - 1) * per_page
+            data = data[start:start + per_page]
+
+        # Build PIC options for the dropdown — collect distinct resolved PICs
+        # across the (un-PIC-filtered) full set. Cheap because we already have
+        # by_id / by_name maps; we just need to enumerate MasterPIC PIC names
+        # that actually appear in the current filtered data.
+        pic_option_q = apply_all_registered_items_filters(base_all_registered_items_query(), request.args, exclude_fields={'pic_name'})
+        # Resolve PIC for every row in the option query (no pagination). Use
+        # Python-side resolution since PIC is derived, not stored.
+        option_rows = pic_option_q.all()
+        pic_set = set()
+        for r in option_rows:
+            resolved = serialize_registered_product(r, pic_map, pic_by_name).get('pic') or ''
+            if resolved:
+                pic_set.add(resolved)
+        pic_options = sorted(pic_set)
+
         mfr_option_q = apply_all_registered_items_filters(base_all_registered_items_query(), request.args, exclude_fields={'mfr_name'})
         vendor_option_q = apply_all_registered_items_filters(base_all_registered_items_query(), request.args, exclude_fields={'vendor_name'})
         payload = {
@@ -6126,6 +6192,7 @@ def get_all_registered_items():
             'filters': {
                 'mfr_names': sorted([r[0] for r in mfr_option_q.with_entities(ProductIDDB.manufacturer_name).distinct().all() if r[0]]),
                 'vendor_names': sorted([r[0] for r in vendor_option_q.with_entities(ProductIDDB.vendor_name).distinct().all() if r[0]]),
+                'pic_options': pic_options,
             }
         }
         runtime_cache_set(cache_key, payload, ttl_seconds=60)
@@ -6139,12 +6206,15 @@ def get_all_registered_items():
 def export_all_registered_items():
     try:
         q = apply_all_registered_items_filters(base_all_registered_items_query(), request.args)
+        by_id, by_name = master_pic_maps()
         rows = q.order_by(ProductIDDB.registration_date.desc(), ProductIDDB.product_id.asc()).all()
-        pic_map = {normalize_category_id(m.category_id): m.pic_name for m in db.session.query(MasterPIC).all()}
+        # If user filtered by PIC, narrow rows down by resolved PIC value
+        # (the resolved PIC isn't a DB column, so we filter in Python).
+        pic_filter = (request.args.get('pic_name', '') or '').strip()
         wb = Workbook()
         ws = wb.active
         ws.title = 'All Registered Items'
-        headers = ['Product ID', 'Category', 'PIC', 'Product Name', 'Specification', 'Manufacturer Name', 'Vendor Name', 'Order Unit', 'Hub Handling Check', 'Tax Type', 'Registration Date', 'Registry PIC', 'Status']
+        headers = ['Product ID', 'Category ID', 'Category', 'PIC', 'Product Name', 'Specification', 'Manufacturer Name', 'Vendor Name', 'Order Unit', 'Hub Handling Check', 'Tax Type', 'Registration Date', 'Registry PIC', 'Status']
         ws.append(headers)
         header_fill = PatternFill(start_color="1D4ED8", end_color="1D4ED8", fill_type="solid")
         for cell in ws[1]:
@@ -6152,13 +6222,15 @@ def export_all_registered_items():
             cell.font = Font(bold=True, color="FFFFFF")
             cell.alignment = Alignment(horizontal='center')
         for row in rows:
-            item = serialize_registered_product(row, pic_map)
+            item = serialize_registered_product(row, by_id, by_name)
+            if pic_filter and (item.get('pic') or '') != pic_filter:
+                continue
             ws.append([
-                item['prod_id'], item['category'], item['pic'], item['prod_name'], item['spec'],
+                item['prod_id'], item['category_id'], item['category'], item['pic'], item['prod_name'], item['spec'],
                 item['mfr_name'], item['vendor_name'], item['odr_unit'], item['hub_handling_check'],
                 item['tax_type'], item['registration_date'], item['product_registry_pic'], item['proc_status']
             ])
-        widths = [18, 28, 18, 35, 45, 28, 28, 14, 20, 14, 18, 24, 16]
+        widths = [18, 16, 28, 18, 35, 45, 28, 28, 14, 20, 14, 18, 24, 16]
         for i, width in enumerate(widths, 1):
             ws.column_dimensions[get_column_letter(i)].width = width
         output = io.BytesIO()
