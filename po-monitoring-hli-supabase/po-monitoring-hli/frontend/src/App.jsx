@@ -1704,8 +1704,10 @@ const App = () => {
   const [registeredItemsAppliedSearch, setRegisteredItemsAppliedSearch] = useState('');
   const [registeredItemsProdIds, setRegisteredItemsProdIds] = useState([]);
   const [registeredItemsAppliedProdIds, setRegisteredItemsAppliedProdIds] = useState([]);
+  const [registeredItemsPicFilter, setRegisteredItemsPicFilter] = useState('');
+  const [registeredItemsAppliedPicFilter, setRegisteredItemsAppliedPicFilter] = useState('');
   const [registeredItemsFilters, setRegisteredItemsFilters] = useState({ mfr_names: [], vendor_names: [] });
-  const [registeredItemsOptions, setRegisteredItemsOptions] = useState({ mfr_names: [], vendor_names: [] });
+  const [registeredItemsOptions, setRegisteredItemsOptions] = useState({ mfr_names: [], vendor_names: [], pic_options: [] });
 
   // Vendor Control
   const [vendorControlData, setVendorControlData] = useState([]);
@@ -1900,6 +1902,11 @@ const App = () => {
         const left = cumulativeLeft;
         const w = widths[idx];
         if (Number.isFinite(w) && w > 0) cumulativeLeft += w;
+        // IMPORTANT: backgrounds use !important so the pinned header & cells
+        // are NEVER transparent. Without this, Tailwind's `bg-slate-50` /
+        // `bg-gray-800/60` on the parent <thead> + sticky positioning can
+        // render semi-transparent, making the stuck header text collide
+        // with the row text scrolling beneath it.
         rules.push(`
           .freeze-table-${tableKey} th:nth-child(${idx}),
           .freeze-table-${tableKey} td:nth-child(${idx}) {
@@ -1912,17 +1919,33 @@ const App = () => {
           .freeze-table-${tableKey} thead th:nth-child(${idx}) {
             z-index: 45;
           }
-          .data-table-page:not(.data-table-page-dark) .freeze-table-${tableKey} td:nth-child(${idx}):not([class*="bg-"]) {
-            background: #ffffff;
+          /* Pinned cells must be FULLY opaque — solid background beats any
+             Tailwind utility on the <tr>/<thead>/<table> ancestors. */
+          .data-table-page:not(.data-table-page-dark) .freeze-table-${tableKey} thead th:nth-child(${idx}) {
+            background: #e2e8f0 !important;
           }
-          .data-table-page:not(.data-table-page-dark) .freeze-table-${tableKey} thead th:nth-child(${idx}):not([class*="bg-"]) {
-            background: #e2e8f0;
+          .data-table-page:not(.data-table-page-dark) .freeze-table-${tableKey} tbody td:nth-child(${idx}) {
+            background: #ffffff !important;
           }
-          .data-table-page-dark .freeze-table-${tableKey} td:nth-child(${idx}):not([class*="bg-"]) {
-            background: #1f2937;
+          .data-table-page:not(.data-table-page-dark) .freeze-table-${tableKey} tfoot td:nth-child(${idx}) {
+            background: #f1f5f9 !important;
           }
-          .data-table-page-dark .freeze-table-${tableKey} thead th:nth-child(${idx}):not([class*="bg-"]) {
-            background: #374151;
+          .data-table-page-dark .freeze-table-${tableKey} thead th:nth-child(${idx}) {
+            background: #374151 !important;
+          }
+          .data-table-page-dark .freeze-table-${tableKey} tbody td:nth-child(${idx}) {
+            background: #1f2937 !important;
+          }
+          .data-table-page-dark .freeze-table-${tableKey} tfoot td:nth-child(${idx}) {
+            background: #111827 !important;
+          }
+          /* Row hover should still tint the pinned cell so users see which
+             row they're hovering across the frozen pane. */
+          .data-table-page:not(.data-table-page-dark) .freeze-table-${tableKey} tbody tr:hover td:nth-child(${idx}) {
+            background: #f8fafc !important;
+          }
+          .data-table-page-dark .freeze-table-${tableKey} tbody tr:hover td:nth-child(${idx}) {
+            background: #283548 !important;
           }
         `);
       }
@@ -2246,7 +2269,8 @@ const App = () => {
     perPage = registeredItemsPerPage,
     search = registeredItemsAppliedSearch,
     prodIds = registeredItemsAppliedProdIds,
-    filters = registeredItemsFilters
+    filters = registeredItemsFilters,
+    picFilter = registeredItemsAppliedPicFilter
   ) => {
     setLoading(true);
     try {
@@ -2255,10 +2279,11 @@ const App = () => {
       (prodIds || []).forEach(v => params.append('prod_id', v));
       resolveFilter(filters.mfr_names).forEach(v => params.append('mfr_name', v));
       resolveFilter(filters.vendor_names).forEach(v => params.append('vendor_name', v));
+      if (picFilter) params.append('pic_name', picFilter);
       const res = await api.get(`/api/all-registered-items?${params}`);
       setRegisteredItemsData(Array.isArray(res.data.data) ? res.data.data : []);
       setRegisteredItemsTotal(res.data.total || 0);
-      setRegisteredItemsOptions(res.data.filters || { mfr_names: [], vendor_names: [] });
+      setRegisteredItemsOptions(res.data.filters || { mfr_names: [], vendor_names: [], pic_options: [] });
     } catch (e) {
       addToast(`Failed to load All Registered Items: ${e.response?.data?.error || e.message}`, 'error');
     } finally { setLoading(false); }
@@ -2268,7 +2293,8 @@ const App = () => {
     registeredItemsPerPage,
     registeredItemsAppliedSearch,
     registeredItemsAppliedProdIds,
-    registeredItemsFilters
+    registeredItemsFilters,
+    registeredItemsAppliedPicFilter
   ]);
 
   const fetchRFQData = useCallback(async (page = rfqPage, perPage = rfqPerPage, search = rfqAppliedSearch, refresh = false, filters = rfqFilters, pic = rfqPicFilter, showSimilarity = rfqShowSimilarity) => {
@@ -2498,7 +2524,9 @@ const App = () => {
         registeredItemsPage,
         registeredItemsPerPage,
         registeredItemsAppliedSearch,
-        registeredItemsAppliedProdIds
+        registeredItemsAppliedProdIds,
+        registeredItemsFilters,
+        registeredItemsAppliedPicFilter
       );
     }
   }, [
@@ -2507,6 +2535,7 @@ const App = () => {
     registeredItemsPerPage,
     registeredItemsAppliedSearch,
     registeredItemsAppliedProdIds,
+    registeredItemsAppliedPicFilter,
     fetchRegisteredItems
   ]);
 
@@ -3884,8 +3913,11 @@ const App = () => {
 
   const renderAllRegisteredItems = () => {
     const totalPages = Math.max(1, Math.ceil(registeredItemsTotal / registeredItemsPerPage));
+    // NOTE: column order MUST match <colgroup> + <td> order below.
+    // "Category ID" is placed to the LEFT of "Category" per spec.
     const columns = [
       ['Product ID', 'prod_id'],
+      ['Category ID', 'category_id'],
       ['Category', 'category'],
       ['PIC', 'pic'],
       ['Product Name', 'prod_name'],
@@ -3899,15 +3931,27 @@ const App = () => {
       ['Product Registry PIC', 'product_registry_pic'],
     ];
 
+    // Apply PIC dropdown filter (locally selected) — sends to backend which
+    // resolves PIC by category_id OR category_name (same logic as Item
+    // Registration / Pending Delivery).
+    const applyPicFilter = (nextPic) => {
+      setRegisteredItemsPicFilter(nextPic);
+      setRegisteredItemsAppliedPicFilter(nextPic);
+      setRegisteredItemsPage(1);
+      fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, registeredItemsFilters, nextPic);
+    };
+
     const handleClear = () => {
       setRegisteredItemsSearch('');
       setRegisteredItemsAppliedSearch('');
       setRegisteredItemsProdIds([]);
       setRegisteredItemsAppliedProdIds([]);
+      setRegisteredItemsPicFilter('');
+      setRegisteredItemsAppliedPicFilter('');
       const emptyFilters = { mfr_names: [], vendor_names: [] };
       setRegisteredItemsFilters(emptyFilters);
       setRegisteredItemsPage(1);
-      fetchRegisteredItems(1, registeredItemsPerPage, '', [], emptyFilters);
+      fetchRegisteredItems(1, registeredItemsPerPage, '', [], emptyFilters, '');
     };
 
     const downloadRegisteredExcel = () => {
@@ -3916,6 +3960,7 @@ const App = () => {
       (registeredItemsAppliedProdIds || []).forEach(v => p.append('prod_id', v));
       resolveFilter(registeredItemsFilters.mfr_names).forEach(v => p.append('mfr_name', v));
       resolveFilter(registeredItemsFilters.vendor_names).forEach(v => p.append('vendor_name', v));
+      if (registeredItemsAppliedPicFilter) p.append('pic_name', registeredItemsAppliedPicFilter);
       downloadBlob(`/api/export/all-registered-items?${p}`, `All_Registered_Items_${new Date().toISOString().slice(0,10)}.xlsx`, 'All Registered Items');
     };
 
@@ -3925,6 +3970,11 @@ const App = () => {
     };
     const fmtProductId = (v) => {
       if (v == null || v === '') return '-';
+      return String(v).replace(/\.0+$/, '');
+    };
+    const fmtCategoryId = (v) => {
+      if (v == null || v === '') return '-';
+      // Category IDs are numeric — strip trailing ".0" that pandas adds.
       return String(v).replace(/\.0+$/, '');
     };
 
@@ -3942,17 +3992,32 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-[minmax(240px,1fr)_170px_minmax(180px,1fr)_minmax(180px,1fr)_90px_110px] items-end">
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-[minmax(240px,1fr)_170px_180px_minmax(180px,1fr)_minmax(180px,1fr)_90px_110px] items-end">
             <div className="min-w-0">
-              <RFQMultiSearch value={registeredItemsSearch} onChange={setRegisteredItemsSearch} onSearch={(next) => { setRegisteredItemsAppliedSearch(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, next, registeredItemsAppliedProdIds, registeredItemsFilters); }} darkMode={darkMode} txt2={txt2} label="Search" description="Enter Product ID, Product Name, Specification, Manufacturer, or Vendor per line. Results match any entered value." placeholder={'8381684\nBearing SKF\nVendor ABC'} />
+              <RFQMultiSearch value={registeredItemsSearch} onChange={setRegisteredItemsSearch} onSearch={(next) => { setRegisteredItemsAppliedSearch(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, next, registeredItemsAppliedProdIds, registeredItemsFilters, registeredItemsAppliedPicFilter); }} darkMode={darkMode} txt2={txt2} label="Search" description="Enter Product ID, Product Name, Specification, Manufacturer, or Vendor per line. Results match any entered value." placeholder={'8381684\nBearing SKF\nVendor ABC'} />
             </div>
             <div className="min-w-0">
               <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Prod ID</label>
-              <SearchInput key={`registered-prod-id-${registeredItemsProdIds.join('|')}`} placeholder={'8381684\n8382076'} label="Prod ID" darkMode={darkMode} txt2={txt2} onSearch={(nums) => { setRegisteredItemsProdIds(nums); setRegisteredItemsAppliedProdIds(nums); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, nums, registeredItemsFilters); }} />
+              <SearchInput key={`registered-prod-id-${registeredItemsProdIds.join('|')}`} placeholder={'8381684\n8382076'} label="Prod ID" darkMode={darkMode} txt2={txt2} onSearch={(nums) => { setRegisteredItemsProdIds(nums); setRegisteredItemsAppliedProdIds(nums); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, nums, registeredItemsFilters, registeredItemsAppliedPicFilter); }} />
             </div>
-            <MultiSelect label="Manufacturer Name" options={registeredItemsOptions.mfr_names || []} selected={registeredItemsFilters.mfr_names} onChange={v => { const next={...registeredItemsFilters, mfr_names:v}; setRegisteredItemsFilters(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, next); }} darkMode={darkMode} txt2={txt2} />
-            <MultiSelect label="Vendor Name" options={registeredItemsOptions.vendor_names || []} selected={registeredItemsFilters.vendor_names} onChange={v => { const next={...registeredItemsFilters, vendor_names:v}; setRegisteredItemsFilters(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, next); }} darkMode={darkMode} txt2={txt2} />
-            <button onClick={() => { setRegisteredItemsAppliedSearch(registeredItemsSearch); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsSearch, registeredItemsAppliedProdIds, registeredItemsFilters); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">Search</button>
+            {/* PIC dropdown — resolved server-side using MasterPIC by category_id
+                OR category_name, identical to Item Registration / Pending Delivery. */}
+            <div className="min-w-0">
+              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>PIC</label>
+              <select
+                value={registeredItemsPicFilter}
+                onChange={(e) => applyPicFilter(e.target.value)}
+                className={`w-full h-10 px-3 rounded-xl border text-sm ${darkMode ? 'bg-gray-700 border-gray-600 text-gray-100' : 'bg-white border-gray-300 text-gray-700'} focus:outline-none focus:ring-2 focus:ring-blue-500`}
+              >
+                <option value="">All PICs</option>
+                {(registeredItemsOptions.pic_options || []).map(pic => (
+                  <option key={pic} value={pic}>{pic}</option>
+                ))}
+              </select>
+            </div>
+            <MultiSelect label="Manufacturer Name" options={registeredItemsOptions.mfr_names || []} selected={registeredItemsFilters.mfr_names} onChange={v => { const next={...registeredItemsFilters, mfr_names:v}; setRegisteredItemsFilters(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, next, registeredItemsAppliedPicFilter); }} darkMode={darkMode} txt2={txt2} />
+            <MultiSelect label="Vendor Name" options={registeredItemsOptions.vendor_names || []} selected={registeredItemsFilters.vendor_names} onChange={v => { const next={...registeredItemsFilters, vendor_names:v}; setRegisteredItemsFilters(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, next, registeredItemsAppliedPicFilter); }} darkMode={darkMode} txt2={txt2} />
+            <button onClick={() => { setRegisteredItemsAppliedSearch(registeredItemsSearch); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsSearch, registeredItemsAppliedProdIds, registeredItemsFilters, registeredItemsAppliedPicFilter); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">Search</button>
             <button onClick={handleClear} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
         </FilterPanel>
@@ -3960,6 +4025,7 @@ const App = () => {
         <DataTableScroll darkMode={darkMode}>
           <table className="freeze-table-all-registered-items w-full text-xs">
             <colgroup>
+              <col style={{minWidth:'120px'}}/>
               <col style={{minWidth:'120px'}}/>
               <col style={{minWidth:'140px'}}/>
               <col style={{minWidth:'80px'}}/>
@@ -3990,6 +4056,7 @@ const App = () => {
               ) : registeredItemsData.map(row => (
                 <tr key={row.id} className={`${trHov} transition-colors`}>
                   <td className="px-2 py-2 font-mono text-blue-600 whitespace-nowrap text-center">{fmtProductId(row.prod_id)}</td>
+                  <td className={`px-2 py-2 font-mono text-center whitespace-nowrap ${txt2}`} title={String(row.category_id || '')}>{fmtCategoryId(row.category_id)}</td>
                   <td className={`px-2 py-2 ${txt2}`} title={row.category}>{row.category || '-'}</td>
                   <td className="px-2 py-2 text-center whitespace-nowrap">
                     {row.pic ? (() => {
@@ -4019,8 +4086,8 @@ const App = () => {
           totalPages={totalPages}
           total={registeredItemsTotal}
           perPage={registeredItemsPerPage}
-          onPageChange={(p) => { setRegisteredItemsPage(p); fetchRegisteredItems(p, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, registeredItemsFilters); }}
-          onPerPageChange={(next) => { setRegisteredItemsPerPage(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, next, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, registeredItemsFilters); }}
+          onPageChange={(p) => { setRegisteredItemsPage(p); fetchRegisteredItems(p, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, registeredItemsFilters, registeredItemsAppliedPicFilter); }}
+          onPerPageChange={(next) => { setRegisteredItemsPerPage(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, next, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, registeredItemsFilters, registeredItemsAppliedPicFilter); }}
         />
       </div>
     );
