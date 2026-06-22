@@ -1792,12 +1792,21 @@ const App = () => {
   // the menu escapes the table card's `overflow-hidden` and is never clipped
   // or covered by the table/filter below.
   const importVendorDropdown = useFloatingDropdown(importVendorMenuOpen, 224, 280, 200);
-  const [importFilters, setImportFilters] = useState(() => ({
-    yupi_po: savedImportFilters.yupi_po || [],
-    vendors: savedImportFilters.vendors || [],
-    statuses: savedImportFilters.statuses || [],
-    daysLeft: savedImportFilters.daysLeft || [],
-  }));
+  const [importFilters, setImportFilters] = useState(() => {
+    // Coerce daysLeft to array — previously it was a string, and old
+    // localStorage entries may still contain a string. Guard against
+    // TypeError when calling .map() on a string.
+    const rawDaysLeft = savedImportFilters.daysLeft;
+    const daysLeftArr = Array.isArray(rawDaysLeft)
+      ? rawDaysLeft
+      : (typeof rawDaysLeft === 'string' && rawDaysLeft ? [rawDaysLeft] : []);
+    return {
+      yupi_po: savedImportFilters.yupi_po || [],
+      vendors: savedImportFilters.vendors || [],
+      statuses: savedImportFilters.statuses || [],
+      daysLeft: daysLeftArr,
+    };
+  });
   const [importOptions, setImportOptions] = useState(() => ({
     yupi_po: [],
     vendors: [],
@@ -5692,7 +5701,7 @@ const App = () => {
               <MultiSelect
                 label="Days Left"
                 options={['Red (≤7 / overdue)', 'Yellow (8–29)', 'Green (≥30)', 'Today (0)']}
-                selected={(importFilters.daysLeft || []).map(v => ({
+                selected={(Array.isArray(importFilters.daysLeft) ? importFilters.daysLeft : []).map(v => ({
                   red: 'Red (≤7 / overdue)',
                   yellow: 'Yellow (8–29)',
                   green: 'Green (≥30)',
