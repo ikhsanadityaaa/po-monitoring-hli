@@ -1267,11 +1267,31 @@ const DataTableScroll = ({ children, className = '', darkMode }) => {
         clone.style.boxSizing = 'border-box';
         clone.style.backgroundClip = 'padding-box';
         clone.style.transform = '';
-        clone.style.background = thStyles.backgroundColor || (darkMode ? '#374151' : '#e2e8f0');
 
-        if (thStyles.position === 'sticky') {
+        // BACKGROUND — must be FULLY OPAQUE for every clone. The original th
+        // often has a transparent computed background-color (it relies on
+        // <thead className="bg-slate-50"> inheritance, which doesn't show up
+        // in getComputedStyle for the th itself — background is NOT
+        // inherited). When the clone ends up transparent, the next column's
+        // text scrolls underneath and shows through, producing the overlap
+        // bug the user reported.
+        //
+        // Solution:
+        //  • For sticky (pinned) ths → always use solid header bg color.
+        //  • For non-pinned ths → use the original bg if it's opaque,
+        //    otherwise fall back to the same solid header color.
+        const solidHeaderBg = darkMode ? '#374151' : '#e2e8f0';
+        const origBg = thStyles.backgroundColor;
+        const isTransparentBg = !origBg
+          || origBg === 'transparent'
+          || origBg === 'rgba(0, 0, 0, 0)'
+          || origBg === 'rgba(0,0,0,0)';
+        const isSticky = thStyles.position === 'sticky';
+        clone.style.background = (isSticky || isTransparentBg) ? solidHeaderBg : origBg;
+
+        if (isSticky) {
           clone.style.zIndex = '45';
-          clone.style.boxShadow = thStyles.boxShadow;
+          clone.style.boxShadow = thStyles.boxShadow || '10px 0 14px -14px rgba(15, 23, 42, 0.55)';
         } else {
           clone.style.zIndex = '1';
           clone.style.boxShadow = '';
@@ -4869,15 +4889,16 @@ const App = () => {
         // rule in <style> can target it as a backstop (see the global CSS
         // block at the top of this file for `input[data-no-focus-ring]:focus`).
         const inputCls = `block w-full min-h-8 px-2 py-1 text-xs border-0 rounded-none ring-0 outline-none focus:outline-none focus:ring-0 focus-visible:outline-none shadow-none ${darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`;
-        const inputStyle = { outline: 'none', outlineStyle: 'none', boxShadow: 'none', borderColor: 'transparent', borderWidth: 0 };
+        const inputStyle = { outline: 'none', outlineStyle: 'none', outlineWidth: 0, boxShadow: 'none', borderColor: 'transparent', borderWidth: 0 };
         // Date input: clean style without box-shadow/appearance suppression — these break the native calendar picker.
         const dateInputCls = `block w-full min-h-8 px-2 py-1 text-xs rounded-none outline-none focus:outline-none ${darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`;
-        const dateInputStyle = { outline: 'none', outlineStyle: 'none', borderColor: 'transparent', borderWidth: 0 };
+        const dateInputStyle = { outline: 'none', outlineStyle: 'none', outlineWidth: 0, borderColor: 'transparent', borderWidth: 0 };
         if (isDateField) {
           return (
             <input
               type="date"
               autoFocus
+              data-no-focus-ring=""
               className={dateInputCls}
               style={dateInputStyle}
               value={toDateInputValue(importEditValue)}
@@ -6205,12 +6226,13 @@ const App = () => {
       className={`min-h-screen font-sans ${darkMode?'bg-gray-900':'bg-[#edf2f1]'} ${darkMode?'':'text-[#1f2937]'}`}
       style={{
         fontFamily: "'Inter', 'Plus Jakarta Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-        // Tabular figures + slashed zeros so digit 0 is never confused with
-        // letter O — the #1 complaint about the old font. Applied globally
-        // so EVERY number (sidebar, dashboard, tables, modals) is rendered
-        // consistently with the same digit style as Item Registration.
-        fontFeatureSettings: '"tnum" 1, "zero" 1',
-        fontVariantNumeric: 'tabular-nums slashed-zero',
+        // Tabular figures only (digits occupy equal width so columns of
+        // numbers align perfectly). We DO NOT enable the "zero" OpenType
+        // feature — that adds a slash/dot inside 0, which the user explicitly
+        // rejected. Plain 0 (Inter's default) matches what the Item
+        // Registration page shows.
+        fontFeatureSettings: '"tnum" 1',
+        fontVariantNumeric: 'tabular-nums',
       }}
     >
     <style>{`
@@ -6218,9 +6240,8 @@ const App = () => {
            FONT BASELINE — Inter for everything, JetBrains Mono for
            monospace blocks. Loaded from Google Fonts. Matches the
            typography used on Item Registration so the entire dashboard
-           looks unified AND digit 0 is never confused with letter O
-           (Inter & JetBrains Mono both ship the "zero" OpenType feature
-           which renders 0 with a slash through it).
+           looks unified. Plain 0 (no slash, no dot) — Inter's default
+           digit zero is used everywhere.
            NOTE: @import statements MUST appear before any other rules
            in a stylesheet, so they live at the very top here.
            ───────────────────────────────────────────────────────────── */
@@ -6228,20 +6249,22 @@ const App = () => {
         @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
 
         /* Global typography baseline. tnum = tabular figures (digits
-           occupy equal width so columns of numbers align perfectly),
-           zero = slashed zero. Applied to EVERY element so there is no
-           drift between sidebar / dashboard / tables / modals. */
+           occupy equal width so columns of numbers align perfectly).
+           The "zero" feature is INTENTIONALLY NOT enabled — the user
+           wants plain 0 (no slash, no dot) just like Item Registration.
+           Applied to EVERY element so there is no drift between sidebar
+           / dashboard / tables / modals. */
         *, *::before, *::after {
           font-family: 'Inter', 'Plus Jakarta Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
-          font-feature-settings: "tnum" 1, "zero" 1 !important;
-          font-variant-numeric: tabular-nums slashed-zero !important;
+          font-feature-settings: "tnum" 1 !important;
+          font-variant-numeric: tabular-nums !important;
         }
         /* Monospace blocks (formulas, code, ID columns) — JetBrains Mono
-           also has a dotted/slashed zero for clear distinction from O. */
+           with plain 0 as well (no slashed/dotted zero feature). */
         .font-mono, code, pre, kbd {
           font-family: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace !important;
-          font-feature-settings: "tnum" 1, "zero" 1 !important;
-          font-variant-numeric: tabular-nums slashed-zero !important;
+          font-feature-settings: "tnum" 1 !important;
+          font-variant-numeric: tabular-nums !important;
         }
 
         /* Suppress chart/card entry animations (they slow down the UI on re-render)
