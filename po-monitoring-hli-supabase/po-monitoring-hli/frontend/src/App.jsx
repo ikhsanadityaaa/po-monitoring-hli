@@ -3219,7 +3219,9 @@ const App = () => {
   const downloadApprovalSOExcel = () => {
     const rows = sortedApprovalSOData.map((so) => {
       const poAmount = (Number(so.purchasing_price) || 0) * (Number(so.so_qty) || 0);
-      const margin = (Number(so.sales_amount) || 0) - poAmount;
+      // Margin valid only when purchase is positive (not empty/zero/negative)
+      const purchaseValid = poAmount > 0;
+      const margin = purchaseValid ? (Number(so.sales_amount) || 0) - poAmount : null;
       return {
         'SO Item': so.so_item || '',
         'Item Name': so.product_name || '',
@@ -6586,10 +6588,13 @@ const App = () => {
                 return sortedSOData.map((so) => {
                 const isDeliveryCompleted = so.so_status === 'Delivery Completed';
                 const poAmount = Number(so.purchasing_amount) || ((Number(so.purchasing_price) || 0) * (Number(so.so_qty) || 0));
-                const margin = (so.sales_amount || 0) - poAmount;
-                const marginPct = poAmount !== 0 ? (margin / poAmount) * 100 : null;
+                // Margin valid only when purchase is positive (not empty/zero/negative).
+                // Invalid purchase → margin = null, displayed as '-'.
+                const purchaseValid = poAmount > 0;
+                const margin = purchaseValid ? (so.sales_amount || 0) - poAmount : null;
+                const marginPct = purchaseValid ? (margin / poAmount) * 100 : null;
                 const workingDays = Number.isFinite(Number(so.aging_days)) ? Number(so.aging_days) : workingDaysUntilToday(so.so_create_date);
-                const marginColor = margin < 0 ? 'text-red-600 font-semibold' : margin > 0 ? 'text-green-600 font-semibold' : txt2;
+                const marginColor = margin == null ? txt2 : margin < 0 ? 'text-red-600 font-semibold' : margin > 0 ? 'text-green-600 font-semibold' : txt2;
                 return (
                 <tr key={so.id} className={`${trHov} transition-colors`}>
                   <td className="px-2 py-2 text-center whitespace-nowrap">
@@ -6635,7 +6640,7 @@ const App = () => {
                   <td className={`px-3 py-2 text-center font-bold whitespace-nowrap min-w-[130px] ${kpiValue}`}>{fmtCur(so.sales_amount)}</td>
                   <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{so.purchasing_currency || '-'}</td>
                   <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${txt}`}>{fmtCur(so.purchasing_price)}</td>
-                  <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${marginColor}`}>{fmtCur(margin)}</td>
+                  <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${marginColor}`}>{margin == null ? '-' : fmtCur(margin)}</td>
                   <td className={`px-3 py-2 text-right whitespace-nowrap ${marginColor}`}>
                     {marginPct !== null ? `${marginPct.toFixed(1)}%` : '-'}
                   </td>
