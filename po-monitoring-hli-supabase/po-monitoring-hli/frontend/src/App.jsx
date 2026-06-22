@@ -415,10 +415,16 @@ const IMPORT_STATUS_OPTIONS = ['ON PROCESS', 'ON DELIVERY', 'DELIVERED', 'CANCEL
 const IMPORT_CHECKLIST_TRUE = new Set(['true', '1', 'yes', 'ya', 'y', 'checked', 'done', 'ok', '✓', '✅']);
 const IMPORT_CHECKLIST_FALSE = new Set(['false', '0', 'no', 'tidak', 'n', 'unchecked', '❌']);
 const IMPORT_CHECKLIST_VALUES = new Set([...IMPORT_CHECKLIST_TRUE, ...IMPORT_CHECKLIST_FALSE]);
-const IMPORT_CHECKLIST_FIELDS = new Set(['sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo', 'non_ski']);
+// sap_input is a checkbox toggle but NOT part of the hide-checklist group
+// (always visible). non_ski is a regular editable text cell (not checkbox).
+const IMPORT_CHECKLIST_FIELDS = new Set(['bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo']);
+// sap_input renders as a checkmark toggle but is NOT hidden behind the
+// "Show Checklist" button — it's always visible.
+const IMPORT_CHECKBOX_ALWAYS_VISIBLE = new Set(['sap_input']);
 const IMPORT_FORMULA_FIELDS = new Set(['days_left', 'site', 'vendor', 'arrival_check', 'purchase_amount', 'lt_days']);
 
 const isImportChecklistColumn = (col) => Boolean(col?.checkbox) || IMPORT_CHECKLIST_FIELDS.has(col?.field);
+const isImportHideableChecklistColumn = (col) => isImportChecklistColumn(col) && !IMPORT_CHECKBOX_ALWAYS_VISIBLE.has(col?.field);
 const isImportFormulaColumn = (col) => Boolean(col?.formula) || IMPORT_FORMULA_FIELDS.has(col?.field);
 const isImportHyperlinkColumn = (col) => Boolean(col?.hyperlink) || col?.field === 'soft_copy_doc';
 
@@ -5121,7 +5127,7 @@ const App = () => {
   const renderImport = () => {
     const totalPages = Math.max(1, Math.ceil(importTotal / importPerPage));
     const columns = importColumns || [];
-    const checklistFields = new Set(columns.filter(col => isImportChecklistColumn(col)).map(col => col.field));
+    const checklistFields = new Set(columns.filter(col => isImportHideableChecklistColumn(col)).map(col => col.field));
     const checklistCount = checklistFields.size;
     const visibleColumns = showImportChecklist ? columns : columns.filter(col => !checklistFields.has(col.field));
     // A "group" column repeats the same value for every item that belongs to
@@ -5243,24 +5249,6 @@ const App = () => {
         );
       }
 
-      // Yes/No dropdown (e.g. NON-SKI) — rendered as a <select> with Yes/No
-      // options instead of the green/gray circle toggle. Still part of the
-      // checklist group (hidden by default, shown via Show Checklist).
-      if (col.yes_no) {
-        const checked = importCheckboxChecked(value);
-        const selectVal = checked ? 'Yes' : 'No';
-        return (
-          <select
-            value={selectVal}
-            onChange={(e) => updateImportCell(row._row_key, col.field, e.target.value === 'Yes' ? 'TRUE' : 'FALSE')}
-            className={`w-full h-7 rounded-lg border px-1 py-0 text-[11px] font-bold outline-none cursor-pointer ${checked ? (darkMode ? 'bg-green-900/45 text-green-100 border-green-700' : 'bg-green-50 text-green-700 border-green-200') : (darkMode ? 'bg-gray-700 text-gray-100 border-gray-600' : 'bg-white text-gray-700 border-gray-300')}`}
-          >
-            <option value="Yes">Yes</option>
-            <option value="No">No</option>
-          </select>
-        );
-      }
-
       if (isImportChecklistColumn(col)) {
         const checked = importCheckboxChecked(value);
         return (
@@ -5271,7 +5259,7 @@ const App = () => {
             title={checked ? 'Checked' : 'Unchecked'}
           >
             {checked ? (
-              <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#20B71F]">
+              <span className={`inline-flex h-6 w-6 items-center justify-center rounded-full ${darkMode ? 'bg-emerald-600' : 'bg-emerald-500'}`}>
                 <Check className="w-4 h-4 text-white stroke-[4]" />
               </span>
             ) : (
