@@ -3420,7 +3420,7 @@ const App = () => {
   const card  = darkMode ? 'bg-gray-800 border border-gray-700 shadow-sm' : 'bg-white border border-gray-200/80 shadow-[0_8px_24px_rgba(15,23,42,0.05)]';
   const txt   = darkMode ? 'text-white' : 'text-[#1f2937]';
   const txt2  = darkMode ? 'text-gray-400' : 'text-[#55585d]';
-  const tblHd = darkMode ? 'bg-gray-800/60' : 'bg-slate-50';
+  const tblHd = darkMode ? 'bg-gray-800' : 'bg-slate-200';
   const tblDv = darkMode ? 'divide-gray-700' : 'divide-gray-100';
   const trHov = darkMode ? 'hover:bg-gray-700' : 'hover:bg-[#f7f7f5]';
   const kpiValue = darkMode ? 'text-gray-100' : 'text-[#334155]';
@@ -5683,17 +5683,17 @@ const App = () => {
                 <tr><td colSpan={Math.max(1, visibleColumns.length)} className={`px-4 py-12 text-center ${txt2}`}><Ship className="w-10 h-10 mx-auto mb-2 opacity-40"/>No import data</td></tr>
               ) : importData.map((row, rowIndex) => {
                 const hasReschedule = String(row.reschedule || '').trim();
-                // Zebra striping by GROUP: even groups → white/slate-900,
-                // odd groups → slate-50/slate-800. Rows in the same merged
-                // group share the same shade. Reschedule rows override with
-                // amber tint regardless of zebra.
+                // Zebra striping by GROUP: even groups → white, odd groups →
+                // slate-100 (light) / gray-900/40 (dark). Rows in the same
+                // merged group share the same shade. Reschedule rows override
+                // with amber tint regardless of zebra.
                 const groupIdx = importGroupIndexFor[rowIndex] || 1;
                 const isEvenGroup = groupIdx % 2 === 0;
                 const zebraClass = hasReschedule
                   ? (darkMode ? 'bg-amber-900/25 hover:bg-amber-900/35' : 'bg-amber-50 hover:bg-amber-100/70')
                   : isEvenGroup
                     ? (darkMode ? 'bg-gray-800/40 hover:bg-gray-700/50' : 'bg-white hover:bg-slate-50')
-                    : (darkMode ? 'bg-gray-900/40 hover:bg-gray-800/50' : 'bg-slate-50/80 hover:bg-slate-100/80');
+                    : (darkMode ? 'bg-gray-900/50 hover:bg-gray-800/60' : 'bg-slate-100 hover:bg-slate-200/70');
                 return <tr key={row._row_key} className={`${trHov} ${zebraClass}`}>{visibleColumns.map((col, colIdx) => {
                   const isGroupCol = isImportGroupColumn(col);
                   const groupStartRow = importGroupStartIndexFor[rowIndex];
@@ -5750,7 +5750,7 @@ const App = () => {
                       }
                     }}
                     onPaste={e => { e.preventDefault(); applyImportPaste(ownerRowIndex, col.field, e.clipboardData.getData('text/plain')); }}
-                    className={`group relative h-8 max-h-8 ${editingCellNow ? 'is-editing p-0' : 'px-2 py-1'} align-middle border-r focus:outline-none cursor-pointer ${formula ? (darkMode ? 'bg-gray-800/50' : 'bg-slate-50/80') : ''} ${hasReschedule ? (darkMode ? 'bg-amber-900/20' : 'bg-amber-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${editingCellNow ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : inMultiSelection ? 'outline outline-2 outline-blue-500 outline-offset-[-2px] bg-blue-50/50' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${col.field === 'days_left' ? 'text-center' : ''} ${txt2}`}
+                    className={`group relative h-8 max-h-8 ${editingCellNow ? 'is-editing p-0' : 'px-2 py-1'} align-middle border-r focus:outline-none cursor-pointer ${hasReschedule ? (darkMode ? 'bg-amber-900/20' : 'bg-amber-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${editingCellNow ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : inMultiSelection ? 'outline outline-2 outline-blue-500 outline-offset-[-2px] bg-blue-50/50' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${col.field === 'days_left' ? 'text-center' : ''} ${txt2}`}
                   >
                     {renderImportCell(ownerRow, col)}
                     {/* Fill handle — bottom-right corner. Drag in any direction:
