@@ -2156,6 +2156,13 @@ const App = () => {
     });
   }, [globalDateFilter, globalClientFilter, globalPicFilter]);
 
+  // ── Toast helpers (declared FIRST so the offline-queue logic below can
+  // reference them without hitting a temporal-dead-zone error). ──────────────
+  const addToast = useCallback((message, type='success') => {
+    const id = Date.now(); setToasts(t => [...t, { id, message, type }]);
+  }, []);
+  const removeToast = useCallback((id) => setToasts(t => t.filter(x => x.id !== id)), []);
+
   // ── Offline queue replay ─────────────────────────────────────────────────
   // When the browser fires `online` (or the app mounts with an existing
   // queue and the connection is up), drain the queue and replay every
@@ -2232,11 +2239,6 @@ const App = () => {
       window.removeEventListener('storage', update);
     };
   }, []);
-
-  const addToast = useCallback((message, type='success') => {
-    const id = Date.now(); setToasts(t => [...t, { id, message, type }]);
-  }, []);
-  const removeToast = useCallback((id) => setToasts(t => t.filter(x => x.id !== id)), []);
 
   function appendMultiParam(params, key, value) {
     if (value === '__NONE__') {
