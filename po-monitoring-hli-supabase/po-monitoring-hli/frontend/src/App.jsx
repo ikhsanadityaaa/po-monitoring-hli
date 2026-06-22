@@ -2699,24 +2699,51 @@ const App = () => {
   const updateImportCell = async (rowKey, field, value) => {
     setImportEditingCell(null);
     const previousRows = importData;
-    // OPTIMISTIC: update UI immediately so the user sees their edit
-    // instantly. If the network fails, we KEEP the local edit and queue the
-    // server sync for later (offline-first, Google-Sheets-style).
-    setImportData(prev => prev.map(row => row._row_key === rowKey ? { ...row, [field]: value } : row));
+    // Group-level fields: when editing po_send_date or status on one row,
+    // sync the same value to ALL rows in the same group (same YUPI PO +
+    // Req Dlv Date). This ensures one PO has one send date and one status,
+    // preventing the "2 different statuses for same PO" bug.
+    const GROUP_SYNC_FIELDS = new Set(['po_send_date', 'status']);
+    const editedRow = importData.find(r => r._row_key === rowKey);
+    const isGroupSync = GROUP_SYNC_FIELDS.has(field) && editedRow;
+    // Find all rows in the same group (same YUPI PO + Req Dlv Date).
+    const groupRowKeys = isGroupSync
+      ? importData
+          .filter(r => String(r.yupi_po ?? '').trim() === String(editedRow.yupi_po ?? '').trim()
+                     && String(r.req_dlv_date ?? '').trim() === String(editedRow.req_dlv_date ?? '').trim()
+                     && String(r.yupi_po ?? '').trim() !== '')
+          .map(r => r._row_key)
+      : [rowKey];
+    // OPTIMISTIC: update UI immediately for ALL rows in the group.
+    setImportData(prev => prev.map(row => groupRowKeys.includes(row._row_key) ? { ...row, [field]: value } : row));
     try {
-      const res = await api.put('/api/import/cell', { row_key: rowKey, field, value });
-      if (res.data?.row) {
-        setImportData(prev => prev.map(row => row._row_key === rowKey ? { ...row, ...res.data.row } : row));
+      // Send batch update to backend so all rows in the group get persisted.
+      if (isGroupSync && groupRowKeys.length > 1) {
+        const res = await api.put('/api/import/cells', {
+          updates: groupRowKeys.map(rk => ({ row_key: rk, field, value })),
+        });
+        if (Array.isArray(res.data?.rows)) {
+          const byKey = new Map(res.data.rows.map(r => [r._row_key, r]));
+          setImportData(prev => prev.map(row => byKey.has(row._row_key) ? { ...row, ...byKey.get(row._row_key) } : row));
+        }
+      } else {
+        const res = await api.put('/api/import/cell', { row_key: rowKey, field, value });
+        if (res.data?.row) {
+          setImportData(prev => prev.map(row => row._row_key === rowKey ? { ...row, ...res.data.row } : row));
+        }
       }
       return true;
     } catch (e) {
       // Network/HTTP failure → queue for replay when online. DO NOT revert
       // the local edit (user input is preserved).
       if (typeof navigator === 'undefined' || !navigator.onLine || e.message?.includes('Network') || e.code === 'ERR_NETWORK' || e.response == null) {
-        enqueueOfflineUpdate('import-cell', { row_key: rowKey, field, value });
+        if (isGroupSync && groupRowKeys.length > 1) {
+          enqueueOfflineUpdate('import-cells', { updates: groupRowKeys.map(rk => ({ row_key: rk, field, value })) });
+        } else {
+          enqueueOfflineUpdate('import-cell', { row_key: rowKey, field, value });
+        }
         addToast(`Saved offline — will sync when connection returns`, 'warning');
       } else {
-        // Server returned an actual error (4xx/5xx) — let the user know.
         addToast(`Failed to update Import data: ${e.response?.data?.error || e.message}`, 'error');
       }
       return false;
