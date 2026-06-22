@@ -415,7 +415,7 @@ const IMPORT_STATUS_OPTIONS = ['ON PROCESS', 'ON DELIVERY', 'DELIVERED', 'CANCEL
 const IMPORT_CHECKLIST_TRUE = new Set(['true', '1', 'yes', 'ya', 'y', 'checked', 'done', 'ok', '✓', '✅']);
 const IMPORT_CHECKLIST_FALSE = new Set(['false', '0', 'no', 'tidak', 'n', 'unchecked', '❌']);
 const IMPORT_CHECKLIST_VALUES = new Set([...IMPORT_CHECKLIST_TRUE, ...IMPORT_CHECKLIST_FALSE]);
-const IMPORT_CHECKLIST_FIELDS = new Set(['sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo']);
+const IMPORT_CHECKLIST_FIELDS = new Set(['sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo', 'non_ski']);
 const IMPORT_FORMULA_FIELDS = new Set(['days_left', 'site', 'vendor', 'arrival_check', 'purchase_amount', 'lt_days']);
 
 const isImportChecklistColumn = (col) => Boolean(col?.checkbox) || IMPORT_CHECKLIST_FIELDS.has(col?.field);
@@ -5239,6 +5239,24 @@ const App = () => {
                 possible if a PO Send Date was entered by mistake). */}
             <option value="NEW" style={importStatusOptionStyle('NEW')}>NEW</option>
             {IMPORT_STATUS_OPTIONS.filter(opt => String(opt).toUpperCase() !== 'NEW').map(opt => <option key={opt} value={opt} style={importStatusOptionStyle(opt)}>{opt}</option>)}
+          </select>
+        );
+      }
+
+      // Yes/No dropdown (e.g. NON-SKI) — rendered as a <select> with Yes/No
+      // options instead of the green/gray circle toggle. Still part of the
+      // checklist group (hidden by default, shown via Show Checklist).
+      if (col.yes_no) {
+        const checked = importCheckboxChecked(value);
+        const selectVal = checked ? 'Yes' : 'No';
+        return (
+          <select
+            value={selectVal}
+            onChange={(e) => updateImportCell(row._row_key, col.field, e.target.value === 'Yes' ? 'TRUE' : 'FALSE')}
+            className={`w-full h-7 rounded-lg border px-1 py-0 text-[11px] font-bold outline-none cursor-pointer ${checked ? (darkMode ? 'bg-green-900/45 text-green-100 border-green-700' : 'bg-green-50 text-green-700 border-green-200') : (darkMode ? 'bg-gray-700 text-gray-100 border-gray-600' : 'bg-white text-gray-700 border-gray-300')}`}
+          >
+            <option value="Yes">Yes</option>
+            <option value="No">No</option>
           </select>
         );
       }
