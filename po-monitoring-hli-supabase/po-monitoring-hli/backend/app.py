@@ -842,7 +842,8 @@ IMPORT_REFERENCE_VISIBLE_COLUMNS = [
     {'sheet_col': 'CW', 'field': 'forwarder',           'label': 'Forwarder',              'width': 150, 'blue_text': True},
     {'sheet_col': 'CX', 'field': 'bl_number',           'label': 'BL Number',              'width': 150, 'blue_text': True},
     {'sheet_col': 'CY', 'field': 'inv_no',              'label': 'Invoice No',             'width': 135, 'blue_text': True},
-    # SAP INPUT moved here (right after Invoice No) per user request.
+    # SAP INPUT moved here (right after Invoice No). NOT part of the checklist
+    # group — always visible as a checkmark toggle.
     {'sheet_col': 'DA', 'field': 'sap_input',           'label': 'SAP INPUT',              'width': 86,  'checkbox': True},
     # SOFT COPY DOC moved here (right after SAP INPUT) per user request.
     {'sheet_col': 'DI', 'field': 'soft_copy_doc',       'label': 'SOFT COPY DOC',          'width': 190, 'hyperlink': True},
@@ -871,10 +872,9 @@ IMPORT_REFERENCE_VISIBLE_COLUMNS = [
     {'sheet_col': 'DF', 'field': 'msds',                'label': 'MSDS',                   'width': 82,  'checkbox': True},
     {'sheet_col': 'DG', 'field': 'coa',                 'label': 'COA',                    'width': 76,  'checkbox': True},
     {'sheet_col': 'DH', 'field': 'coo',                 'label': 'COO',                    'width': 76,  'checkbox': True},
-    # NON-SKI moved to rightmost column. It's part of the checklist group
-    # (hidden by default, toggled via Show Checklist). Rendered as Yes/No
-    # dropdown in the frontend instead of the green/gray circle toggle.
-    {'sheet_col': 'CZ', 'field': 'non_ski',             'label': 'NON-SKI',                'width': 90,  'checkbox': True, 'yes_no': True},
+    # NON-SKI moved to rightmost column. Regular editable cell (free text
+    # input) — NOT a checkbox or dropdown.
+    {'sheet_col': 'CZ', 'field': 'non_ski',             'label': 'NON-SKI',                'width': 90},
 ]
 
 IMPORT_COLUMN_ALIASES = {
