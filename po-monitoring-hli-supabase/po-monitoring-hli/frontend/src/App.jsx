@@ -1191,15 +1191,35 @@ const DataTableScroll = ({ children, className = '', darkMode }) => {
       document.body.appendChild(mirror);
     };
 
-    const syncMirrorHeader = (table, thead) => {
+    const syncMirrorHeader = (table, thead, frameRect) => {
       ensureMirror();
       if (!mirrorTable) return;
+
+      // Strategy: position every mirror <th> absolutely inside the mirror
+      // container (which is a fixed overlay matching the frame's viewport
+      // rectangle). Each th's left offset is read directly from
+      // getBoundingClientRect() on the ORIGINAL th — which already accounts
+      // for the frame's horizontal scroll position because the real table is
+      // rendered inside the scrollable frame. We then subtract frameRect.left
+      // so the offset is relative to the mirror container.
+      //
+      // Pinned (sticky) columns: their real th.getBoundingClientRect().left
+      // is already "stuck" at their pinned position — so we just read it the
+      // same way, and the clone naturally stays at the correct left edge.
+      //
+      // This approach requires no translateX on the table, no counter-hacks,
+      // and works correctly for both pinned and non-pinned columns.
 
       const tableStyles = window.getComputedStyle(table);
       mirrorTable.className = `${table.className || ''} window-sticky-table-header-table`;
       mirrorTable.style.fontSize = tableStyles.fontSize;
       mirrorTable.style.lineHeight = tableStyles.lineHeight;
       mirrorTable.style.letterSpacing = tableStyles.letterSpacing;
+      // Mirror table must fill the container and use absolute positioning for
+      // each th — no table layout engine interference.
+      mirrorTable.style.width = '100%';
+      mirrorTable.style.transform = '';
+      mirrorTable.style.position = 'relative';
 
       const html = thead.outerHTML;
       if (html !== lastHtml) {
@@ -1209,39 +1229,54 @@ const DataTableScroll = ({ children, className = '', darkMode }) => {
 
       const originalThs = Array.from(thead.querySelectorAll('th'));
       const mirrorThs = Array.from(mirrorTable.querySelectorAll('th'));
-      // We intentionally do NOT use position:sticky inside the mirror because
-      // the mirror is a fixed overlay with no horizontal scroll context.
-      // Pinned columns are detected via computed position:'sticky' on the
-      // original <th>. Their clone gets a counter-translateX that cancels out
-      // the table-level translateX so the clone stays visually "stuck" while
-      // all other columns scroll normally with the table transform.
-      const scrollLeft = frame.scrollLeft;
+      const headerHeight = thead.getBoundingClientRect().height || 0;
+
+      // Make the mirror thead the positioning context for absolute th clones.
+      const mirrorThead = mirrorTable.querySelector('thead');
+      const mirrorTr = mirrorTable.querySelector('tr');
+      if (mirrorThead) {
+        mirrorThead.style.position = 'relative';
+        mirrorThead.style.display = 'block';
+        mirrorThead.style.height = `${headerHeight}px`;
+        mirrorThead.style.width = '100%';
+      }
+      if (mirrorTr) {
+        mirrorTr.style.position = 'relative';
+        mirrorTr.style.display = 'block';
+        mirrorTr.style.height = `${headerHeight}px`;
+      }
+
       originalThs.forEach((th, idx) => {
         const clone = mirrorThs[idx];
         if (!clone) return;
         const rect = th.getBoundingClientRect();
         const width = Math.max(1, rect.width);
+        const thStyles = window.getComputedStyle(th);
+
+        // Position absolutely inside the mirror container.
+        // rect.left - frameRect.left gives offset from left edge of the mirror.
+        // For sticky (pinned) columns the browser already holds rect.left at
+        // the stuck position, so no special case needed.
+        clone.style.position = 'absolute';
+        clone.style.top = '0';
+        clone.style.left = `${Math.round(rect.left - frameRect.left)}px`;
         clone.style.width = `${width}px`;
         clone.style.minWidth = `${width}px`;
         clone.style.maxWidth = `${width}px`;
-        clone.style.height = `${Math.max(1, rect.height)}px`;
+        clone.style.height = `${headerHeight}px`;
         clone.style.boxSizing = 'border-box';
         clone.style.backgroundClip = 'padding-box';
-        clone.style.position = 'relative';
-        clone.style.left = 'auto';
-        clone.style.zIndex = '1';
         clone.style.transform = '';
-        const thStyles = window.getComputedStyle(th);
+        clone.style.background = thStyles.backgroundColor || (darkMode ? '#374151' : '#e2e8f0');
+
         if (thStyles.position === 'sticky') {
-          // Counter-translate: the table shifts by -scrollLeft, so shift this
-          // clone back by +scrollLeft so it stays at its pinned left offset.
-          clone.style.transform = `translateX(${scrollLeft}px)`;
           clone.style.zIndex = '45';
-          clone.style.background = thStyles.backgroundColor || (darkMode ? '#374151' : '#e2e8f0');
           clone.style.boxShadow = thStyles.boxShadow;
         } else {
-          clone.style.background = thStyles.backgroundColor;
+          clone.style.zIndex = '1';
+          clone.style.boxShadow = '';
         }
+
         clone.style.fontSize = thStyles.fontSize;
         clone.style.fontWeight = thStyles.fontWeight;
         clone.style.lineHeight = thStyles.lineHeight;
@@ -1253,10 +1288,6 @@ const DataTableScroll = ({ children, className = '', darkMode }) => {
         clone.style.verticalAlign = thStyles.verticalAlign;
         clone.style.overflow = 'hidden';
       });
-
-      const tableRect = table.getBoundingClientRect();
-      mirrorTable.style.width = `${Math.max(frame.scrollWidth, tableRect.width)}px`;
-      mirrorTable.style.transform = `translateX(${-scrollLeft}px)`;
     };
 
     const applyHeaderLock = () => {
@@ -1285,17 +1316,28 @@ const DataTableScroll = ({ children, className = '', darkMode }) => {
         return;
       }
 
-      syncMirrorHeader(table, thead);
-      if (!mirror || !mirrorTable) return;
-
       const left = Math.max(frameRect.left, 0);
       const right = Math.min(frameRect.right, window.innerWidth);
       const width = Math.max(0, right - left);
+
+      // Pass frameRect so syncMirrorHeader can compute each th's offset
+      // relative to the mirror container's left edge.
+      // NOTE: frameRect here reflects the *visible* left edge of the frame
+      // as clipped to the viewport — same as mirror.style.left below.
+      const visibleFrameRect = { ...frameRect, left };
+      syncMirrorHeader(table, thead, visibleFrameRect);
+      if (!mirror || !mirrorTable) return;
 
       mirror.style.display = 'block';
       mirror.style.left = `${left}px`;
       mirror.style.width = `${width}px`;
       mirror.style.height = `${headerHeight}px`;
+      mirror.style.position = 'fixed';
+      mirror.style.overflow = 'hidden';
+      // Mirror container must be 'relative' so absolute-positioned th clones
+      // are anchored to its top-left corner.
+      mirrorTable.style.position = 'relative';
+      mirrorTable.style.height = `${headerHeight}px`;
       mirror.style.background = darkMode ? '#111827' : '#ffffff';
       mirror.classList.toggle('window-sticky-table-header-dark', !!darkMode);
     };
