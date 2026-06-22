@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
@@ -1588,6 +1588,12 @@ const App = () => {
   const uploadDropdownRef = useRef(null);
   const dashboardRequestSeq = useRef(0);
   const [frozenColumns, setFrozenColumns] = useState({});
+  // Widths (in px) of every column for each table that currently has at least
+  // one pinned column. Used to compute the cumulative `left` offset for
+  // stacked pinned columns (col 2 at left=0, col 5 at left=width(col 2), …).
+  // Measured imperatively from the live DOM so it stays correct regardless of
+  // cell content, font metrics, or column min-width settings.
+  const [frozenColumnWidths, setFrozenColumnWidths] = useState({});
 
   const [stats, setStats] = useState(() => readStatsCache(dashboardStatsCacheKey()));
   const [summaryPendingTotal, setSummaryPendingTotal] = useState(() => {
@@ -1762,26 +1768,109 @@ const App = () => {
     }
     return picColorMap.current[name];
   };
-  const getFrozenIndex = (value) => (typeof value === 'object' && value ? value.index : value);
-  const getFreezeLeft = (event) => {
-    const headerCell = event?.currentTarget?.closest?.('th');
-    // DataTableScroll uses class 'data-table-scroll-frame', not 'overflow-x-auto'
-    const scrollBox = event?.currentTarget?.closest?.('.data-table-scroll-frame');
-    if (!headerCell || !scrollBox) return 0;
-    const headerRect = headerCell.getBoundingClientRect();
-    const scrollRect = scrollBox.getBoundingClientRect();
-    const maxLeft = Math.max(0, scrollBox.clientWidth - headerRect.width);
-    return Math.max(0, Math.min(Math.round(headerRect.left - scrollRect.left + scrollBox.scrollLeft), maxLeft));
-  };
-  const toggleFrozenColumn = useCallback((tableKey, colIndex, event) => {
-    const left = getFreezeLeft(event);
+  // ── Pinned (frozen) column logic ───────────────────────────────────────────
+  //
+  // Design (mirrors Excel "freeze panes"):
+  //   • `frozenColumns[tableKey]` is a SORTED array of pinned column indices
+  //     (1-based, matching :nth-child). Multiple columns can be pinned at once.
+  //   • Each pinned column gets `position: sticky` with a cumulative `left`:
+  //       - the leftmost pinned column has left = 0
+  //       - the next pinned column has left = sum of widths of pinned columns
+  //         to its left
+  //     so stacked pinned columns sit side-by-side at the left edge instead of
+  //     overlapping.
+  //   • `position: sticky !important` is required because the global rule
+  //     `.data-table-scroll thead th { position: relative !important; }`
+  //     would otherwise override sticky on header cells (that was the root
+  //     cause of the header "moving" but body cells sticking — they desynced).
+  //   • Only the pinned column is frozen; all other columns scroll normally
+  //     because they don't match the :nth-child selector.
+  //   • The mirror sticky header (DataTableScroll) reads
+  //     getBoundingClientRect() on the real <th>, which already reflects the
+  //     stuck position — so the mirror automatically tracks pinned columns
+  //     correctly once the underlying sticky positioning works.
+
+  const toggleFrozenColumn = useCallback((tableKey, colIndex) => {
     setFrozenColumns(prev => {
-      const activeIndex = getFrozenIndex(prev[tableKey]);
-      return { ...prev, [tableKey]: activeIndex === colIndex ? null : { index: colIndex, left } };
+      const current = Array.isArray(prev[tableKey]) ? prev[tableKey] : [];
+      const exists = current.includes(colIndex);
+      const next = exists
+        ? current.filter(i => i !== colIndex)
+        : [...current, colIndex].sort((a, b) => a - b);
+      return { ...prev, [tableKey]: next };
     });
   }, []);
+
+  // Measure the width of every <th> in each table that has pinned columns.
+  // Re-runs on resize, on pin/unpin, and a few times shortly after pinning to
+  // catch layout shifts caused by content reflow / image loading / fonts.
+  useLayoutEffect(() => {
+    if (typeof document === 'undefined') return undefined;
+    const measure = () => {
+      setFrozenColumnWidths(prev => {
+        const next = { ...prev };
+        let changed = false;
+        Object.keys(frozenColumns).forEach(tableKey => {
+          const indices = frozenColumns[tableKey];
+          if (!Array.isArray(indices) || indices.length === 0) {
+            if (next[tableKey]) { delete next[tableKey]; changed = true; }
+            return;
+          }
+          const table = document.querySelector(`table.freeze-table-${CSS.escape(tableKey)}`);
+          if (!table) return;
+          const ths = table.querySelectorAll('thead th');
+          if (!ths || ths.length === 0) return;
+          const widths = {};
+          ths.forEach((th, idx) => {
+            const w = th.getBoundingClientRect().width;
+            if (Number.isFinite(w) && w > 0) widths[idx + 1] = w;
+          });
+          const prevWidths = prev[tableKey] || {};
+          const prevKeys = Object.keys(prevWidths);
+          const newKeys = Object.keys(widths);
+          const same = prevKeys.length === newKeys.length &&
+            newKeys.every(k => Math.abs((prevWidths[k] || 0) - widths[k]) < 0.5);
+          if (!same) {
+            next[tableKey] = widths;
+            changed = true;
+          }
+        });
+        return changed ? next : prev;
+      });
+    };
+
+    measure();
+    // Retry shortly after to catch delayed layout shifts (font load, images,
+    // table reflow when sticky kicks in, etc.).
+    const timeouts = [60, 200, 450, 900].map(t => setTimeout(measure, t));
+    window.addEventListener('resize', measure, { passive: true });
+
+    // ResizeObserver on each pinned table — catches width changes from
+    // anything other than window resize (e.g. sidebar toggle, parent flex
+    // changes, content edits).
+    const tables = [];
+    const observers = [];
+    Object.keys(frozenColumns).forEach(tableKey => {
+      const t = document.querySelector(`table.freeze-table-${CSS.escape(tableKey)}`);
+      if (!t) return;
+      tables.push(t);
+      if (typeof ResizeObserver !== 'undefined') {
+        const ro = new ResizeObserver(() => measure());
+        ro.observe(t);
+        observers.push(ro);
+      }
+    });
+
+    return () => {
+      timeouts.forEach(clearTimeout);
+      window.removeEventListener('resize', measure);
+      observers.forEach(o => o.disconnect());
+    };
+  }, [frozenColumns]);
+
   const renderFreezeHeader = (tableKey, colIndex, label) => {
-    const active = getFrozenIndex(frozenColumns[tableKey]) === colIndex;
+    const indices = Array.isArray(frozenColumns[tableKey]) ? frozenColumns[tableKey] : [];
+    const active = indices.includes(colIndex);
     return (
       <div className="freeze-header group relative flex min-h-8 w-full min-w-0 items-center justify-center">
         <span className="freeze-header-label max-w-full text-center leading-tight">{label}</span>
@@ -1789,7 +1878,7 @@ const App = () => {
           type="button"
           aria-label={active ? `Unfreeze ${label}` : `Freeze ${label}`}
           title={active ? `Unfreeze ${label}` : `Freeze ${label}`}
-          onClick={(e) => { e.stopPropagation(); toggleFrozenColumn(tableKey, colIndex, e); }}
+          onClick={(e) => { e.stopPropagation(); toggleFrozenColumn(tableKey, colIndex); }}
           className={`absolute right-0 top-1/2 inline-flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-md border opacity-0 shadow-sm transition-all group-hover:opacity-100 group-focus-within:opacity-100 ${active ? 'border-amber-300 bg-amber-100 text-amber-700' : darkMode ? 'border-gray-600 bg-gray-700/90 text-gray-300 hover:bg-gray-600' : 'border-slate-200 bg-white/95 text-slate-500 hover:bg-slate-100'}`}
         >
           {active ? <PinOff className="h-3 w-3" /> : <Pin className="h-3 w-3" />}
@@ -1797,35 +1886,49 @@ const App = () => {
       </div>
     );
   };
-  const frozenColumnCss = useMemo(() => Object.entries(frozenColumns)
-    .map(([tableKey, spec]) => ({ tableKey, idx: getFrozenIndex(spec), left: (typeof spec === 'object' && spec ? spec.left : 0) }))
-    .filter(({ idx }) => Number(idx) > 0)
-    .map(({ tableKey, idx, left }) => `
-      .freeze-table-${tableKey} th:nth-child(${idx}),
-      .freeze-table-${tableKey} td:nth-child(${idx}) {
-        position: sticky;
-        left: ${Number(left) || 0}px;
-        z-index: 25;
-        box-shadow: 10px 0 14px -14px rgba(15, 23, 42, 0.85);
-        background-clip: padding-box;
+
+  const frozenColumnCss = useMemo(() => {
+    return Object.entries(frozenColumns).map(([tableKey, indices]) => {
+      if (!Array.isArray(indices) || indices.length === 0) return '';
+      const widths = frozenColumnWidths[tableKey] || {};
+      // Walk pinned columns in DOM order; each one's `left` is the sum of
+      // widths of pinned columns to its left. This produces the stacked,
+      // non-overlapping "frozen pane" effect.
+      let cumulativeLeft = 0;
+      const rules = [];
+      for (const idx of indices) {
+        const left = cumulativeLeft;
+        const w = widths[idx];
+        if (Number.isFinite(w) && w > 0) cumulativeLeft += w;
+        rules.push(`
+          .freeze-table-${tableKey} th:nth-child(${idx}),
+          .freeze-table-${tableKey} td:nth-child(${idx}) {
+            position: sticky !important;
+            left: ${left}px;
+            z-index: 25;
+            box-shadow: 10px 0 14px -14px rgba(15, 23, 42, 0.55);
+            background-clip: padding-box;
+          }
+          .freeze-table-${tableKey} thead th:nth-child(${idx}) {
+            z-index: 45;
+          }
+          .data-table-page:not(.data-table-page-dark) .freeze-table-${tableKey} td:nth-child(${idx}):not([class*="bg-"]) {
+            background: #ffffff;
+          }
+          .data-table-page:not(.data-table-page-dark) .freeze-table-${tableKey} thead th:nth-child(${idx}):not([class*="bg-"]) {
+            background: #e2e8f0;
+          }
+          .data-table-page-dark .freeze-table-${tableKey} td:nth-child(${idx}):not([class*="bg-"]) {
+            background: #1f2937;
+          }
+          .data-table-page-dark .freeze-table-${tableKey} thead th:nth-child(${idx}):not([class*="bg-"]) {
+            background: #374151;
+          }
+        `);
       }
-      .freeze-table-${tableKey} thead th:nth-child(${idx}) {
-        z-index: 45;
-      }
-      .data-table-page:not(.data-table-page-dark) .freeze-table-${tableKey} td:nth-child(${idx}):not([class*="bg-"]) {
-        background: #ffffff;
-      }
-      .data-table-page:not(.data-table-page-dark) .freeze-table-${tableKey} thead th:nth-child(${idx}):not([class*="bg-"]) {
-        background: #e2e8f0;
-      }
-      .data-table-page-dark .freeze-table-${tableKey} td:nth-child(${idx}):not([class*="bg-"]) {
-        background: #1f2937;
-      }
-      .data-table-page-dark .freeze-table-${tableKey} thead th:nth-child(${idx}):not([class*="bg-"]) {
-        background: #374151;
-      }
-    `)
-    .join('\n'), [frozenColumns]);
+      return rules.join('\n');
+    }).join('\n');
+  }, [frozenColumns, frozenColumnWidths]);
   // ── Global SO Create Date filter (shared across Dashboard / All SO / Delivery Completed)
   const [globalDateFilter, setGlobalDateFilter] = useState({ mode: 'all' });
   const [globalClientFilter, setGlobalClientFilter] = useState([]);
