@@ -60,6 +60,77 @@ const storageRemoveWhere = (predicate) => {
   }
 };
 
+// ── Filter persistence across page refresh ─────────────────────────────────
+// Saves all per-page filter state to localStorage so a refresh restores the
+// exact same view the user was looking at. Mirrors Google Sheets behavior:
+// refresh never loses context.
+const FILTER_STATE_KEY_PREFIX = 'po-monitoring:filter-state:';
+
+const loadFilterState = (pageKey) => {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(`${FILTER_STATE_KEY_PREFIX}${pageKey}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+};
+
+const saveFilterState = (pageKey, state) => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(`${FILTER_STATE_KEY_PREFIX}${pageKey}`, JSON.stringify(state));
+  } catch {
+    /* storage full or disabled — non-fatal */
+  }
+};
+
+// ── Offline-first edit queue ───────────────────────────────────────────────
+// When a cell PUT fails (network down, server 500, etc.), we store the
+// pending update here. On reconnect we replay them in order. Mirrors Google
+// Sheets: edits never disappear, they sync when the connection is back.
+const OFFLINE_QUEUE_KEY = 'po-monitoring:offline-queue';
+
+const loadOfflineQueue = () => {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(OFFLINE_QUEUE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+const saveOfflineQueue = (queue) => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(queue));
+  } catch {
+    /* storage full — drop oldest entries */
+    try {
+      const trimmed = queue.slice(-50);
+      window.localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(trimmed));
+    } catch {}
+  }
+};
+
+const enqueueOfflineUpdate = (kind, payload) => {
+  const queue = loadOfflineQueue();
+  queue.push({ kind, payload, queuedAt: Date.now() });
+  saveOfflineQueue(queue);
+};
+
+const removeFromOfflineQueue = (index) => {
+  const queue = loadOfflineQueue();
+  queue.splice(index, 1);
+  saveOfflineQueue(queue);
+};
+
 const normalizeDashboardCacheQuery = (qs = '') => {
   const raw = String(qs || '').replace(/^\?/, '');
   return raw || DASHBOARD_CACHE_KEY_ALL;
@@ -1603,6 +1674,17 @@ const App = () => {
     setActivePage(page);
     window.scrollTo({ top: 0 });
   }, [setActivePage]);
+  // ── Filter persistence: load saved state on first mount ──────────────────
+  // Each page's filters are stored to localStorage so a refresh restores the
+  // exact same view the user had. Loaded once at mount via lazy useState
+  // initializers, then auto-saved on every change.
+  const savedImportFilters = loadFilterState('import') || {};
+  const savedRfqFilters = loadFilterState('rfq') || {};
+  const savedItemRegFilters = loadFilterState('item-registration') || {};
+  const savedRegisteredItemsFilters = loadFilterState('all-registered-items') || {};
+  const savedVendorControlFilters = loadFilterState('vendor-control') || {};
+  const savedSoFilters = loadFilterState('all-so') || {};
+  const savedDashboardFilters = loadFilterState('dashboard') || {};
   const [showUploadDropdown, setShowUploadDropdown] = useState(false);
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
   const uploadDropdownRef = useRef(null);
@@ -1648,12 +1730,12 @@ const App = () => {
   // Item Registration
   const [itemRegData, setItemRegData] = useState([]);
   const [itemRegTotal, setItemRegTotal] = useState(0);
-  const [itemRegPage, setItemRegPage] = useState(1);
-  const [itemRegPerPage, setItemRegPerPage] = useState(10);
-  const [itemRegSearch, setItemRegSearch] = useState([]);
-  const [itemRegAppliedSearch, setItemRegAppliedSearch] = useState([]);
+  const [itemRegPage, setItemRegPage] = useState(() => savedItemRegFilters.page || 1);
+  const [itemRegPerPage, setItemRegPerPage] = useState(() => savedItemRegFilters.perPage || 10);
+  const [itemRegSearch, setItemRegSearch] = useState(() => savedItemRegFilters.search || []);
+  const [itemRegAppliedSearch, setItemRegAppliedSearch] = useState(() => savedItemRegFilters.appliedSearch || []);
   const [itemRegLastUpdated, setItemRegLastUpdated] = useState(null);
-  const [itemRegFilters, setItemRegFilters] = useState({ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] });
+  const [itemRegFilters, setItemRegFilters] = useState(() => savedItemRegFilters.filters || { clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] });
   const [itemRegOptions, setItemRegOptions] = useState({ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] });
   const [itemRegMissingPicKpis, setItemRegMissingPicKpis] = useState([]);
   const [itemRegPicHighlight, setItemRegPicHighlight] = useState('');
@@ -1661,17 +1743,17 @@ const App = () => {
   // RFQ
   const [rfqData, setRfqData] = useState([]);
   const [rfqTotal, setRfqTotal] = useState(0);
-  const [rfqPage, setRfqPage] = useState(1);
-  const [rfqPerPage, setRfqPerPage] = useState(10);
-  const [rfqSearch, setRfqSearch] = useState('');
-  const [rfqAppliedSearch, setRfqAppliedSearch] = useState('');
+  const [rfqPage, setRfqPage] = useState(() => savedRfqFilters.page || 1);
+  const [rfqPerPage, setRfqPerPage] = useState(() => savedRfqFilters.perPage || 10);
+  const [rfqSearch, setRfqSearch] = useState(() => savedRfqFilters.search || '');
+  const [rfqAppliedSearch, setRfqAppliedSearch] = useState(() => savedRfqFilters.appliedSearch || '');
   const [rfqColumns, setRfqColumns] = useState([]);
   const [rfqSimilarityColumns, setRfqSimilarityColumns] = useState([]);
   const [rfqShowSimilarity, setRfqShowSimilarity] = useState(false);
   const [rfqEditableFields, setRfqEditableFields] = useState([]);
   const [rfqPicKpis, setRfqPicKpis] = useState([]);
-  const [rfqPicFilter, setRfqPicFilter] = useState('');
-  const [rfqFilters, setRfqFilters] = useState({ checks: [], clients: [], rfq_numbers: [], brands: [], purchase_pics: [], vendors: [] });
+  const [rfqPicFilter, setRfqPicFilter] = useState(() => savedRfqFilters.picFilter || '');
+  const [rfqFilters, setRfqFilters] = useState(() => savedRfqFilters.filters || { checks: [], clients: [], rfq_numbers: [], brands: [], purchase_pics: [], vendors: [] });
   const [rfqOptions, setRfqOptions] = useState({ checks: [], clients: [], rfq_numbers: [], brands: [], purchase_pics: [], vendors: [] });
   const [rfqSelectedCell, setRfqSelectedCell] = useState(null);
   const [rfqFillRange, setRfqFillRange] = useState(null);
@@ -1685,10 +1767,10 @@ const App = () => {
   const [importData, setImportData] = useState([]);
   const [importColumns, setImportColumns] = useState([]);
   const [importTotal, setImportTotal] = useState(0);
-  const [importPage, setImportPage] = useState(1);
-  const [importPerPage, setImportPerPage] = useState(10);
-  const [importSearch, setImportSearch] = useState('');
-  const [importAppliedSearch, setImportAppliedSearch] = useState('');
+  const [importPage, setImportPage] = useState(() => savedImportFilters.page || 1);
+  const [importPerPage, setImportPerPage] = useState(() => savedImportFilters.perPage || 10);
+  const [importSearch, setImportSearch] = useState(() => savedImportFilters.search || '');
+  const [importAppliedSearch, setImportAppliedSearch] = useState(() => savedImportFilters.appliedSearch || '');
   const [importVendorCount, setImportVendorCount] = useState(0);
   const [importLastCopyAt, setImportLastCopyAt] = useState('');
   const [importEditingCell, setImportEditingCell] = useState(null);
@@ -1708,27 +1790,35 @@ const App = () => {
   // the menu escapes the table card's `overflow-hidden` and is never clipped
   // or covered by the table/filter below.
   const importVendorDropdown = useFloatingDropdown(importVendorMenuOpen, 224, 280, 200);
-  const [importFilters, setImportFilters] = useState({ yupi_po: [], vendors: [] });
-  const [importOptions, setImportOptions] = useState({ yupi_po: [], vendors: [] });
-  const [importReqDlvSort, setImportReqDlvSort] = useState('newest');
-  const [importYupiPoSort, setImportYupiPoSort] = useState('');
+  const [importFilters, setImportFilters] = useState(() => ({
+    yupi_po: savedImportFilters.yupi_po || [],
+    vendors: savedImportFilters.vendors || [],
+    statuses: savedImportFilters.statuses || [],
+  }));
+  const [importOptions, setImportOptions] = useState(() => ({
+    yupi_po: [],
+    vendors: [],
+    statuses: ['NEW', ...IMPORT_STATUS_OPTIONS],
+  }));
+  const [importReqDlvSort, setImportReqDlvSort] = useState(() => savedImportFilters.reqDlvSort || 'newest');
+  const [importYupiPoSort, setImportYupiPoSort] = useState(() => savedImportFilters.yupiPoSort || '');
   const [rfqEditedRowKeys, setRfqEditedRowKeys] = useState(new Set());
   const rfqDashboardOnlyFields = new Set(['private_remarks_1', 'private_remarks_2']);
 
   // All Registered Items
   const [registeredItemsData, setRegisteredItemsData] = useState([]);
   const [registeredItemsTotal, setRegisteredItemsTotal] = useState(0);
-  const [registeredItemsPage, setRegisteredItemsPage] = useState(1);
-  const [registeredItemsPerPage, setRegisteredItemsPerPage] = useState(10);
-  const [registeredItemsSearch, setRegisteredItemsSearch] = useState('');
-  const [registeredItemsAppliedSearch, setRegisteredItemsAppliedSearch] = useState('');
-  const [registeredItemsProdIds, setRegisteredItemsProdIds] = useState([]);
-  const [registeredItemsAppliedProdIds, setRegisteredItemsAppliedProdIds] = useState([]);
-  const [registeredItemsPicFilter, setRegisteredItemsPicFilter] = useState('');
-  const [registeredItemsAppliedPicFilter, setRegisteredItemsAppliedPicFilter] = useState('');
+  const [registeredItemsPage, setRegisteredItemsPage] = useState(() => savedRegisteredItemsFilters.page || 1);
+  const [registeredItemsPerPage, setRegisteredItemsPerPage] = useState(() => savedRegisteredItemsFilters.perPage || 10);
+  const [registeredItemsSearch, setRegisteredItemsSearch] = useState(() => savedRegisteredItemsFilters.search || '');
+  const [registeredItemsAppliedSearch, setRegisteredItemsAppliedSearch] = useState(() => savedRegisteredItemsFilters.appliedSearch || '');
+  const [registeredItemsProdIds, setRegisteredItemsProdIds] = useState(() => savedRegisteredItemsFilters.prodIds || []);
+  const [registeredItemsAppliedProdIds, setRegisteredItemsAppliedProdIds] = useState(() => savedRegisteredItemsFilters.appliedProdIds || []);
+  const [registeredItemsPicFilter, setRegisteredItemsPicFilter] = useState(() => savedRegisteredItemsFilters.picFilter || '');
+  const [registeredItemsAppliedPicFilter, setRegisteredItemsAppliedPicFilter] = useState(() => savedRegisteredItemsFilters.appliedPicFilter || '');
   // NOTE: vendor_name state removed — source Excel has no Vendor column for
   // product master data, so the filter would always be empty.
-  const [registeredItemsFilters, setRegisteredItemsFilters] = useState({ mfr_names: [] });
+  const [registeredItemsFilters, setRegisteredItemsFilters] = useState(() => ({ mfr_names: savedRegisteredItemsFilters.mfr_names || [] }));
   const [registeredItemsOptions, setRegisteredItemsOptions] = useState({ mfr_names: [], pic_options: [] });
 
   // Vendor Control
@@ -1925,11 +2015,21 @@ const App = () => {
         const w = widths[idx];
         if (Number.isFinite(w) && w > 0) cumulativeLeft += w;
         // IMPORTANT: backgrounds use !important so the pinned header & cells
-        // are NEVER transparent. Without this, Tailwind's `bg-slate-50` /
-        // `bg-gray-800/60` on the parent <thead> + sticky positioning can
-        // render semi-transparent, making the stuck header text collide
-        // with the row text scrolling beneath it.
+        // are NEVER transparent — both in the stuck-vertical-header state
+        // (mirror visible) AND in the unstuck state (user at top of table,
+        // no mirror, original th renders directly). Without !important the
+        // browser may inherit a transparent background from <thead> ancestor
+        // and the pinned column text collides with the column scrolling
+        // beneath it.
+        //
+        // The selector is written WITHOUT `.data-table-page` prefix so it
+        // also applies on pages that don't carry that wrapper class (the
+        // dashboard's pending-delivery table for example). Light/dark is
+        // disambiguated via the same wrapper, with a global fallback for
+        // any table outside that wrapper.
         rules.push(`
+          /* Base sticky rule — applies to EVERY freeze-table-N table
+             regardless of light/dark wrapper. */
           .freeze-table-${tableKey} th:nth-child(${idx}),
           .freeze-table-${tableKey} td:nth-child(${idx}) {
             position: sticky !important;
@@ -1937,37 +2037,35 @@ const App = () => {
             z-index: 25;
             box-shadow: 10px 0 14px -14px rgba(15, 23, 42, 0.55);
             background-clip: padding-box;
+            /* Default opaque backgrounds (light mode). Overridden below for
+               dark mode. These MUST be !important to override any Tailwind
+               bg-* utility applied to <thead>, <tr>, or the cell itself. */
+            background-color: #ffffff !important;
           }
           .freeze-table-${tableKey} thead th:nth-child(${idx}) {
             z-index: 45;
+            background-color: #e2e8f0 !important;
           }
-          /* Pinned cells must be FULLY opaque — solid background beats any
-             Tailwind utility on the <tr>/<thead>/<table> ancestors. */
-          .data-table-page:not(.data-table-page-dark) .freeze-table-${tableKey} thead th:nth-child(${idx}) {
-            background: #e2e8f0 !important;
+          .freeze-table-${tableKey} tfoot td:nth-child(${idx}) {
+            background-color: #f1f5f9 !important;
           }
-          .data-table-page:not(.data-table-page-dark) .freeze-table-${tableKey} tbody td:nth-child(${idx}) {
-            background: #ffffff !important;
-          }
-          .data-table-page:not(.data-table-page-dark) .freeze-table-${tableKey} tfoot td:nth-child(${idx}) {
-            background: #f1f5f9 !important;
+          /* Dark mode overrides — scoped to .data-table-page-dark wrapper. */
+          .data-table-page-dark .freeze-table-${tableKey} td:nth-child(${idx}) {
+            background-color: #1f2937 !important;
           }
           .data-table-page-dark .freeze-table-${tableKey} thead th:nth-child(${idx}) {
-            background: #374151 !important;
-          }
-          .data-table-page-dark .freeze-table-${tableKey} tbody td:nth-child(${idx}) {
-            background: #1f2937 !important;
+            background-color: #374151 !important;
           }
           .data-table-page-dark .freeze-table-${tableKey} tfoot td:nth-child(${idx}) {
-            background: #111827 !important;
+            background-color: #111827 !important;
           }
           /* Row hover should still tint the pinned cell so users see which
              row they're hovering across the frozen pane. */
-          .data-table-page:not(.data-table-page-dark) .freeze-table-${tableKey} tbody tr:hover td:nth-child(${idx}) {
-            background: #f8fafc !important;
+          .freeze-table-${tableKey} tbody tr:hover td:nth-child(${idx}) {
+            background-color: #f8fafc !important;
           }
           .data-table-page-dark .freeze-table-${tableKey} tbody tr:hover td:nth-child(${idx}) {
-            background: #283548 !important;
+            background-color: #283548 !important;
           }
         `);
       }
@@ -1975,9 +2073,9 @@ const App = () => {
     }).join('\n');
   }, [frozenColumns, frozenColumnWidths]);
   // ── Global SO Create Date filter (shared across Dashboard / All SO / Delivery Completed)
-  const [globalDateFilter, setGlobalDateFilter] = useState({ mode: 'all' });
-  const [globalClientFilter, setGlobalClientFilter] = useState([]);
-  const [globalPicFilter, setGlobalPicFilter] = useState([]);
+  const [globalDateFilter, setGlobalDateFilter] = useState(() => savedDashboardFilters.dateFilter || { mode: 'all' });
+  const [globalClientFilter, setGlobalClientFilter] = useState(() => savedDashboardFilters.clients || []);
+  const [globalPicFilter, setGlobalPicFilter] = useState(() => savedDashboardFilters.pics || []);
   const [dashboardFilterOptions, setDashboardFilterOptions] = useState(() => {
     const cachedStats = readStatsCache(dashboardStatsCacheKey());
     return cachedStats?.filters || { clients: [], pics: [] };
@@ -1996,6 +2094,143 @@ const App = () => {
     const handler = (e) => { if (uploadDropdownRef.current && !uploadDropdownRef.current.contains(e.target)) setShowUploadDropdown(false); };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  // ── Auto-persist every page's filter state to localStorage ───────────────
+  // On any filter change, debounce-save so refresh restores the same view.
+  // Mirrors Google Sheets: refresh never loses your place.
+  useEffect(() => {
+    saveFilterState('import', {
+      page: importPage, perPage: importPerPage,
+      search: importSearch, appliedSearch: importAppliedSearch,
+      yupi_po: importFilters.yupi_po, vendors: importFilters.vendors,
+      statuses: importFilters.statuses,
+      reqDlvSort: importReqDlvSort, yupiPoSort: importYupiPoSort,
+    });
+  }, [importPage, importPerPage, importSearch, importAppliedSearch, importFilters, importReqDlvSort, importYupiPoSort]);
+
+  useEffect(() => {
+    saveFilterState('rfq', {
+      page: rfqPage, perPage: rfqPerPage,
+      search: rfqSearch, appliedSearch: rfqAppliedSearch,
+      picFilter: rfqPicFilter, filters: rfqFilters,
+    });
+  }, [rfqPage, rfqPerPage, rfqSearch, rfqAppliedSearch, rfqPicFilter, rfqFilters]);
+
+  useEffect(() => {
+    saveFilterState('item-registration', {
+      page: itemRegPage, perPage: itemRegPerPage,
+      search: itemRegSearch, appliedSearch: itemRegAppliedSearch,
+      filters: itemRegFilters,
+    });
+  }, [itemRegPage, itemRegPerPage, itemRegSearch, itemRegAppliedSearch, itemRegFilters]);
+
+  useEffect(() => {
+    saveFilterState('all-registered-items', {
+      page: registeredItemsPage, perPage: registeredItemsPerPage,
+      search: registeredItemsSearch, appliedSearch: registeredItemsAppliedSearch,
+      prodIds: registeredItemsProdIds, appliedProdIds: registeredItemsAppliedProdIds,
+      picFilter: registeredItemsPicFilter, appliedPicFilter: registeredItemsAppliedPicFilter,
+      mfr_names: registeredItemsFilters.mfr_names,
+    });
+  }, [registeredItemsPage, registeredItemsPerPage, registeredItemsSearch, registeredItemsAppliedSearch, registeredItemsProdIds, registeredItemsAppliedProdIds, registeredItemsPicFilter, registeredItemsAppliedPicFilter, registeredItemsFilters]);
+
+  useEffect(() => {
+    saveFilterState('vendor-control', {
+      page: vendorControlPage, perPage: vendorControlPerPage,
+      search: vendorControlSearch, appliedSearch: vendorControlAppliedSearch,
+      appliedVendors: vendorControlAppliedVendors,
+    });
+  }, [vendorControlPage, vendorControlPerPage, vendorControlSearch, vendorControlAppliedSearch, vendorControlAppliedVendors]);
+
+  useEffect(() => {
+    saveFilterState('all-so', {
+      page: soPage, perPage: soPerPage,
+      searchNums: soSearchNums, filters: soFilters, marginFilter: soMarginFilter, sortOrder: soSortOrder,
+    });
+  }, [soPage, soPerPage, soSearchNums, soFilters, soMarginFilter, soSortOrder]);
+
+  useEffect(() => {
+    saveFilterState('dashboard', {
+      dateFilter: globalDateFilter, clients: globalClientFilter, pics: globalPicFilter,
+    });
+  }, [globalDateFilter, globalClientFilter, globalPicFilter]);
+
+  // ── Offline queue replay ─────────────────────────────────────────────────
+  // When the browser fires `online` (or the app mounts with an existing
+  // queue and the connection is up), drain the queue and replay every
+  // pending edit in order. On success the entry is removed; on failure it
+  // stays in the queue for the next attempt.
+  const replayOfflineQueue = useCallback(async () => {
+    const queue = loadOfflineQueue();
+    if (!queue.length) return;
+    let remaining = [...queue];
+    let changed = false;
+    for (let i = 0; i < queue.length; i++) {
+      const item = queue[i];
+      try {
+        if (item.kind === 'import-cell') {
+          await api.put('/api/import/cell', item.payload);
+        } else if (item.kind === 'import-cells') {
+          await api.put('/api/import/cells', item.payload);
+        } else if (item.kind === 'rfq-cell') {
+          await api.put(`/api/rfq/${encodeURIComponent(item.payload.row_key)}`, { field: item.payload.field, value: item.payload.value });
+        } else if (item.kind === 'rfq-cells') {
+          await api.put('/api/rfq/batch-cells', item.payload);
+        } else {
+          // Unknown kind — drop it so we don't loop forever.
+          remaining = remaining.filter((_, j) => j !== i);
+          changed = true;
+          continue;
+        }
+        // Success: remove this entry from remaining.
+        remaining = remaining.filter(x => x !== item);
+        changed = true;
+      } catch (e) {
+        // Stop on first failure — connection probably still bad. Leave
+        // this entry and everything after it in the queue for the next
+        // `online` event.
+        break;
+      }
+    }
+    if (changed) {
+      saveOfflineQueue(remaining);
+      if (remaining.length === 0) {
+        addToast(`Offline edits synced successfully`, 'success');
+      } else {
+        addToast(`${remaining.length} edit(s) still pending — will retry`, 'warning');
+      }
+    }
+  }, [addToast]);
+
+  // Replay on mount (if online) + whenever `online` event fires.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (typeof navigator !== 'undefined' && navigator.onLine) {
+      // Slight delay so React state (rfqData, importData) has time to mount.
+      const t = setTimeout(replayOfflineQueue, 1500);
+      return () => clearTimeout(t);
+    }
+    const onOnline = () => {
+      addToast(`Connection restored — syncing offline edits...`, 'success');
+      replayOfflineQueue();
+    };
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
+  }, [replayOfflineQueue, addToast]);
+
+  // Also expose the pending count so the user can see it (optional badge).
+  const [offlineQueueCount, setOfflineQueueCount] = useState(0);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const update = () => setOfflineQueueCount(loadOfflineQueue().length);
+    update();
+    window.addEventListener('online', update);
+    window.addEventListener('storage', update);
+    return () => {
+      window.removeEventListener('online', update);
+      window.removeEventListener('storage', update);
+    };
   }, []);
 
   const addToast = useCallback((message, type='success') => {
@@ -2364,13 +2599,19 @@ const App = () => {
       if (yupiPoSort) params.append('yupi_po_sort', yupiPoSort);
       resolveFilter(filters?.yupi_po).forEach(v => params.append('yupi_po', v));
       resolveFilter(filters?.vendors).forEach(v => params.append('vendor_name', v));
+      resolveFilter(filters?.statuses).forEach(v => params.append('status', v));
       const res = await api.get(`/api/import/data?${params}`);
       setImportData(Array.isArray(res.data.data) ? res.data.data : []);
       setImportColumns(Array.isArray(res.data.columns) ? res.data.columns : []);
       setImportTotal(res.data.total || 0);
       setImportVendorCount(res.data.vendor_count || 0);
       setImportLastCopyAt(res.data.last_copy_at || '');
-      setImportOptions(res.data.filters || { yupi_po: [], vendors: [] });
+      // Preserve existing status options list (server may not return it).
+      setImportOptions(prev => ({
+        yupi_po: res.data.filters?.yupi_po || [],
+        vendors: res.data.filters?.vendors || [],
+        statuses: prev.statuses?.length ? prev.statuses : ['NEW', ...IMPORT_STATUS_OPTIONS],
+      }));
       if (refresh && res.data.sync) {
         const added = Number(res.data.sync.added || 0);
         const seen = Number(res.data.sync.seen || 0);
@@ -2392,6 +2633,9 @@ const App = () => {
   const updateImportCell = async (rowKey, field, value) => {
     setImportEditingCell(null);
     const previousRows = importData;
+    // OPTIMISTIC: update UI immediately so the user sees their edit
+    // instantly. If the network fails, we KEEP the local edit and queue the
+    // server sync for later (offline-first, Google-Sheets-style).
     setImportData(prev => prev.map(row => row._row_key === rowKey ? { ...row, [field]: value } : row));
     try {
       const res = await api.put('/api/import/cell', { row_key: rowKey, field, value });
@@ -2400,8 +2644,15 @@ const App = () => {
       }
       return true;
     } catch (e) {
-      setImportData(previousRows);
-      addToast(`Failed to update Import data: ${e.response?.data?.error || e.message}`, 'error');
+      // Network/HTTP failure → queue for replay when online. DO NOT revert
+      // the local edit (user input is preserved).
+      if (typeof navigator === 'undefined' || !navigator.onLine || e.message?.includes('Network') || e.code === 'ERR_NETWORK' || e.response == null) {
+        enqueueOfflineUpdate('import-cell', { row_key: rowKey, field, value });
+        addToast(`Saved offline — will sync when connection returns`, 'warning');
+      } else {
+        // Server returned an actual error (4xx/5xx) — let the user know.
+        addToast(`Failed to update Import data: ${e.response?.data?.error || e.message}`, 'error');
+      }
       return false;
     }
   };
@@ -2411,6 +2662,7 @@ const App = () => {
     if (!safeUpdates.length) return false;
     const previousRows = importData;
     setImportEditingCell(null);
+    // OPTIMISTIC: apply all updates to local state immediately.
     setImportData(prev => {
       const next = prev.map(row => ({ ...row }));
       for (const update of safeUpdates) {
@@ -2428,8 +2680,13 @@ const App = () => {
       }
       return true;
     } catch (e) {
-      setImportData(previousRows);
-      addToast(`Failed to update Import data: ${e.response?.data?.error || e.message}`, 'error');
+      // Network/HTTP failure → queue for replay. Keep local edits intact.
+      if (typeof navigator === 'undefined' || !navigator.onLine || e.message?.includes('Network') || e.code === 'ERR_NETWORK' || e.response == null) {
+        enqueueOfflineUpdate('import-cells', { updates: safeUpdates });
+        addToast(`Saved offline — will sync when connection returns`, 'warning');
+      } else {
+        addToast(`Failed to update Import data: ${e.response?.data?.error || e.message}`, 'error');
+      }
       return false;
     }
   };
@@ -2789,6 +3046,7 @@ const App = () => {
     if (importAppliedSearch) p.append('search', importAppliedSearch);
     resolveFilter(importFilters?.yupi_po).forEach(v => p.append('yupi_po', v));
     resolveFilter(importFilters?.vendors).forEach(v => p.append('vendor_name', v));
+    resolveFilter(importFilters?.statuses).forEach(v => p.append('status', v));
     downloadBlob(`/api/import/export?${p}`, `Import_Dashboard_${new Date().toISOString().slice(0,10)}.xlsx`, 'Import Dashboard Excel');
   };
 
@@ -2999,8 +3257,14 @@ const App = () => {
       }).filter(row => !rfqPicFilter || rfqEditedRowKeys.has(row.row_key) || (row.purchase_pic === rfqPicFilter && row.check === 'open' && row.unit_price_missing && !row.product_id)));
       return true;
     } catch (e) {
-      setRfqData(previousRows);
-      if (!quiet) addToast(`Failed to update RFQ: ${e.response?.data?.error || e.message}`, 'error');
+      // Network/HTTP failure → queue for replay. KEEP the optimistic local
+      // edit (don't revert) so user input is preserved, Google-Sheets-style.
+      if (typeof navigator === 'undefined' || !navigator.onLine || e.message?.includes('Network') || e.code === 'ERR_NETWORK' || e.response == null) {
+        enqueueOfflineUpdate('rfq-cell', { row_key: rowKey, field, value, options });
+        if (!quiet) addToast(`Saved offline — will sync when connection returns`, 'warning');
+      } else {
+        if (!quiet) addToast(`Failed to update RFQ: ${e.response?.data?.error || e.message}`, 'error');
+      }
       return false;
     }
   };
@@ -3022,8 +3286,13 @@ const App = () => {
       }
       return true;
     } catch (e) {
-      setRfqData(previousRows);
-      addToast(`Failed to update RFQ batch: ${e.response?.data?.error || e.message}`, 'error');
+      // Offline / network failure → queue. Keep local edits intact.
+      if (typeof navigator === 'undefined' || !navigator.onLine || e.message?.includes('Network') || e.code === 'ERR_NETWORK' || e.response == null) {
+        enqueueOfflineUpdate('rfq-cells', { updates: cleanUpdates });
+        addToast(`Saved offline — will sync when connection returns`, 'warning');
+      } else {
+        addToast(`Failed to update RFQ batch: ${e.response?.data?.error || e.message}`, 'error');
+      }
       return false;
     }
   };
@@ -4558,15 +4827,16 @@ const App = () => {
                       // + inline style + global CSS rule). This avoids the
                       // double-blue-border bug.
                       const rfqInputCls = `block w-full min-h-8 px-2 py-1 text-xs border-0 rounded-none ring-0 outline-none focus:outline-none focus:ring-0 focus-visible:outline-none shadow-none ${darkMode?'bg-gray-700 text-white':'bg-white text-gray-900'}`;
-                      const rfqInputStyle = { outline: 'none', outlineStyle: 'none', boxShadow: 'none', borderColor: 'transparent', borderWidth: 0 };
+                      const rfqInputStyle = { outline: 'none', outlineStyle: 'none', outlineWidth: 0, boxShadow: 'none', borderColor: 'transparent', borderWidth: 0 };
                       const rfqTdCls = `relative p-0 align-top border-r outline outline-2 outline-blue-500 outline-offset-[-2px] ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`;
                       if (['rfq_date', 'closing_date'].includes(field)) {
                         return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={rfqTdCls}>
                           <input
                             type="date"
-                            style={{ outline: 'none', outlineStyle: 'none', borderColor: 'transparent', borderWidth: 0 }}
+                            data-no-focus-ring=""
+                            style={{ outline: 'none', outlineStyle: 'none', outlineWidth: 0, borderColor: 'transparent', borderWidth: 0 }}
                             value={toDateInputValue(editValue)}
-                            className={`block w-full min-h-8 px-2 py-1 text-xs rounded-none outline-none focus:outline-none ${darkMode?'bg-gray-700 text-white':'bg-white text-gray-900'}`}
+                            className={`block w-full min-h-8 px-2 py-1 text-xs rounded-none outline-none focus:outline-none focus:ring-0 focus-visible:outline-none ${darkMode?'bg-gray-700 text-white':'bg-white text-gray-900'}`}
                             onChange={e => setEditValue(e.target.value)}
                             onBlur={() => updateRFQCell(row.row_key, field, editValue)}
                             onKeyDown={e => {
@@ -5234,7 +5504,7 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="grid grid-cols-1 gap-2 md:grid-cols-[120px_120px_minmax(220px,1fr)_minmax(150px,220px)_minmax(180px,260px)_100px_100px] items-end">
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-[120px_120px_minmax(220px,1fr)_minmax(150px,220px)_minmax(150px,220px)_minmax(180px,260px)_100px_100px] items-end">
             <div className="min-w-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ Req Dlv Date</label>
               <select
@@ -5262,6 +5532,16 @@ const App = () => {
             </div>
             <div className="min-w-0"><label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Import</label><input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/></div>
             <div className="min-w-0">
+              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Status</label>
+              <MultiSelect
+                label=""
+                options={importOptions.statuses || ['NEW', ...IMPORT_STATUS_OPTIONS]}
+                selected={importFilters.statuses || []}
+                onChange={v=>{ const next={...importFilters, statuses:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }}
+                darkMode={darkMode} txt2={txt2}
+              />
+            </div>
+            <div className="min-w-0">
               <MultiSelect label="YUPI PO" options={importOptions.yupi_po || []} selected={importFilters.yupi_po}
                 onChange={v=>{ const next={...importFilters, yupi_po:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }} darkMode={darkMode} txt2={txt2}/>
             </div>
@@ -5270,7 +5550,7 @@ const App = () => {
                 onChange={v=>{ const next={...importFilters, vendors:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }} darkMode={darkMode} txt2={txt2}/>
             </div>
             <button onClick={()=>{ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">Search</button>
-            <button onClick={()=>{ const next={ yupi_po: [], vendors: [] }; const nextSort='newest'; const nextYupiSort=''; setImportSearch(''); setImportAppliedSearch(''); setImportFilters(next); setImportReqDlvSort(nextSort); setImportYupiPoSort(nextYupiSort); setImportPage(1); fetchImportData(1, importPerPage, '', false, next, nextSort, nextYupiSort); }} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
+            <button onClick={()=>{ const next={ yupi_po: [], vendors: [], statuses: [] }; const nextSort='newest'; const nextYupiSort=''; setImportSearch(''); setImportAppliedSearch(''); setImportFilters(next); setImportReqDlvSort(nextSort); setImportYupiPoSort(nextYupiSort); setImportPage(1); fetchImportData(1, importPerPage, '', false, next, nextSort, nextYupiSort); }} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
         </FilterPanel>
 
@@ -6293,11 +6573,19 @@ const App = () => {
           outline-width: 0 !important;
           box-shadow: none !important;
         }
-        /* date inputs must NOT have box-shadow or border suppressed — browser needs these for native picker */
+        /* date inputs: keep the OUTER picker indicator visible but still
+           kill the focus ring. The previous rule already set outline:none
+           and box-shadow:none which is what we want. We only need to NOT
+           restore a border-color here — restoring border-color would
+           re-introduce the second blue border on date inputs in Chrome. */
         input[type="date"][data-no-focus-ring], input[type="date"][data-no-focus-ring]:focus,
         input[type="date"][data-no-focus-ring]:focus-visible {
-          box-shadow: unset;
-          border-color: unset;
+          outline: none !important;
+          outline-style: none !important;
+          outline-width: 0 !important;
+          box-shadow: none !important;
+          /* borderColor stays transparent (set inline) so no second border
+             appears. Don't restore it. */
         }
         /* ── Loading animation keyframes (must be explicit for Tailwind purge) ── */
         @keyframes spin {
