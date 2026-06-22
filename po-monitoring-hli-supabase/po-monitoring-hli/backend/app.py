@@ -824,15 +824,25 @@ IMPORT_SYNC_FIELD_ALIASES = {'yupi_po': 'po_yupi', 'req_dlv_date': 'source_req_d
 IMPORT_REFERENCE_VISIBLE_COLUMNS = [
     {'sheet_col': 'A',  'field': 'status',              'label': 'STATUS',                 'width': 132, 'type': 'status'},
     {'sheet_col': 'B',  'field': 'days_left',           'label': 'Days Left',              'width': 80,  'formula': True},
-    {'sheet_col': 'C',  'field': 'po_send_date',         'label': 'PO Send Date',          'width': 124, 'local': True, 'group_per_item': False},
-    {'sheet_col': 'D',  'source_sheet_col': 'B',  'field': 'site',                'label': 'Site',                   'width': 78,  'formula': True},
-    {'sheet_col': 'E',  'source_sheet_col': 'F',  'field': 'yupi_po',             'label': 'YUPI PO',                'width': 118},
-    {'sheet_col': 'F',  'source_sheet_col': 'Q',  'field': 'vendor',              'label': 'Vendor',                 'width': 190, 'formula': True},
-    {'sheet_col': 'G',  'source_sheet_col': 'K',  'field': 'req_dlv_date',        'label': 'Req Dlv Date',           'width': 122},
-    {'sheet_col': 'H',  'field': 'etd',                 'label': 'ETD',                    'width': 116},
-    {'sheet_col': 'I',  'field': 'eta',                 'label': 'ETA',                    'width': 116},
-    {'sheet_col': 'J',  'field': 'arrival_check',       'label': 'Arrival Check',          'width': 154, 'formula': True},
-    {'sheet_col': 'K',  'field': 'import_remarks',      'label': 'Import Remarks',         'width': 220},
+    {'sheet_col': 'C',  'field': 'po_send_date',         'label': 'PO Send Date',          'width': 124, 'local': True, 'group_per_item': False, 'blue_text': True},
+    {'sheet_col': 'D',  'source_sheet_col': 'B',  'field': 'site',                'label': 'Site',                   'width': 78,  'formula': True, 'blue_text': True},
+    {'sheet_col': 'E',  'source_sheet_col': 'F',  'field': 'yupi_po',             'label': 'YUPI PO',                'width': 118, 'blue_text': True},
+    {'sheet_col': 'F',  'source_sheet_col': 'Q',  'field': 'vendor',              'label': 'Vendor',                 'width': 190, 'formula': True, 'blue_text': True},
+    {'sheet_col': 'G',  'source_sheet_col': 'K',  'field': 'req_dlv_date',        'label': 'Req Dlv Date',           'width': 122, 'blue_text': True},
+    {'sheet_col': 'H',  'field': 'etd',                 'label': 'ETD',                    'width': 116, 'blue_text': True},
+    {'sheet_col': 'I',  'field': 'eta',                 'label': 'ETA',                    'width': 116, 'blue_text': True},
+    {'sheet_col': 'J',  'field': 'arrival_check',       'label': 'Arrival Check',          'width': 154, 'formula': True, 'blue_text': True},
+    {'sheet_col': 'K',  'field': 'import_remarks',      'label': 'Import Remarks',         'width': 220, 'blue_text': True},
+    # ── Shipment-level group columns (moved here per user request) ───────────
+    # These are GROUP columns (no group_per_item flag) so they merge across
+    # rows with the same YUPI PO + Req Dlv Date. Blue text applies from
+    # PO Send Date through Inv No.
+    {'sheet_col': 'CU', 'field': 'lt_days',             'label': 'LT (Days)',              'width': 94,  'formula': True, 'number': True, 'blue_text': True},
+    {'sheet_col': 'CV', 'field': 'incoterm',            'label': 'Incoterm',               'width': 98,  'blue_text': True},
+    {'sheet_col': 'CW', 'field': 'forwarder',           'label': 'Forwarder',              'width': 150, 'blue_text': True},
+    {'sheet_col': 'CX', 'field': 'bl_number',           'label': 'BL Number',              'width': 150, 'blue_text': True},
+    {'sheet_col': 'CY', 'field': 'inv_no',              'label': 'Inv No',                 'width': 135, 'blue_text': True},
+    {'sheet_col': 'CZ', 'field': 'non_ski',             'label': 'NON-SKI',                'width': 90},
     # ── Per-item columns (group_per_item=True → never merged across rows) ──────
     {'sheet_col': 'L',                            'field': 'so',                  'label': 'SO',                     'width': 140, 'group_per_item': True},
     {'sheet_col': 'M',  'source_sheet_col': 'A',  'field': 'group',               'label': 'GROUP',                  'width': 116, 'group_per_item': True},
@@ -851,16 +861,6 @@ IMPORT_REFERENCE_VISIBLE_COLUMNS = [
     {'sheet_col': 'AG', 'source_sheet_col': 'U',  'field': 'purchase_price',      'label': 'PURCHASE PRICE',         'width': 128, 'number': True, 'group_per_item': True},
     {'sheet_col': 'AH', 'source_sheet_col': 'V',  'field': 'currency',            'label': 'CURRENCY',               'width': 92,  'group_per_item': True},
     {'sheet_col': 'AJ', 'source_sheet_col': 'X',  'field': 'purchase_amount',     'label': 'PURCHASE\nAMOUNT',       'width': 132, 'formula': True, 'number': True, 'group_per_item': True},
-    # LT (Days), Incoterm, Forwarder, BL Number, Inv No, NON-SKI are now
-    # GROUP columns (no group_per_item flag) so they merge across rows
-    # with the same YUPI PO + Req Dlv Date. These shipment-level fields
-    # are shared by all items in the same delivery group.
-    {'sheet_col': 'CU', 'field': 'lt_days',             'label': 'LT (Days)',              'width': 94,  'formula': True, 'number': True},
-    {'sheet_col': 'CV', 'field': 'incoterm',            'label': 'Incoterm',               'width': 98},
-    {'sheet_col': 'CW', 'field': 'forwarder',           'label': 'Forwarder',              'width': 150},
-    {'sheet_col': 'CX', 'field': 'bl_number',           'label': 'BL Number',              'width': 150},
-    {'sheet_col': 'CY', 'field': 'inv_no',              'label': 'Inv No',                 'width': 135},
-    {'sheet_col': 'CZ', 'field': 'non_ski',             'label': 'NON-SKI',                'width': 90},
     {'sheet_col': 'DA', 'field': 'sap_input',           'label': 'SAP INPUT',              'width': 86,  'checkbox': True},
     {'sheet_col': 'DB', 'field': 'bl_awb',              'label': 'BL / AWB',               'width': 86,  'checkbox': True},
     {'sheet_col': 'DC', 'field': 'invoice',             'label': 'INVOICE',                'width': 86,  'checkbox': True},
@@ -963,6 +963,8 @@ def import_layout_columns(force=False):
         item['formula'] = bool(item.get('formula') or item.get('field') in IMPORT_FORMULA_FIELDS)
         item['hyperlink'] = bool(item.get('hyperlink') or item.get('field') in IMPORT_HYPERLINK_FIELDS)
         item['local'] = bool(item.get('local') or item.get('field') in IMPORT_DASHBOARD_LOCAL_FIELDS)
+        item['group_per_item'] = bool(item.get('group_per_item', False))
+        item['blue_text'] = bool(item.get('blue_text', False))
         if item.get('field') == 'status': item['options'] = IMPORT_STATUS_OPTIONS
         columns.append(item)
     return columns
@@ -5535,9 +5537,9 @@ def get_import_data():
         selected_statuses = [clean(v) for v in request.args.getlist('status') if clean(v)]
         # NEW: days_left color filter (red / yellow / green / today)
         days_left_filter = (clean(request.args.get('days_left')) or '').lower()
-        req_dlv_sort = str(clean(request.args.get('req_dlv_sort')) or '').lower() or 'newest'
+        req_dlv_sort = str(clean(request.args.get('req_dlv_sort')) or '').lower() or 'oldest'
         if req_dlv_sort not in ('oldest', 'newest'):
-            req_dlv_sort = 'newest'
+            req_dlv_sort = 'oldest'
         yupi_po_sort_val = clean(request.args.get('yupi_po_sort'))
         yupi_po_sort = str(yupi_po_sort_val).lower() if yupi_po_sort_val else ''
         if yupi_po_sort not in ('asc', 'desc'):
