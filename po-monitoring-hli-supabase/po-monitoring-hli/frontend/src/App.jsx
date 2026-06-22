@@ -1706,8 +1706,10 @@ const App = () => {
   const [registeredItemsAppliedProdIds, setRegisteredItemsAppliedProdIds] = useState([]);
   const [registeredItemsPicFilter, setRegisteredItemsPicFilter] = useState('');
   const [registeredItemsAppliedPicFilter, setRegisteredItemsAppliedPicFilter] = useState('');
-  const [registeredItemsFilters, setRegisteredItemsFilters] = useState({ mfr_names: [], vendor_names: [] });
-  const [registeredItemsOptions, setRegisteredItemsOptions] = useState({ mfr_names: [], vendor_names: [], pic_options: [] });
+  // NOTE: vendor_name state removed — source Excel has no Vendor column for
+  // product master data, so the filter would always be empty.
+  const [registeredItemsFilters, setRegisteredItemsFilters] = useState({ mfr_names: [] });
+  const [registeredItemsOptions, setRegisteredItemsOptions] = useState({ mfr_names: [], pic_options: [] });
 
   // Vendor Control
   const [vendorControlData, setVendorControlData] = useState([]);
@@ -2278,12 +2280,12 @@ const App = () => {
       if (search) params.append('search', search);
       (prodIds || []).forEach(v => params.append('prod_id', v));
       resolveFilter(filters.mfr_names).forEach(v => params.append('mfr_name', v));
-      resolveFilter(filters.vendor_names).forEach(v => params.append('vendor_name', v));
+      // vendor_name param intentionally omitted — source has no Vendor column.
       if (picFilter) params.append('pic_name', picFilter);
       const res = await api.get(`/api/all-registered-items?${params}`);
       setRegisteredItemsData(Array.isArray(res.data.data) ? res.data.data : []);
       setRegisteredItemsTotal(res.data.total || 0);
-      setRegisteredItemsOptions(res.data.filters || { mfr_names: [], vendor_names: [], pic_options: [] });
+      setRegisteredItemsOptions(res.data.filters || { mfr_names: [], pic_options: [] });
     } catch (e) {
       addToast(`Failed to load All Registered Items: ${e.response?.data?.error || e.message}`, 'error');
     } finally { setLoading(false); }
@@ -3915,6 +3917,8 @@ const App = () => {
     const totalPages = Math.max(1, Math.ceil(registeredItemsTotal / registeredItemsPerPage));
     // NOTE: column order MUST match <colgroup> + <td> order below.
     // "Category ID" is placed to the LEFT of "Category" per spec.
+    // "Vendor Name" column removed — source Excel has no Vendor column for
+    // product master data.
     const columns = [
       ['Product ID', 'prod_id'],
       ['Category ID', 'category_id'],
@@ -3923,7 +3927,6 @@ const App = () => {
       ['Product Name', 'prod_name'],
       ['Specification', 'spec'],
       ['Manufacturer Name', 'mfr_name'],
-      ['Vendor Name', 'vendor_name'],
       ['Order Unit', 'odr_unit'],
       ['HUB Handling Check', 'hub_handling_check'],
       ['Tax Type', 'tax_type'],
@@ -3948,7 +3951,7 @@ const App = () => {
       setRegisteredItemsAppliedProdIds([]);
       setRegisteredItemsPicFilter('');
       setRegisteredItemsAppliedPicFilter('');
-      const emptyFilters = { mfr_names: [], vendor_names: [] };
+      const emptyFilters = { mfr_names: [] };
       setRegisteredItemsFilters(emptyFilters);
       setRegisteredItemsPage(1);
       fetchRegisteredItems(1, registeredItemsPerPage, '', [], emptyFilters, '');
@@ -3959,7 +3962,6 @@ const App = () => {
       if (registeredItemsAppliedSearch) p.append('search', registeredItemsAppliedSearch);
       (registeredItemsAppliedProdIds || []).forEach(v => p.append('prod_id', v));
       resolveFilter(registeredItemsFilters.mfr_names).forEach(v => p.append('mfr_name', v));
-      resolveFilter(registeredItemsFilters.vendor_names).forEach(v => p.append('vendor_name', v));
       if (registeredItemsAppliedPicFilter) p.append('pic_name', registeredItemsAppliedPicFilter);
       downloadBlob(`/api/export/all-registered-items?${p}`, `All_Registered_Items_${new Date().toISOString().slice(0,10)}.xlsx`, 'All Registered Items');
     };
@@ -3970,11 +3972,17 @@ const App = () => {
     };
     const fmtProductId = (v) => {
       if (v == null || v === '') return '-';
+      // Strip trailing ".0" that pandas may add when reading numeric columns
+      // as floats. Do NOT strip leading zeros (Product IDs in source are
+      // pure integers without leading zeros, but be defensive).
       return String(v).replace(/\.0+$/, '');
     };
     const fmtCategoryId = (v) => {
       if (v == null || v === '') return '-';
-      // Category IDs are numeric — strip trailing ".0" that pandas adds.
+      // IMPORTANT: do NOT strip leading zeros. Category IDs in the source
+      // Excel look like "000200030000100007" and the leading zeros are
+      // significant (they encode hierarchy depth). Only strip the trailing
+      // ".0" pandas appends when it accidentally reads the column as float.
       return String(v).replace(/\.0+$/, '');
     };
 
@@ -3992,9 +4000,11 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-[minmax(240px,1fr)_170px_180px_minmax(180px,1fr)_minmax(180px,1fr)_90px_110px] items-end">
+          {/* Grid: Search | Prod ID | PIC | Mfr Name | Search btn | Clear btn
+              Vendor Name filter removed — source has no Vendor column. */}
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-[minmax(240px,1fr)_170px_180px_minmax(180px,1fr)_90px_110px] items-end">
             <div className="min-w-0">
-              <RFQMultiSearch value={registeredItemsSearch} onChange={setRegisteredItemsSearch} onSearch={(next) => { setRegisteredItemsAppliedSearch(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, next, registeredItemsAppliedProdIds, registeredItemsFilters, registeredItemsAppliedPicFilter); }} darkMode={darkMode} txt2={txt2} label="Search" description="Enter Product ID, Product Name, Specification, Manufacturer, or Vendor per line. Results match any entered value." placeholder={'8381684\nBearing SKF\nVendor ABC'} />
+              <RFQMultiSearch value={registeredItemsSearch} onChange={setRegisteredItemsSearch} onSearch={(next) => { setRegisteredItemsAppliedSearch(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, next, registeredItemsAppliedProdIds, registeredItemsFilters, registeredItemsAppliedPicFilter); }} darkMode={darkMode} txt2={txt2} label="Search" description="Enter Product ID, Product Name, Specification, or Manufacturer per line. Results match any entered value." placeholder={'8381684\nBearing SKF\nJTC'} />
             </div>
             <div className="min-w-0">
               <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Prod ID</label>
@@ -4016,7 +4026,6 @@ const App = () => {
               </select>
             </div>
             <MultiSelect label="Manufacturer Name" options={registeredItemsOptions.mfr_names || []} selected={registeredItemsFilters.mfr_names} onChange={v => { const next={...registeredItemsFilters, mfr_names:v}; setRegisteredItemsFilters(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, next, registeredItemsAppliedPicFilter); }} darkMode={darkMode} txt2={txt2} />
-            <MultiSelect label="Vendor Name" options={registeredItemsOptions.vendor_names || []} selected={registeredItemsFilters.vendor_names} onChange={v => { const next={...registeredItemsFilters, vendor_names:v}; setRegisteredItemsFilters(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, next, registeredItemsAppliedPicFilter); }} darkMode={darkMode} txt2={txt2} />
             <button onClick={() => { setRegisteredItemsAppliedSearch(registeredItemsSearch); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsSearch, registeredItemsAppliedProdIds, registeredItemsFilters, registeredItemsAppliedPicFilter); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">Search</button>
             <button onClick={handleClear} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
@@ -4026,12 +4035,11 @@ const App = () => {
           <table className="freeze-table-all-registered-items w-full text-xs">
             <colgroup>
               <col style={{minWidth:'120px'}}/>
-              <col style={{minWidth:'120px'}}/>
+              <col style={{minWidth:'180px'}}/>
               <col style={{minWidth:'140px'}}/>
               <col style={{minWidth:'80px'}}/>
               <col style={{minWidth:'160px'}}/>
               <col style={{minWidth:'280px'}}/>
-              <col style={{minWidth:'180px'}}/>
               <col style={{minWidth:'180px'}}/>
               <col style={{minWidth:'80px'}}/>
               <col style={{minWidth:'100px'}}/>
@@ -4067,7 +4075,6 @@ const App = () => {
                   <td className={`px-2 py-2 max-w-[160px] truncate ${txt}`} title={row.prod_name}>{row.prod_name || '-'}</td>
                   <td className={`px-2 py-2 max-w-[280px] truncate ${txt2}`} title={row.spec}>{row.spec || '-'}</td>
                   <td className={`px-2 py-2 max-w-[180px] truncate ${txt2}`} title={row.mfr_name}>{row.mfr_name || '-'}</td>
-                  <td className={`px-2 py-2 max-w-[180px] truncate ${txt2}`} title={row.vendor_name}>{row.vendor_name || '-'}</td>
                   <td className={`px-2 py-2 text-center whitespace-nowrap ${txt2}`}>{row.odr_unit || '-'}</td>
                   <td className={`px-2 py-2 text-center whitespace-nowrap ${txt2}`}>{row.hub_handling_check || '-'}</td>
                   <td className={`px-2 py-2 text-center whitespace-nowrap ${txt2}`}>{row.tax_type || '-'}</td>
@@ -6194,8 +6201,49 @@ const App = () => {
   // MAIN RENDER
   // ══════════════════════════════════════════════════════════════
   return (
-    <div className={`min-h-screen font-sans ${darkMode?'bg-gray-900':'bg-[#edf2f1]'} ${darkMode?'':'text-[#1f2937]'}`} style={{fontFamily: "'Inter', 'Plus Jakarta Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"}}>
+    <div
+      className={`min-h-screen font-sans ${darkMode?'bg-gray-900':'bg-[#edf2f1]'} ${darkMode?'':'text-[#1f2937]'}`}
+      style={{
+        fontFamily: "'Inter', 'Plus Jakarta Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+        // Tabular figures + slashed zeros so digit 0 is never confused with
+        // letter O — the #1 complaint about the old font. Applied globally
+        // so EVERY number (sidebar, dashboard, tables, modals) is rendered
+        // consistently with the same digit style as Item Registration.
+        fontFeatureSettings: '"tnum" 1, "zero" 1',
+        fontVariantNumeric: 'tabular-nums slashed-zero',
+      }}
+    >
     <style>{`
+        /* ─────────────────────────────────────────────────────────────
+           FONT BASELINE — Inter for everything, JetBrains Mono for
+           monospace blocks. Loaded from Google Fonts. Matches the
+           typography used on Item Registration so the entire dashboard
+           looks unified AND digit 0 is never confused with letter O
+           (Inter & JetBrains Mono both ship the "zero" OpenType feature
+           which renders 0 with a slash through it).
+           NOTE: @import statements MUST appear before any other rules
+           in a stylesheet, so they live at the very top here.
+           ───────────────────────────────────────────────────────────── */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+        /* Global typography baseline. tnum = tabular figures (digits
+           occupy equal width so columns of numbers align perfectly),
+           zero = slashed zero. Applied to EVERY element so there is no
+           drift between sidebar / dashboard / tables / modals. */
+        *, *::before, *::after {
+          font-family: 'Inter', 'Plus Jakarta Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
+          font-feature-settings: "tnum" 1, "zero" 1 !important;
+          font-variant-numeric: tabular-nums slashed-zero !important;
+        }
+        /* Monospace blocks (formulas, code, ID columns) — JetBrains Mono
+           also has a dotted/slashed zero for clear distinction from O. */
+        .font-mono, code, pre, kbd {
+          font-family: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace !important;
+          font-feature-settings: "tnum" 1, "zero" 1 !important;
+          font-variant-numeric: tabular-nums slashed-zero !important;
+        }
+
         /* Suppress chart/card entry animations (they slow down the UI on re-render)
            but ALLOW spinner, pulse, and slide-in used by loading indicators.
            We define the keyframes here so they survive Tailwind's purge in prod. */
