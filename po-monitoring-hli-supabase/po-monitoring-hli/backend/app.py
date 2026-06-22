@@ -2198,7 +2198,18 @@ def read_upload_excel(file):
     filename = (file.filename or '').lower()
     is_xls_format = raw[:4] == b'\xd0\xcf\x11\xe0'
     engine = 'xlrd' if is_xls_format or filename.endswith('.xls') else 'openpyxl'
-    return pd.read_excel(file, sheet_name=0, engine=engine)
+    # Read ALL columns as strings so leading zeros in IDs (e.g. Category ID
+    # "000200030000100007") are preserved. Pandas otherwise auto-infers
+    # numeric columns and drops leading zeros — that destroyed Category ID
+    # data on every upload. `keep_default_na=False` keeps empty cells as ''
+    # instead of NaN so downstream `clean()` works uniformly.
+    try:
+        return pd.read_excel(file, sheet_name=0, engine=engine, dtype=str, keep_default_na=False)
+    except Exception:
+        # Fallback: some sheets cannot honor dtype=str (mixed-type quirks).
+        # In that case read normally and let `clean()` normalize per cell.
+        file.seek(0)
+        return pd.read_excel(file, sheet_name=0, engine=engine)
 
 def _json_rows_to_dataframe(rows, columns=None):
     if rows is None: rows = []
@@ -2271,7 +2282,7 @@ def _product_id_columns(df):
         'product_status': find_column(df, ['Product Status', 'Prod. Status', 'Prod Status']),
         'specification': find_column(df, ['Specification', 'Spec.', 'Spec']),
         'manufacturer_name': find_column(df, ['Manufacturer Name', 'Mfr. Nm.', 'Mfr. Nm', 'Maker Nm.']),
-        'vendor_name': find_column(df, ['Vendor Name', 'Vendor Nm.', 'Vendor Nm', 'Vendor', 'Vendor (Name)', 'Supplier Name', 'Supplier Nm.', 'Supplier Nm', 'Supplier']),
+        # vendor_name intentionally omitted — source Excel has no Vendor column.
         'order_unit': find_column(df, ['Order Unit', 'Odr. Unit', 'Odr. Unit.']),
         'hub_handling_check': find_column(df, ['HUB Handling Check', 'HUB Handling Chk.', 'HUB Handling Chk']),
         'tax_type': find_column(df, ['Purchasing Price Tax Type', 'Tax Type', 'Tax Type.', 'Tax']),
@@ -2376,9 +2387,34 @@ def source_category_level1(category_value):
     return category.strip()
 
 def normalize_category_id(value):
+    """Normalize a Category ID for storage / lookup.
+
+    IMPORTANT: never strip leading zeros. Category IDs in the source Excel
+    look like "000200030000100007" and the leading zeros are significant
+    (they identify the category hierarchy depth). Pandas may still convert
+    a numeric string column to float on read, producing values like
+    "2.00030000100007e+17" or "200030000100007.0" — we reverse that here.
+    """
     cat_id = clean(value)
     if not cat_id: return ''
-    if re.match(r'^\d+\.0$', cat_id): return cat_id[:-2]
+    # Reverse pandas float coercion: "123.0" -> "123" (only when the entire
+    # string is digits + ".0" suffix, so we don't accidentally touch decimal
+    # values).
+    if re.match(r'^\d+\.0+$', cat_id): return cat_id.split('.', 1)[0]
+    # Reverse scientific notation: "2.0003e+17" -> "200030000000000000"
+    # Pandas produces this for big numbers when dtype wasn't honored.
+    sci = re.match(r'^(\d+)\.(\d+)e\+(\d+)$', cat_id)
+    if sci:
+        mantissa_digits = sci.group(1) + sci.group(2)
+        exponent = int(sci.group(3))
+        # Pad with zeros so the total digit count equals exponent+1
+        target_len = exponent + 1
+        if len(mantissa_digits) <= target_len:
+            mantissa_digits = mantissa_digits + '0' * (target_len - len(mantissa_digits))
+        # We cannot reconstruct leading zeros from scientific notation —
+        # the source must be re-uploaded with dtype=str. At least restore
+        # the magnitude correctly.
+        return mantissa_digits
     return cat_id.strip()
 
 def normalize_category_name(value):
@@ -4300,7 +4336,7 @@ def upload_product_id():
             ('product_id', 'Product ID'), ('category_id', 'Category ID'),
             ('category_name', 'Category Name'), ('product_name', 'Product Name'),
             ('product_status', 'Product Status'), ('specification', 'Specification'),
-            ('manufacturer_name', 'Manufacturer Name'), ('vendor_name', 'Vendor Name'),
+            ('manufacturer_name', 'Manufacturer Name'),
             ('order_unit', 'Order Unit'),
             ('hub_handling_check', 'HUB Handling Check'), ('tax_type', 'Tax Type'),
             ('registration_date', 'Registration Date'), ('product_registry_pic', 'Product Registry PIC')
@@ -4340,7 +4376,8 @@ def upload_product_id():
                     'product_status': clean(df_val(row, col['product_status'])),
                     'specification': clean(df_val(row, col['specification'])),
                     'manufacturer_name': clean(df_val(row, col['manufacturer_name'])),
-                    'vendor_name': clean(df_val(row, col['vendor_name'])),
+                    # vendor_name intentionally omitted — source Excel has no
+                    # Vendor column for product master data.
                     'order_unit': clean(df_val(row, col['order_unit'])),
                     'hub_handling_check': clean(df_val(row, col['hub_handling_check'])),
                     'tax_type': clean(df_val(row, col['tax_type'])),
@@ -6038,7 +6075,9 @@ def apply_all_registered_items_filters(q, args, exclude_fields=None):
     # we simply accept the key here as a no-op.
     # pic_name = (args.get('pic_name', '') or '').strip()
     mfr_names = [clean(v) for v in args.getlist('mfr_name') if clean(v)]
-    vendor_names = [clean(v) for v in args.getlist('vendor_name') if clean(v)]
+    # NOTE: vendor_name filter removed — the source Excel has no Vendor column
+    # for product master data, so the filter would never match anything.
+    # vendor_names = [clean(v) for v in args.getlist('vendor_name') if clean(v)]
 
     if date_filter != 'all':
         today = datetime.now().date()
@@ -6061,8 +6100,6 @@ def apply_all_registered_items_filters(q, args, exclude_fields=None):
         q = q.filter(ProductIDDB.product_id.in_(prod_ids))
     if 'mfr_name' not in exclude_fields and mfr_names:
         q = q.filter(ProductIDDB.manufacturer_name.in_(mfr_names))
-    if 'vendor_name' not in exclude_fields and vendor_names:
-        q = q.filter(ProductIDDB.vendor_name.in_(vendor_names))
 
     if search:
         terms = rfq_multiline_search_terms(search)
@@ -6074,7 +6111,6 @@ def apply_all_registered_items_filters(q, args, exclude_fields=None):
                 ProductIDDB.product_name.ilike(pattern),
                 ProductIDDB.specification.ilike(pattern),
                 ProductIDDB.manufacturer_name.ilike(pattern),
-                ProductIDDB.vendor_name.ilike(pattern),
                 ProductIDDB.category_name.ilike(pattern),
             ))
         if term_filters:
@@ -6091,6 +6127,10 @@ def serialize_registered_product(row, pic_map=None, pic_by_name=None):
     This double lookup is required because some ProductIDDB rows don't have a
     category_id that matches any MasterPIC entry, but their category_name
     still matches a MasterPIC row.
+
+    NOTE: vendor_name is intentionally NOT serialized — the source Excel does
+    not contain a Vendor column for product master data, so the field would
+    always be empty. The frontend no longer shows a Vendor column either.
     """
     pic_map = pic_map or {}
     pic_by_name = pic_by_name or {}
@@ -6110,7 +6150,6 @@ def serialize_registered_product(row, pic_map=None, pic_by_name=None):
         'prod_name': row.product_name or '',
         'spec': row.specification or '',
         'mfr_name': row.manufacturer_name or '',
-        'vendor_name': row.vendor_name or '',
         'odr_unit': row.order_unit or '',
         'hub_handling_check': row.hub_handling_check or '',
         'tax_type': row.tax_type or '',
@@ -6183,7 +6222,7 @@ def get_all_registered_items():
         pic_options = sorted(pic_set)
 
         mfr_option_q = apply_all_registered_items_filters(base_all_registered_items_query(), request.args, exclude_fields={'mfr_name'})
-        vendor_option_q = apply_all_registered_items_filters(base_all_registered_items_query(), request.args, exclude_fields={'vendor_name'})
+        # NOTE: vendor_names option removed — source has no Vendor column.
         payload = {
             'data': data,
             'total': total,
@@ -6191,7 +6230,6 @@ def get_all_registered_items():
             'per_page': per_page,
             'filters': {
                 'mfr_names': sorted([r[0] for r in mfr_option_q.with_entities(ProductIDDB.manufacturer_name).distinct().all() if r[0]]),
-                'vendor_names': sorted([r[0] for r in vendor_option_q.with_entities(ProductIDDB.vendor_name).distinct().all() if r[0]]),
                 'pic_options': pic_options,
             }
         }
@@ -6214,7 +6252,7 @@ def export_all_registered_items():
         wb = Workbook()
         ws = wb.active
         ws.title = 'All Registered Items'
-        headers = ['Product ID', 'Category ID', 'Category', 'PIC', 'Product Name', 'Specification', 'Manufacturer Name', 'Vendor Name', 'Order Unit', 'Hub Handling Check', 'Tax Type', 'Registration Date', 'Registry PIC', 'Status']
+        headers = ['Product ID', 'Category ID', 'Category', 'PIC', 'Product Name', 'Specification', 'Manufacturer Name', 'Order Unit', 'Hub Handling Check', 'Tax Type', 'Registration Date', 'Registry PIC', 'Status']
         ws.append(headers)
         header_fill = PatternFill(start_color="1D4ED8", end_color="1D4ED8", fill_type="solid")
         for cell in ws[1]:
@@ -6227,10 +6265,10 @@ def export_all_registered_items():
                 continue
             ws.append([
                 item['prod_id'], item['category_id'], item['category'], item['pic'], item['prod_name'], item['spec'],
-                item['mfr_name'], item['vendor_name'], item['odr_unit'], item['hub_handling_check'],
+                item['mfr_name'], item['odr_unit'], item['hub_handling_check'],
                 item['tax_type'], item['registration_date'], item['product_registry_pic'], item['proc_status']
             ])
-        widths = [18, 16, 28, 18, 35, 45, 28, 28, 14, 20, 14, 18, 24, 16]
+        widths = [18, 22, 28, 18, 35, 45, 28, 14, 20, 14, 18, 24, 16]
         for i, width in enumerate(widths, 1):
             ws.column_dimensions[get_column_letter(i)].width = width
         output = io.BytesIO()
