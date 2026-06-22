@@ -2014,24 +2014,23 @@ const App = () => {
         const left = cumulativeLeft;
         const w = widths[idx];
         if (Number.isFinite(w) && w > 0) cumulativeLeft += w;
-        // IMPORTANT: backgrounds use !important so the pinned header & cells
-        // are NEVER transparent — both in the stuck-vertical-header state
-        // (mirror visible) AND in the unstuck state (user at top of table,
-        // no mirror, original th renders directly). Without !important the
-        // browser may inherit a transparent background from <thead> ancestor
-        // and the pinned column text collides with the column scrolling
-        // beneath it.
+        // IMPORTANT: We use [data-col-index="${idx}"] instead of :nth-child(${idx}).
+        // The :nth-child selector BREAKS when a table has rowspan (merged cells):
+        // in rows covered by a rowspan, the td count shifts, so :nth-child(1) in
+        // a gap row points to a DIFFERENT column than in the first row. This caused
+        // the "Item Yupi tertahan" bug — Item Yupi values in rowspan gap rows were
+        // getting the pinned CSS treatment.
         //
-        // The selector is written WITHOUT `.data-table-page` prefix so it
-        // also applies on pages that don't carry that wrapper class (the
-        // dashboard's pending-delivery table for example). Light/dark is
-        // disambiguated via the same wrapper, with a global fallback for
-        // any table outside that wrapper.
+        // z-index: 60 for thead th — MUST be higher than the global
+        // `.data-table-scroll thead th { z-index: 56 }` rule, otherwise
+        // non-pinned th elements (z-index 56) scroll OVER the pinned th,
+        // making it look transparent/overlapping.
         rules.push(`
           /* Base sticky rule — applies to EVERY freeze-table-N table
-             regardless of light/dark wrapper. */
-          .freeze-table-${tableKey} th:nth-child(${idx}),
-          .freeze-table-${tableKey} td:nth-child(${idx}) {
+             regardless of light/dark wrapper. Uses [data-col-index] so it
+             works correctly even with rowspan merged cells. */
+          .freeze-table-${tableKey} th[data-col-index="${idx}"],
+          .freeze-table-${tableKey} td[data-col-index="${idx}"] {
             position: sticky !important;
             left: ${left}px;
             z-index: 25;
@@ -2042,29 +2041,29 @@ const App = () => {
                bg-* utility applied to <thead>, <tr>, or the cell itself. */
             background-color: #ffffff !important;
           }
-          .freeze-table-${tableKey} thead th:nth-child(${idx}) {
-            z-index: 45;
+          .freeze-table-${tableKey} thead th[data-col-index="${idx}"] {
+            z-index: 60;
             background-color: #e2e8f0 !important;
           }
-          .freeze-table-${tableKey} tfoot td:nth-child(${idx}) {
+          .freeze-table-${tableKey} tfoot td[data-col-index="${idx}"] {
             background-color: #f1f5f9 !important;
           }
           /* Dark mode overrides — scoped to .data-table-page-dark wrapper. */
-          .data-table-page-dark .freeze-table-${tableKey} td:nth-child(${idx}) {
+          .data-table-page-dark .freeze-table-${tableKey} td[data-col-index="${idx}"] {
             background-color: #1f2937 !important;
           }
-          .data-table-page-dark .freeze-table-${tableKey} thead th:nth-child(${idx}) {
+          .data-table-page-dark .freeze-table-${tableKey} thead th[data-col-index="${idx}"] {
             background-color: #374151 !important;
           }
-          .data-table-page-dark .freeze-table-${tableKey} tfoot td:nth-child(${idx}) {
+          .data-table-page-dark .freeze-table-${tableKey} tfoot td[data-col-index="${idx}"] {
             background-color: #111827 !important;
           }
           /* Row hover should still tint the pinned cell so users see which
              row they're hovering across the frozen pane. */
-          .freeze-table-${tableKey} tbody tr:hover td:nth-child(${idx}) {
+          .freeze-table-${tableKey} tbody tr:hover td[data-col-index="${idx}"] {
             background-color: #f8fafc !important;
           }
-          .data-table-page-dark .freeze-table-${tableKey} tbody tr:hover td:nth-child(${idx}) {
+          .data-table-page-dark .freeze-table-${tableKey} tbody tr:hover td[data-col-index="${idx}"] {
             background-color: #283548 !important;
           }
         `);
@@ -2155,6 +2154,69 @@ const App = () => {
       dateFilter: globalDateFilter, clients: globalClientFilter, pics: globalPicFilter,
     });
   }, [globalDateFilter, globalClientFilter, globalPicFilter]);
+
+  // ── Auto-populate data-col-index for tables that don't set it inline ──────
+  // The pending-delivery table renders 27 <td> per row manually (not via
+  // .map with index), so we can't easily add data-col-index in JSX. This
+  // effect walks every freeze-table row and stamps each th/td with its
+  // 1-based column index. Runs on mount + whenever table content changes
+  // (via ResizeObserver). This is a safety net — tables that already set
+  // data-col-index inline are not affected (we only set if missing).
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const stamp = () => {
+      document.querySelectorAll('table[class*="freeze-table-"]').forEach(table => {
+        // Stamp thead
+        table.querySelectorAll('thead tr').forEach(tr => {
+          tr.querySelectorAll('th').forEach((th, i) => {
+            if (!th.hasAttribute('data-col-index')) th.setAttribute('data-col-index', String(i + 1));
+          });
+        });
+        // Stamp tbody — but rowspan complicates this. For each tr, count
+        // columns by position (1-based), skipping cells covered by a
+        // rowspan from a previous row.
+        const colOffsets = []; // colOffsets[rowIndex] = array of column indices still covered by rowspan
+        table.querySelectorAll('tbody tr').forEach((tr, rowIdx) => {
+          let colIdx = 1;
+          let tdIdx = 0;
+          const tds = tr.querySelectorAll('td');
+          const offset = colOffsets[rowIdx] || [];
+          tds.forEach(td => {
+            // Skip columns covered by rowspan from above
+            while (offset.includes(colIdx)) colIdx++;
+            if (!td.hasAttribute('data-col-index')) td.setAttribute('data-col-index', String(colIdx));
+            const rs = parseInt(td.getAttribute('rowspan') || '1', 10);
+            if (rs > 1) {
+              for (let r = 1; r < rs; r++) {
+                if (!colOffsets[rowIdx + r]) colOffsets[rowIdx + r] = [];
+                colOffsets[rowIdx + r].push(colIdx);
+              }
+            }
+            colIdx++;
+            tdIdx++;
+          });
+        });
+        // Stamp tfoot
+        table.querySelectorAll('tfoot tr').forEach(tr => {
+          tr.querySelectorAll('td').forEach((td, i) => {
+            if (!td.hasAttribute('data-col-index')) td.setAttribute('data-col-index', String(i + 1));
+          });
+        });
+      });
+    };
+    stamp();
+    // Re-stamp periodically to catch re-renders. Use a MutationObserver for
+    // immediate response + interval as fallback.
+    const observer = typeof MutationObserver !== 'undefined' ? new MutationObserver(stamp) : null;
+    if (observer) {
+      document.querySelectorAll('table[class*="freeze-table-"]').forEach(t => observer.observe(t, { childList: true, subtree: true }));
+    }
+    const interval = setInterval(stamp, 500);
+    return () => {
+      if (observer) observer.disconnect();
+      clearInterval(interval);
+    };
+  }, [activePage]);
 
   // ── Toast helpers (declared FIRST so the offline-queue logic below can
   // reference them without hitting a temporal-dead-zone error). ──────────────
@@ -4341,7 +4403,7 @@ const App = () => {
             <thead className={tblHd}>
               <tr>
                 {columns.map(([label], index) => (
-                  <th key={label} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{renderFreezeHeader('all-registered-items', index + 1, label)}</th>
+                  <th key={label} data-col-index={index + 1} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{renderFreezeHeader('all-registered-items', index + 1, label)}</th>
                 ))}
               </tr>
             </thead>
@@ -4354,23 +4416,23 @@ const App = () => {
                 </tr>
               ) : registeredItemsData.map(row => (
                 <tr key={row.id} className={`${trHov} transition-colors`}>
-                  <td className="px-2 py-2 font-mono text-blue-600 whitespace-nowrap text-center">{fmtProductId(row.prod_id)}</td>
-                  <td className={`px-2 py-2 font-mono text-center whitespace-nowrap ${txt2}`} title={String(row.category_id || '')}>{fmtCategoryId(row.category_id)}</td>
-                  <td className={`px-2 py-2 ${txt2}`} title={row.category}>{row.category || '-'}</td>
-                  <td className="px-2 py-2 text-center whitespace-nowrap">
+                  <td data-col-index="1" className="px-2 py-2 font-mono text-blue-600 whitespace-nowrap text-center">{fmtProductId(row.prod_id)}</td>
+                  <td data-col-index="2" className={`px-2 py-2 font-mono text-center whitespace-nowrap ${txt2}`} title={String(row.category_id || '')}>{fmtCategoryId(row.category_id)}</td>
+                  <td data-col-index="3" className={`px-2 py-2 ${txt2}`} title={row.category}>{row.category || '-'}</td>
+                  <td data-col-index="4" className="px-2 py-2 text-center whitespace-nowrap">
                     {row.pic ? (() => {
                       const c = getPicColor(row.pic);
                       return <span className={`px-1.5 py-0.5 rounded-full text-xs font-semibold ${c ? `${c.bg} ${c.text}` : 'bg-gray-100 text-gray-700'}`}>{row.pic}</span>;
                     })() : <span className={txt2}>-</span>}
                   </td>
-                  <td className={`px-2 py-2 max-w-[160px] truncate ${txt}`} title={row.prod_name}>{row.prod_name || '-'}</td>
-                  <td className={`px-2 py-2 max-w-[280px] truncate ${txt2}`} title={row.spec}>{row.spec || '-'}</td>
-                  <td className={`px-2 py-2 max-w-[180px] truncate ${txt2}`} title={row.mfr_name}>{row.mfr_name || '-'}</td>
-                  <td className={`px-2 py-2 text-center whitespace-nowrap ${txt2}`}>{row.odr_unit || '-'}</td>
-                  <td className={`px-2 py-2 text-center whitespace-nowrap ${txt2}`}>{row.hub_handling_check || '-'}</td>
-                  <td className={`px-2 py-2 text-center whitespace-nowrap ${txt2}`}>{row.tax_type || '-'}</td>
-                  <td className={`px-2 py-2 whitespace-nowrap ${txt2}`}>{fmtDateShort(row.registration_date)}</td>
-                  <td className={`px-2 py-2 max-w-[160px] truncate ${txt2}`} title={row.product_registry_pic}>{row.product_registry_pic || '-'}</td>
+                  <td data-col-index="5" className={`px-2 py-2 max-w-[160px] truncate ${txt}`} title={row.prod_name}>{row.prod_name || '-'}</td>
+                  <td data-col-index="6" className={`px-2 py-2 max-w-[280px] truncate ${txt2}`} title={row.spec}>{row.spec || '-'}</td>
+                  <td data-col-index="7" className={`px-2 py-2 max-w-[180px] truncate ${txt2}`} title={row.mfr_name}>{row.mfr_name || '-'}</td>
+                  <td data-col-index="8" className={`px-2 py-2 text-center whitespace-nowrap ${txt2}`}>{row.odr_unit || '-'}</td>
+                  <td data-col-index="9" className={`px-2 py-2 text-center whitespace-nowrap ${txt2}`}>{row.hub_handling_check || '-'}</td>
+                  <td data-col-index="10" className={`px-2 py-2 text-center whitespace-nowrap ${txt2}`}>{row.tax_type || '-'}</td>
+                  <td data-col-index="11" className={`px-2 py-2 whitespace-nowrap ${txt2}`}>{fmtDateShort(row.registration_date)}</td>
+                  <td data-col-index="12" className={`px-2 py-2 max-w-[160px] truncate ${txt2}`} title={row.product_registry_pic}>{row.product_registry_pic || '-'}</td>
                 </tr>
               ))}
             </tbody>
@@ -4793,7 +4855,7 @@ const App = () => {
               <tr>{columns.map((col, index) => {
                 const darkHeaderCols = ['check', 'sheet_status', 'days_left', 'no', 'client_name', 'rfq_date', 'closing_date', 'sales_pic', 'category_name', 'purchase_pic', 'rfq_code', 'item_name', 'detail_spec', 'brand_manufacturer', 'qty', 'unit', 'remark', 'similar_prod_ids', 'similar_prod_name', 'similar_spec', 'similar_mfr_name', 'similar_odr_unit', 'similar_score'];
                 const isDarkHeader = darkHeaderCols.includes(col.field);
-                return <th key={col.field} className={`px-2 py-2 text-center font-bold whitespace-nowrap border-r ${isDarkHeader ? 'bg-slate-200 text-slate-700' : darkMode ? 'bg-gray-800/60 border-gray-700 text-gray-200' : 'bg-slate-50 border-gray-200 text-gray-700'} ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>{renderFreezeHeader('rfq', index + 1, col.label)}</th>;
+                return <th key={col.field} data-col-index={index + 1} className={`px-2 py-2 text-center font-bold whitespace-nowrap border-r ${isDarkHeader ? 'bg-slate-200 text-slate-700' : darkMode ? 'bg-gray-800/60 border-gray-700 text-gray-200' : 'bg-slate-50 border-gray-200 text-gray-700'} ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>{renderFreezeHeader('rfq', index + 1, col.label)}</th>;
               })}</tr>
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
@@ -4802,7 +4864,7 @@ const App = () => {
               ) : rfqData.map((row, rowIndex) => {
                 return (
                 <tr key={row.row_key} className={`${trHov} transition-colors${rfqPicFilter && rfqEditedRowKeys.has(row.row_key) ? ' ring-1 ring-inset ring-amber-400/60' : ''}`}>
-                  {columns.map((col) => {
+                  {columns.map((col, colIdx) => {
                     const field = col.field;
                     const value = row[field] ?? '';
                     const isEditable = editableSet.has(field);
@@ -4810,16 +4872,16 @@ const App = () => {
                     if (field === 'check') {
                       const checkValue = String(row.check || '').toLowerCase();
                       if (checkValue === 'complete') {
-                        return <td key={field} className={`px-2 py-2 text-center border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'}`} title="Complete"><span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#20B71F]"><Check className="w-4 h-4 text-white stroke-[4]"/></span></td>;
+                        return <td key={field} data-col-index={colIdx + 1} className={`px-2 py-2 text-center border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'}`} title="Complete"><span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#20B71F]"><Check className="w-4 h-4 text-white stroke-[4]"/></span></td>;
                       }
                       if (checkValue === 'reject') {
-                        return <td key={field} className={`px-2 py-2 text-center border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'}`} title="Reject"><span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#EA0D0D]"><X className="w-4 h-4 text-white stroke-[4]"/></span></td>;
+                        return <td key={field} data-col-index={colIdx + 1} className={`px-2 py-2 text-center border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'}`} title="Reject"><span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#EA0D0D]"><X className="w-4 h-4 text-white stroke-[4]"/></span></td>;
                       }
                       const closed = checkValue === 'closed' || (!row.product_id && isRFQClosingPast(row.closing_date));
-                      return <td key={field} className={`px-2 py-2 text-center border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'}`} title={closed ? 'Closed' : 'Open'}><span className={`inline-flex h-6 w-6 rounded-full border ${closed ? (darkMode ? 'bg-gray-500 border-gray-400' : 'bg-gray-300 border-gray-400') : darkMode ? 'bg-gray-700 border-gray-500' : 'bg-white border-gray-300'}`}/></td>;
+                      return <td key={field} data-col-index={colIdx + 1} className={`px-2 py-2 text-center border-r ${darkMode ? 'bg-gray-800/60 border-gray-700' : 'bg-slate-50 border-gray-200'}`} title={closed ? 'Closed' : 'Open'}><span className={`inline-flex h-6 w-6 rounded-full border ${closed ? (darkMode ? 'bg-gray-500 border-gray-400' : 'bg-gray-300 border-gray-400') : darkMode ? 'bg-gray-700 border-gray-500' : 'bg-white border-gray-300'}`}/></td>;
                     }
                     if (field === 'days_left') {
-                      return <td key={field} className={`px-2 py-2 text-center border-r ${darkMode ? 'bg-gray-800/60 border-gray-700 text-gray-100' : 'bg-slate-50 border-gray-200 text-black'}`}>{row.days_left === 0 || row.days_left ? fmtNum(row.days_left) : '-'}</td>;
+                      return <td key={field} data-col-index={colIdx + 1} className={`px-2 py-2 text-center border-r ${darkMode ? 'bg-gray-800/60 border-gray-700 text-gray-100' : 'bg-slate-50 border-gray-200 text-black'}`}>{row.days_left === 0 || row.days_left ? fmtNum(row.days_left) : '-'}</td>;
                     }
                     if (isEditable && isEditing) {
                       const tall = ['quoted_spec', 'remarks', 'photo_url'].includes(field);
@@ -4832,7 +4894,7 @@ const App = () => {
                       const rfqInputStyle = { outline: 'none', outlineStyle: 'none', outlineWidth: 0, boxShadow: 'none', borderColor: 'transparent', borderWidth: 0 };
                       const rfqTdCls = `relative p-0 align-top border-r outline outline-2 outline-blue-500 outline-offset-[-2px] ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`;
                       if (['rfq_date', 'closing_date'].includes(field)) {
-                        return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={rfqTdCls}>
+                        return <td key={field} data-col-index={colIdx + 1} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={rfqTdCls}>
                           <input
                             type="date"
                             data-no-focus-ring=""
@@ -4853,7 +4915,7 @@ const App = () => {
                         </td>;
                       }
                       if (field === 'same_replacement') {
-                        return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={rfqTdCls}>
+                        return <td key={field} data-col-index={colIdx + 1} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={rfqTdCls}>
                           <select
                             data-no-focus-ring=""
                             style={rfqInputStyle}
@@ -4870,7 +4932,7 @@ const App = () => {
                           </select>
                         </td>;
                       }
-                      return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={rfqTdCls}>
+                      return <td key={field} data-col-index={colIdx + 1} data-rfq-cell="true" data-row-index={rowIndex} data-field={field} className={rfqTdCls}>
                         <Control
                           data-no-focus-ring=""
                           style={rfqInputStyle}
@@ -4905,7 +4967,7 @@ const App = () => {
                       const inMultiSelection = rfqSelectedCells?.has(rfqCellKeyStr);
                       const sourceStyle = rfqSourceStyleFields.has(field);
                       const fillHighlighted = rfqFillRange?.field === field && rowIndex >= rfqFillRange.minRow && rowIndex <= rfqFillRange.maxRow && rowIndex !== rfqFillRange.startRow;
-                      return <td key={field} data-rfq-cell="true" data-row-index={rowIndex} data-field={field}
+                      return <td key={field} data-col-index={colIdx + 1} data-rfq-cell="true" data-row-index={rowIndex} data-field={field}
                         tabIndex={0}
                         onFocus={() => setRfqSelectedCell({ rowKey: row.row_key, field })}
                         onClick={(e) => {
@@ -5561,7 +5623,7 @@ const App = () => {
             <colgroup>{visibleColumns.map(col => <col key={col.field} style={{ width: `${colWidth(col)}px` }} />)}</colgroup>
             <thead className={tblHd}>
               <tr>{visibleColumns.map((col, index) => (
-                <th key={col.field} className={`px-2 py-2 min-h-10 text-center align-middle font-bold border-r whitespace-pre-line leading-tight ${darkMode ? 'border-gray-700 text-gray-200' : 'border-gray-200 text-slate-700'}`} title={col.sheet_col ? `${col.sheet_col} - ${col.label}` : col.label}>{renderFreezeHeader('import', index + 1, col.label)}</th>
+                <th key={col.field} data-col-index={index + 1} className={`px-2 py-2 h-10 text-center align-middle font-bold border-r whitespace-pre-line leading-tight ${darkMode ? 'border-gray-700 text-gray-200' : 'border-gray-200 text-slate-700'}`} title={col.sheet_col ? `${col.sheet_col} - ${col.label}` : col.label}>{renderFreezeHeader('import', index + 1, col.label)}</th>
               ))}</tr>
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
@@ -5569,7 +5631,7 @@ const App = () => {
                 <tr><td colSpan={Math.max(1, visibleColumns.length)} className={`px-4 py-12 text-center ${txt2}`}><Ship className="w-10 h-10 mx-auto mb-2 opacity-40"/>No import data</td></tr>
               ) : importData.map((row, rowIndex) => {
                 const hasReschedule = String(row.reschedule || '').trim();
-                return <tr key={row._row_key} className={`${trHov} ${hasReschedule ? (darkMode ? 'bg-amber-900/25 hover:bg-amber-900/35' : 'bg-amber-50 hover:bg-amber-100/70') : ''}`}>{visibleColumns.map(col => {
+                return <tr key={row._row_key} className={`${trHov} ${hasReschedule ? (darkMode ? 'bg-amber-900/25 hover:bg-amber-900/35' : 'bg-amber-50 hover:bg-amber-100/70') : ''}`}>{visibleColumns.map((col, colIdx) => {
                   const isGroupCol = isImportGroupColumn(col);
                   const groupStartRow = importGroupStartIndexFor[rowIndex];
                   // Group columns only render their <td> on the group's first
@@ -5589,7 +5651,8 @@ const App = () => {
                   const inMultiSelection = importSelectedCells?.has(cellKey);
                   // Fill highlight: support both vertical (down/up, same
                   // column) and horizontal (left/right, same row) drag-fill.
-                  const colIdx = visibleColumns.findIndex(c => c.field === col.field);
+                  // colIdx is now passed from the map callback directly (no need to findIndex)
+                  // const colIdx = visibleColumns.findIndex(c => c.field === col.field);
                   let fillHighlighted = false;
                   if (importFillRange?.direction === 'vertical') {
                     fillHighlighted = importFillRange.startField === col.field && ownerRowIndex >= importFillRange.minRow && ownerRowIndex <= importFillRange.maxRow && ownerRowIndex !== importFillRange.startRow;
@@ -5601,6 +5664,7 @@ const App = () => {
                   return <td
                     key={col.field}
                     rowSpan={rowSpan > 1 ? rowSpan : undefined}
+                    data-col-index={colIdx + 1}
                     data-import-cell="true"
                     data-row-index={ownerRowIndex}
                     data-field={col.field}
@@ -5623,7 +5687,7 @@ const App = () => {
                       }
                     }}
                     onPaste={e => { e.preventDefault(); applyImportPaste(ownerRowIndex, col.field, e.clipboardData.getData('text/plain')); }}
-                    className={`group relative ${rowSpan > 1 ? 'h-full' : 'h-8 max-h-8'} ${editingCellNow ? 'p-0' : 'px-2 py-1'} align-middle border-r focus:outline-none cursor-pointer ${formula ? (darkMode ? 'bg-gray-800/50' : 'bg-slate-50/80') : ''} ${hasReschedule ? (darkMode ? 'bg-amber-900/20' : 'bg-amber-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${editingCellNow ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : inMultiSelection ? 'outline outline-2 outline-blue-500 outline-offset-[-2px] bg-blue-50/50' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${col.field === 'days_left' ? 'text-center' : ''} ${txt2}`}
+                    className={`group relative h-8 max-h-8 ${editingCellNow ? 'is-editing p-0' : 'px-2 py-1'} align-middle border-r focus:outline-none cursor-pointer ${formula ? (darkMode ? 'bg-gray-800/50' : 'bg-slate-50/80') : ''} ${hasReschedule ? (darkMode ? 'bg-amber-900/20' : 'bg-amber-50') : ''} ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${editingCellNow ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : fillHighlighted ? 'outline outline-2 outline-blue-300 outline-offset-[-2px]' : inMultiSelection ? 'outline outline-2 outline-blue-500 outline-offset-[-2px] bg-blue-50/50' : selected ? 'outline outline-2 outline-blue-500 outline-offset-[-2px]' : 'hover:outline hover:outline-2 hover:outline-blue-400 hover:outline-offset-[-2px]'} ${col.field === 'days_left' ? 'text-center' : ''} ${txt2}`}
                   >
                     {renderImportCell(ownerRow, col)}
                     {/* Fill handle — bottom-right corner. Drag in any direction:
@@ -5779,19 +5843,19 @@ const App = () => {
         <DataTableScroll darkMode={darkMode}>
           <table className="freeze-table-item-registration table-fixed text-xs" style={{ width: `${itemRegTableWidth}px`, minWidth: `${itemRegTableWidth}px` }}>
             <colgroup>{columns.map(([, key]) => <col key={key} style={colStyle(key)}/>)}</colgroup>
-            <thead className={tblHd}><tr>{columns.map(([label], index) => <th key={label} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{renderFreezeHeader('item-registration', index + 1, label)}</th>)}</tr></thead>
+            <thead className={tblHd}><tr>{columns.map(([label], index) => <th key={label} data-col-index={index + 1} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{renderFreezeHeader('item-registration', index + 1, label)}</th>)}</tr></thead>
             <tbody className={`divide-y ${tblDv}`}>
               {itemRegData.length === 0 ? <tr><td colSpan={columns.length} className={`px-4 py-12 text-center ${txt2}`}><Wrench className="w-10 h-10 mx-auto mb-2 opacity-40"/>No Item Registration data</td></tr>
               : itemRegData.map(row => {
                 return <tr key={row.id} className={`${trHov} transition-colors`}>
-                {columns.map(([, key]) => {
+                {columns.map(([label, key], colIdx) => {
                   const value = key === 'prod_price' ? fmtNum(row[key]) : key === 'req_date' ? fmtDateShort(row[key]) : (row[key] || '-');
-                  if (key === 'proc_status') return <td key={key} className="px-2 py-2"><span className={`inline-flex max-w-full items-center px-2 py-0.5 rounded-full border text-[11px] font-semibold leading-snug truncate ${statusClass(row[key])}`}>{value}</span></td>;
+                  if (key === 'proc_status') return <td key={key} data-col-index={colIdx + 1} className="px-2 py-2"><span className={`inline-flex max-w-full items-center px-2 py-0.5 rounded-full border text-[11px] font-semibold leading-snug truncate ${statusClass(row[key])}`}>{value}</span></td>;
                   if (key === 'pic') {
                     const c = getPicColor(row.pic);
-                    return <td key={key} className="px-2 py-2 text-center truncate">{row.pic ? <span className={`inline-flex max-w-full truncate px-2 py-0.5 rounded-full text-[11px] font-semibold ${c ? `${c.bg} ${c.text}` : 'bg-gray-100 text-gray-700'}`}>{row.pic}</span> : <span className={txt2}>-</span>}</td>;
+                    return <td key={key} data-col-index={colIdx + 1} className="px-2 py-2 text-center truncate">{row.pic ? <span className={`inline-flex max-w-full truncate px-2 py-0.5 rounded-full text-[11px] font-semibold ${c ? `${c.bg} ${c.text}` : 'bg-gray-100 text-gray-700'}`}>{row.pic}</span> : <span className={txt2}>-</span>}</td>;
                   }
-                  if (key === 'remarks') return <td key={key} className="px-2 py-2 truncate" title={row.remarks}>{editingCell?.id===row.id && editingCell.field==='item_remarks' ? (
+                  if (key === 'remarks') return <td key={key} data-col-index={colIdx + 1} className="px-2 py-2 truncate" title={row.remarks}>{editingCell?.id===row.id && editingCell.field==='item_remarks' ? (
                     <input type="text" defaultValue={row.remarks}
                       className={`w-full px-2 py-1 rounded text-xs border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                       onChange={e=>setEditValue(e.target.value)}
@@ -5801,7 +5865,7 @@ const App = () => {
                   ) : (
                     <span className="cursor-pointer text-blue-600 hover:underline" onClick={()=>{setEditingCell({id:row.id,field:'item_remarks'});setEditValue(row.remarks||'');}}>{row.remarks||'Add'}</span>
                   )}</td>;
-                  return <td key={key} className={`px-2 py-2 ${['req_no','prod_name'].includes(key) ? '' : 'truncate'} ${key === 'prod_price' ? `text-right font-semibold ${kpiValue}` : txt2} ${['req_date','req_no','prod_id','prod_name','odr_unit','curr'].includes(key) ? 'whitespace-nowrap' : ''}`} title={row[key]}>{value}</td>;
+                  return <td key={key} data-col-index={colIdx + 1} className={`px-2 py-2 ${['req_no','prod_name'].includes(key) ? '' : 'truncate'} ${key === 'prod_price' ? `text-right font-semibold ${kpiValue}` : txt2} ${['req_date','req_no','prod_id','prod_name','odr_unit','curr'].includes(key) ? 'whitespace-nowrap' : ''}`} title={row[key]}>{value}</td>;
                 })}
               </tr>;})}
             </tbody>
@@ -6365,7 +6429,7 @@ const App = () => {
             <thead className={tblHd}>
               <tr>
                 {['Aging','Day','SO Create Date','SO Item','PO No.','SO Status','Category','PIC','Product ID','Product Name','Specification','Manufacturer Name','SO Quantity','Sales Unit','Operation Unit Name','Vendor ID','Vendor Name','Currency','Sales Price (Exclude Tax)','Sales Amount (Exclude Tax)','Purchasing Currency','Purchasing Price','Margin','%Margin','Delivery Memo','Plan Date','Remarks'].map((h, index)=>(
-                  <th key={h} className={`px-3 py-2.5 text-center font-bold ${txt2}`}>{renderFreezeHeader('pending-delivery', index + 1, h)}</th>
+                  <th key={h} data-col-index={index + 1} className={`px-3 py-2.5 text-center font-bold ${txt2}`}>{renderFreezeHeader('pending-delivery', index + 1, h)}</th>
                 ))}
               </tr>
             </thead>
@@ -6620,11 +6684,10 @@ const App = () => {
         button:disabled { cursor: not-allowed !important; opacity: 0.5; }
         .rfq-fill-handle { cursor: crosshair !important; }
         body.rfq-fill-dragging, body.rfq-fill-dragging * { cursor: crosshair !important; }
+        .freeze-table-import td, .freeze-table-import th { box-shadow: inset 0 -1px 0 rgba(148, 163, 184, 0.22), inset -1px 0 0 rgba(148, 163, 184, 0.22); }
         .freeze-table-import tbody tr { height: 32px; }
-        /* max-height only on non-date, non-merged cells — date picker popup needs
-           unrestricted height, and rowSpan (merged) cells need to grow to fill
-           their full spanned height instead of clipping their content to one row. */
-        .freeze-table-import td:not([rowspan]) > *:not(input[type="date"]) { max-height: 28px; }
+        /* max-height only on non-date cells — date picker popup needs unrestricted height */
+        .freeze-table-import td > *:not(input[type="date"]) { max-height: 28px; }
         .freeze-table-import input, .freeze-table-import textarea, .freeze-table-import select {
           outline: none !important;
           box-shadow: none !important;
@@ -6634,6 +6697,15 @@ const App = () => {
         .freeze-table-import select:focus {
           outline: none !important;
           box-shadow: inset 0 0 0 2px #3b82f6 !important;
+        }
+        /* When a cell is being EDITED, the td already shows the outer blue
+           outline. Suppress the inner inset box-shadow so we don't get a
+           double blue border. This is the fix for the Import double-border
+           bug. */
+        .freeze-table-import td.is-editing input:focus,
+        .freeze-table-import td.is-editing textarea:focus,
+        .freeze-table-import td.is-editing select:focus {
+          box-shadow: none !important;
         }
         /* date input: no box-shadow override so browser can render picker normally */
         .freeze-table-import input[type="date"] {
