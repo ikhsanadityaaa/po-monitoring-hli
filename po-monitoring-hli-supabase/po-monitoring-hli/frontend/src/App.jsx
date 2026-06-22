@@ -428,8 +428,9 @@ const importStatusClass = (status, darkMode = false) => {
   const s = String(status || '').trim().toUpperCase();
   if (s === 'NEW') return darkMode ? 'bg-blue-950/55 text-blue-100 border-blue-600' : 'bg-blue-50 text-blue-700 border-blue-200';
   if (s === 'DELIVERED') return darkMode ? 'bg-green-900/45 text-green-100 border-green-700' : 'bg-green-50 text-green-700 border-green-200';
-  if (s === 'ON DELIVERY') return darkMode ? 'bg-blue-900/45 text-blue-100 border-blue-700' : 'bg-blue-50 text-blue-700 border-blue-200';
-  if (s === 'ON PROCESS') return darkMode ? 'bg-amber-900/45 text-amber-100 border-amber-700' : 'bg-amber-50 text-amber-700 border-amber-200';
+  // SWAP per user request: ON DELIVERY → yellow, ON PROCESS → blue.
+  if (s === 'ON DELIVERY') return darkMode ? 'bg-amber-900/45 text-amber-100 border-amber-700' : 'bg-amber-50 text-amber-700 border-amber-200';
+  if (s === 'ON PROCESS') return darkMode ? 'bg-blue-900/45 text-blue-100 border-blue-700' : 'bg-blue-50 text-blue-700 border-blue-200';
   if (s === 'CANCELED') return darkMode ? 'bg-red-900/45 text-red-100 border-red-700' : 'bg-red-50 text-red-700 border-red-200';
   return darkMode ? 'bg-gray-800 text-gray-100 border-gray-600' : 'bg-white text-gray-700 border-gray-200';
 };
@@ -438,8 +439,9 @@ const importStatusOptionStyle = (status) => {
   const s = String(status || '').trim().toUpperCase();
   if (s === 'NEW') return { backgroundColor: '#DBEAFE', color: '#1D4ED8', fontWeight: '700' };
   if (s === 'DELIVERED') return { backgroundColor: '#DCFCE7', color: '#166534' };
-  if (s === 'ON DELIVERY') return { backgroundColor: '#DBEAFE', color: '#1D4ED8' };
-  if (s === 'ON PROCESS') return { backgroundColor: '#FEF3C7', color: '#92400E' };
+  // SWAP per user request: ON DELIVERY → yellow, ON PROCESS → blue.
+  if (s === 'ON DELIVERY') return { backgroundColor: '#FEF3C7', color: '#92400E' };
+  if (s === 'ON PROCESS') return { backgroundColor: '#DBEAFE', color: '#1D4ED8' };
   if (s === 'CANCELED') return { backgroundColor: '#FEE2E2', color: '#B91C1C' };
   return {};
 };
@@ -5120,7 +5122,7 @@ const App = () => {
       return owners;
     })();
     const colWidth = (col) => {
-      if (col.field === 'days_left') return 64;
+      if (col.field === 'days_left') return 80;
       if (Number(col.width)) return Math.max(64, Math.min(Number(col.width), 360));
       const label = String(col.label || '').toLowerCase();
       if (isImportChecklistColumn(col)) return 82;
@@ -5332,13 +5334,44 @@ const App = () => {
       }
 
       if (col.field === 'days_left') {
-        const dayValue = String(value || '').trim();
+        const dayValue = String(value ?? '').trim();
         if (dayValue === '✅') {
-          return <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#20B71F] mx-auto" title="Delivered"><Check className="w-4 h-4 text-white stroke-[4]" /></span>;
+          return <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-emerald-500 mx-auto" title="Delivered"><Check className="w-4 h-4 text-white stroke-[4]" /></span>;
         }
         if (dayValue === '❌') {
-          return <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#EA0D0D] mx-auto" title="Canceled"><X className="w-4 h-4 text-white stroke-[4]" /></span>;
+          return <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-red-500 mx-auto" title="Canceled"><X className="w-4 h-4 text-white stroke-[4]" /></span>;
         }
+        // Color coding (revised thresholds per user):
+        //   green  → days >= 30  (plenty of time)
+        //   yellow → days <= 30  (everything else — moderate to urgent)
+        //   black  → exactly 0   (today is the delivery day)
+        // Empty / '-' / non-numeric → no styling.
+        // Colors use soft Tailwind palette tones that match the existing
+        // dashboard theme (emerald-100/700 light, emerald-900/50 dark).
+        const dayNum = Number(dayValue);
+        if (dayValue !== '' && dayValue !== '-' && Number.isFinite(dayNum)) {
+          let bg, text;
+          if (dayNum === 0) {
+            // TODAY — dark pill with white text (matches dashboard accent)
+            bg = darkMode ? 'bg-gray-900' : 'bg-slate-800';
+            text = 'text-white';
+          } else if (dayNum >= 30) {
+            // Green — plenty of time (emerald matches dashboard KPI cards)
+            bg = darkMode ? 'bg-emerald-900/55 text-emerald-100' : 'bg-emerald-100 text-emerald-700';
+            text = '';
+          } else {
+            // Yellow — moderate to urgent (amber matches dashboard warning tones)
+            bg = darkMode ? 'bg-amber-900/55 text-amber-100' : 'bg-amber-100 text-amber-700';
+            text = '';
+          }
+          return (
+            <span className={`inline-flex h-6 min-w-[28px] items-center justify-center rounded-md px-1.5 text-[11px] font-bold ${bg} ${text}`} title={`Days Left: ${dayNum}`}>
+              {dayNum === 0 ? 'TODAY' : fmtNum(dayNum)}
+            </span>
+          );
+        }
+        // Empty fallback
+        return <span className="text-slate-400">-</span>;
       }
 
       if (col.field === 'arrival_check') {
@@ -6825,6 +6858,14 @@ const App = () => {
           word-break: normal;
           overflow-wrap: normal;
           hyphens: none;
+        }
+        /* Short labels like "Days Left" should NOT wrap to 3 lines — keep
+           them on a single line so the header doesn't look cramped when
+           hovered. Width 80px is enough for "Days Left" + the pin button. */
+        .data-table-page .freeze-table-import th .freeze-header-label,
+        .freeze-table-import th .freeze-header-label {
+          white-space: nowrap !important;
+          -webkit-line-clamp: 1 !important;
         }
         .data-table-page .freeze-header button {
           pointer-events: auto;
