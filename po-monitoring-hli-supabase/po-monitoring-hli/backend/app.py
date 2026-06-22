@@ -5527,6 +5527,8 @@ def get_import_data():
         search = clean(request.args.get('search')) or ''
         selected_yupi_po = [clean(v) for v in request.args.getlist('yupi_po') if clean(v)]
         selected_vendors = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
+        # NEW: status filter (NEW / ON PROCESS / ON DELIVERY / DELIVERED / CANCELED)
+        selected_statuses = [clean(v) for v in request.args.getlist('status') if clean(v)]
         req_dlv_sort = str(clean(request.args.get('req_dlv_sort')) or '').lower() or 'newest'
         if req_dlv_sort not in ('oldest', 'newest'):
             req_dlv_sort = 'newest'
@@ -5538,6 +5540,8 @@ def get_import_data():
         none_vendor = any(v == '__NONE_PLACEHOLDER__' for v in selected_vendors)
         selected_yupi_po = {v.strip().lower() for v in selected_yupi_po if v != '__NONE_PLACEHOLDER__'}
         selected_vendors = {v.strip().lower() for v in selected_vendors if v != '__NONE_PLACEHOLDER__'}
+        # Normalize selected statuses (uppercase) for case-insensitive comparison.
+        selected_status_set = {str(v).strip().upper() for v in selected_statuses if v}
         sync_info = None
 
         if force:
@@ -5583,6 +5587,12 @@ def get_import_data():
                 return False
             if ignore != 'vendor' and selected_vendors and str(item.get('vendor') or '').strip().lower() not in selected_vendors:
                 return False
+            # NEW: status filter. Status is computed by apply_import_formula_columns
+            # and stored at item['data']['status'].
+            if ignore != 'status' and selected_status_set:
+                row_status = str((item.get('data') or {}).get('status') or '').strip().upper()
+                if row_status not in selected_status_set:
+                    return False
             return True
 
         filtered_items = [item for item in parsed if passes(item)]
@@ -5766,10 +5776,12 @@ def export_import_data():
         search = clean(request.args.get('search')) or ''
         selected_yupi_po_raw = [clean(v) for v in request.args.getlist('yupi_po') if clean(v)]
         selected_vendors_raw = [clean(v) for v in request.args.getlist('vendor_name') if clean(v)]
+        selected_statuses_raw = [clean(v) for v in request.args.getlist('status') if clean(v)]
         none_yupi_po = any(v == '__NONE_PLACEHOLDER__' for v in selected_yupi_po_raw)
         none_vendor = any(v == '__NONE_PLACEHOLDER__' for v in selected_vendors_raw)
         selected_yupi_po = {v.strip().lower() for v in selected_yupi_po_raw if v != '__NONE_PLACEHOLDER__'}
         selected_vendors = {v.strip().lower() for v in selected_vendors_raw if v != '__NONE_PLACEHOLDER__'}
+        selected_status_set = {str(v).strip().upper() for v in selected_statuses_raw if v}
 
         columns = import_layout_columns()
         q = ImportDashboardRow.query.filter(
@@ -5805,6 +5817,9 @@ def export_import_data():
             if selected_yupi_po and str(yupi or '').strip().lower() not in selected_yupi_po:
                 continue
             if selected_vendors and str(vendor or '').strip().lower() not in selected_vendors:
+                continue
+            # Status filter (case-insensitive, exact match)
+            if selected_status_set and str(data.get('status') or '').strip().upper() not in selected_status_set:
                 continue
             filtered.append((row, data))
 
