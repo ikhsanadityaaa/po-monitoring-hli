@@ -5089,20 +5089,21 @@ const App = () => {
     // columns (SO, PO Sementara, Item Name, Spec, Qty, prices, ...) carry
     // `group_per_item: true` from the backend and are never merged.
     const isImportGroupColumn = (col) => !col.group_per_item;
-    // Consecutive rows are merged into one visual group when every group
-    // column has the same value AND there's at least one non-blank group
-    // value tying them together (purely-blank rows never merge, so newly
-    // added/blank rows don't accidentally swallow into the row above).
-    // Recomputed from `importData` on every render, so adding or removing
-    // rows automatically reshapes the groups — no stored "group id" needed.
+    // Merge key: rows merge into one visual group when YUPI PO + Req Dlv Date
+    // BOTH match (user spec). Other group columns (status, days_left, vendor,
+    // etc.) are NOT part of the merge key — they may differ between items in
+    // the same delivery group, and that's fine. The merged cell will show
+    // the first row's value for those columns.
+    const IMPORT_MERGE_KEY_FIELDS = ['yupi_po', 'req_dlv_date'];
     const importRowSpans = (() => {
-      const groupCols = columns.filter(isImportGroupColumn).map(c => c.field);
       const spans = new Array(importData.length).fill(null);
       let groupStart = 0;
-      const sameGroup = (a, b) => groupCols.every(f => String(a?.[f] ?? '').trim() === String(b?.[f] ?? '').trim());
-      const hasAnyGroupValue = (row) => groupCols.some(f => String(row?.[f] ?? '').trim() !== '');
+      const sameGroup = (a, b) => IMPORT_MERGE_KEY_FIELDS.every(f => String(a?.[f] ?? '').trim() === String(b?.[f] ?? '').trim());
+      // Require YUPI PO to be non-blank for merging — blank YUPI PO rows
+      // should never merge (they're individual items without a PO).
+      const hasMergeKey = (row) => String(row?.yupi_po ?? '').trim() !== '';
       for (let i = 1; i <= importData.length; i++) {
-        const continues = i < importData.length && hasAnyGroupValue(importData[i]) && sameGroup(importData[i], importData[groupStart]);
+        const continues = i < importData.length && hasMergeKey(importData[i]) && hasMergeKey(importData[groupStart]) && sameGroup(importData[i], importData[groupStart]);
         if (!continues) {
           spans[groupStart] = i - groupStart;
           groupStart = i;
@@ -5120,6 +5121,19 @@ const App = () => {
         owners[i] = currentStart;
       }
       return owners;
+    })();
+    // Zebra striping by GROUP (not by row). Every group gets an alternating
+    // color so merged rows share one shade, the next group gets the other.
+    // Group index = count of group starts up to and including this row's
+    // group. Even groups → shade A, odd groups → shade B.
+    const importGroupIndexFor = (() => {
+      const indices = new Array(importData.length).fill(0);
+      let groupIdx = 0;
+      for (let i = 0; i < importData.length; i++) {
+        if (importRowSpans[i] != null) groupIdx += 1;
+        indices[i] = groupIdx;
+      }
+      return indices;
     })();
     const colWidth = (col) => {
       if (col.field === 'days_left') return 80;
@@ -5341,13 +5355,14 @@ const App = () => {
         if (dayValue === '❌') {
           return <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-red-500 mx-auto" title="Canceled"><X className="w-4 h-4 text-white stroke-[4]" /></span>;
         }
-        // Color coding (revised thresholds per user):
+        // Color coding (final thresholds per user):
+        //   red    → days <= 7  (urgent) OR negative / minus (overdue)
+        //   yellow → 8 <= days <= 29  (moderate)
         //   green  → days >= 30  (plenty of time)
-        //   yellow → days <= 30  (everything else — moderate to urgent)
         //   black  → exactly 0   (today is the delivery day)
         // Empty / '-' / non-numeric → no styling.
         // Colors use soft Tailwind palette tones that match the existing
-        // dashboard theme (emerald-100/700 light, emerald-900/50 dark).
+        // dashboard theme (emerald / amber / red soft tones).
         const dayNum = Number(dayValue);
         if (dayValue !== '' && dayValue !== '-' && Number.isFinite(dayNum)) {
           let bg, text;
@@ -5355,12 +5370,16 @@ const App = () => {
             // TODAY — dark pill with white text (matches dashboard accent)
             bg = darkMode ? 'bg-gray-900' : 'bg-slate-800';
             text = 'text-white';
+          } else if (dayNum < 0 || dayNum <= 7) {
+            // Red — urgent (<=7) or overdue (negative / minus)
+            bg = darkMode ? 'bg-red-900/55 text-red-100' : 'bg-red-100 text-red-700';
+            text = '';
           } else if (dayNum >= 30) {
-            // Green — plenty of time (emerald matches dashboard KPI cards)
+            // Green — plenty of time
             bg = darkMode ? 'bg-emerald-900/55 text-emerald-100' : 'bg-emerald-100 text-emerald-700';
             text = '';
           } else {
-            // Yellow — moderate to urgent (amber matches dashboard warning tones)
+            // Yellow — moderate (8-29 days)
             bg = darkMode ? 'bg-amber-900/55 text-amber-100' : 'bg-amber-100 text-amber-700';
             text = '';
           }
@@ -5664,7 +5683,18 @@ const App = () => {
                 <tr><td colSpan={Math.max(1, visibleColumns.length)} className={`px-4 py-12 text-center ${txt2}`}><Ship className="w-10 h-10 mx-auto mb-2 opacity-40"/>No import data</td></tr>
               ) : importData.map((row, rowIndex) => {
                 const hasReschedule = String(row.reschedule || '').trim();
-                return <tr key={row._row_key} className={`${trHov} ${hasReschedule ? (darkMode ? 'bg-amber-900/25 hover:bg-amber-900/35' : 'bg-amber-50 hover:bg-amber-100/70') : ''}`}>{visibleColumns.map((col, colIdx) => {
+                // Zebra striping by GROUP: even groups → white/slate-900,
+                // odd groups → slate-50/slate-800. Rows in the same merged
+                // group share the same shade. Reschedule rows override with
+                // amber tint regardless of zebra.
+                const groupIdx = importGroupIndexFor[rowIndex] || 1;
+                const isEvenGroup = groupIdx % 2 === 0;
+                const zebraClass = hasReschedule
+                  ? (darkMode ? 'bg-amber-900/25 hover:bg-amber-900/35' : 'bg-amber-50 hover:bg-amber-100/70')
+                  : isEvenGroup
+                    ? (darkMode ? 'bg-gray-800/40 hover:bg-gray-700/50' : 'bg-white hover:bg-slate-50')
+                    : (darkMode ? 'bg-gray-900/40 hover:bg-gray-800/50' : 'bg-slate-50/80 hover:bg-slate-100/80');
+                return <tr key={row._row_key} className={`${trHov} ${zebraClass}`}>{visibleColumns.map((col, colIdx) => {
                   const isGroupCol = isImportGroupColumn(col);
                   const groupStartRow = importGroupStartIndexFor[rowIndex];
                   // Group columns only render their <td> on the group's first
