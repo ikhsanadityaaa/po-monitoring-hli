@@ -6565,6 +6565,7 @@ const App = () => {
               <col style={{minWidth:'140px'}}/>
               <col style={{minWidth:'130px'}}/>
               <col style={{minWidth:'130px'}}/>
+              <col style={{minWidth:'130px'}}/>
               <col style={{minWidth:'100px'}}/>
               <col style={{minWidth:'90px'}}/>
               <col style={{minWidth:'200px'}}/>
@@ -6573,7 +6574,7 @@ const App = () => {
             </colgroup>
             <thead className={tblHd}>
               <tr>
-                {['Aging','Day','SO Create Date','SO Item','PO No.','SO Status','Category','PIC','Product ID','Product Name','Specification','Manufacturer Name','SO Quantity','Sales Unit','Operation Unit Name','Vendor ID','Vendor Name','Currency','Sales Price (Exclude Tax)','Sales Amount (Exclude Tax)','Purchasing Currency','Purchasing Price','Margin','%Margin','Delivery Memo','Plan Date','Remarks'].map((h, index)=>(
+                {['Aging','Day','SO Create Date','SO Item','PO No.','SO Status','Category','PIC','Product ID','Product Name','Specification','Manufacturer Name','SO Quantity','Sales Unit','Operation Unit Name','Vendor ID','Vendor Name','Currency','Sales Price (Exclude Tax)','Sales Amount (Exclude Tax)','Purchasing Currency','Purchasing Price','Purchase Price (IDR)','Margin','%Margin','Delivery Memo','Plan Date','Remarks'].map((h, index)=>(
                   <th key={h} data-col-index={index + 1} className={`px-3 py-2.5 text-center font-bold ${txt2}`}>{renderFreezeHeader('pending-delivery', index + 1, h)}</th>
                 ))}
               </tr>
@@ -6581,14 +6582,17 @@ const App = () => {
             <tbody className={`divide-y ${tblDv}`}>
               {(() => {
                 if (sortedSOData.length === 0) return (
-                <tr><td colSpan={27} className={`px-4 py-10 text-center ${txt2}`}>
+                <tr><td colSpan={28} className={`px-4 py-10 text-center ${txt2}`}>
                     <FileText className="w-10 h-10 mx-auto mb-2 opacity-40"/>No data
                   </td></tr>
                 );
                 return sortedSOData.map((so) => {
                 const isDeliveryCompleted = so.so_status === 'Delivery Completed';
-                const poAmount = Number(so.purchasing_amount) || ((Number(so.purchasing_price) || 0) * (Number(so.so_qty) || 0));
-                // Margin valid only when purchase is positive (not empty/zero/negative).
+                // Use IDR-converted purchase amount for margin (handles USD/EUR).
+                // Backend provides purchase_amount_idr & purchase_price_idr.
+                const poAmount = Number(so.purchase_amount_idr) || 0;
+                const poPriceIdr = Number(so.purchase_price_idr) || 0;
+                // Margin valid only when purchase (in IDR) is positive.
                 // Invalid purchase → margin = null, displayed as '-'.
                 const purchaseValid = poAmount > 0;
                 const margin = purchaseValid ? (so.sales_amount || 0) - poAmount : null;
@@ -6640,6 +6644,7 @@ const App = () => {
                   <td className={`px-3 py-2 text-center font-bold whitespace-nowrap min-w-[130px] ${kpiValue}`}>{fmtCur(so.sales_amount)}</td>
                   <td className={`px-3 py-2 ${txt2} whitespace-nowrap`}>{so.purchasing_currency || '-'}</td>
                   <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${txt}`}>{fmtCur(so.purchasing_price)}</td>
+                  <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${txt}`}>{poPriceIdr > 0 ? fmtCur(poPriceIdr) : '-'}</td>
                   <td className={`px-3 py-2 text-right whitespace-nowrap min-w-[130px] ${marginColor}`}>{margin == null ? '-' : fmtCur(margin)}</td>
                   <td className={`px-3 py-2 text-right whitespace-nowrap ${marginColor}`}>
                     {marginPct !== null ? `${marginPct.toFixed(1)}%` : '-'}
