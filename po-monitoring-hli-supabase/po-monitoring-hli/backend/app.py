@@ -3240,16 +3240,29 @@ def get_all_so():
         vendors_opts  = sorted({s.vendor_name for s in option_source_sos if s.vendor_name})
         manufacturers_opts = sorted({s.manufacturer_name for s in option_source_sos if s.manufacturer_name})
         statuses_opts = sorted({s.so_status for s in option_source_sos if s.so_status})
-        pics_opts     = sorted({canonical_pending_pic(s.pic_name, s.operation_unit_name) for s in option_source_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) != 'Unassigned'})
+        pics_opts     = sorted(_all_known_so_pics)
 
-        pic_aggregations = {}
+        # Collect ALL known PIC names from MasterPIC tables so KPI cards
+        # always show every PIC, even with 0 count.
+        _all_cat_by_id, _all_cat_by_name = master_pic_maps()
+        _all_known_so_pics = set()
+        _all_known_so_pics.update(_all_cat_by_id.values())
+        _all_known_so_pics.update(_all_cat_by_name.values())
+        _all_known_so_pics.update(clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name))
+        _all_known_so_pics.update(clean(m.pic_name) for m in db.session.query(MasterVendorPIC).all() if clean(m.pic_name))
+        _all_known_so_pics.discard('')
+        _all_known_so_pics.discard(None)
+        # Also add PICs from existing SO data
+        _all_known_so_pics.update(canonical_pending_pic(s.pic_name, s.operation_unit_name) for s in kpi_source_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) != 'Unassigned')
+
+        pic_aggregations = {pic: {'pic': pic, 'count': 0, 'amount': 0.0} for pic in _all_known_so_pics}
         for s in kpi_source_sos:
             pic = canonical_pending_pic(s.pic_name, s.operation_unit_name)
             if not pic or pic == 'Unassigned': continue
-            if pic not in pic_aggregations: pic_aggregations[pic] = {'pic': pic, 'count': 0, 'amount': 0}
+            if pic not in pic_aggregations: pic_aggregations[pic] = {'pic': pic, 'count': 0, 'amount': 0.0}
             pic_aggregations[pic]['count'] += 1
             pic_aggregations[pic]['amount'] += float(s.sales_amount or 0)
-        
+
         pic_aggs_list = sort_pic_kpis(list(pic_aggregations.values()))
 
         payload = {
@@ -4305,11 +4318,21 @@ def get_item_registration_data():
         _client_pic_cache = {normalize_client_id(m.client_id): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name)}
         _bid_type_pic_cache = {clean(m.bid_type): clean(m.pic_name) for m in db.session.query(MasterBidTypePIC).all() if clean(m.pic_name)}
         _cat_by_id, _cat_by_name = master_pic_maps()
+
+        # Collect ALL known PIC names from all Master PIC tables — these will
+        # ALWAYS be shown in KPI cards, even if their count is 0.
+        all_known_pics = set()
+        all_known_pics.update(_cat_by_id.values())
+        all_known_pics.update(_cat_by_name.values())
+        all_known_pics.update(_client_pic_cache.values())
+        all_known_pics.update(_bid_type_pic_cache.values())
+        all_known_pics.discard('')
+        all_known_pics.discard(None)
+
         missing_rows = missing_q.all()
-        missing_by_pic = {}
+        missing_by_pic = {pic: 0 for pic in all_known_pics}  # Start all at 0
         for row in missing_rows:
             # Resolve PIC with priority: Client ID > Bid Type > Category
-            # (same logic as resolve_item_registration_pic but using caches)
             pic = None
             cid = normalize_client_id(row.client_id) if row.client_id else ''
             if cid and cid in _client_pic_cache:
@@ -4327,7 +4350,8 @@ def get_item_registration_data():
                     pic = _cat_by_name[cat_name]
             pic = pic or row.pic or ''
             pic = canonical_pending_pic(clean(pic), row.client_name)
-            if pic and pic != 'Unassigned': missing_by_pic[pic] = missing_by_pic.get(pic, 0) + 1
+            if pic and pic != 'Unassigned':
+                missing_by_pic[pic] = missing_by_pic.get(pic, 0) + 1
         missing_prod_id_by_pic = [{'pic': pic, 'count': count} for pic, count in sorted(missing_by_pic.items(), key=lambda item: (-item[1], item[0]))]
 
         q = apply_item_registration_pic_filter(q, pics)
@@ -4339,8 +4363,16 @@ def get_item_registration_data():
         rows = q.order_by(ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()).offset((page-1)*per_page).limit(per_page).all()
         
         option_q = apply_item_registration_visible_status_filter(apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to))
+        # Apply ALL active filters to option_q so dropdown options are
+        # interdependent (selecting one filter narrows options in others).
         if clients: option_q = option_q.filter(ItemRegistration.client_name.in_(clients))
         option_q = apply_item_registration_pic_filter(option_q, global_pics)
+        if item_clients: option_q = option_q.filter(ItemRegistration.client_name.in_(item_clients))
+        if op_units: option_q = option_q.filter(ItemRegistration.operation_unit_name.in_(op_units))
+        if bid_types: option_q = option_q.filter(ItemRegistration.bid_except_type.in_(bid_types))
+        if categories: option_q = option_q.filter(ItemRegistration.category.in_(categories))
+        if proc_statuses: option_q = option_q.filter(ItemRegistration.proc_status.in_(proc_statuses))
+        if mfr_names: option_q = option_q.filter(ItemRegistration.mfr_name.in_(mfr_names))
         if req_numbers: option_q = option_q.filter(ItemRegistration.req_no.in_(req_numbers))
         if search:
             pattern = f'%{search}%'
@@ -4356,9 +4388,10 @@ def get_item_registration_data():
         all_proc_statuses = distinct_options(option_q, ItemRegistration.proc_status)
         all_mfr_names = distinct_options(option_q, ItemRegistration.mfr_name)
         
-        # Use cached PIC resolution for options (same caches as KPI above)
+        # PIC options: always include ALL known PICs from Master PIC tables,
+        # plus any resolved from current data.
+        all_pics = set(all_known_pics)  # Start with all known PICs
         pic_option_rows = option_q.all()
-        all_pics = set()
         for row in pic_option_rows:
             pic = None
             cid = normalize_client_id(row.client_id) if row.client_id else ''
@@ -5191,7 +5224,13 @@ def get_rfq_data():
         # Now KPI respects the purchase_pics dropdown filter, so when a
         # specific PIC is selected, KPI only shows that PIC's count.
         kpi_rows = filtered_for('pic')
-        pending_by_pic = {}
+        # Collect ALL known PIC names from the full dataset (not just filtered)
+        # so KPI cards always show every PIC, even with 0 count.
+        all_rfq_pics = set()
+        for r in search_rows:
+            p = clean(r.get('purchase_pic'))
+            if p and p.lower() != 'unassigned': all_rfq_pics.add(p)
+        pending_by_pic = {p: 0 for p in all_rfq_pics}  # Start all at 0
         for row in kpi_rows:
             # Exclude rows that already have a Product ID — they're done.
             if clean_product_id(row.get('product_id')):
