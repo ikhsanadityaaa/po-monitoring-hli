@@ -218,6 +218,7 @@ class SOData(db.Model):
     so_item = db.Column(db.String(100))
     so_status = db.Column(db.String(50))
     operation_unit_name = db.Column(db.String(200))
+    client_id = db.Column(db.String(100), index=True)
     vendor_id = db.Column(db.String(100))
     vendor_name = db.Column(db.String(200))
     customer_po_number = db.Column(db.String(200))
@@ -598,7 +599,7 @@ def _ensure_extra_columns():
             return {row[0].lower() for row in result}
         except Exception: return set()
     migration_plan = {
-        'so_data': [('specification', 'TEXT'), ('product_id', 'VARCHAR(100)'), ('vendor_id', 'VARCHAR(100)'), ('manufacturer_name', 'VARCHAR(300)'), ('purchasing_currency', 'VARCHAR(10)'), ('purchasing_amount_idr', 'DOUBLE PRECISION'), ('purchasing_amount_idr_cached_at', 'TIMESTAMP'), ('pic_name', 'VARCHAR(100)')],
+        'so_data': [('specification', 'TEXT'), ('product_id', 'VARCHAR(100)'), ('vendor_id', 'VARCHAR(100)'), ('client_id', 'VARCHAR(100)'), ('manufacturer_name', 'VARCHAR(300)'), ('purchasing_currency', 'VARCHAR(10)'), ('purchasing_amount_idr', 'DOUBLE PRECISION'), ('purchasing_amount_idr_cached_at', 'TIMESTAMP'), ('pic_name', 'VARCHAR(100)')],
         'item_registration': [('req_date', 'DATE'), ('existing_owner', 'VARCHAR(100)'), ('client_id', 'VARCHAR(100)'), ('category_id', 'VARCHAR(100)'), ('pic_name', 'VARCHAR(200)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(50)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)'), ('remarks', 'TEXT')],
         'product_id_db': [('specification', 'TEXT'), ('manufacturer_name', 'VARCHAR(255)'), ('vendor_name', 'VARCHAR(300)'), ('order_unit', 'VARCHAR(50)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(100)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)')],
     }
@@ -2389,44 +2390,37 @@ def apply_so_client_filter(query, clients):
 def apply_so_pic_filter(query, pics):
     if not pics: return query
     if '__NONE_PLACEHOLDER__' in pics: return query.filter(SOData.id.is_(None))
-    non_yupi_op_unit = db.or_(SOData.operation_unit_name.is_(None), db.not_(SOData.operation_unit_name.ilike('%YUPI%')))
-    if 'ANDRE' in pics:
-        others = [p for p in pics if p != 'ANDRE']
-        andre_filter = db.or_(SOData.pic_name == 'ANDRE', SOData.operation_unit_name.ilike('%YUPI%'))
-        if others:
-            others_filter = db.and_(SOData.pic_name.in_(others), non_yupi_op_unit)
-            return query.filter(db.or_(others_filter, andre_filter))
-        return query.filter(andre_filter)
+    # No more Yupi/Andre special-casing — filter by pic_name column directly.
     if '(Kosong)' in pics:
         others = [p for p in pics if p != '(Kosong)']
-        empty_pic = db.and_(db.or_(SOData.pic_name.is_(None), SOData.pic_name == ''), non_yupi_op_unit)
+        empty_pic = db.or_(SOData.pic_name.is_(None), SOData.pic_name == '')
         if others:
-            others_filter = db.and_(SOData.pic_name.in_(others), non_yupi_op_unit)
-            return query.filter(db.or_(others_filter, empty_pic))
+            return query.filter(db.or_(SOData.pic_name.in_(others), empty_pic))
         return query.filter(empty_pic)
-    return query.filter(SOData.pic_name.in_(pics), non_yupi_op_unit)
+    return query.filter(SOData.pic_name.in_(pics))
 
 def canonical_pending_pic(pic, client_or_op_unit=None):
-    if client_or_op_unit and 'YUPI' in str(client_or_op_unit).upper(): return 'ANDRE'
+    # PIC is now fully controlled by Master PIC (by category, client ID, and
+    # vendor ID). The old "Yupi → Andre" auto-assignment is removed — all
+    # PIC assignments come from the Master PIC tables.
     return pic or 'Unassigned'
 
 def canonical_rfq_pic(row):
     return canonical_pending_pic(clean(row.get('purchase_pic')), row.get('client_name'))
 
 def sort_pic_kpis(rows):
-    return sorted(rows, key=lambda x: (0 if x.get('pic') == 'ANDRE' else 1, -x.get('count', 0), x.get('pic') or ''))
+    return sorted(rows, key=lambda x: (-x.get('count', 0), x.get('pic') or ''))
 
 def apply_item_registration_pic_filter(query, pics):
     if not pics: return query
-    non_yupi_client = db.or_(ItemRegistration.client_name.is_(None), db.not_(ItemRegistration.client_name.ilike('%YUPI%')))
-    if 'ANDRE' in pics:
-        others = [p for p in pics if p != 'ANDRE']
-        andre_filter = db.or_(ItemRegistration.pic == 'ANDRE', ItemRegistration.client_name.ilike('%YUPI%'))
+    # No more Yupi/Andre special-casing — filter by pic column directly.
+    if '(Kosong)' in pics:
+        others = [p for p in pics if p != '(Kosong)']
+        empty_pic = db.or_(ItemRegistration.pic.is_(None), ItemRegistration.pic == '')
         if others:
-            others_filter = db.and_(ItemRegistration.pic.in_(others), non_yupi_client)
-            return query.filter(db.or_(others_filter, andre_filter))
-        return query.filter(andre_filter)
-    return query.filter(ItemRegistration.pic.in_(pics), non_yupi_client)
+            return query.filter(db.or_(ItemRegistration.pic.in_(others), empty_pic))
+        return query.filter(empty_pic)
+    return query.filter(ItemRegistration.pic.in_(pics))
 
 def item_registration_dict(row, registered_items=None, include_similarity=True):
     pic = resolve_item_registration_pic(row)
@@ -3417,6 +3411,7 @@ def upload_smro():
             if not col_primary: return jsonify({'error': f'SO Item / SO Number column not found in "{filename}". Available columns: {df.columns.tolist()}'}), 400
             col_status   = find_column(df, ['SO Status', 'Status', 'Order Status', 'SO Status Code'])
             col_opunit   = find_column(df, ['Operation Unit Name', 'Op Unit', 'Client Name', 'Client', 'Operation Unit'])
+            col_client_id = find_column(df, ['Client ID', 'Client Id', 'ClientID', 'Client Cd.', 'Client Cd', 'Client Code'])
             col_vendor_id = find_column(df, ['Vendor ID', 'Vendor Id', 'Vendor Code', 'Supplier ID', 'Supplier Code'])
             col_vendor   = find_column(df, ['Vendor Name', 'Vendor', 'Supplier'])
             col_custpo   = find_column(df, ['Customer PO number', 'Customer PO Number', 'Customer PO', 'PO Ref', 'PO Reference'])
@@ -3457,7 +3452,11 @@ def upload_smro():
                 if pid_val: pid_filled += 1
                 new_data = {
                     'so_number': so_val, 'so_item': so_item_val, 'so_status': clean(df_val(row, col_status)),
-                    'operation_unit_name': clean(df_val(row, col_opunit)), 'vendor_id': clean(df_val(row, col_vendor_id)),
+                    'operation_unit_name': clean(df_val(row, col_opunit)),
+                    'client_id': clean(df_val(row, col_client_id)) if col_client_id else None,
+                    # Strip leading zeros from vendor_id (e.g. "0000456144" → "456144")
+                    # so it matches MasterVendorPIC entries which use the bare number.
+                    'vendor_id': (lambda v: v.lstrip('0') or '0' if v else v)(clean(df_val(row, col_vendor_id)) or ''),
                     'vendor_name': clean(df_val(row, col_vendor)), 'customer_po_number': clean(df_val(row, col_custpo)),
                     'delivery_memo': clean(df_val(row, col_memo)), 'product_name': clean(df_val(row, col_prod)),
                     'specification': spec_val, 'manufacturer_name': clean(df_val(row, col_mfr)), 'product_id': pid_val,
@@ -4979,7 +4978,13 @@ def get_rfq_data():
                 filtered_cache[key] = rfq_filter_rows(search_rows, exclude_field)
             return filtered_cache[key]
 
-        kpi_rows = filtered_for({'purchase_pics', 'pic'})
+        # KPI rows: respect ALL filters EXCEPT 'pic' (the KPI highlight).
+        # Previously this also excluded 'purchase_pics', which caused the bug
+        # where selecting ADIT in the dropdown + searching would make ADIT
+        # disappear from KPI and show other PICs (like JOKO) instead.
+        # Now KPI respects the purchase_pics dropdown filter, so when a
+        # specific PIC is selected, KPI only shows that PIC's count.
+        kpi_rows = filtered_for('pic')
         pending_by_pic = {}
         for row in kpi_rows:
             if clean(row.get('check')) != 'open':
@@ -6702,8 +6707,8 @@ def download_master_pic_template():
 
         # ═══════════════════════════════════════════════════════════════════
         # Sheet 2: By Client ID (Client ID, Client Name, PIC)
-        # Pre-fill from ItemRegistration (distinct client_id + client_name).
-        # Yupi clients get PIC = "Andre" (per user spec).
+        # Pre-fill from SOData (Client ID is column A of SO source).
+        # PIC is empty — user fills it in. All PIC control is via Master PIC.
         # ═══════════════════════════════════════════════════════════════════
         ws2 = wb.create_sheet('By Client ID')
         style_sheet(ws2, ['Client ID', 'Client Name', 'PIC'], ref_cols=2, col_widths=[20, 40, 12])
@@ -6714,16 +6719,15 @@ def download_master_pic_template():
             cid = clean(m.client_id)
             if cid:
                 client_rows[cid] = {'client_id': cid, 'client_name': clean(m.client_name), 'pic': clean(m.pic_name)}
-        # Distinct clients from ItemRegistration
-        for ir in db.session.query(ItemRegistration.client_id, ItemRegistration.client_name).filter(
-            ItemRegistration.client_id.isnot(None), ItemRegistration.client_id != ''
+        # Distinct clients from SOData (Client ID is in column A of SO source)
+        for s in db.session.query(SOData.client_id, SOData.operation_unit_name).filter(
+            SOData.client_id.isnot(None), SOData.client_id != ''
         ).distinct().all():
-            cid = clean(ir.client_id)
+            cid = clean(s.client_id)
             if cid and cid not in client_rows:
-                cname = clean(ir.client_name)
-                # Yupi clients default to "Andre"
-                default_pic = 'Andre' if cname and 'yupi' in cname.lower() else ''
-                client_rows[cid] = {'client_id': cid, 'client_name': cname, 'pic': default_pic}
+                # operation_unit_name contains the client name (e.g. "PT. YUPI INDO JELLY GUM Tbk(IDN)-Consumable")
+                cname = clean(s.operation_unit_name)
+                client_rows[cid] = {'client_id': cid, 'client_name': cname, 'pic': ''}
 
         for item in sorted(client_rows.values(), key=lambda x: x['client_id'].lower()):
             ws2.append([item['client_id'], item['client_name'], item['pic']])
@@ -6745,11 +6749,13 @@ def download_master_pic_template():
             vid = clean(m.vendor_id)
             if vid:
                 vendor_rows[vid] = {'vendor_id': vid, 'vendor_name': clean(m.vendor_name), 'pic': clean(m.pic_name)}
-        # Distinct vendors from SOData
+        # Distinct vendors from SOData (strip leading zeros from vendor_id)
         for s in db.session.query(SOData.vendor_id, SOData.vendor_name).filter(
             SOData.vendor_id.isnot(None), SOData.vendor_id != ''
         ).distinct().all():
-            vid = clean(s.vendor_id)
+            vid_raw = clean(s.vendor_id)
+            # Strip leading zeros so "0000456144" → "456144"
+            vid = (vid_raw.lstrip('0') or '0') if vid_raw else vid_raw
             if vid and vid not in vendor_rows:
                 vendor_rows[vid] = {'vendor_id': vid, 'vendor_name': clean(s.vendor_name), 'pic': ''}
 
