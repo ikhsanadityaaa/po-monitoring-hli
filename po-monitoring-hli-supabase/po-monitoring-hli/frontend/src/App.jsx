@@ -5962,8 +5962,8 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[170px_repeat(5,minmax(150px,1fr))_120px] items-end">
-            <div className="min-w-0">
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="min-w-[150px] flex-shrink-0">
               <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Req No.</label>
               <SearchInput
                 key={`item-req-no-${itemRegSearch.join('|')}`}
@@ -5979,36 +5979,36 @@ const App = () => {
                 }}
               />
             </div>
-            <div className="min-w-0">
+            <div className="min-w-[140px] flex-shrink-0">
               <MultiSelect label="Proc. Status" options={itemRegOptions.proc_statuses} selected={itemRegFilters.proc_statuses}
                 onChange={v=>{ const next={...itemRegFilters, proc_statuses:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="min-w-0">
+            <div className="min-w-[140px] flex-shrink-0">
               <MultiSelect label="Client Name" options={itemRegOptions.clients} selected={itemRegFilters.clients}
                 onChange={v=>{ const next={...itemRegFilters, clients:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="min-w-0">
+            <div className="min-w-[140px] flex-shrink-0">
               <MultiSelect label="Op. Unit Nm." options={itemRegOptions.op_units || []} selected={itemRegFilters.op_units || []}
                 onChange={v=>{ const next={...itemRegFilters, op_units:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="min-w-0">
+            <div className="min-w-[140px] flex-shrink-0">
               <MultiSelect label="Bid Except Type" options={itemRegOptions.bid_except_types || []} selected={itemRegFilters.bid_except_types || []}
                 onChange={v=>{ const next={...itemRegFilters, bid_except_types:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="min-w-0">
+            <div className="min-w-[140px] flex-shrink-0">
               <MultiSelect label="Category" options={itemRegOptions.categories} selected={itemRegFilters.categories}
                 onChange={v=>{ const next={...itemRegFilters, categories:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="min-w-0">
+            <div className="min-w-[120px] flex-shrink-0">
               <MultiSelect label="PIC" options={itemRegOptions.pics} selected={itemRegFilters.pics}
                 onChange={v=>{ const next={...itemRegFilters, pics:v}; setItemRegPicHighlight(''); setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next,''); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="min-w-0">
+            <div className="min-w-[130px] flex-shrink-0">
               <MultiSelect label="Mfr. Nm." options={itemRegOptions.mfr_names} selected={itemRegFilters.mfr_names}
                 onChange={v=>{ const next={...itemRegFilters, mfr_names:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <button onClick={() => { const next={ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] }; setItemRegSearch([]); setItemRegAppliedSearch([]); setItemRegPicHighlight(''); setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1, itemRegPerPage, [], next, ''); }}
-              className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
+            <button onClick={() => { const next={ clients: [], op_units: [], bid_except_types: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] }; setItemRegSearch([]); setItemRegAppliedSearch([]); setItemRegPicHighlight(''); setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1, itemRegPerPage, [], next, ''); }}
+              className={`h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap flex-shrink-0 ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
         </FilterPanel>
 
