@@ -258,14 +258,17 @@ const renderPctLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent })
 };
 
 const fmtNum  = (v) => new Intl.NumberFormat('id-ID').format(v || 0);
-const fmtCur  = (v) => `IDR ${new Intl.NumberFormat('id-ID', {maximumFractionDigits:0}).format(v || 0)}`;
+// Currency formatter: numbers only (no "IDR" prefix) with Indonesian
+// thousand separators (dots). The "Purchasing Currency" column shows the
+// currency code separately, so numeric columns stay as pure numbers.
+const fmtCur  = (v) => new Intl.NumberFormat('id-ID', {maximumFractionDigits:0}).format(v || 0);
 const fmtCurShort = (v) => {
   const n = parseFloat(v) || 0;
-  if (n >= 1e12) return `IDR ${(n/1e12).toFixed(1)}T`;
-  if (n >= 1e9)  return `IDR ${(n/1e9).toFixed(1)}B`;
-  if (n >= 1e6)  return `IDR ${(n/1e6).toFixed(1)}M`;
-  if (n >= 1e3)  return `IDR ${(n/1e3).toFixed(1)}K`;
-  return `IDR ${n.toLocaleString('id-ID')}`;
+  if (n >= 1e12) return `${(n/1e12).toFixed(1)}T`;
+  if (n >= 1e9)  return `${(n/1e9).toFixed(1)}B`;
+  if (n >= 1e6)  return `${(n/1e6).toFixed(1)}M`;
+  if (n >= 1e3)  return `${(n/1e3).toFixed(1)}K`;
+  return n.toLocaleString('id-ID');
 };
 const fmtDate = (d) => { try { return d ? format(parseISO(d),'dd MMM yyyy') : '-'; } catch { return d||'-'; } };
 const fmtDateTime = (d) => {
