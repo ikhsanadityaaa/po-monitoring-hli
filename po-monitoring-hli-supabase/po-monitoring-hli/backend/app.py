@@ -4300,11 +4300,16 @@ def get_item_registration_data():
             q = q.filter(db.or_(ItemRegistration.req_no.ilike(pattern), ItemRegistration.prod_id.ilike(pattern), ItemRegistration.prod_name.ilike(pattern), ItemRegistration.vendor_name.ilike(pattern), ItemRegistration.mfr_name.ilike(pattern), ItemRegistration.remarks.ilike(pattern)))
 
         missing_q = apply_item_registration_kpi_status_filter(q).filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-'))
-        missing_rows_db = missing_q.with_entities(ItemRegistration.pic, ItemRegistration.client_name, func.count(ItemRegistration.id)).group_by(ItemRegistration.pic, ItemRegistration.client_name).all()
+        # Use resolve_item_registration_pic to get the REAL-TIME resolved PIC
+        # (including bid type overrides), not just the stored ItemRegistration.pic
+        # column which may be stale if Master PIC was updated without re-uploading
+        # Item Registration data.
+        missing_rows = missing_q.all()
         missing_by_pic = {}
-        for pic_val, client_val, count in missing_rows_db:
-            pic = canonical_pending_pic(clean(pic_val), client_val)
-            if pic and pic != 'Unassigned': missing_by_pic[pic] = missing_by_pic.get(pic, 0) + count
+        for row in missing_rows:
+            pic = resolve_item_registration_pic(row)
+            pic = canonical_pending_pic(clean(pic), row.client_name)
+            if pic and pic != 'Unassigned': missing_by_pic[pic] = missing_by_pic.get(pic, 0) + 1
         missing_prod_id_by_pic = [{'pic': pic, 'count': count} for pic, count in sorted(missing_by_pic.items(), key=lambda item: (-item[1], item[0]))]
 
         q = apply_item_registration_pic_filter(q, pics)
@@ -4333,10 +4338,11 @@ def get_item_registration_data():
         all_proc_statuses = distinct_options(option_q, ItemRegistration.proc_status)
         all_mfr_names = distinct_options(option_q, ItemRegistration.mfr_name)
         
-        pic_option_rows = option_q.with_entities(ItemRegistration.pic, ItemRegistration.client_name).distinct().all()
+        # Use real-time resolved PIC for options (includes bid type overrides)
+        pic_option_rows = option_q.all()
         all_pics = set()
-        for pic_val, client_val in pic_option_rows:
-            resolved = canonical_pending_pic(clean(pic_val), client_val)
+        for row in pic_option_rows:
+            resolved = canonical_pending_pic(clean(resolve_item_registration_pic(row)), row.client_name)
             if resolved != 'Unassigned': all_pics.add(resolved)
         all_pics = sorted(list(all_pics))
 
@@ -6705,7 +6711,10 @@ def get_dashboard_status_detail():
         # open_so_filter + so_countable_sql_filter as before.
         if status:
             q = so_q(so_countable_sql_filter())
-            q = q.filter(SOData.so_status == status)
+            # Use TRIM on so_status to match the heatmap's grouping (which
+            # uses func.trim). Without this, rows with leading/trailing spaces
+            # in so_status won't match the clicked status label.
+            q = q.filter(func.trim(func.coalesce(SOData.so_status, '')) == status)
         else:
             q = so_q(open_so_filter(), so_countable_sql_filter())
         if month:
