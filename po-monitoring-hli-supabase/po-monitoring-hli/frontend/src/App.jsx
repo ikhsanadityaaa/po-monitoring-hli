@@ -4882,8 +4882,8 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="flex flex-nowrap items-end gap-1.5 overflow-x-auto">
-            <div className="min-w-0">
+          <div className="flex flex-nowrap items-end gap-1.5 w-full">
+            <div className="flex-1 min-w-0">
               <RFQMultiSearch
                 value={rfqSearch}
                 onChange={setRfqSearch}
@@ -4896,23 +4896,23 @@ const App = () => {
                 txt2={txt2}
               />
             </div>
-            <div className="min-w-0">
+            <div className="flex-1 min-w-0">
               <MultiSelect label="Check" options={rfqOptions.checks || []} selected={rfqFilters.checks}
                 onChange={v=>{ const next={...rfqFilters, checks:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="min-w-0">
+            <div class="flex-1 min-w-0">
               <MultiSelect label="Nama Client" options={rfqOptions.clients || []} selected={rfqFilters.clients}
                 onChange={v=>{ const next={...rfqFilters, clients:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="min-w-0">
+            <div className="flex-1 min-w-0">
               <MultiSelect label="No. RFQ" options={rfqOptions.rfq_numbers || []} selected={rfqFilters.rfq_numbers}
                 onChange={v=>{ const next={...rfqFilters, rfq_numbers:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="min-w-0">
+            <div className="flex-1 min-w-0">
               <MultiSelect label="Brand/Manufaktur" options={rfqOptions.brands || []} selected={rfqFilters.brands}
                 onChange={v=>{ const next={...rfqFilters, brands:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="min-w-0">
+            <div className="flex-1 min-w-0">
               <MultiSelect label="Purchase PIC" options={rfqOptions.purchase_pics || []} selected={rfqFilters.purchase_pics}
                 onChange={v=>{ const next={...rfqFilters, purchase_pics:v}; setRfqPicFilter(''); setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, '', rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
@@ -5697,8 +5697,8 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="flex flex-nowrap items-end gap-1.5 overflow-x-auto">
-            <div className="min-w-[110px] flex-shrink-0">
+          <div className="flex flex-nowrap items-end gap-1.5 w-full">
+            <div className="flex-shrink-0 w-[100px]">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ Req Dlv Date</label>
               <select
                 className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
@@ -5710,7 +5710,7 @@ const App = () => {
                 <option value="newest">Newest ↓</option>
               </select>
             </div>
-            <div className="min-w-[110px] flex-shrink-0">
+            <div className="flex-shrink-0 w-[100px]">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ YUPI PO</label>
               <select
                 className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
@@ -5723,8 +5723,8 @@ const App = () => {
                 <option value="desc">Z-A ↓</option>
               </select>
             </div>
-            <div className="min-w-[180px] flex-1"><label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Import</label><input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/></div>
-            <div className="min-w-[130px] flex-shrink-0">
+            <div className="flex-1 min-w-0"><label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Import</label><input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/></div>
+            <div className="flex-1 min-w-0">
               <MultiSelect
                 label="Status"
                 options={importOptions.statuses || ['NEW', ...IMPORT_STATUS_OPTIONS]}
@@ -5733,7 +5733,7 @@ const App = () => {
                 darkMode={darkMode} txt2={txt2}
               />
             </div>
-            <div className="min-w-[140px] flex-shrink-0">
+            <div className="flex-1 min-w-0">
               <MultiSelect
                 label="Days Left"
                 options={['Red (≤7 / overdue)', 'Yellow (8–29)', 'Green (≥30)', 'Today (0)']}
@@ -5758,11 +5758,11 @@ const App = () => {
                 darkMode={darkMode} txt2={txt2}
               />
             </div>
-            <div className="min-w-[130px] flex-shrink-0">
+            <div className="flex-1 min-w-0">
               <MultiSelect label="YUPI PO" options={importOptions.yupi_po || []} selected={importFilters.yupi_po}
                 onChange={v=>{ const next={...importFilters, yupi_po:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="min-w-[130px] flex-shrink-0">
+            <div className="flex-1 min-w-0">
               <MultiSelect label="Vendor" options={importOptions.vendors || []} selected={importFilters.vendors}
                 onChange={v=>{ const next={...importFilters, vendors:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }} darkMode={darkMode} txt2={txt2}/>
             </div>
@@ -5962,8 +5962,8 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="flex flex-nowrap items-end gap-1.5 overflow-x-auto">
-            <div className="flex-shrink-0" style={{width: '120px'}}>
+          <div className="flex flex-nowrap items-end gap-1.5 w-full">
+            <div className="flex-1 min-w-0">
               <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Req No.</label>
               <SearchInput
                 key={`item-req-no-${itemRegSearch.join('|')}`}
@@ -5979,36 +5979,36 @@ const App = () => {
                 }}
               />
             </div>
-            <div className="flex-shrink-0" style={{width: '120px'}}>
+            <div className="flex-1 min-w-0">
               <MultiSelect label="Proc. Status" options={itemRegOptions.proc_statuses} selected={itemRegFilters.proc_statuses}
                 onChange={v=>{ const next={...itemRegFilters, proc_statuses:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-shrink-0" style={{width: '120px'}}>
+            <div className="flex-1 min-w-0">
               <MultiSelect label="Client Name" options={itemRegOptions.clients} selected={itemRegFilters.clients}
                 onChange={v=>{ const next={...itemRegFilters, clients:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-shrink-0" style={{width: '120px'}}>
+            <div className="flex-1 min-w-0">
               <MultiSelect label="Op. Unit Nm." options={itemRegOptions.op_units || []} selected={itemRegFilters.op_units || []}
                 onChange={v=>{ const next={...itemRegFilters, op_units:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-shrink-0" style={{width: '120px'}}>
+            <div className="flex-1 min-w-0">
               <MultiSelect label="Bid Except Type" options={itemRegOptions.bid_except_types || []} selected={itemRegFilters.bid_except_types || []}
                 onChange={v=>{ const next={...itemRegFilters, bid_except_types:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-shrink-0" style={{width: '120px'}}>
+            <div className="flex-1 min-w-0">
               <MultiSelect label="Category" options={itemRegOptions.categories} selected={itemRegFilters.categories}
                 onChange={v=>{ const next={...itemRegFilters, categories:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-shrink-0" style={{width: '100px'}}>
+            <div className="flex-1 min-w-0">
               <MultiSelect label="PIC" options={itemRegOptions.pics} selected={itemRegFilters.pics}
                 onChange={v=>{ const next={...itemRegFilters, pics:v}; setItemRegPicHighlight(''); setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next,''); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-shrink-0" style={{width: '110px'}}>
+            <div className="flex-1 min-w-0">
               <MultiSelect label="Mfr. Nm." options={itemRegOptions.mfr_names} selected={itemRegFilters.mfr_names}
                 onChange={v=>{ const next={...itemRegFilters, mfr_names:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
             <button onClick={() => { const next={ clients: [], op_units: [], bid_except_types: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] }; setItemRegSearch([]); setItemRegAppliedSearch([]); setItemRegPicHighlight(''); setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1, itemRegPerPage, [], next, ''); }}
-              className={`h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap flex-shrink-0 ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
+              className={`flex-shrink-0 h-[40px] px-4 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
         </FilterPanel>
 
@@ -6435,7 +6435,7 @@ const App = () => {
 
         {/* Multi-select filters */}
         <FilterPanel darkMode={darkMode} className="mx-0 my-3">
-          <div className="flex flex-nowrap items-end gap-1.5 overflow-x-auto">
+          <div className="flex flex-nowrap items-end gap-1.5 w-full">
             <div className="min-w-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ SO Date</label>
               <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
