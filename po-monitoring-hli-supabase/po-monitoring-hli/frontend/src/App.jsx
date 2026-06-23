@@ -258,17 +258,14 @@ const renderPctLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent })
 };
 
 const fmtNum  = (v) => new Intl.NumberFormat('id-ID').format(v || 0);
-// Currency formatter: numbers only (no "IDR" prefix) with Indonesian
-// thousand separators (dots). The "Purchasing Currency" column shows the
-// currency code separately, so numeric columns stay as pure numbers.
-const fmtCur  = (v) => new Intl.NumberFormat('id-ID', {maximumFractionDigits:0}).format(v || 0);
+const fmtCur  = (v) => `IDR ${new Intl.NumberFormat('id-ID', {maximumFractionDigits:0}).format(v || 0)}`;
 const fmtCurShort = (v) => {
   const n = parseFloat(v) || 0;
-  if (n >= 1e12) return `${(n/1e12).toFixed(1)}T`;
-  if (n >= 1e9)  return `${(n/1e9).toFixed(1)}B`;
-  if (n >= 1e6)  return `${(n/1e6).toFixed(1)}M`;
-  if (n >= 1e3)  return `${(n/1e3).toFixed(1)}K`;
-  return n.toLocaleString('id-ID');
+  if (n >= 1e12) return `IDR ${(n/1e12).toFixed(1)}T`;
+  if (n >= 1e9)  return `IDR ${(n/1e9).toFixed(1)}B`;
+  if (n >= 1e6)  return `IDR ${(n/1e6).toFixed(1)}M`;
+  if (n >= 1e3)  return `IDR ${(n/1e3).toFixed(1)}K`;
+  return `IDR ${n.toLocaleString('id-ID')}`;
 };
 const fmtDate = (d) => { try { return d ? format(parseISO(d),'dd MMM yyyy') : '-'; } catch { return d||'-'; } };
 const fmtDateTime = (d) => {
@@ -1746,8 +1743,8 @@ const App = () => {
   const [itemRegSearch, setItemRegSearch] = useState(() => savedItemRegFilters.search || []);
   const [itemRegAppliedSearch, setItemRegAppliedSearch] = useState(() => savedItemRegFilters.appliedSearch || []);
   const [itemRegLastUpdated, setItemRegLastUpdated] = useState(null);
-  const [itemRegFilters, setItemRegFilters] = useState(() => savedItemRegFilters.filters || { clients: [], op_units: [], bid_except_types: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] });
-  const [itemRegOptions, setItemRegOptions] = useState({ clients: [], op_units: [], bid_except_types: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] });
+  const [itemRegFilters, setItemRegFilters] = useState(() => savedItemRegFilters.filters || { clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] });
+  const [itemRegOptions, setItemRegOptions] = useState({ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] });
   const [itemRegMissingPicKpis, setItemRegMissingPicKpis] = useState([]);
   const [itemRegPicHighlight, setItemRegPicHighlight] = useState('');
 
@@ -2584,8 +2581,6 @@ const App = () => {
       if (Array.isArray(search)) search.forEach(v => params.append('req_no', v));
       else if (search) params.append('search', search);
       resolveFilter(filters.clients).forEach(v => params.append('item_client', v));
-      resolveFilter(filters.op_units).forEach(v => params.append('op_unit', v));
-      resolveFilter(filters.bid_except_types).forEach(v => params.append('bid_except_type', v));
       resolveFilter(filters.categories).forEach(v => params.append('category', v));
       resolveFilter(filters.pics).forEach(v => params.append('pic', v));
       resolveFilter(filters.proc_statuses).forEach(v => params.append('proc_status', v));
@@ -2599,8 +2594,6 @@ const App = () => {
       setItemRegMissingPicKpis(Array.isArray(res.data.missing_prod_id_by_pic) ? res.data.missing_prod_id_by_pic : []);
       setItemRegOptions({
         clients: res.data.client_options || [],
-        op_units: res.data.op_unit_options || [],
-        bid_except_types: res.data.bid_except_type_options || [],
         categories: res.data.category_options || [],
         pics: res.data.pic_options || [],
         proc_statuses: res.data.proc_status_options || [],
@@ -2882,9 +2875,7 @@ const App = () => {
 
   useEffect(() => {
     if (activePage === 'rfq') {
-      // Auto-refresh RFQ data every time the page is opened (force=true
-      // pulls latest from Google Sheets so data is always current).
-      fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, true, rfqFilters, rfqPicFilter, rfqShowSimilarity);
+      fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter, rfqShowSimilarity);
     }
   }, [activePage]);
 
@@ -3043,17 +3034,7 @@ const App = () => {
       });
       const d = res.data;
       setUploadProgress(null);
-      const cat = d.category || {};
-      const client = d.client || {};
-      const vendor = d.vendor || {};
-      const bidType = d.bid_type || {};
-      const parts = [];
-      if (cat.added || cat.updated) parts.push(`Category: +${cat.added} added, ${cat.updated} updated`);
-      if (client.added || client.updated) parts.push(`Client: +${client.added} added, ${client.updated} updated`);
-      if (vendor.added || vendor.updated) parts.push(`Vendor: +${vendor.added} added, ${vendor.updated} updated`);
-      if (bidType.added || bidType.updated) parts.push(`Bid Type: +${bidType.added} added, ${bidType.updated} updated`);
-      const summary = parts.length ? parts.join('. ') : 'No changes';
-      setPicUploadMsg(`✅ Master PIC (${d.files || files.length} file, ${d.sheets || '?'} sheets): ${summary}. SO rows updated: ${d.so_pic_refreshed}.`);
+      setPicUploadMsg(`✅ Master PIC (${d.files || files.length} file): +${d.added} added, ${d.updated} updated${d.unchanged ? `, ${d.unchanged} unchanged` : ''} (total category names: ${d.total_categories}). SO rows updated: ${d.so_pic_refreshed}.`);
       clearDashboardSummaryCache();
       clearStatsCache();
       fetchPicDbStatus();
@@ -3197,8 +3178,6 @@ const App = () => {
     appendMultiParam(p, 'global_pic', globalPicFilter);
     (itemRegAppliedSearch || []).forEach(v => p.append('req_no', v));
     resolveFilter(itemRegFilters.clients).forEach(v => p.append('item_client', v));
-    resolveFilter(itemRegFilters.op_units).forEach(v => p.append('op_unit', v));
-    resolveFilter(itemRegFilters.bid_except_types).forEach(v => p.append('bid_except_type', v));
     resolveFilter(itemRegFilters.categories).forEach(v => p.append('category', v));
     resolveFilter(itemRegFilters.pics).forEach(v => p.append('pic', v));
     resolveFilter(itemRegFilters.proc_statuses).forEach(v => p.append('proc_status', v));
@@ -3336,7 +3315,7 @@ const App = () => {
         next.unit_price_missing = unitPrice == null;
       }
       return next;
-    }).filter(row => !rfqPicFilter || rfqEditedRowKeys.has(row.row_key) || (row.purchase_pic === rfqPicFilter && row.unit_price_missing)));
+    }).filter(row => !rfqPicFilter || rfqEditedRowKeys.has(row.row_key) || (row.purchase_pic === rfqPicFilter && row.check === 'open' && row.unit_price_missing && !row.product_id)));
   };
 
   const updateRFQCell = async (rowKey, field, value, options = {}) => {
@@ -3373,7 +3352,7 @@ const App = () => {
       }
       if (field === 'product_id') {
         const current = rfqData.find(row => row.row_key === rowKey);
-        if (value && current?.unit_price_missing && current?.purchase_pic) {
+        if (value && current?.check === 'open' && current?.unit_price_missing && !current?.product_id && current?.purchase_pic) {
           setRfqPicKpis(prev => prev.map(kpi => kpi.pic === current.purchase_pic ? { ...kpi, count: Math.max(0, (Number(kpi.count) || 0) - 1) } : kpi).filter(kpi => Number(kpi.count) > 0));
         }
       }
@@ -3398,7 +3377,7 @@ const App = () => {
           if (field === 'unit_price_idr') next.unit_price_missing = unitPrice == null;
         }
         return next;
-      }).filter(row => !rfqPicFilter || rfqEditedRowKeys.has(row.row_key) || (row.purchase_pic === rfqPicFilter && row.unit_price_missing)));
+      }).filter(row => !rfqPicFilter || rfqEditedRowKeys.has(row.row_key) || (row.purchase_pic === rfqPicFilter && row.check === 'open' && row.unit_price_missing && !row.product_id)));
       return true;
     } catch (e) {
       // Network/HTTP failure → queue for replay. KEEP the optimistic local
@@ -4048,7 +4027,7 @@ const App = () => {
             { label:'Total Pending Delivery', value: fmtNum(summaryPendingTotal ?? stats?.total_so_count), sub: 'Pending delivery records', icon:<Clock className="w-5 h-5"/>, goPending:true },
           ].map((k,i)=>{
             const Wrapper = k.goPending ? 'button' : 'div';
-            return <Wrapper key={i} type={k.goPending ? 'button' : undefined} onClick={k.goPending ? () => { setActivePage('all-so'); setSoPage(1); window.scrollTo({top:0}); } : undefined} className={`p-5 rounded-2xl text-left ${card} ${k.goPending ? 'cursor-pointer hover:border-blue-300' : ''}`}><div className="flex items-start justify-between gap-3"><div className="flex-1 min-w-0"><p className={`text-sm font-medium ${txt2}`}>{k.label}</p><h3 className={`text-2xl font-bold mt-1 ${kpiValue}`}>{k.value}</h3><p className={`text-xs mt-1 ${txt2}`}>{k.sub}</p></div><div className={`p-2.5 rounded-xl ${neutralIcon}`}>{k.icon}</div></div></Wrapper>;
+            return <Wrapper key={i} type={k.goPending ? 'button' : undefined} onClick={k.goPending ? () => { setActivePage('all-so'); setSoPage(1); window.scrollTo({top:0}); } : undefined} className={`p-5 rounded-2xl text-left ${card} ${k.goPending ? 'cursor-pointer hover:border-blue-300' : ''}`}><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className={`text-sm font-medium ${txt2}`}>{k.label}</p><h3 className={`text-2xl font-bold mt-1 ${kpiValue}`}>{k.value}</h3><p className={`text-xs mt-1 ${txt2}`}>{k.sub}</p></div><div className={`p-2.5 rounded-xl ${neutralIcon}`}>{k.icon}</div></div></Wrapper>;
           })}
         </div>
         {summaryLoading && (
@@ -4436,16 +4415,16 @@ const App = () => {
           {/* Grid: Search | Prod ID | PIC | Mfr Name | Search btn | Clear btn
               Vendor Name filter removed — source has no Vendor column. */}
           <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-[minmax(240px,1fr)_170px_180px_minmax(180px,1fr)_90px_110px] items-end">
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <RFQMultiSearch value={registeredItemsSearch} onChange={setRegisteredItemsSearch} onSearch={(next) => { setRegisteredItemsAppliedSearch(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, next, registeredItemsAppliedProdIds, registeredItemsFilters, registeredItemsAppliedPicFilter); }} darkMode={darkMode} txt2={txt2} label="Search" description="Enter Product ID, Product Name, Specification, or Manufacturer per line. Results match any entered value." placeholder={'8381684\nBearing SKF\nJTC'} />
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Prod ID</label>
               <SearchInput key={`registered-prod-id-${registeredItemsProdIds.join('|')}`} placeholder={'8381684\n8382076'} label="Prod ID" darkMode={darkMode} txt2={txt2} onSearch={(nums) => { setRegisteredItemsProdIds(nums); setRegisteredItemsAppliedProdIds(nums); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, nums, registeredItemsFilters, registeredItemsAppliedPicFilter); }} />
             </div>
             {/* PIC dropdown — resolved server-side using MasterPIC by category_id
                 OR category_name, identical to Item Registration / Pending Delivery. */}
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <label className={`block text-xs font-semibold mb-1 ${txt2}`}>PIC</label>
               <select
                 value={registeredItemsPicFilter}
@@ -4460,7 +4439,7 @@ const App = () => {
             </div>
             <MultiSelect label="Manufacturer Name" options={registeredItemsOptions.mfr_names || []} selected={registeredItemsFilters.mfr_names} onChange={v => { const next={...registeredItemsFilters, mfr_names:v}; setRegisteredItemsFilters(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, next, registeredItemsAppliedPicFilter); }} darkMode={darkMode} txt2={txt2} />
             <button onClick={() => { setRegisteredItemsAppliedSearch(registeredItemsSearch); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsSearch, registeredItemsAppliedProdIds, registeredItemsFilters, registeredItemsAppliedPicFilter); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">Search</button>
-            <button onClick={handleClear} className={`flex-shrink-0 h-[40px] px-4 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
+            <button onClick={handleClear} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
         </FilterPanel>
 
@@ -4868,7 +4847,7 @@ const App = () => {
               return (
                 <button key={row.pic} type="button" onClick={applyRFQPicFilter} className={`min-w-0 p-3 rounded-xl text-left transition-all ${activePic ? (darkMode ? 'bg-amber-900/30 border border-amber-500 ring-2 ring-amber-400' : 'bg-amber-50 border border-amber-300 ring-2 ring-amber-200') : row.isTotal ? (darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200') : card} ${row.isTotal ? 'hover:border-slate-300' : 'hover:border-amber-300'}`}>
                   <div className="flex items-start justify-between gap-2">
-                    <div className="flex-1 min-w-0">
+                    <div className="min-w-0">
                       <p className={`text-xs font-semibold truncate ${activePic ? 'text-amber-700' : row.isTotal ? (darkMode ? 'text-gray-200' : 'text-gray-700') : txt2}`} title={row.pic}>{row.pic}</p>
                       <h3 className={`text-xl font-bold leading-tight ${activePic ? 'text-amber-700' : row.isTotal ? (darkMode ? 'text-gray-100' : 'text-gray-800') : kpiValue}`}>{fmtNum(row.count)}</h3>
                       <p className={`text-[11px] leading-tight whitespace-nowrap ${txt2}`}>No Prod/Price</p>
@@ -4884,8 +4863,8 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="flex flex-nowrap items-end gap-1.5 w-full">
-            <div className="flex-1 min-w-0">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[minmax(160px,1fr)_105px_minmax(130px,0.95fr)_minmax(130px,0.95fr)_repeat(3,minmax(115px,0.9fr))_84px] items-end">
+            <div className="min-w-0">
               <RFQMultiSearch
                 value={rfqSearch}
                 onChange={setRfqSearch}
@@ -4898,31 +4877,31 @@ const App = () => {
                 txt2={txt2}
               />
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <MultiSelect label="Check" options={rfqOptions.checks || []} selected={rfqFilters.checks}
                 onChange={v=>{ const next={...rfqFilters, checks:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <MultiSelect label="Nama Client" options={rfqOptions.clients || []} selected={rfqFilters.clients}
                 onChange={v=>{ const next={...rfqFilters, clients:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <MultiSelect label="No. RFQ" options={rfqOptions.rfq_numbers || []} selected={rfqFilters.rfq_numbers}
                 onChange={v=>{ const next={...rfqFilters, rfq_numbers:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <MultiSelect label="Brand/Manufaktur" options={rfqOptions.brands || []} selected={rfqFilters.brands}
                 onChange={v=>{ const next={...rfqFilters, brands:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <MultiSelect label="Purchase PIC" options={rfqOptions.purchase_pics || []} selected={rfqFilters.purchase_pics}
                 onChange={v=>{ const next={...rfqFilters, purchase_pics:v}; setRfqPicFilter(''); setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, '', rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <MultiSelect label="Vendor Name" options={rfqOptions.vendors || []} selected={rfqFilters.vendors}
                 onChange={v=>{ const next={...rfqFilters, vendors:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <button onClick={handleClear} className={`flex-shrink-0 h-[40px] px-4 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>
+            <button onClick={handleClear} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>
               Clear
             </button>
           </div>
@@ -5699,8 +5678,8 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="flex flex-nowrap items-end gap-1.5 w-full">
-            <div className="flex-shrink-0 w-[100px]">
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="min-w-[110px] flex-shrink-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ Req Dlv Date</label>
               <select
                 className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
@@ -5712,7 +5691,7 @@ const App = () => {
                 <option value="newest">Newest ↓</option>
               </select>
             </div>
-            <div className="flex-shrink-0 w-[100px]">
+            <div className="min-w-[110px] flex-shrink-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ YUPI PO</label>
               <select
                 className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
@@ -5725,8 +5704,8 @@ const App = () => {
                 <option value="desc">Z-A ↓</option>
               </select>
             </div>
-            <div className="flex-1 min-w-0"><label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Import</label><input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/></div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-[180px] flex-1"><label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Import</label><input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/></div>
+            <div className="min-w-[130px] flex-shrink-0">
               <MultiSelect
                 label="Status"
                 options={importOptions.statuses || ['NEW', ...IMPORT_STATUS_OPTIONS]}
@@ -5735,7 +5714,7 @@ const App = () => {
                 darkMode={darkMode} txt2={txt2}
               />
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-[140px] flex-shrink-0">
               <MultiSelect
                 label="Days Left"
                 options={['Red (≤7 / overdue)', 'Yellow (8–29)', 'Green (≥30)', 'Today (0)']}
@@ -5760,11 +5739,11 @@ const App = () => {
                 darkMode={darkMode} txt2={txt2}
               />
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-[130px] flex-shrink-0">
               <MultiSelect label="YUPI PO" options={importOptions.yupi_po || []} selected={importFilters.yupi_po}
                 onChange={v=>{ const next={...importFilters, yupi_po:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-[130px] flex-shrink-0">
               <MultiSelect label="Vendor" options={importOptions.vendors || []} selected={importFilters.vendors}
                 onChange={v=>{ const next={...importFilters, vendors:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }} darkMode={darkMode} txt2={txt2}/>
             </div>
@@ -5877,9 +5856,9 @@ const App = () => {
       try { return String(d).slice(0, 10); } catch { return d; }
     };
     const baseColumns = [
-      ['Proc. Status', 'proc_status'], ['Req. Date', 'req_date'], ['Client Nm.', 'client_name'], ['Op. Unit Nm.', 'operation_unit_name'], ['Category', 'category'], ['PIC', 'pic'],
+      ['Proc. Status', 'proc_status'], ['Req. Date', 'req_date'], ['Client Nm.', 'client_name'], ['Category', 'category'], ['PIC', 'pic'],
       ['Req. No', 'req_no'], ['Prod. ID', 'prod_id'], ['Prod. Nm.', 'prod_name'],
-      ['Spec.', 'spec'], ['Mfr. Nm.', 'mfr_name'], ['Unit', 'odr_unit'], ['Bid Except Type', 'bid_except_type'],
+      ['Spec.', 'spec'], ['Mfr. Nm.', 'mfr_name'], ['Unit', 'odr_unit'],
       ['Prod. Price', 'prod_price'], ['Curr.', 'curr']
     ];
     const columns = [...baseColumns, ['Remarks', 'remarks']];
@@ -5900,8 +5879,8 @@ const App = () => {
     ];
     const itemRegKpiCols = Math.max(1, itemRegPicKpis.length);
     const colWidth = (key) => ({
-      proc_status: 150, req_date: 110, client_name: 180, operation_unit_name: 200, category: 170, pic: 90, req_no: 150, prod_id: 110,
-      prod_name: 240, spec: 220, mfr_name: 150, odr_unit: 80, bid_except_type: 200,
+      proc_status: 150, req_date: 110, client_name: 180, category: 170, pic: 90, req_no: 150, prod_id: 110,
+      prod_name: 240, spec: 220, mfr_name: 150, odr_unit: 80,
       prod_price: 120, curr: 70, remarks: 560
     }[key] || 140);
     const colStyle = (key) => {
@@ -5948,7 +5927,7 @@ const App = () => {
               return (
                 <button key={row.pic} type="button" onClick={applyItemRegPicFilter} className={`min-w-0 p-3 rounded-xl text-left transition-all ${activePic ? (darkMode ? 'bg-amber-900/30 border border-amber-500 ring-2 ring-amber-400' : 'bg-amber-50 border border-amber-300 ring-2 ring-amber-200') : row.isTotal ? (darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200') : card} ${row.isTotal ? 'hover:border-slate-300' : 'hover:border-amber-300'}`}>
                   <div className="flex items-start justify-between gap-2">
-                    <div className="flex-1 min-w-0">
+                    <div className="min-w-0">
                       <p className={`text-xs font-semibold truncate ${activePic ? 'text-amber-700' : row.isTotal ? (darkMode ? 'text-gray-200' : 'text-gray-700') : txt2}`} title={row.pic}>{row.pic}</p>
                       <h3 className={`text-xl font-bold leading-tight ${activePic ? 'text-amber-700' : row.isTotal ? (darkMode ? 'text-gray-100' : 'text-gray-800') : kpiValue}`}>{fmtNum(row.count)}</h3>
                       <p className={`text-[11px] leading-tight whitespace-nowrap ${txt2}`}>{row.sub}</p>
@@ -5964,8 +5943,8 @@ const App = () => {
         </div>
 
         <FilterPanel darkMode={darkMode}>
-          <div className="flex flex-nowrap items-end gap-1.5 w-full">
-            <div className="flex-1 min-w-0">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[170px_repeat(5,minmax(150px,1fr))_120px] items-end">
+            <div className="min-w-0">
               <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Req No.</label>
               <SearchInput
                 key={`item-req-no-${itemRegSearch.join('|')}`}
@@ -5981,36 +5960,28 @@ const App = () => {
                 }}
               />
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <MultiSelect label="Proc. Status" options={itemRegOptions.proc_statuses} selected={itemRegFilters.proc_statuses}
                 onChange={v=>{ const next={...itemRegFilters, proc_statuses:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <MultiSelect label="Client Name" options={itemRegOptions.clients} selected={itemRegFilters.clients}
                 onChange={v=>{ const next={...itemRegFilters, clients:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-1 min-w-0">
-              <MultiSelect label="Op. Unit Nm." options={itemRegOptions.op_units || []} selected={itemRegFilters.op_units || []}
-                onChange={v=>{ const next={...itemRegFilters, op_units:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
-            </div>
-            <div className="flex-1 min-w-0">
-              <MultiSelect label="Bid Except Type" options={itemRegOptions.bid_except_types || []} selected={itemRegFilters.bid_except_types || []}
-                onChange={v=>{ const next={...itemRegFilters, bid_except_types:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
-            </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <MultiSelect label="Category" options={itemRegOptions.categories} selected={itemRegFilters.categories}
                 onChange={v=>{ const next={...itemRegFilters, categories:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <MultiSelect label="PIC" options={itemRegOptions.pics} selected={itemRegFilters.pics}
                 onChange={v=>{ const next={...itemRegFilters, pics:v}; setItemRegPicHighlight(''); setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next,''); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <MultiSelect label="Mfr. Nm." options={itemRegOptions.mfr_names} selected={itemRegFilters.mfr_names}
                 onChange={v=>{ const next={...itemRegFilters, mfr_names:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <button onClick={() => { const next={ clients: [], op_units: [], bid_except_types: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] }; setItemRegSearch([]); setItemRegAppliedSearch([]); setItemRegPicHighlight(''); setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1, itemRegPerPage, [], next, ''); }}
-              className={`flex-shrink-0 h-[40px] px-4 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
+            <button onClick={() => { const next={ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] }; setItemRegSearch([]); setItemRegAppliedSearch([]); setItemRegPicHighlight(''); setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1, itemRegPerPage, [], next, ''); }}
+              className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
         </FilterPanel>
 
@@ -6369,7 +6340,7 @@ const App = () => {
               return (
               <button key={p.pic} type="button" onClick={applyPicKpiFilter} className={`min-w-0 p-3 rounded-xl text-left transition-all ${activePic ? (darkMode ? 'bg-amber-900/30 border border-amber-500 ring-2 ring-amber-400' : 'bg-amber-50 border border-amber-300 ring-2 ring-amber-200') : p.isTotal ? (darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200') : card} ${p.isTotal ? 'hover:border-slate-300' : 'hover:border-amber-300'}`}>
                 <div className="flex items-start justify-between gap-2">
-                  <div className="flex-1 min-w-0">
+                  <div className="min-w-0">
                     <p className={`text-xs font-semibold truncate ${activePic ? 'text-amber-700' : p.isTotal ? (darkMode ? 'text-gray-200' : 'text-gray-700') : txt2}`} title={p.pic}>{p.pic}</p>
                     <h3 className={`text-xl font-bold leading-tight ${activePic ? 'text-amber-700' : p.isTotal ? (darkMode ? 'text-gray-100' : 'text-gray-800') : kpiValue}`}>{fmtNum(p.count)}</h3>
                     <p className={`text-[11px] leading-tight whitespace-nowrap ${txt2}`}>{fmtCurShort(p.amount)}</p>
@@ -6437,8 +6408,8 @@ const App = () => {
 
         {/* Multi-select filters */}
         <FilterPanel darkMode={darkMode} className="mx-0 my-3">
-          <div className="flex flex-nowrap items-end gap-1.5 w-full">
-            <div className="flex-1 min-w-0">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[105px_150px_repeat(6,minmax(105px,1fr))_105px] items-end">
+            <div className="min-w-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ SO Date</label>
               <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                 value={soSortOrder} onChange={e=>{ setSoSortOrder(e.target.value); setSoPage(1); }} title="Sort SO Date">
@@ -6446,7 +6417,7 @@ const App = () => {
                 <option value="newest">Newest ↓</option>
               </select>
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Search SO Item</label>
               <SearchInput
                 label="SO Item"
@@ -6459,7 +6430,7 @@ const App = () => {
                 darkMode={darkMode} txt2={txt2}
               />
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <MultiSelect label="PIC" options={soFilterOptions.pics || []}
                 selected={soFilters.pics} onChange={v=>{
                   const next = {...soFilters, pics: v};
@@ -6469,7 +6440,7 @@ const App = () => {
                 }}
                 darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <MultiSelect label="SO Status" options={soFilterOptions.statuses}
                 selected={soFilters.statuses} onChange={v=>{
                   const next = {...soFilters, statuses: v};
@@ -6478,7 +6449,7 @@ const App = () => {
                 }}
                 darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <MultiSelect label="Operation Unit" options={soFilterOptions.op_units}
                 selected={soFilters.op_units} onChange={v=>{
                   const next = {...soFilters, op_units: v};
@@ -6487,7 +6458,7 @@ const App = () => {
                 }}
                 darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <MultiSelect label="Vendor Name" options={soFilterOptions.vendors}
                 selected={soFilters.vendors} onChange={v=>{
                   const next = {...soFilters, vendors: v};
@@ -6496,7 +6467,7 @@ const App = () => {
                 }}
                 darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <MultiSelect label="Manufacturer Name" options={soFilterOptions.manufacturers || []}
                 selected={soFilters.manufacturers} onChange={v=>{
                   const next = {...soFilters, manufacturers: v};
@@ -6505,7 +6476,7 @@ const App = () => {
                 }}
                 darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="min-w-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Margin</label>
               <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                 value={soMarginFilter} onChange={e=>{
@@ -6518,14 +6489,14 @@ const App = () => {
                 <option value="negative">Below 0</option>
               </select>
             </div>
-            <div className="flex-shrink-0">
+            <div className="min-w-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2} opacity-0`}>.</label>
               <button onClick={()=>{
                 const f={op_units:[],vendors:[],manufacturers:[],statuses:[],aging:[],pics:[]};
                 setSoFilters(f); setPendingPicHighlight(''); setSoSearchNums([]); setSoMarginFilter('all'); setSoPage(1);
                 fetchSOData(f,1,soPerPage,[],'all',soDateFilter,soSortOrder,'');
               }}
-                className={`flex-shrink-0 h-[40px] px-4 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
+                className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
             </div>
           </div>
           {/* Active filter tags */}
