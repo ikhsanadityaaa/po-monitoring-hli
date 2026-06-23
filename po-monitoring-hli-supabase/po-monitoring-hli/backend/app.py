@@ -218,7 +218,6 @@ class SOData(db.Model):
     so_item = db.Column(db.String(100))
     so_status = db.Column(db.String(50))
     operation_unit_name = db.Column(db.String(200))
-    client_id = db.Column(db.String(100), index=True)
     vendor_id = db.Column(db.String(100))
     vendor_name = db.Column(db.String(200))
     customer_po_number = db.Column(db.String(200))
@@ -287,38 +286,13 @@ class MasterPIC(db.Model):
     pic_name = db.Column(db.String(100))
     updated_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-class MasterClientPIC(db.Model):
-    __tablename__ = 'master_client_pic'
-    id = db.Column(db.Integer, primary_key=True)
-    client_id = db.Column(db.String(100), unique=True, nullable=False, index=True)
-    client_name = db.Column(db.String(300))
-    pic_name = db.Column(db.String(100))
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-class MasterVendorPIC(db.Model):
-    __tablename__ = 'master_vendor_pic'
-    id = db.Column(db.Integer, primary_key=True)
-    vendor_id = db.Column(db.String(100), unique=True, nullable=False, index=True)
-    vendor_name = db.Column(db.String(300))
-    pic_name = db.Column(db.String(100))
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-class MasterBidTypePIC(db.Model):
-    __tablename__ = 'master_bid_type_pic'
-    id = db.Column(db.Integer, primary_key=True)
-    bid_type = db.Column(db.String(255), unique=True, nullable=False, index=True)
-    pic_name = db.Column(db.String(100))
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
-
 class ItemRegistration(db.Model):
     __tablename__ = 'item_registration'
     id = db.Column(db.Integer, primary_key=True)
     proc_status = db.Column(db.String(100))
     req_date = db.Column(db.Date, index=True)
     existing_owner = db.Column(db.String(100))
-    client_id = db.Column(db.String(100), index=True)
     client_name = db.Column(db.String(300), index=True)
-    operation_unit_name = db.Column(db.String(300), index=True)
     category = db.Column(db.String(255))
     category_id = db.Column(db.String(100))
     pic = db.Column(db.String(200))
@@ -331,7 +305,6 @@ class ItemRegistration(db.Model):
     spec = db.Column(db.Text)
     mfr_name = db.Column(db.String(300))
     odr_unit = db.Column(db.String(50))
-    bid_except_type = db.Column(db.String(255))
     vendor_name = db.Column(db.String(300))
     prod_price = db.Column(db.Float)
     curr = db.Column(db.String(20))
@@ -608,8 +581,8 @@ def _ensure_extra_columns():
             return {row[0].lower() for row in result}
         except Exception: return set()
     migration_plan = {
-        'so_data': [('specification', 'TEXT'), ('product_id', 'VARCHAR(100)'), ('vendor_id', 'VARCHAR(100)'), ('client_id', 'VARCHAR(100)'), ('manufacturer_name', 'VARCHAR(300)'), ('purchasing_currency', 'VARCHAR(10)'), ('purchasing_amount_idr', 'DOUBLE PRECISION'), ('purchasing_amount_idr_cached_at', 'TIMESTAMP'), ('pic_name', 'VARCHAR(100)')],
-        'item_registration': [('req_date', 'DATE'), ('existing_owner', 'VARCHAR(100)'), ('client_id', 'VARCHAR(100)'), ('operation_unit_name', 'VARCHAR(300)'), ('bid_except_type', 'VARCHAR(255)'), ('category_id', 'VARCHAR(100)'), ('pic_name', 'VARCHAR(200)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(50)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)'), ('remarks', 'TEXT')],
+        'so_data': [('specification', 'TEXT'), ('product_id', 'VARCHAR(100)'), ('vendor_id', 'VARCHAR(100)'), ('manufacturer_name', 'VARCHAR(300)'), ('purchasing_currency', 'VARCHAR(10)'), ('purchasing_amount_idr', 'DOUBLE PRECISION'), ('purchasing_amount_idr_cached_at', 'TIMESTAMP'), ('pic_name', 'VARCHAR(100)')],
+        'item_registration': [('req_date', 'DATE'), ('existing_owner', 'VARCHAR(100)'), ('category_id', 'VARCHAR(100)'), ('pic_name', 'VARCHAR(200)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(50)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)'), ('remarks', 'TEXT')],
         'product_id_db': [('specification', 'TEXT'), ('manufacturer_name', 'VARCHAR(255)'), ('vendor_name', 'VARCHAR(300)'), ('order_unit', 'VARCHAR(50)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(100)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)')],
     }
     for table_name, columns in migration_plan.items():
@@ -2399,7 +2372,6 @@ def apply_so_client_filter(query, clients):
 def apply_so_pic_filter(query, pics):
     if not pics: return query
     if '__NONE_PLACEHOLDER__' in pics: return query.filter(SOData.id.is_(None))
-    # No more Yupi/Andre special-casing — filter by pic_name column directly.
     if '(Kosong)' in pics:
         others = [p for p in pics if p != '(Kosong)']
         empty_pic = db.or_(SOData.pic_name.is_(None), SOData.pic_name == '')
@@ -2410,8 +2382,7 @@ def apply_so_pic_filter(query, pics):
 
 def canonical_pending_pic(pic, client_or_op_unit=None):
     # PIC is now fully controlled by Master PIC (by category, client ID, and
-    # vendor ID). The old "Yupi → Andre" auto-assignment is removed — all
-    # PIC assignments come from the Master PIC tables.
+    # vendor ID). The old "Yupi → Andre" auto-assignment is removed.
     return pic or 'Unassigned'
 
 def canonical_rfq_pic(row):
@@ -2422,7 +2393,6 @@ def sort_pic_kpis(rows):
 
 def apply_item_registration_pic_filter(query, pics):
     if not pics: return query
-    # No more Yupi/Andre special-casing — filter by pic column directly.
     if '(Kosong)' in pics:
         others = [p for p in pics if p != '(Kosong)']
         empty_pic = db.or_(ItemRegistration.pic.is_(None), ItemRegistration.pic == '')
@@ -2436,12 +2406,9 @@ def item_registration_dict(row, registered_items=None, include_similarity=True):
     similar_items = find_similar_registered_items(row, registered_items) if include_similarity else None
     return {
         'id': row.id, 'proc_status': row.proc_status or '', 'req_date': row.req_date.isoformat() if row.req_date else '',
-        'existing_owner': row.existing_owner or '', 'client_name': row.client_name or '',
-        'operation_unit_name': row.operation_unit_name or '',
-        'category': source_category_level1(row.category),
+        'existing_owner': row.existing_owner or '', 'client_name': row.client_name or '', 'category': source_category_level1(row.category),
         'pic': pic, 'req_no': row.req_no or '', 'prod_id': row.prod_id or '', 'batch_grp_no': row.batch_grp_no or '',
         'prod_name': row.prod_name or '', 'spec': row.spec or '', 'mfr_name': row.mfr_name or '', 'odr_unit': row.odr_unit or '',
-        'bid_except_type': row.bid_except_type or '',
         'vendor_name': row.vendor_name or '', 'prod_price': row.prod_price or 0, 'curr': row.curr or '', 'remarks': row.remarks or '',
         'uploaded_at': utc_isoformat(row.uploaded_at), 'similar_items': similar_items,
         'similar_prod_ids': (similar_items or {}).get('product_ids', ''), 'similar_prod_name': (similar_items or {}).get('product_name', ''),
@@ -2493,25 +2460,6 @@ def normalize_category_id(value):
         # the magnitude correctly.
         return mantissa_digits
     return cat_id.strip()
-
-def normalize_vendor_id(value):
-    """Normalize a Vendor ID: strip trailing '.0' (pandas float artifact)
-    and strip leading zeros. '0000456144' → '456144', '456144.0' → '456144'."""
-    vid = clean(value)
-    if not vid: return ''
-    # Strip pandas float artifact: "456144.0" → "456144"
-    if re.match(r'^\d+\.0+$', vid): vid = vid.split('.', 1)[0]
-    # Strip leading zeros: "0000456144" → "456144"
-    vid = vid.lstrip('0') or '0'
-    return vid
-
-def normalize_client_id(value):
-    """Normalize a Client ID: strip trailing '.0' (pandas float artifact).
-    Client IDs like 'S000037130' are alphanumeric — no leading zero strip."""
-    cid = clean(value)
-    if not cid: return ''
-    if re.match(r'^\d+\.0+$', cid): cid = cid.split('.', 1)[0]
-    return cid.strip()
 
 def normalize_category_name(value):
     category = source_category_level1(value)
@@ -2567,65 +2515,9 @@ def _lookup_pic_by_category(category_id=None, category_name=None):
     if cat_name and cat_name in by_name: return by_name[cat_name]
     return None
 
-def resolve_pic_with_overrides(category_id=None, category_name=None, client_id=None, vendor_id=None, bid_except_type=None):
-    """Resolve PIC with priority: Client ID > Bid Type > Vendor ID > Category.
-    
-    1. If client_id has a PIC in MasterClientPIC → use it (overrides all)
-    2. If bid_except_type has a PIC in MasterBidTypePIC → use it (overrides vendor & category)
-    3. If vendor_id has a PIC in MasterVendorPIC → use it (overrides category)
-    4. Fall back to category-based PIC from MasterPIC
-    
-    This makes Client ID, Bid Type, and Vendor ID "exception overrides" —
-    the category is the default, but specific clients/bid types/vendors can
-    be assigned a different PIC.
-    """
-    # Priority 1: Client ID override
-    if client_id:
-        cid = normalize_client_id(client_id)
-        if cid:
-            client_pic = db.session.query(MasterClientPIC.pic_name).filter(
-                MasterClientPIC.client_id == cid
-            ).first()
-            if client_pic and clean(client_pic[0]):
-                return clean(client_pic[0])
-    
-    # Priority 2: Bid Type override (only for Item Registration)
-    if bid_except_type:
-        bt = clean(bid_except_type)
-        if bt:
-            bid_pic = db.session.query(MasterBidTypePIC.pic_name).filter(
-                MasterBidTypePIC.bid_type == bt
-            ).first()
-            if bid_pic and clean(bid_pic[0]):
-                return clean(bid_pic[0])
-    
-    # Priority 3: Vendor ID override
-    if vendor_id:
-        vid = normalize_vendor_id(vendor_id)
-        if vid:
-            vendor_pic = db.session.query(MasterVendorPIC.pic_name).filter(
-                MasterVendorPIC.vendor_id == vid
-            ).first()
-            if vendor_pic and clean(vendor_pic[0]):
-                return clean(vendor_pic[0])
-    
-    # Priority 4: Category-based PIC (default)
-    return _lookup_pic_by_category(category_id, category_name)
-
-
 def resolve_item_registration_pic(row):
-    # Use priority overrides: Client ID > Bid Type > Category
-    # ItemRegistration doesn't have vendor_id, so Vendor ID override is skipped.
-    client_id = getattr(row, 'client_id', None) or (row.get('client_id') if isinstance(row, dict) else None)
-    bid_except_type = getattr(row, 'bid_except_type', None) or (row.get('bid_except_type') if isinstance(row, dict) else None)
-    pic = resolve_pic_with_overrides(
-        category_id=row.category_id if hasattr(row, 'category_id') else row.get('category_id'),
-        category_name=row.category if hasattr(row, 'category') else row.get('category'),
-        client_id=client_id,
-        vendor_id=None,  # ItemRegistration has no vendor_id
-        bid_except_type=bid_except_type,
-    )
-    return canonical_pending_pic(mapped_or_pic := (pic or (row.pic if hasattr(row, 'pic') else row.get('pic')) or ''), row.client_name if hasattr(row, 'client_name') else row.get('client_name'))
+    mapped = _lookup_pic_by_category(row.category_id, row.category)
+    return canonical_pending_pic(mapped or row.pic or '', row.client_name)
 
 def is_existing_owner_pur_pic(value): return (clean(value) or '').strip().lower() == 'pur. pic'
 
@@ -2647,14 +2539,7 @@ def refresh_item_registration_mappings():
         normalized_cat_id = normalize_category_id(row.category_id)
         if row.category_id != normalized_cat_id: row.category_id = normalized_cat_id; changed = True
         if row.category != category: row.category = category; changed = True
-        # Use full priority resolution: Client ID > Bid Type > Category
-        pic = resolve_pic_with_overrides(
-            category_id=normalized_cat_id,
-            category_name=category,
-            client_id=row.client_id,
-            vendor_id=None,
-            bid_except_type=row.bid_except_type,
-        ) or ''
+        pic = _lookup_pic_by_category(normalized_cat_id, category) or ''
         if row.pic != pic: row.pic = pic; changed = True
     if changed: db.session.commit()
 
@@ -2663,9 +2548,7 @@ def _item_registration_columns(df):
         'proc_status': find_column(df, ['Proc. Status', 'Proc Status', 'Process Status']),
         'req_date': find_column(df, ['Req. Date', 'Req Date', 'Request Date']),
         'existing_owner': find_column(df, ['Existing Owner', 'Existing Owner.', 'Owner']),
-        'client_id': find_column(df, ['Client ID', 'Client Id', 'ClientID', 'Client Cd.', 'Client Cd', 'Client Code']),
         'client_name': find_column(df, ['Client Nm.', 'Client Nm', 'Client Name']),
-        'operation_unit_name': find_column(df, ['Op. Unit Nm.', 'Op. Unit Nm', 'Op Unit Nm', 'Operation Unit Nm.', 'Operation Unit Nm', 'Operation Unit Name', 'Op. Unit Name', 'Op Unit Name']),
         'category': find_column(df, ['Cat. Nm.', 'Cat. Nm', 'Category', 'Cate. Nm.', 'Category Name']),
         'category_id': find_column(df, ['Cat. ID', 'Cat. ID.', 'Category ID', 'Category Id', 'CategoryID']),
         'pic': find_column(df, ['PIC', 'Pur. PIC', 'Purchase PIC']),
@@ -2677,7 +2560,6 @@ def _item_registration_columns(df):
         'spec': find_column(df, ['Spec.', 'Spec', 'Specification']),
         'mfr_name': find_column(df, ['Mfr. Nm.', 'Mfr. Nm', 'Manufacturer Name', 'Maker Nm.']),
         'odr_unit': find_column(df, ['Odr. Unit', 'Odr. Unit.', 'Order Unit']),
-        'bid_except_type': find_column(df, ['Bid Except Type', 'Bid/Except Type', 'Bid Type', 'Bid/Except. Type']),
         'vendor_name': find_column(df, ['Vendor Nm.', 'Vendor Nm', 'Vendor Name']),
         'prod_price': find_column(df, ['Prod. Price', 'Product Price', 'Price']),
         'curr': find_column(df, ['Curr.', 'Curr', 'Currency']),
@@ -2715,15 +2597,11 @@ def import_item_registration_dataframe(df, filename='Item Registration'):
         category = source_category_level1(df_val(row, col['category']))
         incoming[req_no] = {
             'proc_status': clean(df_val(row, col['proc_status'])), 'req_date': parse_date(df_val(row, col['req_date'])),
-            'existing_owner': clean(df_val(row, col['existing_owner'])),
-            'client_id': clean(df_val(row, col['client_id'])),
-            'client_name': clean(df_val(row, col['client_name'])),
-            'operation_unit_name': clean(df_val(row, col['operation_unit_name'])),
+            'existing_owner': clean(df_val(row, col['existing_owner'])), 'client_name': clean(df_val(row, col['client_name'])),
             'category': category, 'category_id': category_id, 'pic': _lookup_pic_by_category(category_id, category) or '',
             'req_no': req_no, 'prod_id': prod_id, 'product_status': clean(df_val(row, col['product_status'])),
             'batch_grp_no': clean(df_val(row, col['batch_grp_no'])), 'prod_name': prod_name, 'spec': clean(df_val(row, col['spec'])),
             'mfr_name': clean(df_val(row, col['mfr_name'])), 'odr_unit': clean(df_val(row, col['odr_unit'])),
-            'bid_except_type': clean(df_val(row, col['bid_except_type'])),
             'vendor_name': clean(df_val(row, col['vendor_name'])), 'prod_price': safe_float(df_val(row, col['prod_price'])),
             'curr': clean(df_val(row, col['curr'])), 'hub_handling_check': clean(df_val(row, col['hub_handling_check'])),
             'tax_type': clean(df_val(row, col['tax_type'])), 'registration_date': parse_date(df_val(row, col['registration_date'])),
@@ -2773,12 +2651,7 @@ def so_dict(s):
     pa_idr = purchase_amount_idr_for_margin(s)
     return {
         'id': s.id, 'so_number': s.so_number, 'so_item': s.so_item, 'so_status': s.so_status,
-        'operation_unit_name': s.operation_unit_name,
-        # Normalize vendor_id & client_id on read so old DB data (with leading
-        # zeros or .0 artifacts) displays correctly without re-upload.
-        'vendor_id': normalize_vendor_id(s.vendor_id) if s.vendor_id else '',
-        'client_id': normalize_client_id(s.client_id) if s.client_id else '',
-        'vendor_name': s.vendor_name,
+        'operation_unit_name': s.operation_unit_name, 'vendor_id': s.vendor_id or '', 'vendor_name': s.vendor_name,
         'customer_po_number': s.customer_po_number, 'delivery_memo': s.delivery_memo, 'product_name': s.product_name,
         'specification': s.specification, 'manufacturer_name': s.manufacturer_name or '', 'product_id': s.product_id,
         'category_name': category_name, 'svo_po': s.matched_po_number or '', 'so_qty': s.so_qty, 'sales_unit': s.sales_unit or '',
@@ -2933,7 +2806,6 @@ def get_dashboard_stats():
         for p in raw_pic_options:
             label = canonical_pending_pic(p, '')
             if label and label not in seen_pics: seen_pics.add(label); pic_options.append(label)
-        if any('YUPI' in str(c or '').upper() for c in client_options) and 'ANDRE' not in seen_pics: pic_options.insert(0, 'ANDRE')
         
         last_uploads = db.session.query(UploadLog.file_type, func.max(UploadLog.uploaded_at)).group_by(UploadLog.file_type).all()
         last_upload_map = {ft: dt for ft, dt in last_uploads}
@@ -3151,7 +3023,7 @@ def get_all_so():
         global_pics = request.args.getlist('global_pic')
         clients = selected_clients()
         margin_filter = request.args.get('margin_filter', 'all')
-        sort_order = request.args.get('sort_order', 'newest')
+        sort_order = request.args.get('sort_order', 'oldest')
         date_year, date_from, date_to = parse_so_date_args()
 
         q = SOData.query.filter(open_so_filter(), so_countable_sql_filter())
@@ -3186,7 +3058,7 @@ def get_all_so():
             SOData.purchasing_amount_idr, SOData.product_id, SOData.product_name,
             SOData.specification, SOData.matched_po_number, SOData.remarks,
             SOData.delivery_plan_date, SOData.sales_price, SOData.sales_unit,
-            SOData.vendor_id, SOData.currency, SOData.client_id,
+            SOData.vendor_id, SOData.currency,
         )
 
         if sort_order == 'oldest':
@@ -3240,29 +3112,16 @@ def get_all_so():
         vendors_opts  = sorted({s.vendor_name for s in option_source_sos if s.vendor_name})
         manufacturers_opts = sorted({s.manufacturer_name for s in option_source_sos if s.manufacturer_name})
         statuses_opts = sorted({s.so_status for s in option_source_sos if s.so_status})
-        pics_opts     = sorted(_all_known_so_pics)
+        pics_opts     = sorted({canonical_pending_pic(s.pic_name, s.operation_unit_name) for s in option_source_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) != 'Unassigned'})
 
-        # Collect ALL known PIC names from MasterPIC tables so KPI cards
-        # always show every PIC, even with 0 count.
-        _all_cat_by_id, _all_cat_by_name = master_pic_maps()
-        _all_known_so_pics = set()
-        _all_known_so_pics.update(_all_cat_by_id.values())
-        _all_known_so_pics.update(_all_cat_by_name.values())
-        _all_known_so_pics.update(clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name))
-        _all_known_so_pics.update(clean(m.pic_name) for m in db.session.query(MasterVendorPIC).all() if clean(m.pic_name))
-        _all_known_so_pics.discard('')
-        _all_known_so_pics.discard(None)
-        # Also add PICs from existing SO data
-        _all_known_so_pics.update(canonical_pending_pic(s.pic_name, s.operation_unit_name) for s in kpi_source_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) != 'Unassigned')
-
-        pic_aggregations = {pic: {'pic': pic, 'count': 0, 'amount': 0.0} for pic in _all_known_so_pics}
+        pic_aggregations = {}
         for s in kpi_source_sos:
             pic = canonical_pending_pic(s.pic_name, s.operation_unit_name)
             if not pic or pic == 'Unassigned': continue
-            if pic not in pic_aggregations: pic_aggregations[pic] = {'pic': pic, 'count': 0, 'amount': 0.0}
+            if pic not in pic_aggregations: pic_aggregations[pic] = {'pic': pic, 'count': 0, 'amount': 0}
             pic_aggregations[pic]['count'] += 1
             pic_aggregations[pic]['amount'] += float(s.sales_amount or 0)
-
+        
         pic_aggs_list = sort_pic_kpis(list(pic_aggregations.values()))
 
         payload = {
@@ -3472,44 +3331,6 @@ def cleanup_item_registration_duplicates_only(): return cleanup_source_table_sna
 @app.route('/api/upload/scor', methods=['POST'])
 @app.route('/api/upload/smro-json', methods=['POST'])
 @app.route('/api/upload/smro', methods=['POST'])
-def _refresh_so_pic_names():
-    """Refresh SO pic_name using priority: Client ID > Vendor ID > Category.
-    Called after SO upload and Master PIC upload."""
-    prod_map = {
-        str(p.product_id).strip(): (p.category_id, p.category_name)
-        for p in db.session.query(ProductIDDB).all()
-        if p.product_id
-    }
-    client_pic_cache = {normalize_client_id(m.client_id): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name)}
-    vendor_pic_cache = {normalize_vendor_id(m.vendor_id): clean(m.pic_name) for m in db.session.query(MasterVendorPIC).all() if clean(m.pic_name)}
-    cat_pic_cache = {}
-    so_rows = db.session.query(SOData).filter(
-        SOData.product_id.isnot(None), SOData.product_id != ''
-    ).all()
-    refreshed = 0
-    for s in so_rows:
-        cat_id, cat_name = prod_map.get(str(s.product_id).strip(), (None, None))
-        cache_key = (normalize_category_id(cat_id), normalize_category_name(cat_name))
-        if cache_key not in cat_pic_cache:
-            cat_pic_cache[cache_key] = _lookup_pic_by_category(cat_id, cat_name)
-        new_pic = None
-        cid = normalize_client_id(s.client_id) if s.client_id else ''
-        if cid and cid in client_pic_cache:
-            new_pic = client_pic_cache[cid]
-        if not new_pic:
-            vid = normalize_vendor_id(s.vendor_id) if s.vendor_id else ''
-            if vid and vid in vendor_pic_cache:
-                new_pic = vendor_pic_cache[vid]
-        if not new_pic:
-            new_pic = cat_pic_cache[cache_key]
-        if s.pic_name != new_pic:
-            s.pic_name = new_pic
-            refreshed += 1
-    db.session.commit()
-    clear_runtime_caches()
-    return refreshed
-
-
 def upload_smro():
     try:
         uploads, upload_mode = request_upload_dataframes('smro')
@@ -3565,7 +3386,6 @@ def upload_smro():
             if not col_primary: return jsonify({'error': f'SO Item / SO Number column not found in "{filename}". Available columns: {df.columns.tolist()}'}), 400
             col_status   = find_column(df, ['SO Status', 'Status', 'Order Status', 'SO Status Code'])
             col_opunit   = find_column(df, ['Operation Unit Name', 'Op Unit', 'Client Name', 'Client', 'Operation Unit'])
-            col_client_id = find_column(df, ['Client ID', 'Client Id', 'ClientID', 'Client Cd.', 'Client Cd', 'Client Code'])
             col_vendor_id = find_column(df, ['Vendor ID', 'Vendor Id', 'Vendor Code', 'Supplier ID', 'Supplier Code'])
             col_vendor   = find_column(df, ['Vendor Name', 'Vendor', 'Supplier'])
             col_custpo   = find_column(df, ['Customer PO number', 'Customer PO Number', 'Customer PO', 'PO Ref', 'PO Reference'])
@@ -3606,9 +3426,7 @@ def upload_smro():
                 if pid_val: pid_filled += 1
                 new_data = {
                     'so_number': so_val, 'so_item': so_item_val, 'so_status': clean(df_val(row, col_status)),
-                    'operation_unit_name': clean(df_val(row, col_opunit)),
-                    'client_id': normalize_client_id(clean(df_val(row, col_client_id))) if col_client_id else None,
-                    'vendor_id': normalize_vendor_id(clean(df_val(row, col_vendor_id)) or ''),
+                    'operation_unit_name': clean(df_val(row, col_opunit)), 'vendor_id': clean(df_val(row, col_vendor_id)),
                     'vendor_name': clean(df_val(row, col_vendor)), 'customer_po_number': clean(df_val(row, col_custpo)),
                     'delivery_memo': clean(df_val(row, col_memo)), 'product_name': clean(df_val(row, col_prod)),
                     'specification': spec_val, 'manufacturer_name': clean(df_val(row, col_mfr)), 'product_id': pid_val,
@@ -3673,15 +3491,6 @@ def upload_smro():
         except Exception as fx_exc:
             db.session.rollback(); converted_fx_rows = 0; fx_warning = str(fx_exc)
         clear_runtime_caches()
-
-        # After SO upload, refresh pic_name using priority overrides
-        # (Client ID > Vendor ID > Category). This ensures PIC assignments
-        # are correct when new client_id/vendor_id values are captured.
-        try:
-            _refresh_so_pic_names()
-        except Exception as pic_exc:
-            import traceback; traceback.print_exc()
-
         diagnostics = diagnostics_by_file[-1] if diagnostics_by_file else {}
         if len(diagnostics_by_file) > 1: diagnostics = {**diagnostics, 'files': diagnostics_by_file}
         return jsonify({
@@ -4094,7 +3903,7 @@ def completed_summary():
             }
             with _COMPLETED_CACHE_LOCK: _COMPLETED_SUMMARY_CACHE[cache_key] = {'created_at': now_ts, 'payload': payload}
             return jsonify(payload)
-        completed_summary_fields = (SOData.so_number, SOData.so_item, SOData.operation_unit_name, SOData.vendor_name, SOData.vendor_id, SOData.client_id, SOData.so_qty, SOData.sales_amount, SOData.purchasing_price, SOData.purchasing_amount, SOData.purchasing_currency, SOData.purchasing_amount_idr, SOData.so_create_date)
+        completed_summary_fields = (SOData.so_number, SOData.so_item, SOData.operation_unit_name, SOData.vendor_name, SOData.so_qty, SOData.sales_amount, SOData.purchasing_price, SOData.purchasing_amount, SOData.purchasing_currency, SOData.purchasing_amount_idr, SOData.so_create_date)
         if not light_mode: completed_summary_fields = completed_summary_fields + (SOData.product_name, SOData.specification, SOData.product_id)
         purchase_summary_fields = (SOData.so_qty, SOData.purchasing_price, SOData.purchasing_amount, SOData.purchasing_currency, SOData.purchasing_amount_idr, SOData.so_create_date)
         rows = q.options(load_only(*completed_summary_fields)).all()
@@ -4281,7 +4090,7 @@ def get_item_registration_data():
         cache_key = runtime_cache_key('item_registration_data')
         cached = runtime_cache_get(cache_key)
         if cached is not None: return jsonify(cached)
-
+        
         page = int(request.args.get('page', 1))
         per_page = int(request.args.get('per_page', 10))
         search = request.args.get('search', '').strip()
@@ -4295,8 +4104,6 @@ def get_item_registration_data():
         kpi_pic = (request.args.get('kpi_pic') or '').strip()
         proc_statuses = [s.strip() for s in request.args.getlist('proc_status') if s.strip()]
         mfr_names = [s.strip() for s in request.args.getlist('mfr_name') if s.strip()]
-        op_units = [s.strip() for s in request.args.getlist('op_unit') if s.strip()]
-        bid_types = [s.strip() for s in request.args.getlist('bid_except_type') if s.strip()]
         
         q = apply_item_registration_visible_status_filter(apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to))
         if clients: q = q.filter(ItemRegistration.client_name.in_(clients))
@@ -4305,53 +4112,17 @@ def get_item_registration_data():
         if categories: q = q.filter(ItemRegistration.category.in_(categories))
         if proc_statuses: q = q.filter(ItemRegistration.proc_status.in_(proc_statuses))
         if mfr_names: q = q.filter(ItemRegistration.mfr_name.in_(mfr_names))
-        if op_units: q = q.filter(ItemRegistration.operation_unit_name.in_(op_units))
-        if bid_types: q = q.filter(ItemRegistration.bid_except_type.in_(bid_types))
         if req_numbers: q = q.filter(ItemRegistration.req_no.in_(req_numbers))
         if search:
             pattern = f'%{search}%'
             q = q.filter(db.or_(ItemRegistration.req_no.ilike(pattern), ItemRegistration.prod_id.ilike(pattern), ItemRegistration.prod_name.ilike(pattern), ItemRegistration.vendor_name.ilike(pattern), ItemRegistration.mfr_name.ilike(pattern), ItemRegistration.remarks.ilike(pattern)))
 
         missing_q = apply_item_registration_kpi_status_filter(q).filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-'))
-        # Build in-memory caches for Master PIC tables to avoid N+1 queries
-        # when resolving PIC for each missing row.
-        _client_pic_cache = {normalize_client_id(m.client_id): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name)}
-        _bid_type_pic_cache = {clean(m.bid_type): clean(m.pic_name) for m in db.session.query(MasterBidTypePIC).all() if clean(m.pic_name)}
-        _cat_by_id, _cat_by_name = master_pic_maps()
-
-        # Collect ALL known PIC names from all Master PIC tables — these will
-        # ALWAYS be shown in KPI cards, even if their count is 0.
-        all_known_pics = set()
-        all_known_pics.update(_cat_by_id.values())
-        all_known_pics.update(_cat_by_name.values())
-        all_known_pics.update(_client_pic_cache.values())
-        all_known_pics.update(_bid_type_pic_cache.values())
-        all_known_pics.discard('')
-        all_known_pics.discard(None)
-
-        missing_rows = missing_q.all()
-        missing_by_pic = {pic: 0 for pic in all_known_pics}  # Start all at 0
-        for row in missing_rows:
-            # Resolve PIC with priority: Client ID > Bid Type > Category
-            pic = None
-            cid = normalize_client_id(row.client_id) if row.client_id else ''
-            if cid and cid in _client_pic_cache:
-                pic = _client_pic_cache[cid]
-            if not pic and row.bid_except_type:
-                bt = clean(row.bid_except_type)
-                if bt and bt in _bid_type_pic_cache:
-                    pic = _bid_type_pic_cache[bt]
-            if not pic:
-                cat_id = normalize_category_id(row.category_id)
-                cat_name = normalize_category_name(row.category)
-                if cat_id and cat_id in _cat_by_id:
-                    pic = _cat_by_id[cat_id]
-                elif cat_name and cat_name in _cat_by_name:
-                    pic = _cat_by_name[cat_name]
-            pic = pic or row.pic or ''
-            pic = canonical_pending_pic(clean(pic), row.client_name)
-            if pic and pic != 'Unassigned':
-                missing_by_pic[pic] = missing_by_pic.get(pic, 0) + 1
+        missing_rows_db = missing_q.with_entities(ItemRegistration.pic, ItemRegistration.client_name, func.count(ItemRegistration.id)).group_by(ItemRegistration.pic, ItemRegistration.client_name).all()
+        missing_by_pic = {}
+        for pic_val, client_val, count in missing_rows_db:
+            pic = canonical_pending_pic(clean(pic_val), client_val)
+            if pic and pic != 'Unassigned': missing_by_pic[pic] = missing_by_pic.get(pic, 0) + count
         missing_prod_id_by_pic = [{'pic': pic, 'count': count} for pic, count in sorted(missing_by_pic.items(), key=lambda item: (-item[1], item[0]))]
 
         q = apply_item_registration_pic_filter(q, pics)
@@ -4363,16 +4134,8 @@ def get_item_registration_data():
         rows = q.order_by(ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()).offset((page-1)*per_page).limit(per_page).all()
         
         option_q = apply_item_registration_visible_status_filter(apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to))
-        # Apply ALL active filters to option_q so dropdown options are
-        # interdependent (selecting one filter narrows options in others).
         if clients: option_q = option_q.filter(ItemRegistration.client_name.in_(clients))
         option_q = apply_item_registration_pic_filter(option_q, global_pics)
-        if item_clients: option_q = option_q.filter(ItemRegistration.client_name.in_(item_clients))
-        if op_units: option_q = option_q.filter(ItemRegistration.operation_unit_name.in_(op_units))
-        if bid_types: option_q = option_q.filter(ItemRegistration.bid_except_type.in_(bid_types))
-        if categories: option_q = option_q.filter(ItemRegistration.category.in_(categories))
-        if proc_statuses: option_q = option_q.filter(ItemRegistration.proc_status.in_(proc_statuses))
-        if mfr_names: option_q = option_q.filter(ItemRegistration.mfr_name.in_(mfr_names))
         if req_numbers: option_q = option_q.filter(ItemRegistration.req_no.in_(req_numbers))
         if search:
             pattern = f'%{search}%'
@@ -4382,34 +4145,14 @@ def get_item_registration_data():
             return sorted({clean(value) for (value,) in query.with_entities(column).distinct().all() if clean(value)})
 
         all_clients = distinct_options(option_q, ItemRegistration.client_name)
-        all_op_units = distinct_options(option_q, ItemRegistration.operation_unit_name)
-        all_bid_types = distinct_options(option_q, ItemRegistration.bid_except_type)
         all_categories = distinct_options(option_q, ItemRegistration.category)
         all_proc_statuses = distinct_options(option_q, ItemRegistration.proc_status)
         all_mfr_names = distinct_options(option_q, ItemRegistration.mfr_name)
         
-        # PIC options: always include ALL known PICs from Master PIC tables,
-        # plus any resolved from current data.
-        all_pics = set(all_known_pics)  # Start with all known PICs
-        pic_option_rows = option_q.all()
-        for row in pic_option_rows:
-            pic = None
-            cid = normalize_client_id(row.client_id) if row.client_id else ''
-            if cid and cid in _client_pic_cache:
-                pic = _client_pic_cache[cid]
-            if not pic and row.bid_except_type:
-                bt = clean(row.bid_except_type)
-                if bt and bt in _bid_type_pic_cache:
-                    pic = _bid_type_pic_cache[bt]
-            if not pic:
-                cat_id = normalize_category_id(row.category_id)
-                cat_name = normalize_category_name(row.category)
-                if cat_id and cat_id in _cat_by_id:
-                    pic = _cat_by_id[cat_id]
-                elif cat_name and cat_name in _cat_by_name:
-                    pic = _cat_by_name[cat_name]
-            pic = pic or row.pic or ''
-            resolved = canonical_pending_pic(clean(pic), row.client_name)
+        pic_option_rows = option_q.with_entities(ItemRegistration.pic, ItemRegistration.client_name).distinct().all()
+        all_pics = set()
+        for pic_val, client_val in pic_option_rows:
+            resolved = canonical_pending_pic(clean(pic_val), client_val)
             if resolved != 'Unassigned': all_pics.add(resolved)
         all_pics = sorted(list(all_pics))
 
@@ -4418,7 +4161,7 @@ def get_item_registration_data():
 
         payload = {
             'data': response_rows, 'total': total, 'page': page, 'per_page': per_page,
-            'client_options': all_clients, 'op_unit_options': all_op_units, 'bid_except_type_options': all_bid_types, 'category_options': all_categories, 'pic_options': all_pics,
+            'client_options': all_clients, 'category_options': all_categories, 'pic_options': all_pics,
             'proc_status_options': all_proc_statuses, 'mfr_name_options': all_mfr_names,
             'missing_prod_id_by_pic': missing_prod_id_by_pic, 'last_updated': utc_isoformat(last_upload),
         }
@@ -4487,14 +4230,10 @@ def apply_item_registration_request_filters(query):
     kpi_pic = (request.args.get('kpi_pic') or '').strip()
     proc_statuses = [s.strip() for s in request.args.getlist('proc_status') if s.strip()]
     mfr_names = [s.strip() for s in request.args.getlist('mfr_name') if s.strip()]
-    op_units = [s.strip() for s in request.args.getlist('op_unit') if s.strip()]
-    bid_types = [s.strip() for s in request.args.getlist('bid_except_type') if s.strip()]
     query = apply_item_registration_date_filter(query, date_year, date_from, date_to)
     if clients: query = query.filter(ItemRegistration.client_name.in_(clients))
     query = apply_item_registration_pic_filter(query, global_pics)
     if item_clients: query = query.filter(ItemRegistration.client_name.in_(item_clients))
-    if op_units: query = query.filter(ItemRegistration.operation_unit_name.in_(op_units))
-    if bid_types: query = query.filter(ItemRegistration.bid_except_type.in_(bid_types))
     if categories: query = query.filter(ItemRegistration.category.in_(categories))
     query = apply_item_registration_pic_filter(query, pics)
     if proc_statuses: query = query.filter(ItemRegistration.proc_status.in_(proc_statuses))
@@ -4551,18 +4290,17 @@ def export_item_registration():
         ws = wb.active
         ws.title = "Item Registration"
         headers = [
-            'Proc. Status', 'Client Nm.', 'Op. Unit Nm.', 'Category', 'PIC', 'Req. No', 'Prod. ID',
-            'Prod. Nm.', 'Spec.', 'Mfr. Nm.', 'Odr. Unit', 'Bid Except Type', 'Prod. Price', 'Curr.', 'Remarks'
+            'Proc. Status', 'Client Nm.', 'Category', 'PIC', 'Req. No', 'Prod. ID',
+            'Prod. Nm.', 'Spec.', 'Mfr. Nm.', 'Odr. Unit', 'Prod. Price', 'Curr.', 'Remarks'
         ]
-        _style_wb(ws, headers, num_cols=[12])
-        widths = [26, 34, 34, 24, 16, 18, 18, 28, 48, 24, 14, 28, 16, 12, 60]
+        _style_wb(ws, headers, num_cols=[11])
+        widths = [26, 34, 24, 16, 18, 18, 28, 48, 24, 14, 16, 12, 60]
         for i, width in enumerate(widths, 1):
             ws.column_dimensions[get_column_letter(i)].width = width
         for row in rows:
             ws.append([
                 row.proc_status or '',
                 row.client_name or '',
-                row.operation_unit_name or '',
                 source_category_level1(row.category),
                 row.pic or '',
                 row.req_no or '',
@@ -4571,7 +4309,6 @@ def export_item_registration():
                 row.spec or '',
                 row.mfr_name or '',
                 row.odr_unit or '',
-                row.bid_except_type or '',
                 row.prod_price or 0,
                 row.curr or '',
                 row.remarks or '',
@@ -4791,37 +4528,27 @@ def upload_product_id():
 @app.route('/api/upload/master-pic-json', methods=['POST'])
 @app.route('/api/upload/master-pic', methods=['POST'])
 def upload_master_pic():
-    """Upload Master PIC Excel (3 sheets: By Category, By Client ID, By Vendor).
-    Upserts PIC mappings, then refreshes SO pic_name."""
+    """Upload Master PIC Excel. Upserts Category Name → PIC mapping, then refreshes SO pic_name."""
     try:
-        # Read ALL sheets from the uploaded Excel file (not just sheet 0).
-        # The template has 3 sheets: "By Category", "By Client ID", "By Vendor".
-        files = uploaded_files()
-        uploads = []
-        for file in files:
-            raw = file.read()
-            file.seek(0)
-            filename = (file.filename or '').lower()
-            is_xls = raw[:4] == b'\xd0\xcf\x11\xe0'
-            engine = 'xlrd' if is_xls or filename.endswith('.xls') else 'openpyxl'
-            # Read ALL sheets into a dict of DataFrames
-            all_sheets = pd.read_excel(file, sheet_name=None, engine=engine, dtype=str, keep_default_na=False)
-            for sheet_name, df in all_sheets.items():
-                df.columns = [str(c).strip() for c in df.columns]
-                uploads.append({'filename': f"{file.filename} [{sheet_name}]", 'df': df})
+        uploads, upload_mode = request_upload_dataframes('master_pic')
         if not uploads:
-            return jsonify({'error': 'No file uploaded or no sheets found'}), 400
+            return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
         replace_existing = upload_replace_mode()
 
-        added_cat = updated_cat = unchanged_cat = 0
-        added_client = updated_client = unchanged_client = 0
-        added_vendor = updated_vendor = unchanged_vendor = 0
-        added_bid_type = updated_bid_type = unchanged_bid_type = 0
-        removed_duplicates = removed_stale = removed_blank = 0
-
-        # ── Sheet 1: By Category ───────────────────────────────────────────
-        # Process the first dataframe (or the one matching "By Category" sheet)
+        cleanup_pre = cleanup_master_pic_by_category_name(None)
+        db.session.flush()
+        added = updated = unchanged = 0
+        removed_duplicates = cleanup_pre.get('removed_duplicates', 0)
+        removed_stale = cleanup_pre.get('removed_stale', 0)
+        removed_blank = cleanup_pre.get('removed_blank', 0)
         latest_category_names = set()
+        expected = [
+            ('category_name', 'Category Name'),
+            ('pic', 'PIC'),
+            ('pic_update', 'Update New PIC'),
+        ]
+        required = [('category_name', 'Category Name')]
+
         all_master_pics = db.session.query(MasterPIC).all()
         master_pic_by_norm_name = {}
         master_pic_by_cat_id = {}
@@ -4835,124 +4562,56 @@ def upload_master_pic():
         for upload in uploads:
             df = upload['df']
             df.columns = [str(c).strip() for c in df.columns]
-            # Detect sheet type by column headers
-            col_names_lower = {str(c).strip().lower() for c in df.columns}
-            has_category = any('category' in c for c in col_names_lower)
-            has_client_id = any('client id' in c or 'client cd' in c for c in col_names_lower)
-            has_vendor_id = any('vendor id' in c or 'vendor cd' in c for c in col_names_lower)
-            has_bid_type = any('bid type' in c or 'bid except' in c for c in col_names_lower)
+            col = _master_pic_columns(df)
+            validate_upload_columns(upload['filename'], 'Update PIC', col, expected, required)
 
-            if has_bid_type and not has_category and not has_vendor_id:
-                # ── Sheet 4: By Bid Type ───────────────────────────────────
-                bt_col = find_column(df, ['Bid Type', 'Bid Except Type', 'Bid/Except Type'])
-                pic_col = find_column(df, ['PIC', 'PIC Name'])
-                if bt_col and pic_col:
-                    existing_bid_types = {clean(m.bid_type): m for m in db.session.query(MasterBidTypePIC).all()}
-                    for _, row in df.iterrows():
-                        bt = clean(df_val(row, bt_col))
-                        if not bt: continue
-                        pic = clean(df_val(row, pic_col))
-                        if not pic: continue
-                        existing = existing_bid_types.get(bt)
-                        if existing:
-                            changed = clean(existing.pic_name) != pic
-                            existing.pic_name = pic
-                            existing.updated_at = datetime.utcnow()
-                            if changed: updated_bid_type += 1
-                            else: unchanged_bid_type += 1
-                        else:
-                            db.session.add(MasterBidTypePIC(bid_type=bt, pic_name=pic, updated_at=datetime.utcnow()))
-                            added_bid_type += 1
-                            existing_bid_types[bt] = {'bid_type': bt}
+            for _, row in df.iterrows():
+                cat_name = source_category_level1(df_val(row, col['category_name']))
+                if not cat_name:
+                    continue
 
-            elif has_vendor_id and not has_category:
-                # ── Sheet 3: By Vendor ─────────────────────────────────────
-                vid_col = find_column(df, ['Vendor ID', 'Vendor Id', 'VendorID', 'Vendor Cd.', 'Vendor Cd', 'Vendor Code'])
-                vname_col = find_column(df, ['Vendor Name', 'Vendor Nm.', 'Vendor Nm', 'Vendor'])
-                pic_col = find_column(df, ['PIC', 'PIC Name'])
-                if vid_col and pic_col:
-                    existing_vendors = {normalize_vendor_id(m.vendor_id): m for m in db.session.query(MasterVendorPIC).all()}
-                    for _, row in df.iterrows():
-                        vid = normalize_vendor_id(df_val(row, vid_col))
-                        if not vid: continue
-                        vname = clean(df_val(row, vname_col))
-                        pic = clean(df_val(row, pic_col))
-                        if not pic: continue
-                        existing = existing_vendors.get(vid)
-                        if existing:
-                            changed = clean(existing.pic_name) != pic or clean(existing.vendor_name) != vname
-                            existing.vendor_name = vname
-                            existing.pic_name = pic
-                            existing.updated_at = datetime.utcnow()
-                            if changed: updated_vendor += 1
-                            else: unchanged_vendor += 1
-                        else:
-                            db.session.add(MasterVendorPIC(vendor_id=vid, vendor_name=vname, pic_name=pic, updated_at=datetime.utcnow()))
-                            added_vendor += 1
-                            existing_vendors[vid] = {'vendor_id': vid}
+                current_pic = clean(df_val(row, col['pic']))
+                update_pic = clean(df_val(row, col['pic_update']))
+                pic_name = update_pic or current_pic
 
-            elif has_client_id and not has_category:
-                # ── Sheet 2: By Client ID ──────────────────────────────────
-                cid_col = find_column(df, ['Client ID', 'Client Id', 'ClientID', 'Client Cd.', 'Client Cd', 'Client Code'])
-                cname_col = find_column(df, ['Client Name', 'Client Nm.', 'Client Nm'])
-                pic_col = find_column(df, ['PIC', 'PIC Name'])
-                if cid_col and pic_col:
-                    existing_clients = {normalize_client_id(m.client_id): m for m in db.session.query(MasterClientPIC).all()}
-                    for _, row in df.iterrows():
-                        cid = normalize_client_id(df_val(row, cid_col))
-                        if not cid: continue
-                        cname = clean(df_val(row, cname_col))
-                        pic = clean(df_val(row, pic_col))
-                        if not pic: continue
-                        existing = existing_clients.get(cid)
-                        if existing:
-                            changed = clean(existing.pic_name) != pic or clean(existing.client_name) != cname
-                            existing.client_name = cname
-                            existing.pic_name = pic
-                            existing.updated_at = datetime.utcnow()
-                            if changed: updated_client += 1
-                            else: unchanged_client += 1
-                        else:
-                            db.session.add(MasterClientPIC(client_id=cid, client_name=cname, pic_name=pic, updated_at=datetime.utcnow()))
-                            added_client += 1
-                            existing_clients[cid] = {'client_id': cid}
+                if not pic_name:
+                    continue
 
-            else:
-                # ── Sheet 1: By Category (existing logic, no Update PIC) ───
-                col = _master_pic_columns(df)
-                # Don't validate strictly — the template no longer has "Update New PIC"
-                # but old templates might. Handle both gracefully.
-                for _, row in df.iterrows():
-                    cat_name = source_category_level1(df_val(row, col['category_name']))
-                    if not cat_name: continue
-                    current_pic = clean(df_val(row, col['pic']))
-                    update_pic = clean(df_val(row, col['pic_update'])) if col.get('pic_update') else None
-                    pic_name = update_pic or current_pic
-                    if not pic_name: continue
-                    latest_category_names.add(cat_name)
-                    norm_cat_name = normalize_category_name(cat_name)
-                    generated_key = master_pic_category_key(cat_name)
-                    existing = master_pic_by_cat_id.get(generated_key) or master_pic_by_norm_name.get(norm_cat_name)
-                    if existing:
-                        changed = False
-                        new_key = generated_key or existing.category_id
-                        if (normalize_category_name(existing.category_name) != norm_cat_name
-                            or clean(existing.pic_name) != pic_name
-                            or (str(existing.category_id or '').startswith('CATNAME_') and existing.category_id != new_key)):
-                            changed = True
-                        existing.category_name = cat_name
-                        if str(existing.category_id or '').startswith('CATNAME_'):
-                            existing.category_id = new_key
-                        existing.pic_name = pic_name
-                        existing.updated_at = datetime.utcnow()
-                        if changed: updated_cat += 1
-                        else: unchanged_cat += 1
+                latest_category_names.add(cat_name)
+                norm_cat_name = normalize_category_name(cat_name)
+                generated_key = master_pic_category_key(cat_name)
+                
+                existing = master_pic_by_cat_id.get(generated_key) or master_pic_by_norm_name.get(norm_cat_name)
+                
+                if existing:
+                    changed = False
+                    new_key = generated_key or existing.category_id
+                    if (
+                        normalize_category_name(existing.category_name) != norm_cat_name
+                        or clean(existing.pic_name) != pic_name
+                        or (str(existing.category_id or '').startswith('CATNAME_') and existing.category_id != new_key)
+                    ):
+                        changed = True
+                    existing.category_name = cat_name
+                    if str(existing.category_id or '').startswith('CATNAME_'):
+                        existing.category_id = new_key
+                    existing.pic_name = pic_name
+                    existing.updated_at = datetime.utcnow()
+                    if changed:
+                        updated += 1
                     else:
-                        new_rec = MasterPIC(category_id=generated_key, category_name=cat_name, pic_name=pic_name, updated_at=datetime.utcnow())
-                        db.session.add(new_rec)
-                        added_cat += 1
-                        master_pic_by_norm_name[norm_cat_name] = new_rec
-                        if generated_key: master_pic_by_cat_id[generated_key] = new_rec
+                        unchanged += 1
+                else:
+                    new_rec = MasterPIC(
+                        category_id=generated_key,
+                        category_name=cat_name,
+                        pic_name=pic_name,
+                        updated_at=datetime.utcnow()
+                    )
+                    db.session.add(new_rec)
+                    added += 1
+                    master_pic_by_norm_name[norm_cat_name] = new_rec
+                    master_pic_by_cat_id[generated_key] = new_rec
 
         db.session.flush()
         cleanup_post = cleanup_master_pic_by_category_name(latest_category_names if replace_existing else None)
@@ -4963,20 +4622,37 @@ def upload_master_pic():
         db.session.commit()
         invalidate_master_pic_cache()
 
-        # Refresh SO pic_name using priority: Client ID > Vendor ID > Category
-        refreshed = _refresh_so_pic_names()
+        prod_map = {
+            str(p.product_id).strip(): (p.category_id, p.category_name)
+            for p in db.session.query(ProductIDDB).all()
+            if p.product_id
+        }
+        pic_cache = {}
+        so_rows = db.session.query(SOData).filter(
+            SOData.product_id.isnot(None), SOData.product_id != ''
+        ).all()
+        refreshed = 0
+        for s in so_rows:
+            cat_id, cat_name = prod_map.get(str(s.product_id).strip(), (None, None))
+            cache_key = (normalize_category_id(cat_id), normalize_category_name(cat_name))
+            if cache_key not in pic_cache:
+                pic_cache[cache_key] = _lookup_pic_by_category(cat_id, cat_name)
+            new_pic = pic_cache[cache_key]
+            if s.pic_name != new_pic:
+                s.pic_name = new_pic
+                refreshed += 1
+        db.session.commit()
+        clear_runtime_caches()
         refresh_item_registration_mappings()
 
         return jsonify({
             'status': 'ok',
-            'files': len(files),
-            'sheets': len(uploads),
-            'mode': 'excel',
+            'files': len(uploads),
+            'mode': upload_mode,
             'replace': replace_existing,
-            'category': {'added': added_cat, 'updated': updated_cat, 'unchanged': unchanged_cat},
-            'client': {'added': added_client, 'updated': updated_client, 'unchanged': unchanged_client},
-            'vendor': {'added': added_vendor, 'updated': updated_vendor, 'unchanged': unchanged_vendor},
-            'bid_type': {'added': added_bid_type, 'updated': updated_bid_type, 'unchanged': unchanged_bid_type},
+            'added': added,
+            'updated': updated,
+            'unchanged': unchanged,
             'removed_duplicates': removed_duplicates,
             'removed_stale': removed_stale,
             'removed_blank': removed_blank,
@@ -5217,30 +4893,13 @@ def get_rfq_data():
                 filtered_cache[key] = rfq_filter_rows(search_rows, exclude_field)
             return filtered_cache[key]
 
-        # KPI rows: respect ALL filters EXCEPT 'pic' (the KPI highlight).
-        # Previously this also excluded 'purchase_pics', which caused the bug
-        # where selecting ADIT in the dropdown + searching would make ADIT
-        # disappear from KPI and show other PICs (like JOKO) instead.
-        # Now KPI respects the purchase_pics dropdown filter, so when a
-        # specific PIC is selected, KPI only shows that PIC's count.
-        kpi_rows = filtered_for('pic')
-        # Collect ALL known PIC names from the full dataset (not just filtered)
-        # so KPI cards always show every PIC, even with 0 count.
-        all_rfq_pics = set()
-        for r in search_rows:
-            p = clean(r.get('purchase_pic'))
-            if p and p.lower() != 'unassigned': all_rfq_pics.add(p)
-        pending_by_pic = {p: 0 for p in all_rfq_pics}  # Start all at 0
+        kpi_rows = filtered_for({'purchase_pics', 'pic'})
+        pending_by_pic = {}
         for row in kpi_rows:
-            # Exclude rows that already have a Product ID — they're done.
+            if clean(row.get('check')) != 'open':
+                continue
             if clean_product_id(row.get('product_id')):
                 continue
-            # Exclude rows with check status 'complete' or 'reject' —
-            # they're no longer pending.
-            check_val = clean(row.get('check', '')).lower()
-            if check_val in ('complete', 'reject'):
-                continue
-            # Only count rows that still need a unit price.
             if not row.get('unit_price_missing'):
                 continue
             row_pic = clean(row.get('purchase_pic'))
@@ -5316,10 +4975,7 @@ def rfq_filtered_rows_from_request(force=False):
     if checks:
         rows = [row for row in rows if clean(row.get('check')) and clean(row.get('check')).lower() in checks]
     if pic:
-        # For export, only filter by purchase_pic — don't apply the KPI
-        # display filter (check == 'open' + unit_price_missing + !product_id)
-        # which would exclude rows that the user expects in the export.
-        rows = [row for row in rows if clean(row.get('purchase_pic')) == pic]
+        rows = [row for row in rows if clean(row.get('purchase_pic')) == pic and clean(row.get('check')) == 'open' and row.get('unit_price_missing') and not clean_product_id(row.get('product_id'))]
     return rows, fetched_at
 
 @app.route('/api/rfq/template', methods=['GET'])
@@ -6784,20 +6440,9 @@ def get_dashboard_status_detail():
             q = apply_so_pic_filter(q, pics)
             return apply_so_create_date_filter(q, date_year, date_from, date_to)
 
-        # When a specific status is clicked, filter ONLY by that status —
-        # don't apply open_so_filter (which excludes closed statuses like
-        # "Delivery Completed"). But DO apply so_countable_sql_filter so
-        # non-countable items are excluded (matching the heatmap count).
-        # When no status is specified (e.g. "All Pending Status"), use
-        # open_so_filter + so_countable_sql_filter as before.
+        q = so_q(open_so_filter())
         if status:
-            q = so_q(so_countable_sql_filter())
-            # Use TRIM on so_status to match the heatmap's grouping (which
-            # uses func.trim). Without this, rows with leading/trailing spaces
-            # in so_status won't match the clicked status label.
-            q = q.filter(func.trim(func.coalesce(SOData.so_status, '')) == status)
-        else:
-            q = so_q(open_so_filter(), so_countable_sql_filter())
+            q = q.filter(SOData.so_status == status)
         if month:
             try:
                 month_date = datetime.strptime(month, '%b %Y')
@@ -6909,6 +6554,12 @@ def get_pic_kpi():
 def download_master_pic_template():
     try:
         wb = Workbook()
+        ws = wb.active
+        ws.title = 'Master PIC'
+
+        headers = ['Category Name', 'PIC', 'Update New PIC']
+        ws.append(headers)
+        ws.freeze_panes = 'A2'
 
         ref_header_fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
         input_header_fill = PatternFill(start_color='0070C0', end_color='0070C0', fill_type='solid')
@@ -6918,35 +6569,14 @@ def download_master_pic_template():
         center = Alignment(horizontal='center', vertical='center')
         left = Alignment(horizontal='left', vertical='center')
 
-        def style_sheet(ws, headers, ref_cols=2, col_widths=None):
-            ws.append(headers)
-            ws.freeze_panes = 'A2'
-            for cell in ws[1]:
-                cell.alignment = center
-                if cell.column <= ref_cols:
-                    cell.fill = ref_header_fill
-                    cell.font = ref_font
-                else:
-                    cell.fill = input_header_fill
-                    cell.font = input_font
-            if col_widths:
-                for i, w in enumerate(col_widths, 1):
-                    ws.column_dimensions[get_column_letter(i)].width = w
-            ws.auto_filter.ref = f'A1:{get_column_letter(len(headers))}{ws.max_row}'
-
-        def fill_body(ws, start_row=2):
-            for row in ws.iter_rows(min_row=start_row, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
-                for cell in row:
-                    cell.font = body_font
-                    cell.alignment = left if cell.column == 1 else center
-                    cell.number_format = '@'
-
-        # ═══════════════════════════════════════════════════════════════════
-        # Sheet 1: By Category (existing — Category Name + PIC, no Update PIC)
-        # ═══════════════════════════════════════════════════════════════════
-        ws1 = wb.active
-        ws1.title = 'By Category'
-        style_sheet(ws1, ['Category Name', 'PIC'], ref_cols=2, col_widths=[32, 12])
+        for cell in ws[1]:
+            cell.alignment = center
+            if cell.column <= 2:
+                cell.fill = ref_header_fill
+                cell.font = ref_font
+            else:
+                cell.fill = input_header_fill
+                cell.font = input_font
 
         category_rows = {}
         for m in db.session.query(MasterPIC).order_by(MasterPIC.category_name).all():
@@ -6963,105 +6593,22 @@ def download_master_pic_template():
                 category_rows[norm] = {'category_name': cat_name, 'pic': _lookup_pic_by_category(None, cat_name) or ''}
 
         for item in sorted(category_rows.values(), key=lambda x: x['category_name'].lower()):
-            ws1.append([item['category_name'], item['pic']])
+            ws.append([item['category_name'], item['pic'], ''])
+
         min_rows = max(20, len(category_rows) + 5)
-        while ws1.max_row < min_rows:
-            ws1.append(['', ''])
-        fill_body(ws1)
+        while ws.max_row < min_rows:
+            ws.append(['', '', ''])
 
-        # ═══════════════════════════════════════════════════════════════════
-        # Sheet 2: By Client ID (Client ID, Client Name, PIC)
-        # Pre-fill from SOData (Client ID is column A of SO source).
-        # PIC is empty — user fills it in. All PIC control is via Master PIC.
-        # ═══════════════════════════════════════════════════════════════════
-        ws2 = wb.create_sheet('By Client ID')
-        style_sheet(ws2, ['Client ID', 'Client Name', 'PIC'], ref_cols=2, col_widths=[20, 40, 12])
+        for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=3):
+            for cell in row:
+                cell.font = body_font
+                cell.alignment = left if cell.column == 1 else center
+                cell.number_format = '@'
 
-        client_rows = {}
-        # Existing MasterClientPIC entries
-        for m in db.session.query(MasterClientPIC).all():
-            cid = clean(m.client_id)
-            if cid:
-                client_rows[cid] = {'client_id': cid, 'client_name': clean(m.client_name), 'pic': clean(m.pic_name)}
-        # Distinct clients from SOData (Client ID is in column A of SO source)
-        for s in db.session.query(SOData.client_id, SOData.operation_unit_name).filter(
-            SOData.client_id.isnot(None), SOData.client_id != ''
-        ).distinct().all():
-            cid = clean(s.client_id)
-            if cid and cid not in client_rows:
-                # operation_unit_name contains the client name (e.g. "PT. YUPI INDO JELLY GUM Tbk(IDN)-Consumable")
-                cname = clean(s.operation_unit_name)
-                client_rows[cid] = {'client_id': cid, 'client_name': cname, 'pic': ''}
-
-        for item in sorted(client_rows.values(), key=lambda x: x['client_id'].lower()):
-            ws2.append([item['client_id'], item['client_name'], item['pic']])
-        min_rows = max(20, len(client_rows) + 5)
-        while ws2.max_row < min_rows:
-            ws2.append(['', '', ''])
-        fill_body(ws2)
-
-        # ═══════════════════════════════════════════════════════════════════
-        # Sheet 3: By Vendor (Vendor ID, Vendor Name, PIC)
-        # Pre-fill from MasterVendorPIC + SOData (distinct vendor_id + vendor_name).
-        # Shows existing PIC assignments so user can see current state.
-        # ═══════════════════════════════════════════════════════════════════
-        ws3 = wb.create_sheet('By Vendor')
-        style_sheet(ws3, ['Vendor ID', 'Vendor Name', 'PIC'], ref_cols=2, col_widths=[20, 40, 12])
-
-        vendor_rows = {}
-        # Existing MasterVendorPIC entries
-        for m in db.session.query(MasterVendorPIC).all():
-            vid = normalize_vendor_id(m.vendor_id)
-            if vid:
-                vendor_rows[vid] = {'vendor_id': vid, 'vendor_name': clean(m.vendor_name), 'pic': clean(m.pic_name)}
-        # Distinct vendors from SOData (normalize vendor_id to strip .0 and leading zeros)
-        for s in db.session.query(SOData.vendor_id, SOData.vendor_name).filter(
-            SOData.vendor_id.isnot(None), SOData.vendor_id != ''
-        ).distinct().all():
-            vid = normalize_vendor_id(s.vendor_id)
-            if vid and vid not in vendor_rows:
-                vendor_rows[vid] = {'vendor_id': vid, 'vendor_name': clean(s.vendor_name), 'pic': ''}
-
-        for item in sorted(vendor_rows.values(), key=lambda x: x['vendor_id'].lower()):
-            ws3.append([item['vendor_id'], item['vendor_name'], item['pic']])
-        min_rows = max(20, len(vendor_rows) + 5)
-        while ws3.max_row < min_rows:
-            ws3.append(['', '', ''])
-        fill_body(ws3)
-
-        # ═══════════════════════════════════════════════════════════════════
-        # Sheet 4: By Bid Type (Bid Type, PIC)
-        # Pre-fill from MasterBidTypePIC + default "Imported Product Request Purchasing".
-        # This is an EXCEPTION override: if a bid type has a PIC here, it
-        # overrides category-based PIC for that Item Registration row.
-        # ═══════════════════════════════════════════════════════════════════
-        ws4 = wb.create_sheet('By Bid Type')
-        style_sheet(ws4, ['Bid Type', 'PIC'], ref_cols=2, col_widths=[40, 12])
-
-        bid_type_rows = {}
-        # Existing MasterBidTypePIC entries
-        for m in db.session.query(MasterBidTypePIC).all():
-            bt = clean(m.bid_type)
-            if bt:
-                bid_type_rows[bt] = {'bid_type': bt, 'pic': clean(m.pic_name)}
-        # Distinct bid types from ItemRegistration
-        for (bt_raw,) in db.session.query(ItemRegistration.bid_except_type).filter(
-            ItemRegistration.bid_except_type.isnot(None), ItemRegistration.bid_except_type != ''
-        ).distinct().all():
-            bt = clean(bt_raw)
-            if bt and bt not in bid_type_rows:
-                bid_type_rows[bt] = {'bid_type': bt, 'pic': ''}
-        # Default bid type per user spec
-        default_bt = 'Imported Product Request Purchasing'
-        if default_bt not in bid_type_rows:
-            bid_type_rows[default_bt] = {'bid_type': default_bt, 'pic': ''}
-
-        for item in sorted(bid_type_rows.values(), key=lambda x: x['bid_type'].lower()):
-            ws4.append([item['bid_type'], item['pic']])
-        min_rows = max(20, len(bid_type_rows) + 5)
-        while ws4.max_row < min_rows:
-            ws4.append(['', ''])
-        fill_body(ws4)
+        ws.column_dimensions['A'].width = 32
+        ws.column_dimensions['B'].width = 12
+        ws.column_dimensions['C'].width = 20
+        ws.auto_filter.ref = f'A1:C{ws.max_row}'
 
         output = io.BytesIO()
         wb.save(output)
