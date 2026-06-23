@@ -2737,7 +2737,12 @@ def so_dict(s):
     pa_idr = purchase_amount_idr_for_margin(s)
     return {
         'id': s.id, 'so_number': s.so_number, 'so_item': s.so_item, 'so_status': s.so_status,
-        'operation_unit_name': s.operation_unit_name, 'vendor_id': s.vendor_id or '', 'vendor_name': s.vendor_name,
+        'operation_unit_name': s.operation_unit_name,
+        # Normalize vendor_id & client_id on read so old DB data (with leading
+        # zeros or .0 artifacts) displays correctly without re-upload.
+        'vendor_id': normalize_vendor_id(s.vendor_id) if s.vendor_id else '',
+        'client_id': normalize_client_id(s.client_id) if s.client_id else '',
+        'vendor_name': s.vendor_name,
         'customer_po_number': s.customer_po_number, 'delivery_memo': s.delivery_memo, 'product_name': s.product_name,
         'specification': s.specification, 'manufacturer_name': s.manufacturer_name or '', 'product_id': s.product_id,
         'category_name': category_name, 'svo_po': s.matched_po_number or '', 'so_qty': s.so_qty, 'sales_unit': s.sales_unit or '',
@@ -3145,7 +3150,7 @@ def get_all_so():
             SOData.purchasing_amount_idr, SOData.product_id, SOData.product_name,
             SOData.specification, SOData.matched_po_number, SOData.remarks,
             SOData.delivery_plan_date, SOData.sales_price, SOData.sales_unit,
-            SOData.vendor_id, SOData.currency,
+            SOData.vendor_id, SOData.currency, SOData.client_id,
         )
 
         if sort_order == 'oldest':
@@ -3418,6 +3423,44 @@ def cleanup_item_registration_duplicates_only(): return cleanup_source_table_sna
 @app.route('/api/upload/scor', methods=['POST'])
 @app.route('/api/upload/smro-json', methods=['POST'])
 @app.route('/api/upload/smro', methods=['POST'])
+def _refresh_so_pic_names():
+    """Refresh SO pic_name using priority: Client ID > Vendor ID > Category.
+    Called after SO upload and Master PIC upload."""
+    prod_map = {
+        str(p.product_id).strip(): (p.category_id, p.category_name)
+        for p in db.session.query(ProductIDDB).all()
+        if p.product_id
+    }
+    client_pic_cache = {normalize_client_id(m.client_id): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name)}
+    vendor_pic_cache = {normalize_vendor_id(m.vendor_id): clean(m.pic_name) for m in db.session.query(MasterVendorPIC).all() if clean(m.pic_name)}
+    cat_pic_cache = {}
+    so_rows = db.session.query(SOData).filter(
+        SOData.product_id.isnot(None), SOData.product_id != ''
+    ).all()
+    refreshed = 0
+    for s in so_rows:
+        cat_id, cat_name = prod_map.get(str(s.product_id).strip(), (None, None))
+        cache_key = (normalize_category_id(cat_id), normalize_category_name(cat_name))
+        if cache_key not in cat_pic_cache:
+            cat_pic_cache[cache_key] = _lookup_pic_by_category(cat_id, cat_name)
+        new_pic = None
+        cid = normalize_client_id(s.client_id) if s.client_id else ''
+        if cid and cid in client_pic_cache:
+            new_pic = client_pic_cache[cid]
+        if not new_pic:
+            vid = normalize_vendor_id(s.vendor_id) if s.vendor_id else ''
+            if vid and vid in vendor_pic_cache:
+                new_pic = vendor_pic_cache[vid]
+        if not new_pic:
+            new_pic = cat_pic_cache[cache_key]
+        if s.pic_name != new_pic:
+            s.pic_name = new_pic
+            refreshed += 1
+    db.session.commit()
+    clear_runtime_caches()
+    return refreshed
+
+
 def upload_smro():
     try:
         uploads, upload_mode = request_upload_dataframes('smro')
@@ -3581,6 +3624,15 @@ def upload_smro():
         except Exception as fx_exc:
             db.session.rollback(); converted_fx_rows = 0; fx_warning = str(fx_exc)
         clear_runtime_caches()
+
+        # After SO upload, refresh pic_name using priority overrides
+        # (Client ID > Vendor ID > Category). This ensures PIC assignments
+        # are correct when new client_id/vendor_id values are captured.
+        try:
+            _refresh_so_pic_names()
+        except Exception as pic_exc:
+            import traceback; traceback.print_exc()
+
         diagnostics = diagnostics_by_file[-1] if diagnostics_by_file else {}
         if len(diagnostics_by_file) > 1: diagnostics = {**diagnostics, 'files': diagnostics_by_file}
         return jsonify({
@@ -3993,7 +4045,7 @@ def completed_summary():
             }
             with _COMPLETED_CACHE_LOCK: _COMPLETED_SUMMARY_CACHE[cache_key] = {'created_at': now_ts, 'payload': payload}
             return jsonify(payload)
-        completed_summary_fields = (SOData.so_number, SOData.so_item, SOData.operation_unit_name, SOData.vendor_name, SOData.so_qty, SOData.sales_amount, SOData.purchasing_price, SOData.purchasing_amount, SOData.purchasing_currency, SOData.purchasing_amount_idr, SOData.so_create_date)
+        completed_summary_fields = (SOData.so_number, SOData.so_item, SOData.operation_unit_name, SOData.vendor_name, SOData.vendor_id, SOData.client_id, SOData.so_qty, SOData.sales_amount, SOData.purchasing_price, SOData.purchasing_amount, SOData.purchasing_currency, SOData.purchasing_amount_idr, SOData.so_create_date)
         if not light_mode: completed_summary_fields = completed_summary_fields + (SOData.product_name, SOData.specification, SOData.product_id)
         purchase_summary_fields = (SOData.so_qty, SOData.purchasing_price, SOData.purchasing_amount, SOData.purchasing_currency, SOData.purchasing_amount_idr, SOData.so_create_date)
         rows = q.options(load_only(*completed_summary_fields)).all()
@@ -4766,40 +4818,7 @@ def upload_master_pic():
         invalidate_master_pic_cache()
 
         # Refresh SO pic_name using priority: Client ID > Vendor ID > Category
-        prod_map = {
-            str(p.product_id).strip(): (p.category_id, p.category_name)
-            for p in db.session.query(ProductIDDB).all()
-            if p.product_id
-        }
-        # Build lookup caches for MasterClientPIC and MasterVendorPIC
-        client_pic_cache = {normalize_client_id(m.client_id): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name)}
-        vendor_pic_cache = {normalize_vendor_id(m.vendor_id): clean(m.pic_name) for m in db.session.query(MasterVendorPIC).all() if clean(m.pic_name)}
-        cat_pic_cache = {}
-        so_rows = db.session.query(SOData).filter(
-            SOData.product_id.isnot(None), SOData.product_id != ''
-        ).all()
-        refreshed = 0
-        for s in so_rows:
-            cat_id, cat_name = prod_map.get(str(s.product_id).strip(), (None, None))
-            cache_key = (normalize_category_id(cat_id), normalize_category_name(cat_name))
-            if cache_key not in cat_pic_cache:
-                cat_pic_cache[cache_key] = _lookup_pic_by_category(cat_id, cat_name)
-            # Priority: Client ID > Vendor ID > Category
-            new_pic = None
-            cid = normalize_client_id(s.client_id) if s.client_id else ''
-            if cid and cid in client_pic_cache:
-                new_pic = client_pic_cache[cid]
-            if not new_pic:
-                vid = normalize_vendor_id(s.vendor_id) if s.vendor_id else ''
-                if vid and vid in vendor_pic_cache:
-                    new_pic = vendor_pic_cache[vid]
-            if not new_pic:
-                new_pic = cat_pic_cache[cache_key]
-            if s.pic_name != new_pic:
-                s.pic_name = new_pic
-                refreshed += 1
-        db.session.commit()
-        clear_runtime_caches()
+        refreshed = _refresh_so_pic_names()
         refresh_item_registration_mappings()
 
         return jsonify({
