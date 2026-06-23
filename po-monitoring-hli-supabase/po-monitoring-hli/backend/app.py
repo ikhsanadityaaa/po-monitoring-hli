@@ -2567,16 +2567,17 @@ def _lookup_pic_by_category(category_id=None, category_name=None):
     if cat_name and cat_name in by_name: return by_name[cat_name]
     return None
 
-def resolve_pic_with_overrides(category_id=None, category_name=None, client_id=None, vendor_id=None):
-    """Resolve PIC with priority: Client ID > Vendor ID > Category.
+def resolve_pic_with_overrides(category_id=None, category_name=None, client_id=None, vendor_id=None, bid_except_type=None):
+    """Resolve PIC with priority: Client ID > Bid Type > Vendor ID > Category.
     
     1. If client_id has a PIC in MasterClientPIC → use it (overrides all)
-    2. If vendor_id has a PIC in MasterVendorPIC → use it (overrides category)
-    3. Fall back to category-based PIC from MasterPIC
+    2. If bid_except_type has a PIC in MasterBidTypePIC → use it (overrides vendor & category)
+    3. If vendor_id has a PIC in MasterVendorPIC → use it (overrides category)
+    4. Fall back to category-based PIC from MasterPIC
     
-    This makes Client ID and Vendor ID "exception overrides" — the category
-    is the default, but specific clients/vendors can be assigned a different
-    PIC.
+    This makes Client ID, Bid Type, and Vendor ID "exception overrides" —
+    the category is the default, but specific clients/bid types/vendors can
+    be assigned a different PIC.
     """
     # Priority 1: Client ID override
     if client_id:
@@ -2588,7 +2589,17 @@ def resolve_pic_with_overrides(category_id=None, category_name=None, client_id=N
             if client_pic and clean(client_pic[0]):
                 return clean(client_pic[0])
     
-    # Priority 2: Vendor ID override
+    # Priority 2: Bid Type override (only for Item Registration)
+    if bid_except_type:
+        bt = clean(bid_except_type)
+        if bt:
+            bid_pic = db.session.query(MasterBidTypePIC.pic_name).filter(
+                MasterBidTypePIC.bid_type == bt
+            ).first()
+            if bid_pic and clean(bid_pic[0]):
+                return clean(bid_pic[0])
+    
+    # Priority 3: Vendor ID override
     if vendor_id:
         vid = normalize_vendor_id(vendor_id)
         if vid:
@@ -2598,19 +2609,21 @@ def resolve_pic_with_overrides(category_id=None, category_name=None, client_id=N
             if vendor_pic and clean(vendor_pic[0]):
                 return clean(vendor_pic[0])
     
-    # Priority 3: Category-based PIC (default)
+    # Priority 4: Category-based PIC (default)
     return _lookup_pic_by_category(category_id, category_name)
 
 
 def resolve_item_registration_pic(row):
-    # Use priority overrides: Client ID > Vendor ID > Category
-    # ItemRegistration doesn't have vendor_id, so only Client ID + Category apply.
+    # Use priority overrides: Client ID > Bid Type > Category
+    # ItemRegistration doesn't have vendor_id, so Vendor ID override is skipped.
     client_id = getattr(row, 'client_id', None) or (row.get('client_id') if isinstance(row, dict) else None)
+    bid_except_type = getattr(row, 'bid_except_type', None) or (row.get('bid_except_type') if isinstance(row, dict) else None)
     pic = resolve_pic_with_overrides(
         category_id=row.category_id if hasattr(row, 'category_id') else row.get('category_id'),
         category_name=row.category if hasattr(row, 'category') else row.get('category'),
         client_id=client_id,
         vendor_id=None,  # ItemRegistration has no vendor_id
+        bid_except_type=bid_except_type,
     )
     return canonical_pending_pic(mapped_or_pic := (pic or (row.pic if hasattr(row, 'pic') else row.get('pic')) or ''), row.client_name if hasattr(row, 'client_name') else row.get('client_name'))
 
@@ -2634,7 +2647,14 @@ def refresh_item_registration_mappings():
         normalized_cat_id = normalize_category_id(row.category_id)
         if row.category_id != normalized_cat_id: row.category_id = normalized_cat_id; changed = True
         if row.category != category: row.category = category; changed = True
-        pic = _lookup_pic_by_category(normalized_cat_id, category) or ''
+        # Use full priority resolution: Client ID > Bid Type > Category
+        pic = resolve_pic_with_overrides(
+            category_id=normalized_cat_id,
+            category_name=category,
+            client_id=row.client_id,
+            vendor_id=None,
+            bid_except_type=row.bid_except_type,
+        ) or ''
         if row.pic != pic: row.pic = pic; changed = True
     if changed: db.session.commit()
 
@@ -4394,10 +4414,14 @@ def apply_item_registration_request_filters(query):
     kpi_pic = (request.args.get('kpi_pic') or '').strip()
     proc_statuses = [s.strip() for s in request.args.getlist('proc_status') if s.strip()]
     mfr_names = [s.strip() for s in request.args.getlist('mfr_name') if s.strip()]
+    op_units = [s.strip() for s in request.args.getlist('op_unit') if s.strip()]
+    bid_types = [s.strip() for s in request.args.getlist('bid_except_type') if s.strip()]
     query = apply_item_registration_date_filter(query, date_year, date_from, date_to)
     if clients: query = query.filter(ItemRegistration.client_name.in_(clients))
     query = apply_item_registration_pic_filter(query, global_pics)
     if item_clients: query = query.filter(ItemRegistration.client_name.in_(item_clients))
+    if op_units: query = query.filter(ItemRegistration.operation_unit_name.in_(op_units))
+    if bid_types: query = query.filter(ItemRegistration.bid_except_type.in_(bid_types))
     if categories: query = query.filter(ItemRegistration.category.in_(categories))
     query = apply_item_registration_pic_filter(query, pics)
     if proc_statuses: query = query.filter(ItemRegistration.proc_status.in_(proc_statuses))
@@ -4454,17 +4478,18 @@ def export_item_registration():
         ws = wb.active
         ws.title = "Item Registration"
         headers = [
-            'Proc. Status', 'Client Nm.', 'Category', 'PIC', 'Req. No', 'Prod. ID',
-            'Prod. Nm.', 'Spec.', 'Mfr. Nm.', 'Odr. Unit', 'Prod. Price', 'Curr.', 'Remarks'
+            'Proc. Status', 'Client Nm.', 'Op. Unit Nm.', 'Category', 'PIC', 'Req. No', 'Prod. ID',
+            'Prod. Nm.', 'Spec.', 'Mfr. Nm.', 'Odr. Unit', 'Bid Except Type', 'Prod. Price', 'Curr.', 'Remarks'
         ]
-        _style_wb(ws, headers, num_cols=[11])
-        widths = [26, 34, 24, 16, 18, 18, 28, 48, 24, 14, 16, 12, 60]
+        _style_wb(ws, headers, num_cols=[12])
+        widths = [26, 34, 34, 24, 16, 18, 18, 28, 48, 24, 14, 28, 16, 12, 60]
         for i, width in enumerate(widths, 1):
             ws.column_dimensions[get_column_letter(i)].width = width
         for row in rows:
             ws.append([
                 row.proc_status or '',
                 row.client_name or '',
+                row.operation_unit_name or '',
                 source_category_level1(row.category),
                 row.pic or '',
                 row.req_no or '',
@@ -4473,6 +4498,7 @@ def export_item_registration():
                 row.spec or '',
                 row.mfr_name or '',
                 row.odr_unit or '',
+                row.bid_except_type or '',
                 row.prod_price or 0,
                 row.curr or '',
                 row.remarks or '',
@@ -6673,15 +6699,15 @@ def get_dashboard_status_detail():
 
         # When a specific status is clicked, filter ONLY by that status —
         # don't apply open_so_filter (which excludes closed statuses like
-        # "Delivery Completed"). This ensures the clicked number matches
-        # exactly what the user sees in the Status Distribution table.
+        # "Delivery Completed"). But DO apply so_countable_sql_filter so
+        # non-countable items are excluded (matching the heatmap count).
         # When no status is specified (e.g. "All Pending Status"), use
-        # open_so_filter as before.
+        # open_so_filter + so_countable_sql_filter as before.
         if status:
-            q = so_q()
+            q = so_q(so_countable_sql_filter())
             q = q.filter(SOData.so_status == status)
         else:
-            q = so_q(open_so_filter())
+            q = so_q(open_so_filter(), so_countable_sql_filter())
         if month:
             try:
                 month_date = datetime.strptime(month, '%b %Y')
