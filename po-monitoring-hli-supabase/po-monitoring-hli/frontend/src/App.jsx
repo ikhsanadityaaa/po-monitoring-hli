@@ -1746,8 +1746,8 @@ const App = () => {
   const [itemRegSearch, setItemRegSearch] = useState(() => savedItemRegFilters.search || []);
   const [itemRegAppliedSearch, setItemRegAppliedSearch] = useState(() => savedItemRegFilters.appliedSearch || []);
   const [itemRegLastUpdated, setItemRegLastUpdated] = useState(null);
-  const [itemRegFilters, setItemRegFilters] = useState(() => savedItemRegFilters.filters || { clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] });
-  const [itemRegOptions, setItemRegOptions] = useState({ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] });
+  const [itemRegFilters, setItemRegFilters] = useState(() => savedItemRegFilters.filters || { clients: [], op_units: [], bid_except_types: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] });
+  const [itemRegOptions, setItemRegOptions] = useState({ clients: [], op_units: [], bid_except_types: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] });
   const [itemRegMissingPicKpis, setItemRegMissingPicKpis] = useState([]);
   const [itemRegPicHighlight, setItemRegPicHighlight] = useState('');
 
@@ -2584,6 +2584,8 @@ const App = () => {
       if (Array.isArray(search)) search.forEach(v => params.append('req_no', v));
       else if (search) params.append('search', search);
       resolveFilter(filters.clients).forEach(v => params.append('item_client', v));
+      resolveFilter(filters.op_units).forEach(v => params.append('op_unit', v));
+      resolveFilter(filters.bid_except_types).forEach(v => params.append('bid_except_type', v));
       resolveFilter(filters.categories).forEach(v => params.append('category', v));
       resolveFilter(filters.pics).forEach(v => params.append('pic', v));
       resolveFilter(filters.proc_statuses).forEach(v => params.append('proc_status', v));
@@ -2597,6 +2599,8 @@ const App = () => {
       setItemRegMissingPicKpis(Array.isArray(res.data.missing_prod_id_by_pic) ? res.data.missing_prod_id_by_pic : []);
       setItemRegOptions({
         clients: res.data.client_options || [],
+        op_units: res.data.op_unit_options || [],
+        bid_except_types: res.data.bid_except_type_options || [],
         categories: res.data.category_options || [],
         pics: res.data.pic_options || [],
         proc_statuses: res.data.proc_status_options || [],
@@ -3040,10 +3044,12 @@ const App = () => {
       const cat = d.category || {};
       const client = d.client || {};
       const vendor = d.vendor || {};
+      const bidType = d.bid_type || {};
       const parts = [];
       if (cat.added || cat.updated) parts.push(`Category: +${cat.added} added, ${cat.updated} updated`);
       if (client.added || client.updated) parts.push(`Client: +${client.added} added, ${client.updated} updated`);
       if (vendor.added || vendor.updated) parts.push(`Vendor: +${vendor.added} added, ${vendor.updated} updated`);
+      if (bidType.added || bidType.updated) parts.push(`Bid Type: +${bidType.added} added, ${bidType.updated} updated`);
       const summary = parts.length ? parts.join('. ') : 'No changes';
       setPicUploadMsg(`✅ Master PIC (${d.files || files.length} file, ${d.sheets || '?'} sheets): ${summary}. SO rows updated: ${d.so_pic_refreshed}.`);
       clearDashboardSummaryCache();
@@ -3189,6 +3195,8 @@ const App = () => {
     appendMultiParam(p, 'global_pic', globalPicFilter);
     (itemRegAppliedSearch || []).forEach(v => p.append('req_no', v));
     resolveFilter(itemRegFilters.clients).forEach(v => p.append('item_client', v));
+    resolveFilter(itemRegFilters.op_units).forEach(v => p.append('op_unit', v));
+    resolveFilter(itemRegFilters.bid_except_types).forEach(v => p.append('bid_except_type', v));
     resolveFilter(itemRegFilters.categories).forEach(v => p.append('category', v));
     resolveFilter(itemRegFilters.pics).forEach(v => p.append('pic', v));
     resolveFilter(itemRegFilters.proc_statuses).forEach(v => p.append('proc_status', v));
@@ -5867,9 +5875,9 @@ const App = () => {
       try { return String(d).slice(0, 10); } catch { return d; }
     };
     const baseColumns = [
-      ['Proc. Status', 'proc_status'], ['Req. Date', 'req_date'], ['Client Nm.', 'client_name'], ['Category', 'category'], ['PIC', 'pic'],
+      ['Proc. Status', 'proc_status'], ['Req. Date', 'req_date'], ['Client Nm.', 'client_name'], ['Op. Unit Nm.', 'operation_unit_name'], ['Category', 'category'], ['PIC', 'pic'],
       ['Req. No', 'req_no'], ['Prod. ID', 'prod_id'], ['Prod. Nm.', 'prod_name'],
-      ['Spec.', 'spec'], ['Mfr. Nm.', 'mfr_name'], ['Unit', 'odr_unit'],
+      ['Spec.', 'spec'], ['Mfr. Nm.', 'mfr_name'], ['Unit', 'odr_unit'], ['Bid Except Type', 'bid_except_type'],
       ['Prod. Price', 'prod_price'], ['Curr.', 'curr']
     ];
     const columns = [...baseColumns, ['Remarks', 'remarks']];
@@ -5890,8 +5898,8 @@ const App = () => {
     ];
     const itemRegKpiCols = Math.max(1, itemRegPicKpis.length);
     const colWidth = (key) => ({
-      proc_status: 150, req_date: 110, client_name: 180, category: 170, pic: 90, req_no: 150, prod_id: 110,
-      prod_name: 240, spec: 220, mfr_name: 150, odr_unit: 80,
+      proc_status: 150, req_date: 110, client_name: 180, operation_unit_name: 200, category: 170, pic: 90, req_no: 150, prod_id: 110,
+      prod_name: 240, spec: 220, mfr_name: 150, odr_unit: 80, bid_except_type: 200,
       prod_price: 120, curr: 70, remarks: 560
     }[key] || 140);
     const colStyle = (key) => {
@@ -5978,6 +5986,14 @@ const App = () => {
             <div className="min-w-0">
               <MultiSelect label="Client Name" options={itemRegOptions.clients} selected={itemRegFilters.clients}
                 onChange={v=>{ const next={...itemRegFilters, clients:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="min-w-0">
+              <MultiSelect label="Op. Unit Nm." options={itemRegOptions.op_units || []} selected={itemRegFilters.op_units || []}
+                onChange={v=>{ const next={...itemRegFilters, op_units:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
+            </div>
+            <div className="min-w-0">
+              <MultiSelect label="Bid Except Type" options={itemRegOptions.bid_except_types || []} selected={itemRegFilters.bid_except_types || []}
+                onChange={v=>{ const next={...itemRegFilters, bid_except_types:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
             </div>
             <div className="min-w-0">
               <MultiSelect label="Category" options={itemRegOptions.categories} selected={itemRegFilters.categories}
