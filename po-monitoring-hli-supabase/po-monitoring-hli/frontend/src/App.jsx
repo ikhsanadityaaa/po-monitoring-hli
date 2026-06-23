@@ -3037,7 +3037,15 @@ const App = () => {
       });
       const d = res.data;
       setUploadProgress(null);
-      setPicUploadMsg(`✅ Master PIC (${d.files || files.length} file): +${d.added} added, ${d.updated} updated${d.unchanged ? `, ${d.unchanged} unchanged` : ''} (total category names: ${d.total_categories}). SO rows updated: ${d.so_pic_refreshed}.`);
+      const cat = d.category || {};
+      const client = d.client || {};
+      const vendor = d.vendor || {};
+      const parts = [];
+      if (cat.added || cat.updated) parts.push(`Category: +${cat.added} added, ${cat.updated} updated`);
+      if (client.added || client.updated) parts.push(`Client: +${client.added} added, ${client.updated} updated`);
+      if (vendor.added || vendor.updated) parts.push(`Vendor: +${vendor.added} added, ${vendor.updated} updated`);
+      const summary = parts.length ? parts.join('. ') : 'No changes';
+      setPicUploadMsg(`✅ Master PIC (${d.files || files.length} file, ${d.sheets || '?'} sheets): ${summary}. SO rows updated: ${d.so_pic_refreshed}.`);
       clearDashboardSummaryCache();
       clearStatsCache();
       fetchPicDbStatus();
