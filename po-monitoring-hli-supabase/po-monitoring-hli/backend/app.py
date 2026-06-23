@@ -504,6 +504,38 @@ def is_purchase_valid(s):
     except Exception:
         return False
 
+def purchase_price_idr(s):
+    """Convert purchasing_price to IDR using cached exchange rates.
+    If currency is already IDR (or empty), return as-is.
+    If USD/EUR, convert using the rate for the SO create date.
+    Returns 0 if no exchange rate is available (cache_only)."""
+    price = float(s.purchasing_price or 0)
+    if price <= 0: return 0.0
+    cur = (s.purchasing_currency or 'IDR').strip().upper()
+    if cur in ('IDR', ''): return price
+    if cur in ('USD', 'EUR'):
+        rate = get_currency_to_idr(cur, s.so_create_date, cache_only=True)
+        return price * rate
+    return price  # unknown currency — return as-is
+
+def purchase_amount_idr_for_margin(s):
+    """Purchase amount in IDR, used for ALL margin calculations.
+    Priority:
+    1. purchasing_amount_idr (cached column) if present
+    2. Convert raw_purchase_amount to IDR using cached rates
+    If currency is IDR → use raw amount directly.
+    Returns 0.0 if conversion not possible (no rate cached)."""
+    cached = getattr(s, 'purchasing_amount_idr', None)
+    if cached is not None and cached > 0: return float(cached)
+    raw = raw_purchase_amount(s)
+    if raw <= 0: return 0.0
+    cur = (s.purchasing_currency or 'IDR').strip().upper()
+    if cur in ('IDR', ''): return raw
+    if cur in ('USD', 'EUR'):
+        rate = get_currency_to_idr(cur, s.so_create_date, cache_only=True)
+        return raw * rate
+    return raw  # unknown currency — return as-is
+
 def purchase_amount_idr(s, allow_persist=False):
     cached = getattr(s, 'purchasing_amount_idr', None)
     cur = (s.purchasing_currency or 'IDR').strip().upper()
@@ -2623,6 +2655,10 @@ def so_dict(s):
     today = date.today()
     age_days = workdays_since(s.so_create_date, today)
     category_name = _pid_category_lookup(s.product_id) if s.product_id else ''
+    # Pre-compute IDR-converted purchase price & amount for the frontend
+    # so margin can be calculated correctly regardless of currency.
+    pp_idr = purchase_price_idr(s)
+    pa_idr = purchase_amount_idr_for_margin(s)
     return {
         'id': s.id, 'so_number': s.so_number, 'so_item': s.so_item, 'so_status': s.so_status,
         'operation_unit_name': s.operation_unit_name, 'vendor_id': s.vendor_id or '', 'vendor_name': s.vendor_name,
@@ -2631,6 +2667,7 @@ def so_dict(s):
         'category_name': category_name, 'svo_po': s.matched_po_number or '', 'so_qty': s.so_qty, 'sales_unit': s.sales_unit or '',
         'sales_price': s.sales_price, 'sales_amount': s.sales_amount, 'currency': s.currency or '',
         'purchasing_price': s.purchasing_price, 'purchasing_amount': s.purchasing_amount, 'purchasing_currency': s.purchasing_currency,
+        'purchase_price_idr': pp_idr, 'purchase_amount_idr': pa_idr,
         'so_create_date': s.so_create_date.isoformat() if s.so_create_date else '',
         'delivery_possible_date': s.delivery_possible_date.isoformat() if s.delivery_possible_date else '',
         'delivery_plan_date': s.delivery_plan_date.isoformat() if s.delivery_plan_date else '',
@@ -3029,13 +3066,20 @@ def get_all_so():
             SOData.customer_po_number, SOData.delivery_memo, SOData.so_create_date,
             SOData.pic_name, SOData.sales_amount, SOData.purchasing_amount,
             SOData.purchasing_price, SOData.so_qty, SOData.purchasing_currency,
-            SOData.purchasing_amount_idr, SOData.product_id,
+            SOData.purchasing_amount_idr, SOData.product_id, SOData.product_name,
+            SOData.specification, SOData.matched_po_number, SOData.remarks,
+            SOData.delivery_plan_date, SOData.sales_price, SOData.sales_unit,
+            SOData.vendor_id, SOData.currency,
         )
 
         if sort_order == 'oldest':
             all_sos = q.options(load_only(*so_list_fields)).order_by(SOData.so_create_date.asc(), SOData.so_item.asc()).all()
         else:
             all_sos = q.options(load_only(*so_list_fields)).order_by(SOData.so_create_date.desc(), SOData.so_item.asc()).all()
+
+        # Prefetch exchange rates for USD/EUR rows so purchase_price_idr /
+        # purchase_amount_idr_for_margin can convert correctly.
+        prefetch_convertible_exchange_rates(all_sos, fetch_missing=False)
 
         if aging_list:
             today = date.today()
@@ -3612,9 +3656,8 @@ def download_so_batch_template():
         if margin_filter in ('positive', 'negative'):
             prefetch_convertible_exchange_rates(all_sos)
             def calc_margin(s):
-                raw_po = (s.purchasing_amount or 0) or (s.purchasing_price or 0) * (s.so_qty or 0)
-                if raw_po <= 0: return None  # invalid purchase → no margin
-                po_amt = convert_to_idr(raw_po, s.purchasing_currency, s.so_create_date, cache_only=True)
+                po_amt = purchase_amount_idr_for_margin(s)
+                if po_amt <= 0: return None  # invalid purchase → no margin
                 return float(s.sales_amount or 0) - po_amt
             if margin_filter == 'negative': all_sos = [s for s in all_sos if (lambda m: m is not None and m < 0)(calc_margin(s))]
             else: all_sos = [s for s in all_sos if (lambda m: m is not None and m >= 0)(calc_margin(s))]
@@ -3713,7 +3756,7 @@ def export_all_so():
         if aging_list: sos = [s for s in sos if get_aging_label(workdays_since(s.so_create_date, today)) in aging_list]
         if margin_filter in ('positive', 'negative'):
             def calc_margin(s):
-                po_amt = raw_purchase_amount(s)
+                po_amt = purchase_amount_idr_for_margin(s)
                 if po_amt <= 0: return None  # invalid purchase → no margin
                 return float(s.sales_amount or 0) - po_amt
             if margin_filter == 'negative': sos = [s for s in sos if (lambda m: m is not None and m < 0)(calc_margin(s))]
@@ -3726,11 +3769,12 @@ def export_all_so():
         for i, width in enumerate(widths, 1): ws.column_dimensions[get_column_letter(i)].width = width
         for s in sos:
             day = workdays_since(s.so_create_date, today)
-            po_amount = raw_purchase_amount(s)
+            # Use IDR-converted purchase amount for margin (handles USD/EUR).
+            po_amount = purchase_amount_idr_for_margin(s)
             sales_amount = float(s.sales_amount or 0)
-            # Margin valid only when purchase is present AND positive.
+            # Margin valid only when purchase is present AND positive (in IDR).
             # Empty/zero/negative purchase → margin = None.
-            purchase_valid = is_purchase_valid(s)
+            purchase_valid = po_amount > 0
             margin = (sales_amount - po_amount) if purchase_valid else None
             margin_pct = (margin / po_amount * 100) if (purchase_valid and po_amount) else None
             ws.append([
@@ -3881,10 +3925,10 @@ def completed_summary():
         enriched = []
         for s in rows:
             po_amt = po_amt_of(s); sales = float(s.sales_amount or 0)
-            # Margin valid only when purchase is present AND positive (not
-            # empty/zero/negative). Invalid purchase → margin = None.
-            has_purchase_data = ((s.purchasing_amount is not None and s.purchasing_amount > 0) or (s.purchasing_price is not None and s.purchasing_price > 0))
-            margin = (sales - po_amt) if (has_purchase_data and po_amt > 0) else None
+            # Margin valid only when purchase (in IDR) is present AND positive.
+            # Uses purchase_amount_idr_for_margin which handles USD/EUR conversion.
+            po_amt_margin = purchase_amount_idr_for_margin(s)
+            margin = (sales - po_amt_margin) if po_amt_margin > 0 else None
             enriched.append((s, po_amt, sales, margin))
         monthly = {}
         for s, po_amt, sales, _m in enriched:
@@ -4006,9 +4050,10 @@ def completed_margin_detail():
         result = []
         for s in rows:
             po_amt = get_po_amt(s)
-            # Margin valid only when purchase is present AND positive.
-            has_purchase_data = ((s.purchasing_amount is not None and s.purchasing_amount > 0) or (s.purchasing_price is not None and s.purchasing_price > 0))
-            m = (float(s.sales_amount or 0) - po_amt) if (has_purchase_data and po_amt > 0) else None
+            # Margin valid only when purchase (in IDR) is positive.
+            # Use purchase_amount_idr_for_margin for USD/EUR conversion.
+            po_amt_margin = purchase_amount_idr_for_margin(s)
+            m = (float(s.sales_amount or 0) - po_amt_margin) if po_amt_margin > 0 else None
             if m is None and category in ('positive', 'negative'): continue
             if category == 'positive' and (m is None or m <= 0): continue
             elif category == 'negative' and (m is None or m >= 0): continue
@@ -6490,13 +6535,12 @@ def get_pic_kpi():
             
             pic_map[pic]['so_count'] += 1
             sales = float(s.sales_amount or 0)
-            po_price = float(s.purchasing_price or 0)
-            qty = float(s.so_qty or 0)
-            po_amount = po_price * qty
-            # Margin valid only when purchase price is positive (not empty/
+            # Use IDR-converted purchase amount for margin (handles USD/EUR).
+            po_amount = purchase_amount_idr_for_margin(s)
+            # Margin valid only when purchase (in IDR) is positive (not empty/
             # zero/negative). Invalid purchase → margin = None, excluded
             # from KPI totals and counts.
-            purchase_valid = po_price > 0 and po_amount > 0
+            purchase_valid = po_amount > 0
             margin = (sales - po_amount) if purchase_valid else None
 
             pic_map[pic]['total_sales'] += sales
