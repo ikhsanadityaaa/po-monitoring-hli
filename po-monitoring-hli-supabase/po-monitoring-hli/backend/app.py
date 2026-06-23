@@ -4268,7 +4268,11 @@ def get_item_registration_data():
         cache_key = runtime_cache_key('item_registration_data')
         cached = runtime_cache_get(cache_key)
         if cached is not None: return jsonify(cached)
-        
+
+        # Ensure PIC mappings are up-to-date (includes bid type, client ID,
+        # vendor ID overrides from Master PIC tables).
+        refresh_item_registration_mappings()
+
         page = int(request.args.get('page', 1))
         per_page = int(request.args.get('per_page', 10))
         search = request.args.get('search', '').strip()
@@ -5238,7 +5242,10 @@ def rfq_filtered_rows_from_request(force=False):
     if checks:
         rows = [row for row in rows if clean(row.get('check')) and clean(row.get('check')).lower() in checks]
     if pic:
-        rows = [row for row in rows if clean(row.get('purchase_pic')) == pic and clean(row.get('check')) == 'open' and row.get('unit_price_missing') and not clean_product_id(row.get('product_id'))]
+        # For export, only filter by purchase_pic — don't apply the KPI
+        # display filter (check == 'open' + unit_price_missing + !product_id)
+        # which would exclude rows that the user expects in the export.
+        rows = [row for row in rows if clean(row.get('purchase_pic')) == pic]
     return rows, fetched_at
 
 @app.route('/api/rfq/template', methods=['GET'])
