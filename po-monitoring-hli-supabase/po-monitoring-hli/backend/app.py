@@ -6878,16 +6878,30 @@ def download_master_pic_template():
 
         # ═══════════════════════════════════════════════════════════════════
         # Sheet 3: By Vendor (Vendor ID, Vendor Name, PIC)
-        # EMPTY — user fills in vendor IDs + PICs manually.
-        # This is an EXCEPTION override: if a vendor has a PIC here, it
-        # overrides category-based PIC for that vendor's SO rows.
+        # Pre-fill from MasterVendorPIC + SOData (distinct vendor_id + vendor_name).
+        # Shows existing PIC assignments so user can see current state.
         # ═══════════════════════════════════════════════════════════════════
         ws3 = wb.create_sheet('By Vendor')
         style_sheet(ws3, ['Vendor ID', 'Vendor Name', 'PIC'], ref_cols=2, col_widths=[20, 40, 12])
 
-        # No pre-fill — user manually enters vendor IDs that need PIC overrides.
-        # Just add empty rows for input.
-        for _ in range(20):
+        vendor_rows = {}
+        # Existing MasterVendorPIC entries
+        for m in db.session.query(MasterVendorPIC).all():
+            vid = normalize_vendor_id(m.vendor_id)
+            if vid:
+                vendor_rows[vid] = {'vendor_id': vid, 'vendor_name': clean(m.vendor_name), 'pic': clean(m.pic_name)}
+        # Distinct vendors from SOData (normalize vendor_id to strip .0 and leading zeros)
+        for s in db.session.query(SOData.vendor_id, SOData.vendor_name).filter(
+            SOData.vendor_id.isnot(None), SOData.vendor_id != ''
+        ).distinct().all():
+            vid = normalize_vendor_id(s.vendor_id)
+            if vid and vid not in vendor_rows:
+                vendor_rows[vid] = {'vendor_id': vid, 'vendor_name': clean(s.vendor_name), 'pic': ''}
+
+        for item in sorted(vendor_rows.values(), key=lambda x: x['vendor_id'].lower()):
+            ws3.append([item['vendor_id'], item['vendor_name'], item['pic']])
+        min_rows = max(20, len(vendor_rows) + 5)
+        while ws3.max_row < min_rows:
             ws3.append(['', '', ''])
         fill_body(ws3)
 
