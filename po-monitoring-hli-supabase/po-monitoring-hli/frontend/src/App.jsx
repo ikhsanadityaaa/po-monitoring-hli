@@ -4046,7 +4046,7 @@ const App = () => {
             { label:'Total Pending Delivery', value: fmtNum(summaryPendingTotal ?? stats?.total_so_count), sub: 'Pending delivery records', icon:<Clock className="w-5 h-5"/>, goPending:true },
           ].map((k,i)=>{
             const Wrapper = k.goPending ? 'button' : 'div';
-            return <Wrapper key={i} type={k.goPending ? 'button' : undefined} onClick={k.goPending ? () => { setActivePage('all-so'); setSoPage(1); window.scrollTo({top:0}); } : undefined} className={`p-5 rounded-2xl text-left ${card} ${k.goPending ? 'cursor-pointer hover:border-blue-300' : ''}`}><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className={`text-sm font-medium ${txt2}`}>{k.label}</p><h3 className={`text-2xl font-bold mt-1 ${kpiValue}`}>{k.value}</h3><p className={`text-xs mt-1 ${txt2}`}>{k.sub}</p></div><div className={`p-2.5 rounded-xl ${neutralIcon}`}>{k.icon}</div></div></Wrapper>;
+            return <Wrapper key={i} type={k.goPending ? 'button' : undefined} onClick={k.goPending ? () => { setActivePage('all-so'); setSoPage(1); window.scrollTo({top:0}); } : undefined} className={`p-5 rounded-2xl text-left ${card} ${k.goPending ? 'cursor-pointer hover:border-blue-300' : ''}`}><div className="flex items-start justify-between gap-3"><div className="flex-1 min-w-0"><p className={`text-sm font-medium ${txt2}`}>{k.label}</p><h3 className={`text-2xl font-bold mt-1 ${kpiValue}`}>{k.value}</h3><p className={`text-xs mt-1 ${txt2}`}>{k.sub}</p></div><div className={`p-2.5 rounded-xl ${neutralIcon}`}>{k.icon}</div></div></Wrapper>;
           })}
         </div>
         {summaryLoading && (
@@ -4434,16 +4434,16 @@ const App = () => {
           {/* Grid: Search | Prod ID | PIC | Mfr Name | Search btn | Clear btn
               Vendor Name filter removed — source has no Vendor column. */}
           <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-[minmax(240px,1fr)_170px_180px_minmax(180px,1fr)_90px_110px] items-end">
-            <div className="min-w-0">
+            <div className="flex-1 min-w-0">
               <RFQMultiSearch value={registeredItemsSearch} onChange={setRegisteredItemsSearch} onSearch={(next) => { setRegisteredItemsAppliedSearch(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, next, registeredItemsAppliedProdIds, registeredItemsFilters, registeredItemsAppliedPicFilter); }} darkMode={darkMode} txt2={txt2} label="Search" description="Enter Product ID, Product Name, Specification, or Manufacturer per line. Results match any entered value." placeholder={'8381684\nBearing SKF\nJTC'} />
             </div>
-            <div className="min-w-0">
+            <div className="flex-1 min-w-0">
               <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Prod ID</label>
               <SearchInput key={`registered-prod-id-${registeredItemsProdIds.join('|')}`} placeholder={'8381684\n8382076'} label="Prod ID" darkMode={darkMode} txt2={txt2} onSearch={(nums) => { setRegisteredItemsProdIds(nums); setRegisteredItemsAppliedProdIds(nums); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, nums, registeredItemsFilters, registeredItemsAppliedPicFilter); }} />
             </div>
             {/* PIC dropdown — resolved server-side using MasterPIC by category_id
                 OR category_name, identical to Item Registration / Pending Delivery. */}
-            <div className="min-w-0">
+            <div className="flex-1 min-w-0">
               <label className={`block text-xs font-semibold mb-1 ${txt2}`}>PIC</label>
               <select
                 value={registeredItemsPicFilter}
@@ -4458,7 +4458,7 @@ const App = () => {
             </div>
             <MultiSelect label="Manufacturer Name" options={registeredItemsOptions.mfr_names || []} selected={registeredItemsFilters.mfr_names} onChange={v => { const next={...registeredItemsFilters, mfr_names:v}; setRegisteredItemsFilters(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, registeredItemsAppliedProdIds, next, registeredItemsAppliedPicFilter); }} darkMode={darkMode} txt2={txt2} />
             <button onClick={() => { setRegisteredItemsAppliedSearch(registeredItemsSearch); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsSearch, registeredItemsAppliedProdIds, registeredItemsFilters, registeredItemsAppliedPicFilter); }} className="w-full h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm">Search</button>
-            <button onClick={handleClear} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
+            <button onClick={handleClear} className={`flex-shrink-0 h-[40px] px-4 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
         </FilterPanel>
 
@@ -4866,7 +4866,7 @@ const App = () => {
               return (
                 <button key={row.pic} type="button" onClick={applyRFQPicFilter} className={`min-w-0 p-3 rounded-xl text-left transition-all ${activePic ? (darkMode ? 'bg-amber-900/30 border border-amber-500 ring-2 ring-amber-400' : 'bg-amber-50 border border-amber-300 ring-2 ring-amber-200') : row.isTotal ? (darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200') : card} ${row.isTotal ? 'hover:border-slate-300' : 'hover:border-amber-300'}`}>
                   <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
+                    <div className="flex-1 min-w-0">
                       <p className={`text-xs font-semibold truncate ${activePic ? 'text-amber-700' : row.isTotal ? (darkMode ? 'text-gray-200' : 'text-gray-700') : txt2}`} title={row.pic}>{row.pic}</p>
                       <h3 className={`text-xl font-bold leading-tight ${activePic ? 'text-amber-700' : row.isTotal ? (darkMode ? 'text-gray-100' : 'text-gray-800') : kpiValue}`}>{fmtNum(row.count)}</h3>
                       <p className={`text-[11px] leading-tight whitespace-nowrap ${txt2}`}>No Prod/Price</p>
@@ -4900,7 +4900,7 @@ const App = () => {
               <MultiSelect label="Check" options={rfqOptions.checks || []} selected={rfqFilters.checks}
                 onChange={v=>{ const next={...rfqFilters, checks:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div class="flex-1 min-w-0">
+            <div className="flex-1 min-w-0">
               <MultiSelect label="Nama Client" options={rfqOptions.clients || []} selected={rfqFilters.clients}
                 onChange={v=>{ const next={...rfqFilters, clients:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
@@ -4916,11 +4916,11 @@ const App = () => {
               <MultiSelect label="Purchase PIC" options={rfqOptions.purchase_pics || []} selected={rfqFilters.purchase_pics}
                 onChange={v=>{ const next={...rfqFilters, purchase_pics:v}; setRfqPicFilter(''); setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, '', rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="min-w-0">
+            <div className="flex-1 min-w-0">
               <MultiSelect label="Vendor Name" options={rfqOptions.vendors || []} selected={rfqFilters.vendors}
                 onChange={v=>{ const next={...rfqFilters, vendors:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <button onClick={handleClear} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>
+            <button onClick={handleClear} className={`flex-shrink-0 h-[40px] px-4 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>
               Clear
             </button>
           </div>
@@ -5946,7 +5946,7 @@ const App = () => {
               return (
                 <button key={row.pic} type="button" onClick={applyItemRegPicFilter} className={`min-w-0 p-3 rounded-xl text-left transition-all ${activePic ? (darkMode ? 'bg-amber-900/30 border border-amber-500 ring-2 ring-amber-400' : 'bg-amber-50 border border-amber-300 ring-2 ring-amber-200') : row.isTotal ? (darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200') : card} ${row.isTotal ? 'hover:border-slate-300' : 'hover:border-amber-300'}`}>
                   <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
+                    <div className="flex-1 min-w-0">
                       <p className={`text-xs font-semibold truncate ${activePic ? 'text-amber-700' : row.isTotal ? (darkMode ? 'text-gray-200' : 'text-gray-700') : txt2}`} title={row.pic}>{row.pic}</p>
                       <h3 className={`text-xl font-bold leading-tight ${activePic ? 'text-amber-700' : row.isTotal ? (darkMode ? 'text-gray-100' : 'text-gray-800') : kpiValue}`}>{fmtNum(row.count)}</h3>
                       <p className={`text-[11px] leading-tight whitespace-nowrap ${txt2}`}>{row.sub}</p>
@@ -6367,7 +6367,7 @@ const App = () => {
               return (
               <button key={p.pic} type="button" onClick={applyPicKpiFilter} className={`min-w-0 p-3 rounded-xl text-left transition-all ${activePic ? (darkMode ? 'bg-amber-900/30 border border-amber-500 ring-2 ring-amber-400' : 'bg-amber-50 border border-amber-300 ring-2 ring-amber-200') : p.isTotal ? (darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200') : card} ${p.isTotal ? 'hover:border-slate-300' : 'hover:border-amber-300'}`}>
                 <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
+                  <div className="flex-1 min-w-0">
                     <p className={`text-xs font-semibold truncate ${activePic ? 'text-amber-700' : p.isTotal ? (darkMode ? 'text-gray-200' : 'text-gray-700') : txt2}`} title={p.pic}>{p.pic}</p>
                     <h3 className={`text-xl font-bold leading-tight ${activePic ? 'text-amber-700' : p.isTotal ? (darkMode ? 'text-gray-100' : 'text-gray-800') : kpiValue}`}>{fmtNum(p.count)}</h3>
                     <p className={`text-[11px] leading-tight whitespace-nowrap ${txt2}`}>{fmtCurShort(p.amount)}</p>
@@ -6436,7 +6436,7 @@ const App = () => {
         {/* Multi-select filters */}
         <FilterPanel darkMode={darkMode} className="mx-0 my-3">
           <div className="flex flex-nowrap items-end gap-1.5 w-full">
-            <div className="min-w-0">
+            <div className="flex-1 min-w-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ SO Date</label>
               <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                 value={soSortOrder} onChange={e=>{ setSoSortOrder(e.target.value); setSoPage(1); }} title="Sort SO Date">
@@ -6444,7 +6444,7 @@ const App = () => {
                 <option value="newest">Newest ↓</option>
               </select>
             </div>
-            <div className="min-w-0">
+            <div className="flex-1 min-w-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Search SO Item</label>
               <SearchInput
                 label="SO Item"
@@ -6457,7 +6457,7 @@ const App = () => {
                 darkMode={darkMode} txt2={txt2}
               />
             </div>
-            <div className="min-w-0">
+            <div className="flex-1 min-w-0">
               <MultiSelect label="PIC" options={soFilterOptions.pics || []}
                 selected={soFilters.pics} onChange={v=>{
                   const next = {...soFilters, pics: v};
@@ -6467,7 +6467,7 @@ const App = () => {
                 }}
                 darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="min-w-0">
+            <div className="flex-1 min-w-0">
               <MultiSelect label="SO Status" options={soFilterOptions.statuses}
                 selected={soFilters.statuses} onChange={v=>{
                   const next = {...soFilters, statuses: v};
@@ -6476,7 +6476,7 @@ const App = () => {
                 }}
                 darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="min-w-0">
+            <div className="flex-1 min-w-0">
               <MultiSelect label="Operation Unit" options={soFilterOptions.op_units}
                 selected={soFilters.op_units} onChange={v=>{
                   const next = {...soFilters, op_units: v};
@@ -6485,7 +6485,7 @@ const App = () => {
                 }}
                 darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="min-w-0">
+            <div className="flex-1 min-w-0">
               <MultiSelect label="Vendor Name" options={soFilterOptions.vendors}
                 selected={soFilters.vendors} onChange={v=>{
                   const next = {...soFilters, vendors: v};
@@ -6494,7 +6494,7 @@ const App = () => {
                 }}
                 darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="min-w-0">
+            <div className="flex-1 min-w-0">
               <MultiSelect label="Manufacturer Name" options={soFilterOptions.manufacturers || []}
                 selected={soFilters.manufacturers} onChange={v=>{
                   const next = {...soFilters, manufacturers: v};
@@ -6503,7 +6503,7 @@ const App = () => {
                 }}
                 darkMode={darkMode} txt2={txt2}/>
             </div>
-            <div className="min-w-0">
+            <div className="flex-1 min-w-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Margin</label>
               <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
                 value={soMarginFilter} onChange={e=>{
@@ -6516,14 +6516,14 @@ const App = () => {
                 <option value="negative">Below 0</option>
               </select>
             </div>
-            <div className="min-w-0">
+            <div className="flex-shrink-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2} opacity-0`}>.</label>
               <button onClick={()=>{
                 const f={op_units:[],vendors:[],manufacturers:[],statuses:[],aging:[],pics:[]};
                 setSoFilters(f); setPendingPicHighlight(''); setSoSearchNums([]); setSoMarginFilter('all'); setSoPage(1);
                 fetchSOData(f,1,soPerPage,[],'all',soDateFilter,soSortOrder,'');
               }}
-                className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
+                className={`flex-shrink-0 h-[40px] px-4 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
             </div>
           </div>
           {/* Active filter tags */}
