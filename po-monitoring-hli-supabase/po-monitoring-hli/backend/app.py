@@ -5127,10 +5127,10 @@ def get_rfq_data():
         kpi_rows = filtered_for('pic')
         pending_by_pic = {}
         for row in kpi_rows:
-            if clean(row.get('check')) != 'open':
-                continue
-            if clean_product_id(row.get('product_id')):
-                continue
+            # Count ALL rows with missing unit price — not just 'open' ones.
+            # Previously: only check == 'open' was counted, which excluded
+            # 'complete'/'reject'/'closed' rows that still lack a unit price.
+            # Now: any row with unit_price_missing is counted, regardless of check status.
             if not row.get('unit_price_missing'):
                 continue
             row_pic = clean(row.get('purchase_pic'))
@@ -6671,9 +6671,17 @@ def get_dashboard_status_detail():
             q = apply_so_pic_filter(q, pics)
             return apply_so_create_date_filter(q, date_year, date_from, date_to)
 
-        q = so_q(open_so_filter())
+        # When a specific status is clicked, filter ONLY by that status —
+        # don't apply open_so_filter (which excludes closed statuses like
+        # "Delivery Completed"). This ensures the clicked number matches
+        # exactly what the user sees in the Status Distribution table.
+        # When no status is specified (e.g. "All Pending Status"), use
+        # open_so_filter as before.
         if status:
+            q = so_q()
             q = q.filter(SOData.so_status == status)
+        else:
+            q = so_q(open_so_filter())
         if month:
             try:
                 month_date = datetime.strptime(month, '%b %Y')
