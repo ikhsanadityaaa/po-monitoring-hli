@@ -303,6 +303,13 @@ class MasterVendorPIC(db.Model):
     pic_name = db.Column(db.String(100))
     updated_at = db.Column(db.DateTime, default=datetime.utcnow)
 
+class MasterBidTypePIC(db.Model):
+    __tablename__ = 'master_bid_type_pic'
+    id = db.Column(db.Integer, primary_key=True)
+    bid_type = db.Column(db.String(255), unique=True, nullable=False, index=True)
+    pic_name = db.Column(db.String(100))
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+
 class ItemRegistration(db.Model):
     __tablename__ = 'item_registration'
     id = db.Column(db.Integer, primary_key=True)
@@ -311,6 +318,7 @@ class ItemRegistration(db.Model):
     existing_owner = db.Column(db.String(100))
     client_id = db.Column(db.String(100), index=True)
     client_name = db.Column(db.String(300), index=True)
+    operation_unit_name = db.Column(db.String(300), index=True)
     category = db.Column(db.String(255))
     category_id = db.Column(db.String(100))
     pic = db.Column(db.String(200))
@@ -323,6 +331,7 @@ class ItemRegistration(db.Model):
     spec = db.Column(db.Text)
     mfr_name = db.Column(db.String(300))
     odr_unit = db.Column(db.String(50))
+    bid_except_type = db.Column(db.String(255))
     vendor_name = db.Column(db.String(300))
     prod_price = db.Column(db.Float)
     curr = db.Column(db.String(20))
@@ -600,7 +609,7 @@ def _ensure_extra_columns():
         except Exception: return set()
     migration_plan = {
         'so_data': [('specification', 'TEXT'), ('product_id', 'VARCHAR(100)'), ('vendor_id', 'VARCHAR(100)'), ('client_id', 'VARCHAR(100)'), ('manufacturer_name', 'VARCHAR(300)'), ('purchasing_currency', 'VARCHAR(10)'), ('purchasing_amount_idr', 'DOUBLE PRECISION'), ('purchasing_amount_idr_cached_at', 'TIMESTAMP'), ('pic_name', 'VARCHAR(100)')],
-        'item_registration': [('req_date', 'DATE'), ('existing_owner', 'VARCHAR(100)'), ('client_id', 'VARCHAR(100)'), ('category_id', 'VARCHAR(100)'), ('pic_name', 'VARCHAR(200)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(50)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)'), ('remarks', 'TEXT')],
+        'item_registration': [('req_date', 'DATE'), ('existing_owner', 'VARCHAR(100)'), ('client_id', 'VARCHAR(100)'), ('operation_unit_name', 'VARCHAR(300)'), ('bid_except_type', 'VARCHAR(255)'), ('category_id', 'VARCHAR(100)'), ('pic_name', 'VARCHAR(200)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(50)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)'), ('remarks', 'TEXT')],
         'product_id_db': [('specification', 'TEXT'), ('manufacturer_name', 'VARCHAR(255)'), ('vendor_name', 'VARCHAR(300)'), ('order_unit', 'VARCHAR(50)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(100)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)')],
     }
     for table_name, columns in migration_plan.items():
@@ -2427,9 +2436,12 @@ def item_registration_dict(row, registered_items=None, include_similarity=True):
     similar_items = find_similar_registered_items(row, registered_items) if include_similarity else None
     return {
         'id': row.id, 'proc_status': row.proc_status or '', 'req_date': row.req_date.isoformat() if row.req_date else '',
-        'existing_owner': row.existing_owner or '', 'client_name': row.client_name or '', 'category': source_category_level1(row.category),
+        'existing_owner': row.existing_owner or '', 'client_name': row.client_name or '',
+        'operation_unit_name': row.operation_unit_name or '',
+        'category': source_category_level1(row.category),
         'pic': pic, 'req_no': row.req_no or '', 'prod_id': row.prod_id or '', 'batch_grp_no': row.batch_grp_no or '',
         'prod_name': row.prod_name or '', 'spec': row.spec or '', 'mfr_name': row.mfr_name or '', 'odr_unit': row.odr_unit or '',
+        'bid_except_type': row.bid_except_type or '',
         'vendor_name': row.vendor_name or '', 'prod_price': row.prod_price or 0, 'curr': row.curr or '', 'remarks': row.remarks or '',
         'uploaded_at': utc_isoformat(row.uploaded_at), 'similar_items': similar_items,
         'similar_prod_ids': (similar_items or {}).get('product_ids', ''), 'similar_prod_name': (similar_items or {}).get('product_name', ''),
@@ -2633,6 +2645,7 @@ def _item_registration_columns(df):
         'existing_owner': find_column(df, ['Existing Owner', 'Existing Owner.', 'Owner']),
         'client_id': find_column(df, ['Client ID', 'Client Id', 'ClientID', 'Client Cd.', 'Client Cd', 'Client Code']),
         'client_name': find_column(df, ['Client Nm.', 'Client Nm', 'Client Name']),
+        'operation_unit_name': find_column(df, ['Op. Unit Nm.', 'Op. Unit Nm', 'Op Unit Nm', 'Operation Unit Nm.', 'Operation Unit Nm', 'Operation Unit Name', 'Op. Unit Name', 'Op Unit Name']),
         'category': find_column(df, ['Cat. Nm.', 'Cat. Nm', 'Category', 'Cate. Nm.', 'Category Name']),
         'category_id': find_column(df, ['Cat. ID', 'Cat. ID.', 'Category ID', 'Category Id', 'CategoryID']),
         'pic': find_column(df, ['PIC', 'Pur. PIC', 'Purchase PIC']),
@@ -2644,6 +2657,7 @@ def _item_registration_columns(df):
         'spec': find_column(df, ['Spec.', 'Spec', 'Specification']),
         'mfr_name': find_column(df, ['Mfr. Nm.', 'Mfr. Nm', 'Manufacturer Name', 'Maker Nm.']),
         'odr_unit': find_column(df, ['Odr. Unit', 'Odr. Unit.', 'Order Unit']),
+        'bid_except_type': find_column(df, ['Bid Except Type', 'Bid/Except Type', 'Bid Type', 'Bid/Except. Type']),
         'vendor_name': find_column(df, ['Vendor Nm.', 'Vendor Nm', 'Vendor Name']),
         'prod_price': find_column(df, ['Prod. Price', 'Product Price', 'Price']),
         'curr': find_column(df, ['Curr.', 'Curr', 'Currency']),
@@ -2684,10 +2698,12 @@ def import_item_registration_dataframe(df, filename='Item Registration'):
             'existing_owner': clean(df_val(row, col['existing_owner'])),
             'client_id': clean(df_val(row, col['client_id'])),
             'client_name': clean(df_val(row, col['client_name'])),
+            'operation_unit_name': clean(df_val(row, col['operation_unit_name'])),
             'category': category, 'category_id': category_id, 'pic': _lookup_pic_by_category(category_id, category) or '',
             'req_no': req_no, 'prod_id': prod_id, 'product_status': clean(df_val(row, col['product_status'])),
             'batch_grp_no': clean(df_val(row, col['batch_grp_no'])), 'prod_name': prod_name, 'spec': clean(df_val(row, col['spec'])),
             'mfr_name': clean(df_val(row, col['mfr_name'])), 'odr_unit': clean(df_val(row, col['odr_unit'])),
+            'bid_except_type': clean(df_val(row, col['bid_except_type'])),
             'vendor_name': clean(df_val(row, col['vendor_name'])), 'prod_price': safe_float(df_val(row, col['prod_price'])),
             'curr': clean(df_val(row, col['curr'])), 'hub_handling_check': clean(df_val(row, col['hub_handling_check'])),
             'tax_type': clean(df_val(row, col['tax_type'])), 'registration_date': parse_date(df_val(row, col['registration_date'])),
@@ -4246,6 +4262,8 @@ def get_item_registration_data():
         kpi_pic = (request.args.get('kpi_pic') or '').strip()
         proc_statuses = [s.strip() for s in request.args.getlist('proc_status') if s.strip()]
         mfr_names = [s.strip() for s in request.args.getlist('mfr_name') if s.strip()]
+        op_units = [s.strip() for s in request.args.getlist('op_unit') if s.strip()]
+        bid_types = [s.strip() for s in request.args.getlist('bid_except_type') if s.strip()]
         
         q = apply_item_registration_visible_status_filter(apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to))
         if clients: q = q.filter(ItemRegistration.client_name.in_(clients))
@@ -4254,6 +4272,8 @@ def get_item_registration_data():
         if categories: q = q.filter(ItemRegistration.category.in_(categories))
         if proc_statuses: q = q.filter(ItemRegistration.proc_status.in_(proc_statuses))
         if mfr_names: q = q.filter(ItemRegistration.mfr_name.in_(mfr_names))
+        if op_units: q = q.filter(ItemRegistration.operation_unit_name.in_(op_units))
+        if bid_types: q = q.filter(ItemRegistration.bid_except_type.in_(bid_types))
         if req_numbers: q = q.filter(ItemRegistration.req_no.in_(req_numbers))
         if search:
             pattern = f'%{search}%'
@@ -4287,6 +4307,8 @@ def get_item_registration_data():
             return sorted({clean(value) for (value,) in query.with_entities(column).distinct().all() if clean(value)})
 
         all_clients = distinct_options(option_q, ItemRegistration.client_name)
+        all_op_units = distinct_options(option_q, ItemRegistration.operation_unit_name)
+        all_bid_types = distinct_options(option_q, ItemRegistration.bid_except_type)
         all_categories = distinct_options(option_q, ItemRegistration.category)
         all_proc_statuses = distinct_options(option_q, ItemRegistration.proc_status)
         all_mfr_names = distinct_options(option_q, ItemRegistration.mfr_name)
@@ -4303,7 +4325,7 @@ def get_item_registration_data():
 
         payload = {
             'data': response_rows, 'total': total, 'page': page, 'per_page': per_page,
-            'client_options': all_clients, 'category_options': all_categories, 'pic_options': all_pics,
+            'client_options': all_clients, 'op_unit_options': all_op_units, 'bid_except_type_options': all_bid_types, 'category_options': all_categories, 'pic_options': all_pics,
             'proc_status_options': all_proc_statuses, 'mfr_name_options': all_mfr_names,
             'missing_prod_id_by_pic': missing_prod_id_by_pic, 'last_updated': utc_isoformat(last_upload),
         }
@@ -4695,6 +4717,7 @@ def upload_master_pic():
         added_cat = updated_cat = unchanged_cat = 0
         added_client = updated_client = unchanged_client = 0
         added_vendor = updated_vendor = unchanged_vendor = 0
+        added_bid_type = updated_bid_type = unchanged_bid_type = 0
         removed_duplicates = removed_stale = removed_blank = 0
 
         # ── Sheet 1: By Category ───────────────────────────────────────────
@@ -4718,8 +4741,32 @@ def upload_master_pic():
             has_category = any('category' in c for c in col_names_lower)
             has_client_id = any('client id' in c or 'client cd' in c for c in col_names_lower)
             has_vendor_id = any('vendor id' in c or 'vendor cd' in c for c in col_names_lower)
+            has_bid_type = any('bid type' in c or 'bid except' in c for c in col_names_lower)
 
-            if has_vendor_id and not has_category:
+            if has_bid_type and not has_category and not has_vendor_id:
+                # ── Sheet 4: By Bid Type ───────────────────────────────────
+                bt_col = find_column(df, ['Bid Type', 'Bid Except Type', 'Bid/Except Type'])
+                pic_col = find_column(df, ['PIC', 'PIC Name'])
+                if bt_col and pic_col:
+                    existing_bid_types = {clean(m.bid_type): m for m in db.session.query(MasterBidTypePIC).all()}
+                    for _, row in df.iterrows():
+                        bt = clean(df_val(row, bt_col))
+                        if not bt: continue
+                        pic = clean(df_val(row, pic_col))
+                        if not pic: continue
+                        existing = existing_bid_types.get(bt)
+                        if existing:
+                            changed = clean(existing.pic_name) != pic
+                            existing.pic_name = pic
+                            existing.updated_at = datetime.utcnow()
+                            if changed: updated_bid_type += 1
+                            else: unchanged_bid_type += 1
+                        else:
+                            db.session.add(MasterBidTypePIC(bid_type=bt, pic_name=pic, updated_at=datetime.utcnow()))
+                            added_bid_type += 1
+                            existing_bid_types[bt] = {'bid_type': bt}
+
+            elif has_vendor_id and not has_category:
                 # ── Sheet 3: By Vendor ─────────────────────────────────────
                 vid_col = find_column(df, ['Vendor ID', 'Vendor Id', 'VendorID', 'Vendor Cd.', 'Vendor Cd', 'Vendor Code'])
                 vname_col = find_column(df, ['Vendor Name', 'Vendor Nm.', 'Vendor Nm', 'Vendor'])
@@ -4830,6 +4877,7 @@ def upload_master_pic():
             'category': {'added': added_cat, 'updated': updated_cat, 'unchanged': unchanged_cat},
             'client': {'added': added_client, 'updated': updated_client, 'unchanged': unchanged_client},
             'vendor': {'added': added_vendor, 'updated': updated_vendor, 'unchanged': unchanged_vendor},
+            'bid_type': {'added': added_bid_type, 'updated': updated_bid_type, 'unchanged': unchanged_bid_type},
             'removed_duplicates': removed_duplicates,
             'removed_stale': removed_stale,
             'removed_blank': removed_blank,
@@ -6842,6 +6890,40 @@ def download_master_pic_template():
         for _ in range(20):
             ws3.append(['', '', ''])
         fill_body(ws3)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # Sheet 4: By Bid Type (Bid Type, PIC)
+        # Pre-fill from MasterBidTypePIC + default "Imported Product Request Purchasing".
+        # This is an EXCEPTION override: if a bid type has a PIC here, it
+        # overrides category-based PIC for that Item Registration row.
+        # ═══════════════════════════════════════════════════════════════════
+        ws4 = wb.create_sheet('By Bid Type')
+        style_sheet(ws4, ['Bid Type', 'PIC'], ref_cols=2, col_widths=[40, 12])
+
+        bid_type_rows = {}
+        # Existing MasterBidTypePIC entries
+        for m in db.session.query(MasterBidTypePIC).all():
+            bt = clean(m.bid_type)
+            if bt:
+                bid_type_rows[bt] = {'bid_type': bt, 'pic': clean(m.pic_name)}
+        # Distinct bid types from ItemRegistration
+        for (bt_raw,) in db.session.query(ItemRegistration.bid_except_type).filter(
+            ItemRegistration.bid_except_type.isnot(None), ItemRegistration.bid_except_type != ''
+        ).distinct().all():
+            bt = clean(bt_raw)
+            if bt and bt not in bid_type_rows:
+                bid_type_rows[bt] = {'bid_type': bt, 'pic': ''}
+        # Default bid type per user spec
+        default_bt = 'Imported Product Request Purchasing'
+        if default_bt not in bid_type_rows:
+            bid_type_rows[default_bt] = {'bid_type': default_bt, 'pic': ''}
+
+        for item in sorted(bid_type_rows.values(), key=lambda x: x['bid_type'].lower()):
+            ws4.append([item['bid_type'], item['pic']])
+        min_rows = max(20, len(bid_type_rows) + 5)
+        while ws4.max_row < min_rows:
+            ws4.append(['', ''])
+        fill_body(ws4)
 
         output = io.BytesIO()
         wb.save(output)
