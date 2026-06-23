@@ -3334,7 +3334,7 @@ const App = () => {
         next.unit_price_missing = unitPrice == null;
       }
       return next;
-    }).filter(row => !rfqPicFilter || rfqEditedRowKeys.has(row.row_key) || (row.purchase_pic === rfqPicFilter && row.check === 'open' && row.unit_price_missing && !row.product_id)));
+    }).filter(row => !rfqPicFilter || rfqEditedRowKeys.has(row.row_key) || (row.purchase_pic === rfqPicFilter && row.unit_price_missing)));
   };
 
   const updateRFQCell = async (rowKey, field, value, options = {}) => {
@@ -3371,7 +3371,7 @@ const App = () => {
       }
       if (field === 'product_id') {
         const current = rfqData.find(row => row.row_key === rowKey);
-        if (value && current?.check === 'open' && current?.unit_price_missing && !current?.product_id && current?.purchase_pic) {
+        if (value && current?.unit_price_missing && current?.purchase_pic) {
           setRfqPicKpis(prev => prev.map(kpi => kpi.pic === current.purchase_pic ? { ...kpi, count: Math.max(0, (Number(kpi.count) || 0) - 1) } : kpi).filter(kpi => Number(kpi.count) > 0));
         }
       }
@@ -3396,7 +3396,7 @@ const App = () => {
           if (field === 'unit_price_idr') next.unit_price_missing = unitPrice == null;
         }
         return next;
-      }).filter(row => !rfqPicFilter || rfqEditedRowKeys.has(row.row_key) || (row.purchase_pic === rfqPicFilter && row.check === 'open' && row.unit_price_missing && !row.product_id)));
+      }).filter(row => !rfqPicFilter || rfqEditedRowKeys.has(row.row_key) || (row.purchase_pic === rfqPicFilter && row.unit_price_missing)));
       return true;
     } catch (e) {
       // Network/HTTP failure → queue for replay. KEEP the optimistic local
