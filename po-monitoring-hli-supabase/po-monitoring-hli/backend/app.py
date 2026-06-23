@@ -4269,10 +4269,6 @@ def get_item_registration_data():
         cached = runtime_cache_get(cache_key)
         if cached is not None: return jsonify(cached)
 
-        # Ensure PIC mappings are up-to-date (includes bid type, client ID,
-        # vendor ID overrides from Master PIC tables).
-        refresh_item_registration_mappings()
-
         page = int(request.args.get('page', 1))
         per_page = int(request.args.get('per_page', 10))
         search = request.args.get('search', '').strip()
@@ -4304,14 +4300,32 @@ def get_item_registration_data():
             q = q.filter(db.or_(ItemRegistration.req_no.ilike(pattern), ItemRegistration.prod_id.ilike(pattern), ItemRegistration.prod_name.ilike(pattern), ItemRegistration.vendor_name.ilike(pattern), ItemRegistration.mfr_name.ilike(pattern), ItemRegistration.remarks.ilike(pattern)))
 
         missing_q = apply_item_registration_kpi_status_filter(q).filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-'))
-        # Use resolve_item_registration_pic to get the REAL-TIME resolved PIC
-        # (including bid type overrides), not just the stored ItemRegistration.pic
-        # column which may be stale if Master PIC was updated without re-uploading
-        # Item Registration data.
+        # Build in-memory caches for Master PIC tables to avoid N+1 queries
+        # when resolving PIC for each missing row.
+        _client_pic_cache = {normalize_client_id(m.client_id): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name)}
+        _bid_type_pic_cache = {clean(m.bid_type): clean(m.pic_name) for m in db.session.query(MasterBidTypePIC).all() if clean(m.pic_name)}
+        _cat_by_id, _cat_by_name = master_pic_maps()
         missing_rows = missing_q.all()
         missing_by_pic = {}
         for row in missing_rows:
-            pic = resolve_item_registration_pic(row)
+            # Resolve PIC with priority: Client ID > Bid Type > Category
+            # (same logic as resolve_item_registration_pic but using caches)
+            pic = None
+            cid = normalize_client_id(row.client_id) if row.client_id else ''
+            if cid and cid in _client_pic_cache:
+                pic = _client_pic_cache[cid]
+            if not pic and row.bid_except_type:
+                bt = clean(row.bid_except_type)
+                if bt and bt in _bid_type_pic_cache:
+                    pic = _bid_type_pic_cache[bt]
+            if not pic:
+                cat_id = normalize_category_id(row.category_id)
+                cat_name = normalize_category_name(row.category)
+                if cat_id and cat_id in _cat_by_id:
+                    pic = _cat_by_id[cat_id]
+                elif cat_name and cat_name in _cat_by_name:
+                    pic = _cat_by_name[cat_name]
+            pic = pic or row.pic or ''
             pic = canonical_pending_pic(clean(pic), row.client_name)
             if pic and pic != 'Unassigned': missing_by_pic[pic] = missing_by_pic.get(pic, 0) + 1
         missing_prod_id_by_pic = [{'pic': pic, 'count': count} for pic, count in sorted(missing_by_pic.items(), key=lambda item: (-item[1], item[0]))]
@@ -4342,11 +4356,27 @@ def get_item_registration_data():
         all_proc_statuses = distinct_options(option_q, ItemRegistration.proc_status)
         all_mfr_names = distinct_options(option_q, ItemRegistration.mfr_name)
         
-        # Use real-time resolved PIC for options (includes bid type overrides)
+        # Use cached PIC resolution for options (same caches as KPI above)
         pic_option_rows = option_q.all()
         all_pics = set()
         for row in pic_option_rows:
-            resolved = canonical_pending_pic(clean(resolve_item_registration_pic(row)), row.client_name)
+            pic = None
+            cid = normalize_client_id(row.client_id) if row.client_id else ''
+            if cid and cid in _client_pic_cache:
+                pic = _client_pic_cache[cid]
+            if not pic and row.bid_except_type:
+                bt = clean(row.bid_except_type)
+                if bt and bt in _bid_type_pic_cache:
+                    pic = _bid_type_pic_cache[bt]
+            if not pic:
+                cat_id = normalize_category_id(row.category_id)
+                cat_name = normalize_category_name(row.category)
+                if cat_id and cat_id in _cat_by_id:
+                    pic = _cat_by_id[cat_id]
+                elif cat_name and cat_name in _cat_by_name:
+                    pic = _cat_by_name[cat_name]
+            pic = pic or row.pic or ''
+            resolved = canonical_pending_pic(clean(pic), row.client_name)
             if resolved != 'Unassigned': all_pics.add(resolved)
         all_pics = sorted(list(all_pics))
 
@@ -5163,10 +5193,15 @@ def get_rfq_data():
         kpi_rows = filtered_for('pic')
         pending_by_pic = {}
         for row in kpi_rows:
-            # Count ALL rows with missing unit price — not just 'open' ones.
-            # Previously: only check == 'open' was counted, which excluded
-            # 'complete'/'reject'/'closed' rows that still lack a unit price.
-            # Now: any row with unit_price_missing is counted, regardless of check status.
+            # Exclude rows that already have a Product ID — they're done.
+            if clean_product_id(row.get('product_id')):
+                continue
+            # Exclude rows with check status 'complete' or 'reject' —
+            # they're no longer pending.
+            check_val = clean(row.get('check', '')).lower()
+            if check_val in ('complete', 'reject'):
+                continue
+            # Only count rows that still need a unit price.
             if not row.get('unit_price_missing'):
                 continue
             row_pic = clean(row.get('purchase_pic'))
