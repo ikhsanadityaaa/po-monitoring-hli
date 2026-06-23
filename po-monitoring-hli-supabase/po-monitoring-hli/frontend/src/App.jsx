@@ -2882,7 +2882,9 @@ const App = () => {
 
   useEffect(() => {
     if (activePage === 'rfq') {
-      fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter, rfqShowSimilarity);
+      // Auto-refresh RFQ data every time the page is opened (force=true
+      // pulls latest from Google Sheets so data is always current).
+      fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, true, rfqFilters, rfqPicFilter, rfqShowSimilarity);
     }
   }, [activePage]);
 
