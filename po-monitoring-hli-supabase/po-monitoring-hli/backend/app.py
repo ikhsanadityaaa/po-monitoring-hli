@@ -2482,6 +2482,25 @@ def normalize_category_id(value):
         return mantissa_digits
     return cat_id.strip()
 
+def normalize_vendor_id(value):
+    """Normalize a Vendor ID: strip trailing '.0' (pandas float artifact)
+    and strip leading zeros. '0000456144' → '456144', '456144.0' → '456144'."""
+    vid = clean(value)
+    if not vid: return ''
+    # Strip pandas float artifact: "456144.0" → "456144"
+    if re.match(r'^\d+\.0+$', vid): vid = vid.split('.', 1)[0]
+    # Strip leading zeros: "0000456144" → "456144"
+    vid = vid.lstrip('0') or '0'
+    return vid
+
+def normalize_client_id(value):
+    """Normalize a Client ID: strip trailing '.0' (pandas float artifact).
+    Client IDs like 'S000037130' are alphanumeric — no leading zero strip."""
+    cid = clean(value)
+    if not cid: return ''
+    if re.match(r'^\d+\.0+$', cid): cid = cid.split('.', 1)[0]
+    return cid.strip()
+
 def normalize_category_name(value):
     category = source_category_level1(value)
     if not category: return ''
@@ -2536,9 +2555,52 @@ def _lookup_pic_by_category(category_id=None, category_name=None):
     if cat_name and cat_name in by_name: return by_name[cat_name]
     return None
 
+def resolve_pic_with_overrides(category_id=None, category_name=None, client_id=None, vendor_id=None):
+    """Resolve PIC with priority: Client ID > Vendor ID > Category.
+    
+    1. If client_id has a PIC in MasterClientPIC → use it (overrides all)
+    2. If vendor_id has a PIC in MasterVendorPIC → use it (overrides category)
+    3. Fall back to category-based PIC from MasterPIC
+    
+    This makes Client ID and Vendor ID "exception overrides" — the category
+    is the default, but specific clients/vendors can be assigned a different
+    PIC.
+    """
+    # Priority 1: Client ID override
+    if client_id:
+        cid = normalize_client_id(client_id)
+        if cid:
+            client_pic = db.session.query(MasterClientPIC.pic_name).filter(
+                MasterClientPIC.client_id == cid
+            ).first()
+            if client_pic and clean(client_pic[0]):
+                return clean(client_pic[0])
+    
+    # Priority 2: Vendor ID override
+    if vendor_id:
+        vid = normalize_vendor_id(vendor_id)
+        if vid:
+            vendor_pic = db.session.query(MasterVendorPIC.pic_name).filter(
+                MasterVendorPIC.vendor_id == vid
+            ).first()
+            if vendor_pic and clean(vendor_pic[0]):
+                return clean(vendor_pic[0])
+    
+    # Priority 3: Category-based PIC (default)
+    return _lookup_pic_by_category(category_id, category_name)
+
+
 def resolve_item_registration_pic(row):
-    mapped = _lookup_pic_by_category(row.category_id, row.category)
-    return canonical_pending_pic(mapped or row.pic or '', row.client_name)
+    # Use priority overrides: Client ID > Vendor ID > Category
+    # ItemRegistration doesn't have vendor_id, so only Client ID + Category apply.
+    client_id = getattr(row, 'client_id', None) or (row.get('client_id') if isinstance(row, dict) else None)
+    pic = resolve_pic_with_overrides(
+        category_id=row.category_id if hasattr(row, 'category_id') else row.get('category_id'),
+        category_name=row.category if hasattr(row, 'category') else row.get('category'),
+        client_id=client_id,
+        vendor_id=None,  # ItemRegistration has no vendor_id
+    )
+    return canonical_pending_pic(mapped_or_pic := (pic or (row.pic if hasattr(row, 'pic') else row.get('pic')) or ''), row.client_name if hasattr(row, 'client_name') else row.get('client_name'))
 
 def is_existing_owner_pur_pic(value): return (clean(value) or '').strip().lower() == 'pur. pic'
 
@@ -3453,10 +3515,8 @@ def upload_smro():
                 new_data = {
                     'so_number': so_val, 'so_item': so_item_val, 'so_status': clean(df_val(row, col_status)),
                     'operation_unit_name': clean(df_val(row, col_opunit)),
-                    'client_id': clean(df_val(row, col_client_id)) if col_client_id else None,
-                    # Strip leading zeros from vendor_id (e.g. "0000456144" → "456144")
-                    # so it matches MasterVendorPIC entries which use the bare number.
-                    'vendor_id': (lambda v: v.lstrip('0') or '0' if v else v)(clean(df_val(row, col_vendor_id)) or ''),
+                    'client_id': normalize_client_id(clean(df_val(row, col_client_id))) if col_client_id else None,
+                    'vendor_id': normalize_vendor_id(clean(df_val(row, col_vendor_id)) or ''),
                     'vendor_name': clean(df_val(row, col_vendor)), 'customer_po_number': clean(df_val(row, col_custpo)),
                     'delivery_memo': clean(df_val(row, col_memo)), 'product_name': clean(df_val(row, col_prod)),
                     'specification': spec_val, 'manufacturer_name': clean(df_val(row, col_mfr)), 'product_id': pid_val,
@@ -4613,9 +4673,9 @@ def upload_master_pic():
                 vname_col = find_column(df, ['Vendor Name', 'Vendor Nm.', 'Vendor Nm', 'Vendor'])
                 pic_col = find_column(df, ['PIC', 'PIC Name'])
                 if vid_col and pic_col:
-                    existing_vendors = {clean(m.vendor_id): m for m in db.session.query(MasterVendorPIC).all()}
+                    existing_vendors = {normalize_vendor_id(m.vendor_id): m for m in db.session.query(MasterVendorPIC).all()}
                     for _, row in df.iterrows():
-                        vid = clean(df_val(row, vid_col))
+                        vid = normalize_vendor_id(df_val(row, vid_col))
                         if not vid: continue
                         vname = clean(df_val(row, vname_col))
                         pic = clean(df_val(row, pic_col))
@@ -4639,9 +4699,9 @@ def upload_master_pic():
                 cname_col = find_column(df, ['Client Name', 'Client Nm.', 'Client Nm'])
                 pic_col = find_column(df, ['PIC', 'PIC Name'])
                 if cid_col and pic_col:
-                    existing_clients = {clean(m.client_id): m for m in db.session.query(MasterClientPIC).all()}
+                    existing_clients = {normalize_client_id(m.client_id): m for m in db.session.query(MasterClientPIC).all()}
                     for _, row in df.iterrows():
-                        cid = clean(df_val(row, cid_col))
+                        cid = normalize_client_id(df_val(row, cid_col))
                         if not cid: continue
                         cname = clean(df_val(row, cname_col))
                         pic = clean(df_val(row, pic_col))
@@ -4705,13 +4765,16 @@ def upload_master_pic():
         db.session.commit()
         invalidate_master_pic_cache()
 
-        # Refresh SO pic_name from category-based PIC
+        # Refresh SO pic_name using priority: Client ID > Vendor ID > Category
         prod_map = {
             str(p.product_id).strip(): (p.category_id, p.category_name)
             for p in db.session.query(ProductIDDB).all()
             if p.product_id
         }
-        pic_cache = {}
+        # Build lookup caches for MasterClientPIC and MasterVendorPIC
+        client_pic_cache = {normalize_client_id(m.client_id): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name)}
+        vendor_pic_cache = {normalize_vendor_id(m.vendor_id): clean(m.pic_name) for m in db.session.query(MasterVendorPIC).all() if clean(m.pic_name)}
+        cat_pic_cache = {}
         so_rows = db.session.query(SOData).filter(
             SOData.product_id.isnot(None), SOData.product_id != ''
         ).all()
@@ -4719,9 +4782,19 @@ def upload_master_pic():
         for s in so_rows:
             cat_id, cat_name = prod_map.get(str(s.product_id).strip(), (None, None))
             cache_key = (normalize_category_id(cat_id), normalize_category_name(cat_name))
-            if cache_key not in pic_cache:
-                pic_cache[cache_key] = _lookup_pic_by_category(cat_id, cat_name)
-            new_pic = pic_cache[cache_key]
+            if cache_key not in cat_pic_cache:
+                cat_pic_cache[cache_key] = _lookup_pic_by_category(cat_id, cat_name)
+            # Priority: Client ID > Vendor ID > Category
+            new_pic = None
+            cid = normalize_client_id(s.client_id) if s.client_id else ''
+            if cid and cid in client_pic_cache:
+                new_pic = client_pic_cache[cid]
+            if not new_pic:
+                vid = normalize_vendor_id(s.vendor_id) if s.vendor_id else ''
+                if vid and vid in vendor_pic_cache:
+                    new_pic = vendor_pic_cache[vid]
+            if not new_pic:
+                new_pic = cat_pic_cache[cache_key]
             if s.pic_name != new_pic:
                 s.pic_name = new_pic
                 refreshed += 1
@@ -6738,31 +6811,16 @@ def download_master_pic_template():
 
         # ═══════════════════════════════════════════════════════════════════
         # Sheet 3: By Vendor (Vendor ID, Vendor Name, PIC)
-        # Pre-fill from SOData (distinct vendor_id + vendor_name) + VendorControl.
+        # EMPTY — user fills in vendor IDs + PICs manually.
+        # This is an EXCEPTION override: if a vendor has a PIC here, it
+        # overrides category-based PIC for that vendor's SO rows.
         # ═══════════════════════════════════════════════════════════════════
         ws3 = wb.create_sheet('By Vendor')
         style_sheet(ws3, ['Vendor ID', 'Vendor Name', 'PIC'], ref_cols=2, col_widths=[20, 40, 12])
 
-        vendor_rows = {}
-        # Existing MasterVendorPIC entries
-        for m in db.session.query(MasterVendorPIC).all():
-            vid = clean(m.vendor_id)
-            if vid:
-                vendor_rows[vid] = {'vendor_id': vid, 'vendor_name': clean(m.vendor_name), 'pic': clean(m.pic_name)}
-        # Distinct vendors from SOData (strip leading zeros from vendor_id)
-        for s in db.session.query(SOData.vendor_id, SOData.vendor_name).filter(
-            SOData.vendor_id.isnot(None), SOData.vendor_id != ''
-        ).distinct().all():
-            vid_raw = clean(s.vendor_id)
-            # Strip leading zeros so "0000456144" → "456144"
-            vid = (vid_raw.lstrip('0') or '0') if vid_raw else vid_raw
-            if vid and vid not in vendor_rows:
-                vendor_rows[vid] = {'vendor_id': vid, 'vendor_name': clean(s.vendor_name), 'pic': ''}
-
-        for item in sorted(vendor_rows.values(), key=lambda x: x['vendor_id'].lower()):
-            ws3.append([item['vendor_id'], item['vendor_name'], item['pic']])
-        min_rows = max(20, len(vendor_rows) + 5)
-        while ws3.max_row < min_rows:
+        # No pre-fill — user manually enters vendor IDs that need PIC overrides.
+        # Just add empty rows for input.
+        for _ in range(20):
             ws3.append(['', '', ''])
         fill_body(ws3)
 
