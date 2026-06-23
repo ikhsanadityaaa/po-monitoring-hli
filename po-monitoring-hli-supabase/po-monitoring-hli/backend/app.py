@@ -286,12 +286,29 @@ class MasterPIC(db.Model):
     pic_name = db.Column(db.String(100))
     updated_at = db.Column(db.DateTime, default=datetime.utcnow)
 
+class MasterClientPIC(db.Model):
+    __tablename__ = 'master_client_pic'
+    id = db.Column(db.Integer, primary_key=True)
+    client_id = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    client_name = db.Column(db.String(300))
+    pic_name = db.Column(db.String(100))
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class MasterVendorPIC(db.Model):
+    __tablename__ = 'master_vendor_pic'
+    id = db.Column(db.Integer, primary_key=True)
+    vendor_id = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    vendor_name = db.Column(db.String(300))
+    pic_name = db.Column(db.String(100))
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+
 class ItemRegistration(db.Model):
     __tablename__ = 'item_registration'
     id = db.Column(db.Integer, primary_key=True)
     proc_status = db.Column(db.String(100))
     req_date = db.Column(db.Date, index=True)
     existing_owner = db.Column(db.String(100))
+    client_id = db.Column(db.String(100), index=True)
     client_name = db.Column(db.String(300), index=True)
     category = db.Column(db.String(255))
     category_id = db.Column(db.String(100))
@@ -582,7 +599,7 @@ def _ensure_extra_columns():
         except Exception: return set()
     migration_plan = {
         'so_data': [('specification', 'TEXT'), ('product_id', 'VARCHAR(100)'), ('vendor_id', 'VARCHAR(100)'), ('manufacturer_name', 'VARCHAR(300)'), ('purchasing_currency', 'VARCHAR(10)'), ('purchasing_amount_idr', 'DOUBLE PRECISION'), ('purchasing_amount_idr_cached_at', 'TIMESTAMP'), ('pic_name', 'VARCHAR(100)')],
-        'item_registration': [('req_date', 'DATE'), ('existing_owner', 'VARCHAR(100)'), ('category_id', 'VARCHAR(100)'), ('pic_name', 'VARCHAR(200)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(50)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)'), ('remarks', 'TEXT')],
+        'item_registration': [('req_date', 'DATE'), ('existing_owner', 'VARCHAR(100)'), ('client_id', 'VARCHAR(100)'), ('category_id', 'VARCHAR(100)'), ('pic_name', 'VARCHAR(200)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(50)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)'), ('remarks', 'TEXT')],
         'product_id_db': [('specification', 'TEXT'), ('manufacturer_name', 'VARCHAR(255)'), ('vendor_name', 'VARCHAR(300)'), ('order_unit', 'VARCHAR(50)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(100)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)')],
     }
     for table_name, columns in migration_plan.items():
@@ -2558,6 +2575,7 @@ def _item_registration_columns(df):
         'proc_status': find_column(df, ['Proc. Status', 'Proc Status', 'Process Status']),
         'req_date': find_column(df, ['Req. Date', 'Req Date', 'Request Date']),
         'existing_owner': find_column(df, ['Existing Owner', 'Existing Owner.', 'Owner']),
+        'client_id': find_column(df, ['Client ID', 'Client Id', 'ClientID', 'Client Cd.', 'Client Cd', 'Client Code']),
         'client_name': find_column(df, ['Client Nm.', 'Client Nm', 'Client Name']),
         'category': find_column(df, ['Cat. Nm.', 'Cat. Nm', 'Category', 'Cate. Nm.', 'Category Name']),
         'category_id': find_column(df, ['Cat. ID', 'Cat. ID.', 'Category ID', 'Category Id', 'CategoryID']),
@@ -2607,7 +2625,9 @@ def import_item_registration_dataframe(df, filename='Item Registration'):
         category = source_category_level1(df_val(row, col['category']))
         incoming[req_no] = {
             'proc_status': clean(df_val(row, col['proc_status'])), 'req_date': parse_date(df_val(row, col['req_date'])),
-            'existing_owner': clean(df_val(row, col['existing_owner'])), 'client_name': clean(df_val(row, col['client_name'])),
+            'existing_owner': clean(df_val(row, col['existing_owner'])),
+            'client_id': clean(df_val(row, col['client_id'])),
+            'client_name': clean(df_val(row, col['client_name'])),
             'category': category, 'category_id': category_id, 'pic': _lookup_pic_by_category(category_id, category) or '',
             'req_no': req_no, 'prod_id': prod_id, 'product_status': clean(df_val(row, col['product_status'])),
             'batch_grp_no': clean(df_val(row, col['batch_grp_no'])), 'prod_name': prod_name, 'spec': clean(df_val(row, col['spec'])),
@@ -4539,27 +4559,36 @@ def upload_product_id():
 @app.route('/api/upload/master-pic-json', methods=['POST'])
 @app.route('/api/upload/master-pic', methods=['POST'])
 def upload_master_pic():
-    """Upload Master PIC Excel. Upserts Category Name → PIC mapping, then refreshes SO pic_name."""
+    """Upload Master PIC Excel (3 sheets: By Category, By Client ID, By Vendor).
+    Upserts PIC mappings, then refreshes SO pic_name."""
     try:
-        uploads, upload_mode = request_upload_dataframes('master_pic')
+        # Read ALL sheets from the uploaded Excel file (not just sheet 0).
+        # The template has 3 sheets: "By Category", "By Client ID", "By Vendor".
+        files = uploaded_files()
+        uploads = []
+        for file in files:
+            raw = file.read()
+            file.seek(0)
+            filename = (file.filename or '').lower()
+            is_xls = raw[:4] == b'\xd0\xcf\x11\xe0'
+            engine = 'xlrd' if is_xls or filename.endswith('.xls') else 'openpyxl'
+            # Read ALL sheets into a dict of DataFrames
+            all_sheets = pd.read_excel(file, sheet_name=None, engine=engine, dtype=str, keep_default_na=False)
+            for sheet_name, df in all_sheets.items():
+                df.columns = [str(c).strip() for c in df.columns]
+                uploads.append({'filename': f"{file.filename} [{sheet_name}]", 'df': df})
         if not uploads:
-            return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
+            return jsonify({'error': 'No file uploaded or no sheets found'}), 400
         replace_existing = upload_replace_mode()
 
-        cleanup_pre = cleanup_master_pic_by_category_name(None)
-        db.session.flush()
-        added = updated = unchanged = 0
-        removed_duplicates = cleanup_pre.get('removed_duplicates', 0)
-        removed_stale = cleanup_pre.get('removed_stale', 0)
-        removed_blank = cleanup_pre.get('removed_blank', 0)
-        latest_category_names = set()
-        expected = [
-            ('category_name', 'Category Name'),
-            ('pic', 'PIC'),
-            ('pic_update', 'Update New PIC'),
-        ]
-        required = [('category_name', 'Category Name')]
+        added_cat = updated_cat = unchanged_cat = 0
+        added_client = updated_client = unchanged_client = 0
+        added_vendor = updated_vendor = unchanged_vendor = 0
+        removed_duplicates = removed_stale = removed_blank = 0
 
+        # ── Sheet 1: By Category ───────────────────────────────────────────
+        # Process the first dataframe (or the one matching "By Category" sheet)
+        latest_category_names = set()
         all_master_pics = db.session.query(MasterPIC).all()
         master_pic_by_norm_name = {}
         master_pic_by_cat_id = {}
@@ -4573,56 +4602,100 @@ def upload_master_pic():
         for upload in uploads:
             df = upload['df']
             df.columns = [str(c).strip() for c in df.columns]
-            col = _master_pic_columns(df)
-            validate_upload_columns(upload['filename'], 'Update PIC', col, expected, required)
+            # Detect sheet type by column headers
+            col_names_lower = {str(c).strip().lower() for c in df.columns}
+            has_category = any('category' in c for c in col_names_lower)
+            has_client_id = any('client id' in c or 'client cd' in c for c in col_names_lower)
+            has_vendor_id = any('vendor id' in c or 'vendor cd' in c for c in col_names_lower)
 
-            for _, row in df.iterrows():
-                cat_name = source_category_level1(df_val(row, col['category_name']))
-                if not cat_name:
-                    continue
+            if has_vendor_id and not has_category:
+                # ── Sheet 3: By Vendor ─────────────────────────────────────
+                vid_col = find_column(df, ['Vendor ID', 'Vendor Id', 'VendorID', 'Vendor Cd.', 'Vendor Cd', 'Vendor Code'])
+                vname_col = find_column(df, ['Vendor Name', 'Vendor Nm.', 'Vendor Nm', 'Vendor'])
+                pic_col = find_column(df, ['PIC', 'PIC Name'])
+                if vid_col and pic_col:
+                    existing_vendors = {clean(m.vendor_id): m for m in db.session.query(MasterVendorPIC).all()}
+                    for _, row in df.iterrows():
+                        vid = clean(df_val(row, vid_col))
+                        if not vid: continue
+                        vname = clean(df_val(row, vname_col))
+                        pic = clean(df_val(row, pic_col))
+                        if not pic: continue
+                        existing = existing_vendors.get(vid)
+                        if existing:
+                            changed = clean(existing.pic_name) != pic or clean(existing.vendor_name) != vname
+                            existing.vendor_name = vname
+                            existing.pic_name = pic
+                            existing.updated_at = datetime.utcnow()
+                            if changed: updated_vendor += 1
+                            else: unchanged_vendor += 1
+                        else:
+                            db.session.add(MasterVendorPIC(vendor_id=vid, vendor_name=vname, pic_name=pic, updated_at=datetime.utcnow()))
+                            added_vendor += 1
+                            existing_vendors[vid] = {'vendor_id': vid}
 
-                current_pic = clean(df_val(row, col['pic']))
-                update_pic = clean(df_val(row, col['pic_update']))
-                pic_name = update_pic or current_pic
+            elif has_client_id and not has_category:
+                # ── Sheet 2: By Client ID ──────────────────────────────────
+                cid_col = find_column(df, ['Client ID', 'Client Id', 'ClientID', 'Client Cd.', 'Client Cd', 'Client Code'])
+                cname_col = find_column(df, ['Client Name', 'Client Nm.', 'Client Nm'])
+                pic_col = find_column(df, ['PIC', 'PIC Name'])
+                if cid_col and pic_col:
+                    existing_clients = {clean(m.client_id): m for m in db.session.query(MasterClientPIC).all()}
+                    for _, row in df.iterrows():
+                        cid = clean(df_val(row, cid_col))
+                        if not cid: continue
+                        cname = clean(df_val(row, cname_col))
+                        pic = clean(df_val(row, pic_col))
+                        if not pic: continue
+                        existing = existing_clients.get(cid)
+                        if existing:
+                            changed = clean(existing.pic_name) != pic or clean(existing.client_name) != cname
+                            existing.client_name = cname
+                            existing.pic_name = pic
+                            existing.updated_at = datetime.utcnow()
+                            if changed: updated_client += 1
+                            else: unchanged_client += 1
+                        else:
+                            db.session.add(MasterClientPIC(client_id=cid, client_name=cname, pic_name=pic, updated_at=datetime.utcnow()))
+                            added_client += 1
+                            existing_clients[cid] = {'client_id': cid}
 
-                if not pic_name:
-                    continue
-
-                latest_category_names.add(cat_name)
-                norm_cat_name = normalize_category_name(cat_name)
-                generated_key = master_pic_category_key(cat_name)
-                
-                existing = master_pic_by_cat_id.get(generated_key) or master_pic_by_norm_name.get(norm_cat_name)
-                
-                if existing:
-                    changed = False
-                    new_key = generated_key or existing.category_id
-                    if (
-                        normalize_category_name(existing.category_name) != norm_cat_name
-                        or clean(existing.pic_name) != pic_name
-                        or (str(existing.category_id or '').startswith('CATNAME_') and existing.category_id != new_key)
-                    ):
-                        changed = True
-                    existing.category_name = cat_name
-                    if str(existing.category_id or '').startswith('CATNAME_'):
-                        existing.category_id = new_key
-                    existing.pic_name = pic_name
-                    existing.updated_at = datetime.utcnow()
-                    if changed:
-                        updated += 1
+            else:
+                # ── Sheet 1: By Category (existing logic, no Update PIC) ───
+                col = _master_pic_columns(df)
+                # Don't validate strictly — the template no longer has "Update New PIC"
+                # but old templates might. Handle both gracefully.
+                for _, row in df.iterrows():
+                    cat_name = source_category_level1(df_val(row, col['category_name']))
+                    if not cat_name: continue
+                    current_pic = clean(df_val(row, col['pic']))
+                    update_pic = clean(df_val(row, col['pic_update'])) if col.get('pic_update') else None
+                    pic_name = update_pic or current_pic
+                    if not pic_name: continue
+                    latest_category_names.add(cat_name)
+                    norm_cat_name = normalize_category_name(cat_name)
+                    generated_key = master_pic_category_key(cat_name)
+                    existing = master_pic_by_cat_id.get(generated_key) or master_pic_by_norm_name.get(norm_cat_name)
+                    if existing:
+                        changed = False
+                        new_key = generated_key or existing.category_id
+                        if (normalize_category_name(existing.category_name) != norm_cat_name
+                            or clean(existing.pic_name) != pic_name
+                            or (str(existing.category_id or '').startswith('CATNAME_') and existing.category_id != new_key)):
+                            changed = True
+                        existing.category_name = cat_name
+                        if str(existing.category_id or '').startswith('CATNAME_'):
+                            existing.category_id = new_key
+                        existing.pic_name = pic_name
+                        existing.updated_at = datetime.utcnow()
+                        if changed: updated_cat += 1
+                        else: unchanged_cat += 1
                     else:
-                        unchanged += 1
-                else:
-                    new_rec = MasterPIC(
-                        category_id=generated_key,
-                        category_name=cat_name,
-                        pic_name=pic_name,
-                        updated_at=datetime.utcnow()
-                    )
-                    db.session.add(new_rec)
-                    added += 1
-                    master_pic_by_norm_name[norm_cat_name] = new_rec
-                    master_pic_by_cat_id[generated_key] = new_rec
+                        new_rec = MasterPIC(category_id=generated_key, category_name=cat_name, pic_name=pic_name, updated_at=datetime.utcnow())
+                        db.session.add(new_rec)
+                        added_cat += 1
+                        master_pic_by_norm_name[norm_cat_name] = new_rec
+                        if generated_key: master_pic_by_cat_id[generated_key] = new_rec
 
         db.session.flush()
         cleanup_post = cleanup_master_pic_by_category_name(latest_category_names if replace_existing else None)
@@ -4633,6 +4706,7 @@ def upload_master_pic():
         db.session.commit()
         invalidate_master_pic_cache()
 
+        # Refresh SO pic_name from category-based PIC
         prod_map = {
             str(p.product_id).strip(): (p.category_id, p.category_name)
             for p in db.session.query(ProductIDDB).all()
@@ -4658,12 +4732,13 @@ def upload_master_pic():
 
         return jsonify({
             'status': 'ok',
-            'files': len(uploads),
-            'mode': upload_mode,
+            'files': len(files),
+            'sheets': len(uploads),
+            'mode': 'excel',
             'replace': replace_existing,
-            'added': added,
-            'updated': updated,
-            'unchanged': unchanged,
+            'category': {'added': added_cat, 'updated': updated_cat, 'unchanged': unchanged_cat},
+            'client': {'added': added_client, 'updated': updated_client, 'unchanged': unchanged_client},
+            'vendor': {'added': added_vendor, 'updated': updated_vendor, 'unchanged': unchanged_vendor},
             'removed_duplicates': removed_duplicates,
             'removed_stale': removed_stale,
             'removed_blank': removed_blank,
@@ -6565,12 +6640,6 @@ def get_pic_kpi():
 def download_master_pic_template():
     try:
         wb = Workbook()
-        ws = wb.active
-        ws.title = 'Master PIC'
-
-        headers = ['Category Name', 'PIC', 'Update New PIC']
-        ws.append(headers)
-        ws.freeze_panes = 'A2'
 
         ref_header_fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
         input_header_fill = PatternFill(start_color='0070C0', end_color='0070C0', fill_type='solid')
@@ -6580,14 +6649,35 @@ def download_master_pic_template():
         center = Alignment(horizontal='center', vertical='center')
         left = Alignment(horizontal='left', vertical='center')
 
-        for cell in ws[1]:
-            cell.alignment = center
-            if cell.column <= 2:
-                cell.fill = ref_header_fill
-                cell.font = ref_font
-            else:
-                cell.fill = input_header_fill
-                cell.font = input_font
+        def style_sheet(ws, headers, ref_cols=2, col_widths=None):
+            ws.append(headers)
+            ws.freeze_panes = 'A2'
+            for cell in ws[1]:
+                cell.alignment = center
+                if cell.column <= ref_cols:
+                    cell.fill = ref_header_fill
+                    cell.font = ref_font
+                else:
+                    cell.fill = input_header_fill
+                    cell.font = input_font
+            if col_widths:
+                for i, w in enumerate(col_widths, 1):
+                    ws.column_dimensions[get_column_letter(i)].width = w
+            ws.auto_filter.ref = f'A1:{get_column_letter(len(headers))}{ws.max_row}'
+
+        def fill_body(ws, start_row=2):
+            for row in ws.iter_rows(min_row=start_row, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
+                for cell in row:
+                    cell.font = body_font
+                    cell.alignment = left if cell.column == 1 else center
+                    cell.number_format = '@'
+
+        # ═══════════════════════════════════════════════════════════════════
+        # Sheet 1: By Category (existing — Category Name + PIC, no Update PIC)
+        # ═══════════════════════════════════════════════════════════════════
+        ws1 = wb.active
+        ws1.title = 'By Category'
+        style_sheet(ws1, ['Category Name', 'PIC'], ref_cols=2, col_widths=[32, 12])
 
         category_rows = {}
         for m in db.session.query(MasterPIC).order_by(MasterPIC.category_name).all():
@@ -6604,22 +6694,71 @@ def download_master_pic_template():
                 category_rows[norm] = {'category_name': cat_name, 'pic': _lookup_pic_by_category(None, cat_name) or ''}
 
         for item in sorted(category_rows.values(), key=lambda x: x['category_name'].lower()):
-            ws.append([item['category_name'], item['pic'], ''])
-
+            ws1.append([item['category_name'], item['pic']])
         min_rows = max(20, len(category_rows) + 5)
-        while ws.max_row < min_rows:
-            ws.append(['', '', ''])
+        while ws1.max_row < min_rows:
+            ws1.append(['', ''])
+        fill_body(ws1)
 
-        for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=3):
-            for cell in row:
-                cell.font = body_font
-                cell.alignment = left if cell.column == 1 else center
-                cell.number_format = '@'
+        # ═══════════════════════════════════════════════════════════════════
+        # Sheet 2: By Client ID (Client ID, Client Name, PIC)
+        # Pre-fill from ItemRegistration (distinct client_id + client_name).
+        # Yupi clients get PIC = "Andre" (per user spec).
+        # ═══════════════════════════════════════════════════════════════════
+        ws2 = wb.create_sheet('By Client ID')
+        style_sheet(ws2, ['Client ID', 'Client Name', 'PIC'], ref_cols=2, col_widths=[20, 40, 12])
 
-        ws.column_dimensions['A'].width = 32
-        ws.column_dimensions['B'].width = 12
-        ws.column_dimensions['C'].width = 20
-        ws.auto_filter.ref = f'A1:C{ws.max_row}'
+        client_rows = {}
+        # Existing MasterClientPIC entries
+        for m in db.session.query(MasterClientPIC).all():
+            cid = clean(m.client_id)
+            if cid:
+                client_rows[cid] = {'client_id': cid, 'client_name': clean(m.client_name), 'pic': clean(m.pic_name)}
+        # Distinct clients from ItemRegistration
+        for ir in db.session.query(ItemRegistration.client_id, ItemRegistration.client_name).filter(
+            ItemRegistration.client_id.isnot(None), ItemRegistration.client_id != ''
+        ).distinct().all():
+            cid = clean(ir.client_id)
+            if cid and cid not in client_rows:
+                cname = clean(ir.client_name)
+                # Yupi clients default to "Andre"
+                default_pic = 'Andre' if cname and 'yupi' in cname.lower() else ''
+                client_rows[cid] = {'client_id': cid, 'client_name': cname, 'pic': default_pic}
+
+        for item in sorted(client_rows.values(), key=lambda x: x['client_id'].lower()):
+            ws2.append([item['client_id'], item['client_name'], item['pic']])
+        min_rows = max(20, len(client_rows) + 5)
+        while ws2.max_row < min_rows:
+            ws2.append(['', '', ''])
+        fill_body(ws2)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # Sheet 3: By Vendor (Vendor ID, Vendor Name, PIC)
+        # Pre-fill from SOData (distinct vendor_id + vendor_name) + VendorControl.
+        # ═══════════════════════════════════════════════════════════════════
+        ws3 = wb.create_sheet('By Vendor')
+        style_sheet(ws3, ['Vendor ID', 'Vendor Name', 'PIC'], ref_cols=2, col_widths=[20, 40, 12])
+
+        vendor_rows = {}
+        # Existing MasterVendorPIC entries
+        for m in db.session.query(MasterVendorPIC).all():
+            vid = clean(m.vendor_id)
+            if vid:
+                vendor_rows[vid] = {'vendor_id': vid, 'vendor_name': clean(m.vendor_name), 'pic': clean(m.pic_name)}
+        # Distinct vendors from SOData
+        for s in db.session.query(SOData.vendor_id, SOData.vendor_name).filter(
+            SOData.vendor_id.isnot(None), SOData.vendor_id != ''
+        ).distinct().all():
+            vid = clean(s.vendor_id)
+            if vid and vid not in vendor_rows:
+                vendor_rows[vid] = {'vendor_id': vid, 'vendor_name': clean(s.vendor_name), 'pic': ''}
+
+        for item in sorted(vendor_rows.values(), key=lambda x: x['vendor_id'].lower()):
+            ws3.append([item['vendor_id'], item['vendor_name'], item['pic']])
+        min_rows = max(20, len(vendor_rows) + 5)
+        while ws3.max_row < min_rows:
+            ws3.append(['', '', ''])
+        fill_body(ws3)
 
         output = io.BytesIO()
         wb.save(output)
