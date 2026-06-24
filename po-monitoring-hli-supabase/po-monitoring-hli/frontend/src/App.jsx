@@ -5316,12 +5316,23 @@ const App = () => {
       if (!files.length) return;
       const fd = new FormData();
       files.forEach(file => fd.append('file', file));
+      const label = files.length > 1 ? `Vendor Import (${files.length} files)` : 'Vendor Import';
+      // Show the upload progress overlay — same pattern used by other uploads
+      // (SMRO, Product ID, Master PIC, etc.). Without this the user sees no
+      // feedback that the upload is in progress, which is why they thought
+      // "Upload Vendor Import tidak bekerja".
+      setUploadProgress({ label, pct: 0 });
       try {
-        const res = await api.post('/api/import/vendors/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+        const res = await api.post('/api/import/vendors/upload', fd, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+          onUploadProgress: (ev) => setUploadProgress({ label, pct: Math.round(ev.loaded * 100 / (ev.total || ev.loaded)) }),
+        });
+        setUploadProgress(null);
         addToast(res.data?.message || 'Import vendors updated', 'success');
         setImportPage(1);
         fetchImportData(1, importPerPage, importAppliedSearch, true, importFilters, importReqDlvSort, importYupiPoSort);
       } catch (err) {
+        setUploadProgress(null);
         addToast(`Failed to upload import vendors: ${err.response?.data?.error || err.message}`, 'error');
       }
     };
