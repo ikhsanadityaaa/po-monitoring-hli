@@ -1786,6 +1786,10 @@ const App = () => {
   const [importEditingCell, setImportEditingCell] = useState(null);
   const [importEditValue, setImportEditValue] = useState('');
   const [showImportChecklist, setShowImportChecklist] = useState(false);
+  // Show/Hide Detail — toggles the per-item block (SO through PURCHASE AMOUNT).
+  // When hidden, the table becomes much narrower (1 line per row) since the
+  // long spec / remark / item name columns disappear. Useful for quick overview.
+  const [showImportDetail, setShowImportDetail] = useState(true);
   const [importSelectedCell, setImportSelectedCell] = useState(null);
   const [importFillRange, setImportFillRange] = useState(null);
   // Multi-select state for Shift+click (Excel-like). Stores a Set of
@@ -3137,20 +3141,74 @@ const App = () => {
     }
   };
 
+  // Helper: trigger browser download from a blob: URL, then revoke it.
+  // Defined before downloadBlob so the closure reference is always ready.
+  const triggerDownload = (objectUrl, filename) => {
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.setAttribute('download', filename);
+    // Some browsers ignore `download` on blob: URLs without a type hint —
+    // adding `type` via the Blob constructor (above) is the primary fix,
+    // but we also set `target` and `rel` as a belt-and-suspenders measure.
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    // Revoke the object URL after a short delay so the download has time
+    // to start. Revoking immediately can abort the download on some browsers.
+    setTimeout(() => { try { window.URL.revokeObjectURL(objectUrl); } catch {} }, 1000);
+  };
+
   const downloadBlob = async (url, filename, label) => {
     const toastId = Date.now();
     setDownloadToast({ id: toastId, message: `Downloading ${label || filename}...` });
     try {
       const res = await api.get(url, { responseType: 'blob' });
-      const link = document.createElement('a');
-      link.href = window.URL.createObjectURL(new Blob([res.data]));
-      link.setAttribute('download', filename);
-      document.body.appendChild(link); link.click(); link.remove();
+      // res.data is ALREADY a Blob (because responseType: 'blob'). Wrapping
+      // it in `new Blob([res.data])` without a type loses the MIME type,
+      // which causes some browsers to:
+      //   - open the file in a new tab instead of downloading it
+      //   - download with a .bin extension or no extension
+      //   - silently fail the download on mobile
+      // Use res.data directly, and preserve the Content-Type from the
+      // response headers so the browser knows it's an xlsx/pdf/csv/etc.
+      const contentType = res.headers['content-type'] || 'application/octet-stream';
+      const blob = res.data instanceof Blob ? res.data : new Blob([res.data], { type: contentType });
+      // If the blob somehow lost its type, recreate it with the correct type.
+      let objectUrl;
+      if (!blob.type && contentType) {
+        objectUrl = window.URL.createObjectURL(new Blob([blob], { type: contentType }));
+      } else {
+        objectUrl = window.URL.createObjectURL(blob);
+      }
+      triggerDownload(objectUrl, filename);
       setDownloadToast(null);
       addToast(`✅ File "${filename}" downloaded successfully`, 'success');
     } catch (e) {
       setDownloadToast(null);
-      addToast('❌ Failed to download file', 'error');
+      // When the backend returns an error (e.g. 500), the response body is
+      // JSON but received as a Blob because of responseType: 'blob'. Try to
+      // read the actual error message from the blob so the user sees what
+      // went wrong instead of a generic "Failed to download file".
+      let errMsg = e?.message || 'Unknown error';
+      try {
+        const errBlob = e?.response?.data;
+        if (errBlob instanceof Blob) {
+          const text = await errBlob.text();
+          try {
+            const j = JSON.parse(text);
+            errMsg = j.error || j.message || text;
+          } catch {
+            errMsg = text.slice(0, 200);
+          }
+        } else if (typeof errBlob === 'string') {
+          errMsg = errBlob;
+        } else if (errBlob && typeof errBlob === 'object') {
+          errMsg = errBlob.error || errBlob.message || JSON.stringify(errBlob);
+        }
+      } catch {}
+      const status = e?.response?.status ? ` (HTTP ${e.response.status})` : '';
+      addToast(`❌ Failed to download ${label || filename}${status}: ${errMsg}`, 'error');
     }
   };
 
@@ -5164,7 +5222,22 @@ const App = () => {
     const columns = importColumns || [];
     const checklistFields = new Set(columns.filter(col => isImportHideableChecklistColumn(col)).map(col => col.field));
     const checklistCount = checklistFields.size;
-    const visibleColumns = showImportChecklist ? columns : columns.filter(col => !checklistFields.has(col.field));
+    // "Detail" block = per-item columns from SO through PURCHASE AMOUNT.
+    // Toggled by the Show/Hide Detail button. When hidden, the table
+    // becomes much narrower (1 line per row) — useful for quick overview
+    // without the long Spec / Item Name / Remark columns eating space.
+    const IMPORT_DETAIL_FIELDS = new Set([
+      'so', 'group', 'po_date_by_email', 'po_sementara', 'item_yupi',
+      'item_name', 'spec', 'remark_yupi', 'reschedule', 'ord_qty', 'unit',
+      'unit_price', 'amount', 'purchase_price', 'currency', 'purchase_amount',
+    ]);
+    const detailCount = columns.filter(col => IMPORT_DETAIL_FIELDS.has(col.field)).length;
+    // Apply both filters: hide checklist (if toggled off) + hide detail (if toggled off).
+    const visibleColumns = columns.filter(col => {
+      if (!showImportChecklist && checklistFields.has(col.field)) return false;
+      if (!showImportDetail && IMPORT_DETAIL_FIELDS.has(col.field)) return false;
+      return true;
+    });
     // A "group" column repeats the same value for every item that belongs to
     // the same PO (Status, Vendor, dates, checklist docs, ...). Per-item
     // columns (SO, PO Sementara, Item Name, Spec, Qty, prices, ...) carry
@@ -5773,6 +5846,16 @@ const App = () => {
                 {showImportChecklist ? 'Hide Checklist' : 'Show Checklist'}
               </button>
             )}
+            {/* Show/Hide Detail — toggles the per-item block (SO through
+                PURCHASE AMOUNT). When hidden, the table collapses to one
+                line per row (much narrower) for a quick overview without
+                the long Spec / Item Name / Remark columns. */}
+            {detailCount > 0 && (
+              <button onClick={() => setShowImportDetail(v => !v)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
+                {showImportDetail ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}
+                {showImportDetail ? 'Hide Detail' : 'Show Detail'}
+              </button>
+            )}
             {/* Print PO — opens the Serveone PO printing tool in a new tab. */}
             <a href="https://serveone.streamlit.app/" target="_blank" rel="noopener noreferrer" className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
               <Printer className="w-4 h-4"/>Print PO
@@ -5789,7 +5872,9 @@ const App = () => {
             sub-count of rows whose SAP INPUT is still unchecked), Sales Amount,
             PO Amount (IDR-converted by ETA-date FX rate), and Gross Margin
             (= Sales − PO IDR). All values are computed backend-side across
-            the FULL filtered result set, so they don't change with pagination. */}
+            the FULL filtered result set, so they don't change with pagination.
+            Currency values use the same short-format (IDR + B/K/M/T suffix) as
+            the Summary page KPIs for visual consistency. */}
         <div className={`px-5 py-3 border-b ${darkMode ? 'border-gray-700' : 'border-gray-100'}`}>
           <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(5, minmax(0, 1fr))' }}>
             {/* Total PO */}
@@ -5812,7 +5897,7 @@ const App = () => {
                   <p className={`text-xs font-semibold truncate ${txt2}`} title="This Week Arrival">This Week Arrival</p>
                   <h3 className={`text-xl font-bold leading-tight ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>{fmtNum(importKpis.this_week_arrival)}</h3>
                   <p className={`text-[11px] leading-tight ${importKpis.this_week_no_sap > 0 ? 'text-red-500 font-semibold' : txt2}`} title="Rows arriving this week with SAP INPUT not yet checked">
-                    Belum input SAP: {fmtNum(importKpis.this_week_no_sap)}
+                    SAP not input: {fmtNum(importKpis.this_week_no_sap)}
                   </p>
                 </div>
                 <div className={`p-1.5 rounded-lg flex-shrink-0 ${darkMode ? 'bg-amber-900/40 text-amber-200' : 'bg-amber-100 text-amber-700'}`}>
@@ -5825,8 +5910,8 @@ const App = () => {
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <p className={`text-xs font-semibold truncate ${txt2}`} title="Sales Amount">Sales Amount</p>
-                  <h3 className={`text-xl font-bold leading-tight ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>Rp {fmtNum(importKpis.sales_amount)}</h3>
-                  <p className={`text-[11px] leading-tight ${txt2}`} title="Sum of AMOUNT column">Sum of AMOUNT</p>
+                  <h3 className={`text-xl font-bold leading-tight ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>{fmtCurShort(importKpis.sales_amount)}</h3>
+                  <p className={`text-[11px] leading-tight ${txt2}`} title="Sum of AMOUNT column">{fmtCur(importKpis.sales_amount)}</p>
                 </div>
                 <div className={`p-1.5 rounded-lg flex-shrink-0 ${darkMode ? 'bg-emerald-900/40 text-emerald-200' : 'bg-emerald-100 text-emerald-700'}`}>
                   <DollarSign className="w-3.5 h-3.5" />
@@ -5838,8 +5923,8 @@ const App = () => {
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <p className={`text-xs font-semibold truncate ${txt2}`} title="PO Amount (IDR-converted by ETA date)">PO Amount (IDR)</p>
-                  <h3 className={`text-xl font-bold leading-tight ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>Rp {fmtNum(importKpis.po_amount_idr)}</h3>
-                  <p className={`text-[11px] leading-tight ${txt2}`} title="Converted using ETA-date exchange rate">By ETA-date FX rate</p>
+                  <h3 className={`text-xl font-bold leading-tight ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>{fmtCurShort(importKpis.po_amount_idr)}</h3>
+                  <p className={`text-[11px] leading-tight ${txt2}`} title="Converted using ETA-date exchange rate">{fmtCur(importKpis.po_amount_idr)}</p>
                 </div>
                 <div className={`p-1.5 rounded-lg flex-shrink-0 ${darkMode ? 'bg-blue-900/40 text-blue-200' : 'bg-blue-100 text-blue-700'}`}>
                   <Wallet className="w-3.5 h-3.5" />
@@ -5851,8 +5936,8 @@ const App = () => {
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <p className={`text-xs font-semibold truncate ${txt2}`} title="Gross Margin = Sales Amount − PO Amount (IDR)">Gross Margin</p>
-                  <h3 className={`text-xl font-bold leading-tight ${importKpis.gross_margin < 0 ? 'text-red-500' : (darkMode ? 'text-gray-100' : 'text-gray-800')}`}>Rp {fmtNum(importKpis.gross_margin)}</h3>
-                  <p className={`text-[11px] leading-tight ${txt2}`}>Sales − PO (IDR)</p>
+                  <h3 className={`text-xl font-bold leading-tight ${importKpis.gross_margin < 0 ? 'text-red-500' : (darkMode ? 'text-gray-100' : 'text-gray-800')}`}>{fmtCurShort(importKpis.gross_margin)}</h3>
+                  <p className={`text-[11px] leading-tight ${txt2}`}>{fmtCur(importKpis.gross_margin)}</p>
                 </div>
                 <div className={`p-1.5 rounded-lg flex-shrink-0 ${importKpis.gross_margin < 0 ? (darkMode ? 'bg-red-900/50 text-red-200' : 'bg-red-100 text-red-700') : (darkMode ? 'bg-emerald-900/40 text-emerald-200' : 'bg-emerald-100 text-emerald-700')}`}>
                   <TrendingUp className="w-3.5 h-3.5" />
