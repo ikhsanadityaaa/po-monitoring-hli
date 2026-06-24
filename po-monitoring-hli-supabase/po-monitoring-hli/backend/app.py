@@ -1766,7 +1766,12 @@ def sync_import_sheet_to_dashboard():
     except: db.session.rollback(); purged_legacy = 0
     try:
         sheet_rows = import_layout_tracker_visible_rows(columns)
-        filter_vendors, vendor_source = import_vendor_filter_names()
+        # Use UPLOADED vendor names (from ImportVendor table) — NOT the
+        # import_vendor_filter_names() fallback that includes existing
+        # dashboard vendor names. The fallback would defeat the purpose
+        # of the vendor filter for both source-sheet sync and purge.
+        filter_vendors = import_uploaded_vendor_names()
+        vendor_source = 'vendor_import' if filter_vendors else 'none'
     except:
         import traceback; traceback.print_exc()
         return {'added': 0, 'updated': 0, 'seen': 0, 'sheet_rows': 0, 'vendor_count': vendor_count, 'vendor_filter_count': 0, 'vendor_filter_source': 'none', 'purged_legacy': purged_legacy, 'copy_only': True, 'columns': columns, 'error': 'Failed to read the live Import tracker sheet.', 'source_sheet_url': f'https://docs.google.com/spreadsheets/d/{IMPORT_LAYOUT_SHEET_ID}/edit#gid={IMPORT_LAYOUT_GID}'}
@@ -1783,15 +1788,20 @@ def sync_import_sheet_to_dashboard():
     # at the source level (vendor_set filter) so they never enter the
     # dashboard. If no vendors have been uploaded yet, we skip source-sheet
     # sync entirely (no point pulling thousands of unfiltered rows).
-    filter_vendor_names, _filter_vendor_src = import_vendor_filter_names()
-    filter_vendor_set = {v.strip().lower() for v in filter_vendor_names if v and v.strip()}
+    #
+    # NOTE: We use import_uploaded_vendor_names() directly (NOT
+    # import_vendor_filter_names()) because the latter falls back to
+    # existing dashboard vendor names when nothing is uploaded — which
+    # would defeat the purpose of filtering.
+    uploaded_vendor_names = import_uploaded_vendor_names()
+    uploaded_vendor_set = {v.strip().lower() for v in uploaded_vendor_names if v and v.strip()}
     source_rows_added = 0
     source_errors = []
-    if filter_vendor_set:
+    if uploaded_vendor_set:
         for source in IMPORT_SOURCE_SHEETS:
             try:
                 # vendor_set filter → only rows with matching vendors are returned
-                src_rows = import_source_rows_fast(source, columns, filter_vendor_set)
+                src_rows = import_source_rows_fast(source, columns, uploaded_vendor_set)
                 sheet_rows.extend(src_rows)
                 source_rows_added += len(src_rows)
             except Exception as src_exc:
@@ -1815,21 +1825,29 @@ def sync_import_sheet_to_dashboard():
     # has since been updated to a smaller set — the old vendor rows should
     # be purged so they don't linger in the dashboard forever.
     #
-    # We only purge when there IS an uploaded vendor list (filter_vendor_set
-    # is non-empty). If no vendors are uploaded, we skip purge so the user
-    # doesn't accidentally lose all their data.
+    # IMPORTANT: We use uploaded_vendor_set (from ImportVendor table only)
+    # — NOT import_vendor_filter_names() — because the latter falls back to
+    # existing dashboard vendor names, which would mean NOTHING gets purged
+    # (since the filter set would include every vendor already in the DB).
+    #
+    # We only purge when there IS an uploaded vendor list. If no vendors are
+    # uploaded, we skip purge so the user doesn't accidentally lose all data.
     purged_non_vendor = 0
-    if filter_vendor_set:
+    if uploaded_vendor_set:
         rows_to_purge = []
         for ex_row in existing_rows:
             try: ex_payload = json.loads(ex_row.data_json or '{}')
             except: ex_payload = {}
             ex_vendor = import_nonblank(ex_payload.get('vendor')) or import_nonblank(ex_payload.get('vendor_name')) or import_nonblank(ex_row.vendor_name)
             if not ex_vendor:
-                # No vendor on the row — can't match, keep it (might be a
-                # legitimately blank-vendor row the user wants to keep).
+                # No vendor on the row — can't match. These rows are stale
+                # leftovers from before the vendor filter existed. PURGE them
+                # too so the dashboard only contains vendor-attributed rows.
+                # (If the user actually wants blank-vendor rows, they can
+                # re-add the vendor name in the source sheet and re-sync.)
+                rows_to_purge.append(ex_row)
                 continue
-            if ex_vendor.strip().lower() not in filter_vendor_set:
+            if ex_vendor.strip().lower() not in uploaded_vendor_set:
                 rows_to_purge.append(ex_row)
         for row in rows_to_purge:
             db.session.delete(row)
@@ -6458,6 +6476,15 @@ def get_import_data():
         ).all()
 
         parsed = []
+        # Build the uploaded-vendor set ONCE. When the user has uploaded a
+        # Vendor Import list, only rows whose vendor matches the uploaded
+        # set are eligible for display — even if those rows still exist in
+        # the DB from a previous (broader) sync. This is a safety net that
+        # complements the purge logic in sync_import_sheet_to_dashboard():
+        # if purge hasn't run yet (user hasn't clicked Copy Sheet), the
+        # /data endpoint still hides non-matching rows so the user doesn't
+        # see stale data.
+        uploaded_vendor_set_for_display = {v.strip().lower() for v in import_uploaded_vendor_names() if v and v.strip()}
         for row in candidate_rows:
             try:
                 data = json.loads(row.data_json or '{}')
@@ -6466,6 +6493,13 @@ def get_import_data():
             data = apply_import_formula_columns(dict(data))
             yupi = import_nonblank(data.get('yupi_po')) or import_nonblank(data.get('po_yupi'))
             vendor = import_nonblank(data.get('vendor_name')) or import_nonblank(data.get('vendor')) or import_nonblank(row.vendor_name)
+            # Apply uploaded-vendor filter at the parse level — non-matching
+            # rows never enter `parsed`, so they don't show up in the table
+            # or in any filter dropdown options. Rows with no vendor are also
+            # excluded when an uploaded vendor list exists.
+            if uploaded_vendor_set_for_display:
+                if not vendor or vendor.strip().lower() not in uploaded_vendor_set_for_display:
+                    continue
             parsed.append({'row': row, 'data': data, 'yupi_po': yupi, 'vendor': vendor})
 
         def passes(item, ignore=None):
@@ -6846,6 +6880,11 @@ def export_import_data():
             ImportDashboardRow.id.desc(),
         ).all()
 
+        # Apply the uploaded-vendor filter to exports too — same safety net
+        # as /api/import/data. When a Vendor Import list exists, only rows
+        # with matching vendors are exported.
+        uploaded_vendor_set_for_export = {v.strip().lower() for v in import_uploaded_vendor_names() if v and v.strip()}
+
         filtered = []
         for row in candidate_rows:
             try:
@@ -6855,6 +6894,11 @@ def export_import_data():
             data = apply_import_formula_columns(dict(data))
             yupi = import_nonblank(data.get('yupi_po')) or import_nonblank(data.get('po_yupi'))
             vendor = import_nonblank(data.get('vendor_name')) or import_nonblank(data.get('vendor')) or import_nonblank(row.vendor_name)
+            # Uploaded-vendor filter — skip rows whose vendor is not in the
+            # uploaded list (or has no vendor at all).
+            if uploaded_vendor_set_for_export:
+                if not vendor or vendor.strip().lower() not in uploaded_vendor_set_for_export:
+                    continue
             if none_yupi_po or none_vendor:
                 continue
             if selected_yupi_po and str(yupi or '').strip().lower() not in selected_yupi_po:
