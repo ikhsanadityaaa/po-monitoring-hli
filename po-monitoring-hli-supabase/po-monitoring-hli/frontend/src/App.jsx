@@ -1804,6 +1804,12 @@ const App = () => {
   // the menu escapes the table card's `overflow-hidden` and is never clipped
   // or covered by the table/filter below.
   const importVendorDropdown = useFloatingDropdown(importVendorMenuOpen, 224, 280, 200);
+  // Ref for the hidden vendor-import file input. Lives OUTSIDE the dropdown
+  // so it's always mounted — the dropdown's onBlur would otherwise unmount
+  // the <input> before the file picker's onChange fires, causing the upload
+  // to silently fail. The dropdown's "Upload Vendor Import" button calls
+  // importVendorFileRef.current.click() to open the file picker.
+  const importVendorFileRef = useRef(null);
   const [importFilters, setImportFilters] = useState(() => {
     // Coerce daysLeft to array — previously it was a string, and old
     // localStorage entries may still contain a string. Guard against
@@ -5312,15 +5318,16 @@ const App = () => {
     const tableWidth = Math.max(1100, visibleColumns.reduce((sum, col) => sum + colWidth(col), 0));
     const handleVendorUpload = async (e) => {
       const files = Array.from(e.target.files || []);
-      e.target.value = '';
+      // Reset the input value immediately so the same file can be re-uploaded
+      // later (onChange won't fire again if the same filename is selected).
+      if (e.target) e.target.value = '';
       if (!files.length) return;
       const fd = new FormData();
       files.forEach(file => fd.append('file', file));
       const label = files.length > 1 ? `Vendor Import (${files.length} files)` : 'Vendor Import';
       // Show the upload progress overlay — same pattern used by other uploads
       // (SMRO, Product ID, Master PIC, etc.). Without this the user sees no
-      // feedback that the upload is in progress, which is why they thought
-      // "Upload Vendor Import tidak bekerja".
+      // feedback that the upload is in progress.
       setUploadProgress({ label, pct: 0 });
       try {
         const res = await api.post('/api/import/vendors/upload', fd, {
@@ -5328,8 +5335,12 @@ const App = () => {
           onUploadProgress: (ev) => setUploadProgress({ label, pct: Math.round(ev.loaded * 100 / (ev.total || ev.loaded)) }),
         });
         setUploadProgress(null);
-        addToast(res.data?.message || 'Import vendors updated', 'success');
+        addToast(`✅ ${res.data?.message || 'Import vendors updated'}`, 'success');
         setImportPage(1);
+        // refresh=true triggers Copy Sheet sync from Google Sheets so new
+        // vendor-attributed rows get pulled in. The Import data endpoint
+        // then injects Origin/TOP from the ImportVendor table by matching
+        // vendor_name, so those columns fill in automatically.
         fetchImportData(1, importPerPage, importAppliedSearch, true, importFilters, importReqDlvSort, importYupiPoSort);
       } catch (err) {
         setUploadProgress(null);
@@ -5836,7 +5847,7 @@ const App = () => {
               </button>
               {importVendorMenuOpen && (
                 <div
-                  style={importVendorDropdown.menuPos.style}
+                  style={{ ...importVendorDropdown.menuPos.style, zIndex: 9999 }}
                   className={`rounded-xl border shadow-2xl overflow-hidden ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}
                 >
                   <button
@@ -5846,10 +5857,13 @@ const App = () => {
                   >
                     <Download className="w-4 h-4"/>Template Vendor
                   </button>
-                  <label className={`flex items-center gap-2 w-full px-3 py-2.5 text-sm font-medium cursor-pointer ${darkMode ? 'text-gray-100 hover:bg-gray-700' : 'text-gray-700 hover:bg-blue-50'}`}>
+                  <button
+                    type="button"
+                    onMouseDown={(e) => { e.preventDefault(); setImportVendorMenuOpen(false); importVendorFileRef.current?.click(); }}
+                    className={`flex items-center gap-2 w-full px-3 py-2.5 text-left text-sm font-medium cursor-pointer ${darkMode ? 'text-gray-100 hover:bg-gray-700' : 'text-gray-700 hover:bg-blue-50'}`}
+                  >
                     <FileSpreadsheet className="w-4 h-4"/>Upload Vendor Import
-                    <input type="file" accept=".xlsx,.xls,.csv" multiple onChange={(e) => { handleVendorUpload(e); setImportVendorMenuOpen(false); }} className="hidden"/>
-                  </label>
+                  </button>
                 </div>
               )}
             </div>
@@ -6139,6 +6153,20 @@ const App = () => {
         </DataTableScroll>
 
         <PagePagination darkMode={darkMode} txt2={txt2} page={importPage} totalPages={totalPages} total={importTotal} perPage={importPerPage} onPageChange={(p)=>{ setImportPage(p); fetchImportData(p, importPerPage, importAppliedSearch, false, importFilters, importReqDlvSort, importYupiPoSort); }} onPerPageChange={(next)=>{ setImportPerPage(next); setImportPage(1); fetchImportData(1, next, importAppliedSearch, false, importFilters, importReqDlvSort, importYupiPoSort); }} />
+
+        {/* Hidden file input for Vendor Import upload — lives OUTSIDE the
+            dropdown so it's always mounted. The dropdown's "Upload Vendor
+            Import" button triggers this input via importVendorFileRef.current.click().
+            This prevents the onBlur-closes-dropdown-before-onChange-fires bug
+            that was silently failing the upload. */}
+        <input
+          ref={importVendorFileRef}
+          type="file"
+          accept=".xlsx,.xls,.csv"
+          multiple
+          onChange={(e) => handleVendorUpload(e)}
+          className="hidden"
+        />
       </div>
     );
   };
