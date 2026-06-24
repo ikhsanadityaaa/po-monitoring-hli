@@ -1829,6 +1829,7 @@ const App = () => {
     yupi_po: [],
     vendors: [],
     statuses: ['NEW', ...IMPORT_STATUS_OPTIONS],
+    daysLeftZones: [],  // interdependent days-left color zones from backend
   }));
   const [importReqDlvSort, setImportReqDlvSort] = useState(() => savedImportFilters.reqDlvSort || 'oldest');
   const [importYupiPoSort, setImportYupiPoSort] = useState(() => savedImportFilters.yupiPoSort || '');
@@ -2723,11 +2724,22 @@ const App = () => {
           gross_margin: Number(res.data.kpis.gross_margin) || 0,
         });
       }
-      // Preserve existing status options list (server may not return it).
+      // Store interdependent filter options from backend. Each option list
+      // is built from rows that pass ALL OTHER filters, so the dropdowns
+      // only show values that actually exist in the (otherwise-filtered)
+      // data. E.g., if no rows have status "NEW", the status dropdown won't
+      // show "NEW".
       setImportOptions(prev => ({
         yupi_po: res.data.filters?.yupi_po || [],
         vendors: res.data.filters?.vendors || [],
-        statuses: prev.statuses?.length ? prev.statuses : ['NEW', ...IMPORT_STATUS_OPTIONS],
+        // Backend returns only statuses that exist in the filtered data.
+        // Falls back to the full list on first load (when backend hasn't
+        // returned statuses yet).
+        statuses: (Array.isArray(res.data.filters?.statuses) && res.data.filters.statuses.length > 0)
+          ? res.data.filters.statuses
+          : (prev.statuses?.length ? prev.statuses : ['NEW', ...IMPORT_STATUS_OPTIONS]),
+        // Backend returns only days-left color zones that exist.
+        daysLeftZones: Array.isArray(res.data.filters?.days_left_zones) ? res.data.filters.days_left_zones : (prev.daysLeftZones || []),
       }));
       if (refresh && res.data.sync) {
         const added = Number(res.data.sync.added || 0);
@@ -6008,7 +6020,15 @@ const App = () => {
             <div className="min-w-[130px] flex-shrink-0">
               <MultiSelect
                 label="Status"
-                options={importOptions.statuses || ['NEW', ...IMPORT_STATUS_OPTIONS]}
+                options={(() => {
+                  // Use interdependent status options from backend if available.
+                  // Backend returns only statuses that actually exist in the
+                  // (otherwise-filtered) data. Falls back to the full list
+                  // ['NEW', ...IMPORT_STATUS_OPTIONS] on first load.
+                  const backendOpts = importOptions.statuses;
+                  if (Array.isArray(backendOpts) && backendOpts.length > 0) return backendOpts;
+                  return ['NEW', ...IMPORT_STATUS_OPTIONS];
+                })()}
                 selected={importFilters.statuses || []}
                 onChange={v=>{ const next={...importFilters, statuses:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }}
                 darkMode={darkMode} txt2={txt2}
@@ -6017,7 +6037,23 @@ const App = () => {
             <div className="min-w-[140px] flex-shrink-0">
               <MultiSelect
                 label="Days Left"
-                options={['Red (≤7 / overdue)', 'Yellow (8–29)', 'Green (≥30)', 'Today (0)']}
+                options={(() => {
+                  // Build the days-left option labels from the interdependent
+                  // zone list returned by the backend. Only zones that actually
+                  // exist in the (otherwise-filtered) data are shown.
+                  const allZones = [
+                    { zone: 'red', label: 'Red (≤7 / overdue)' },
+                    { zone: 'yellow', label: 'Yellow (8–29)' },
+                    { zone: 'green', label: 'Green (≥30)' },
+                    { zone: 'today', label: 'Today (0)' },
+                  ];
+                  const backendZones = importOptions.daysLeftZones;
+                  if (Array.isArray(backendZones) && backendZones.length > 0) {
+                    return allZones.filter(z => backendZones.includes(z.zone)).map(z => z.label);
+                  }
+                  // Fallback: show all zones
+                  return allZones.map(z => z.label);
+                })()}
                 selected={(Array.isArray(importFilters.daysLeft) ? importFilters.daysLeft : []).map(v => ({
                   red: 'Red (≤7 / overdue)',
                   yellow: 'Yellow (8–29)',
