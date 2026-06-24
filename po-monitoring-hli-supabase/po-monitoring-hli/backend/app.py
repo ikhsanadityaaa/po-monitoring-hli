@@ -2420,13 +2420,40 @@ def sort_pic_kpis(rows):
 
 def apply_item_registration_pic_filter(query, pics):
     if not pics: return query
-    if '(Kosong)' in pics:
-        others = [p for p in pics if p != '(Kosong)']
-        empty_pic = db.or_(ItemRegistration.pic.is_(None), ItemRegistration.pic == '')
-        if others:
-            return query.filter(db.or_(ItemRegistration.pic.in_(others), empty_pic))
-        return query.filter(empty_pic)
-    return query.filter(ItemRegistration.pic.in_(pics))
+    # IMPORTANT: ItemRegistration.pic column may be stale (not yet refreshed
+    # by refresh_item_registration_mappings). The PIC shown in the table and
+    # KPI is resolved in real-time via resolve_item_registration_pic which
+    # checks MasterClientPIC, MasterBidTypePIC, and MasterPIC.
+    # To filter correctly, we need to match against the RESOLVED PIC, not the
+    # stored column. Fetch needed fields in one query, resolve in Python.
+    _client_pic_cache = {normalize_client_id(m.client_id): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name)}
+    _bid_type_pic_cache = {clean(m.bid_type): clean(m.pic_name) for m in db.session.query(MasterBidTypePIC).all() if clean(m.pic_name)}
+    _cat_by_id, _cat_by_name = master_pic_maps()
+    all_rows = query.with_entities(
+        ItemRegistration.id, ItemRegistration.client_id, ItemRegistration.bid_except_type,
+        ItemRegistration.category_id, ItemRegistration.category, ItemRegistration.pic,
+        ItemRegistration.client_name
+    ).all()
+    matching_ids = []
+    for row_id, cid_val, bt_val, cat_id_val, cat_val, pic_val, client_val in all_rows:
+        pic = None
+        cid = normalize_client_id(cid_val) if cid_val else ''
+        if cid and cid in _client_pic_cache: pic = _client_pic_cache[cid]
+        if not pic and bt_val:
+            bt = clean(bt_val)
+            if bt and bt in _bid_type_pic_cache: pic = _bid_type_pic_cache[bt]
+        if not pic:
+            cat_id = normalize_category_id(cat_id_val)
+            cat_name = normalize_category_name(cat_val)
+            if cat_id and cat_id in _cat_by_id: pic = _cat_by_id[cat_id]
+            elif cat_name and cat_name in _cat_by_name: pic = _cat_by_name[cat_name]
+        pic = pic or clean(pic_val) or ''
+        pic = canonical_pending_pic(pic, client_val)
+        if pic in pics:
+            matching_ids.append(row_id)
+    if not matching_ids:
+        return query.filter(ItemRegistration.id == -1)
+    return query.filter(ItemRegistration.id.in_(matching_ids))
 
 def item_registration_dict(row, registered_items=None, include_similarity=True):
     pic = resolve_item_registration_pic(row)
@@ -2912,17 +2939,37 @@ def get_dashboard_stats():
         wib_today = (datetime.utcnow() + timedelta(hours=7)).date()
         today_start_utc = datetime.combine(wib_today, datetime.min.time()) - timedelta(hours=7)
         tomorrow_start_utc = today_start_utc + timedelta(days=1)
-        updated_today_filters = (SOData.so_create_date.isnot(None), SOData.uploaded_at.isnot(None), SOData.uploaded_at >= today_start_utc, SOData.uploaded_at < tomorrow_start_utc)
-        if is_sqlite:
-            updated_month_rows = db.session.query(func.strftime('%Y', SOData.so_create_date).label('yr'), func.strftime('%m', SOData.so_create_date).label('mo')).filter(*updated_today_filters).distinct().all()
-        else:
-            updated_month_rows = db.session.query(func.extract('year', SOData.so_create_date).label('yr'), func.extract('month', SOData.so_create_date).label('mo')).filter(*updated_today_filters).distinct().all()
+        # "SO months updated today" should show only months where NEW rows
+        # were inserted (not just updated existing rows). We identify new
+        # rows by checking if they were inserted today — but since SOData
+        # doesn't have a separate "created_at" column, we approximate by
+        # looking at the LATEST upload batch: rows whose uploaded_at is
+        # within the last upload's time window. The upload_smro function
+        # sets uploaded_at to datetime.utcnow() for all rows in the batch,
+        # so we find the max(uploaded_at) and use a 5-minute window.
+        latest_upload_time = db.session.query(func.max(SOData.uploaded_at)).scalar()
         so_updated_months_today = {}
-        for yr, mo in updated_month_rows:
-            if yr is None or mo is None: continue
-            yr_s = str(int(yr)) if not isinstance(yr, str) else yr; mo_i = int(mo)
-            so_updated_months_today.setdefault(yr_s, []).append((mo_i, _MONTH_NAMES[mo_i - 1]))
-        so_updated_months_today = {yr: [name for _, name in sorted(months)] for yr, months in sorted(so_updated_months_today.items())}
+        if latest_upload_time:
+            # Check if the latest upload was today (WIB)
+            latest_wib = latest_upload_time + timedelta(hours=7)
+            if latest_wib.date() == wib_today:
+                # Find the upload window: 5 minutes before the latest upload
+                upload_window_start = latest_upload_time - timedelta(minutes=5)
+                updated_today_filters = (
+                    SOData.so_create_date.isnot(None),
+                    SOData.uploaded_at.isnot(None),
+                    SOData.uploaded_at >= upload_window_start,
+                    SOData.uploaded_at <= latest_upload_time + timedelta(seconds=1),
+                )
+                if is_sqlite:
+                    updated_month_rows = db.session.query(func.strftime('%Y', SOData.so_create_date).label('yr'), func.strftime('%m', SOData.so_create_date).label('mo')).filter(*updated_today_filters).distinct().all()
+                else:
+                    updated_month_rows = db.session.query(func.extract('year', SOData.so_create_date).label('yr'), func.extract('month', SOData.so_create_date).label('mo')).filter(*updated_today_filters).distinct().all()
+                for yr, mo in updated_month_rows:
+                    if yr is None or mo is None: continue
+                    yr_s = str(int(yr)) if not isinstance(yr, str) else yr; mo_i = int(mo)
+                    so_updated_months_today.setdefault(yr_s, []).append((mo_i, _MONTH_NAMES[mo_i - 1]))
+                so_updated_months_today = {yr: [name for _, name in sorted(months)] for yr, months in sorted(so_updated_months_today.items())}
         payload = {
             'po_without_so': 0, 'so_without_po': total_so_count, 'total_po_count': 0, 'total_po_line_count': 0, 'total_po_amount': 0.0,
             'total_so_count': total_so_count, 'total_open_so_amount': total_open_so_amount, 'monthly_trend': monthly_trend,
@@ -3195,10 +3242,6 @@ def get_all_so():
         statuses_opts = sorted({s.so_status for s in option_source_sos if s.so_status})
 
         _all_cat_by_id, _all_cat_by_name = master_pic_maps()
-        # FIX V3: _all_known_so_pics DIPINDAHKAN ke sini (sebelum baris pakainya).
-        # Sebelumnya definisi ada di baris 3199 (di bawah pemakaian di baris 3196),
-        # menyebabkan "UnboundLocalError: local variable '_all_known_so_pics'
-        # referenced before assignment" saat get_all_so dipanggil.
         _all_known_so_pics = set()
         _all_known_so_pics.update(_all_cat_by_id.values())
         _all_known_so_pics.update(_all_cat_by_name.values())
@@ -3422,18 +3465,11 @@ def cleanup_master_pic_by_category_name(valid_category_names=None):
 
 def cleanup_item_registration_duplicates_only(): return cleanup_source_table_snapshot(ItemRegistration, 'req_no', None, timestamp_fields=('uploaded_at',), delete_blank=True)
 
+@app.route('/api/upload/scor-json', methods=['POST'])
+@app.route('/api/upload/scor', methods=['POST'])
+@app.route('/api/upload/smro-json', methods=['POST'])
+@app.route('/api/upload/smro', methods=['POST'])
 def _refresh_so_pic_names():
-    """Helper function (BUKAN route handler!) — refresh pic_name untuk semua SO rows.
-    Me-return jumlah baris yang di-refresh (int).
-
-    FIX V3: sebelumnya function ini disertai decorator @app.route('/api/upload/smro', ...)
-    yang membuat Flask mendaftarkannya sebagai view function untuk endpoint upload.
-    Akibatnya, saat client POST /api/upload/smro, Flask memanggil function ini dan
-    mendapat return value int → throw TypeError → HTTP 500.
-
-    Decorator @app.route sekarang DIPINDAHKAN ke upload_smro() yang benar.
-    Lihat https://stackoverflow.com/q/... untuk pola umumnya.
-    """
     prod_map = {str(p.product_id).strip(): (p.category_id, p.category_name) for p in db.session.query(ProductIDDB).all() if p.product_id}
     client_pic_cache = {normalize_client_id(m.client_id): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name)}
     vendor_pic_cache = {normalize_vendor_id(m.vendor_id): clean(m.pic_name) for m in db.session.query(MasterVendorPIC).all() if clean(m.pic_name)}
@@ -3457,14 +3493,6 @@ def _refresh_so_pic_names():
     return refreshed
 
 
-# FIX V3: decorator @app.route untuk endpoint /api/upload/smro dan /api/upload/scor
-# DIPINDAHKAN dari _refresh_so_pic_names() (yang return int) ke upload_smro() (yang return jsonify).
-# Sebelumnya Flask memanggil _refresh_so_pic_names() saat POST /api/upload/smro,
-# mendapat int, lalu throw "TypeError: ... but it was a int" → HTTP 500.
-@app.route('/api/upload/scor-json', methods=['POST'])
-@app.route('/api/upload/scor', methods=['POST'])
-@app.route('/api/upload/smro-json', methods=['POST'])
-@app.route('/api/upload/smro', methods=['POST'])
 def upload_smro():
     try:
         uploads, upload_mode = request_upload_dataframes('smro')
@@ -6640,8 +6668,14 @@ def get_dashboard_status_detail():
             q = apply_so_pic_filter(q, pics)
             return apply_so_create_date_filter(q, date_year, date_from, date_to)
 
+        # Heatmap counts SOs with open_so_filter() + so_countable_sql_filter().
+        # The status-detail popup must use the SAME filters so the row count
+        # matches the clicked number exactly.
+        # When a specific status is clicked: filter by that status (TRIM'd to
+        # match heatmap grouping) + open_so_filter + so_countable.
+        # When no status (e.g. "All Pending Status"): open + countable only.
         if status:
-            q = so_q(so_countable_sql_filter())
+            q = so_q(open_so_filter(), so_countable_sql_filter())
             q = q.filter(func.trim(func.coalesce(SOData.so_status, '')) == status)
         else:
             q = so_q(open_so_filter(), so_countable_sql_filter())
