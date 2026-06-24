@@ -5796,19 +5796,19 @@ const App = () => {
 
     return (
       <div className={`rounded-2xl overflow-hidden ${card}`}>
-        <div className={`px-5 py-4 border-b ${darkMode ? 'border-gray-700' : 'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
-          <div className="flex items-center gap-2 min-w-0">
+        <div className={`px-5 py-4 border-b ${darkMode ? 'border-gray-700' : 'border-gray-100'} flex flex-wrap items-center gap-3`}>
+          <div className="flex items-center gap-2 min-w-0 flex-shrink-0">
             <Ship className="w-5 h-5 text-blue-500 flex-shrink-0" />
             <h2 className={`text-lg font-bold ${txt}`}>Import</h2>
             <span className={`text-sm ${txt2}`}>({fmtNum(importTotal)} records)</span>
             <span className={`text-xs ${txt2}`} title={`Vendor Import: ${fmtNum(importVendorCount)}`}>Last Copy: {fmtWibDateTime(importLastCopyAt)}</span>
           </div>
           {/* Action buttons — kept on a SINGLE line (no wrap) and right-aligned.
-              `flex-nowrap` prevents the buttons from stacking onto multiple
-              rows on narrower screens. On very small viewports the row scrolls
-              horizontally via `overflow-x-auto` rather than wrapping, which
-              avoids the "menumpuk" (stacking) effect the user reported. */}
-          <div className="flex flex-nowrap items-center justify-end gap-2 overflow-x-auto max-w-full -mx-1 px-1">
+              `ml-auto` pushes this whole group to the RIGHT edge of the header,
+              even when the title wraps onto its own line on narrow viewports.
+              `flex-nowrap` keeps the buttons themselves on one line (with
+              horizontal scroll if needed) so they never "menumpuk" (stack). */}
+          <div className="flex flex-nowrap items-center justify-end gap-2 ml-auto overflow-x-auto max-w-full -mx-1 px-1">
             {/* Vendor Import — single dropdown combining Template + Upload.
                 Keeps the header tidy and matches the "1 menu per logical
                 action" pattern used in other tables (RFQ, Item Registration). */}
