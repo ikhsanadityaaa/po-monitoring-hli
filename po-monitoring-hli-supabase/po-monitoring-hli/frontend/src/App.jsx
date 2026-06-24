@@ -468,7 +468,7 @@ const importDisplayValue = (value) => {
 
 const DownloadToast = ({ message, onClose }) => {
   return (
-    <div className="fixed top-5 right-5 z-[200] flex items-center gap-3 px-5 py-3 rounded-xl shadow-2xl text-white bg-blue-700 max-w-sm animate-slide-in">
+    <div className="fixed top-5 right-5 z-[9999] flex items-center gap-3 px-5 py-3 rounded-xl shadow-2xl text-white bg-blue-700 max-w-sm animate-slide-in">
       <Loader2 className="w-5 h-5 flex-shrink-0 animate-spin"/>
       <span className="text-sm font-medium">{message}</span>
     </div>
@@ -479,7 +479,11 @@ const Toast = ({ message, type, onClose }) => {
   useEffect(() => { const t = setTimeout(onClose, 3000); return () => clearTimeout(t); }, [onClose]);
   const bg = type === 'success' ? 'bg-green-600' : type === 'error' ? 'bg-red-600' : 'bg-blue-600';
   return (
-    <div className={`fixed top-5 right-5 z-[100] flex items-center gap-3 px-5 py-3 rounded-xl shadow-2xl text-white ${bg} max-w-sm`}>
+    // NOTE: no `fixed` here — the parent container handles positioning + stacking.
+    // Adding `fixed` on each Toast caused all toasts to stack at the SAME
+    // top-right spot (overlapping each other) instead of stacking vertically
+    // inside the parent's `flex flex-col`.
+    <div className={`flex items-center gap-3 px-5 py-3 rounded-xl shadow-2xl text-white ${bg} max-w-sm`}>
       {type === 'success' ? <CheckCircle className="w-5 h-5 flex-shrink-0" /> : <AlertCircle className="w-5 h-5 flex-shrink-0" />}
       <span className="text-sm font-medium">{message}</span>
       <button onClick={onClose} className="ml-2 hover:opacity-70"><X className="w-4 h-4" /></button>
@@ -7368,7 +7372,10 @@ const App = () => {
         ${frozenColumnCss}
       `}</style>
 
-      <div className="fixed top-5 right-5 z-[100] flex flex-col gap-2">
+      {/* Toast notifications — top-right, above EVERYTHING (z-[9999] beats
+          modals at z-[9999] via DOM order, and beats dropdowns at z-[180]
+          and the upload-progress overlay at z-[10000] is separate). */}
+      <div className="fixed top-5 right-5 z-[9999] flex flex-col gap-2">
         {toasts.map(t=><Toast key={t.id} message={t.message} type={t.type} onClose={()=>removeToast(t.id)}/>)}
       </div>
 
