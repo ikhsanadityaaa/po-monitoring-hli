@@ -934,7 +934,7 @@ IMPORT_SOURCE_ONLY_COLUMNS = [
 IMPORT_SYNC_FIELD_ALIASES = {'yupi_po': 'po_yupi', 'req_dlv_date': 'source_req_dlv_date'}
 
 IMPORT_REFERENCE_VISIBLE_COLUMNS = [
-    {'sheet_col': 'A',  'field': 'status',              'label': 'STATUS',                 'width': 110, 'type': 'status'},
+    {'sheet_col': 'A',  'field': 'status',              'label': 'STATUS',                 'width': 130, 'type': 'status'},
     {'sheet_col': 'B',  'field': 'days_left',           'label': 'Days',                   'width': 64,  'formula': True},
     {'sheet_col': 'C',  'field': 'po_send_date',         'label': 'PO Send Date',          'width': 100, 'local': True, 'group_per_item': False, 'blue_text': True},
     {'sheet_col': 'D',  'source_sheet_col': 'B',  'field': 'site',                'label': 'Site',                   'width': 60,  'formula': True, 'blue_text': True},
@@ -1765,6 +1765,29 @@ def sync_import_sheet_to_dashboard():
     except:
         import traceback; traceback.print_exc()
         return {'added': 0, 'updated': 0, 'seen': 0, 'sheet_rows': 0, 'vendor_count': vendor_count, 'vendor_filter_count': 0, 'vendor_filter_source': 'none', 'purged_legacy': purged_legacy, 'copy_only': True, 'columns': columns, 'error': 'Failed to read the live Import tracker sheet.', 'source_sheet_url': f'https://docs.google.com/spreadsheets/d/{IMPORT_LAYOUT_SHEET_ID}/edit#gid={IMPORT_LAYOUT_GID}'}
+
+    # ── ALSO pull directly from the 2 source sheets (RM=source_1, SP=source_2)
+    # The consolidated layout sheet may not contain all rows from both
+    # sources — SP rows in particular are often missing. By pulling directly
+    # from each source sheet we guarantee both RM and SP data make it into
+    # the dashboard. Source rows are appended to `sheet_rows` so they go
+    # through the same upsert logic below.
+    #
+    # We pass an EMPTY vendor_set so ALL rows are returned (no filtering).
+    # The vendor filter is applied later by the /api/import/data endpoint
+    # via import_vendor_filter_names() — but for sync we want everything.
+    source_rows_added = 0
+    source_errors = []
+    for source in IMPORT_SOURCE_SHEETS:
+        try:
+            # vendor_set=None (or empty set) → return ALL rows, no filter
+            src_rows = import_source_rows_fast(source, columns, set())
+            sheet_rows.extend(src_rows)
+            source_rows_added += len(src_rows)
+        except Exception as src_exc:
+            import traceback; traceback.print_exc()
+            source_errors.append({'source': source.get('key'), 'label': source.get('label'), 'error': str(src_exc)})
+
     existing_rows = ImportDashboardRow.query.filter(
         db.or_(
             ImportDashboardRow.source_key == IMPORT_LAYOUT_SOURCE_KEY,
@@ -1842,7 +1865,19 @@ def sync_import_sheet_to_dashboard():
         import_meta_set('last_copy_at', wib_now.strftime('%Y-%m-%d %H:%M'))
     except: pass
     clear_runtime_caches()
-    return {'added': added, 'updated': updated, 'seen': seen, 'sheet_rows': len(sheet_rows), 'vendor_count': vendor_count, 'vendor_filter_count': len(filter_vendors), 'vendor_filter_source': vendor_source, 'purged_legacy': purged_legacy, 'copy_only': True, 'columns': columns, 'source_sheet_url': f'https://docs.google.com/spreadsheets/d/{IMPORT_LAYOUT_SHEET_ID}/edit#gid={IMPORT_LAYOUT_GID}'}
+    return {
+        'added': added, 'updated': updated, 'seen': seen,
+        'sheet_rows': len(sheet_rows),
+        'source_rows_added': source_rows_added,
+        'source_errors': source_errors,
+        'vendor_count': vendor_count,
+        'vendor_filter_count': len(filter_vendors),
+        'vendor_filter_source': vendor_source,
+        'purged_legacy': purged_legacy,
+        'copy_only': True,
+        'columns': columns,
+        'source_sheet_url': f'https://docs.google.com/spreadsheets/d/{IMPORT_LAYOUT_SHEET_ID}/edit#gid={IMPORT_LAYOUT_GID}',
+    }
 
 RFQ_DASHBOARD_ONLY_FIELDS = {'private_remarks_1', 'private_remarks_2'}
 
