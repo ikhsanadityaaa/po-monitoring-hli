@@ -10,7 +10,8 @@ import {
   ChevronRight, Moon, Sun, FileText, BarChart3, FileSpreadsheet,
   Filter, X, ChevronDown, ChevronUp, Building2, Search, Loader2,
   EyeOff, Eye, Trash2, RotateCcw, Plus, Coins, Wallet, Mail, Minus,
-  Clock, Wrench, Check, Link as LinkIcon, Pin, PinOff, Ship, FolderOpen, Pencil, Printer
+  Clock, Wrench, Check, Link as LinkIcon, Pin, PinOff, Ship, FolderOpen, Pencil, Printer,
+  DollarSign
 } from 'lucide-react';
 import axios from 'axios';
 import { format, parseISO } from 'date-fns';
@@ -1821,6 +1822,16 @@ const App = () => {
   }));
   const [importReqDlvSort, setImportReqDlvSort] = useState(() => savedImportFilters.reqDlvSort || 'oldest');
   const [importYupiPoSort, setImportYupiPoSort] = useState(() => savedImportFilters.yupiPoSort || '');
+  // Import page KPIs (returned by /api/import/data). Computed backend-side
+  // across ALL filtered rows so they don't change with pagination.
+  const [importKpis, setImportKpis] = useState({
+    total_po: 0,
+    this_week_arrival: 0,
+    this_week_no_sap: 0,
+    sales_amount: 0,
+    po_amount_idr: 0,
+    gross_margin: 0,
+  });
   const [rfqEditedRowKeys, setRfqEditedRowKeys] = useState(new Set());
   const rfqDashboardOnlyFields = new Set(['private_remarks_1', 'private_remarks_2']);
 
@@ -2691,6 +2702,17 @@ const App = () => {
       setImportTotal(res.data.total || 0);
       setImportVendorCount(res.data.vendor_count || 0);
       setImportLastCopyAt(res.data.last_copy_at || '');
+      // Store KPIs returned by backend (computed across all filtered rows).
+      if (res.data.kpis && typeof res.data.kpis === 'object') {
+        setImportKpis({
+          total_po: Number(res.data.kpis.total_po) || 0,
+          this_week_arrival: Number(res.data.kpis.this_week_arrival) || 0,
+          this_week_no_sap: Number(res.data.kpis.this_week_no_sap) || 0,
+          sales_amount: Number(res.data.kpis.sales_amount) || 0,
+          po_amount_idr: Number(res.data.kpis.po_amount_idr) || 0,
+          gross_margin: Number(res.data.kpis.gross_margin) || 0,
+        });
+      }
       // Preserve existing status options list (server may not return it).
       setImportOptions(prev => ({
         yupi_po: res.data.filters?.yupi_po || [],
@@ -5195,17 +5217,24 @@ const App = () => {
       return indices;
     })();
     const colWidth = (col) => {
-      if (col.field === 'days_left') return 80;
-      if (Number(col.width)) return Math.max(64, Math.min(Number(col.width), 360));
+      if (col.field === 'days_left') return 64;
+      // Use the backend-provided width (already tightened to match content),
+      // clamped to a sensible min/max. Spec column is allowed to exceed the
+      // max so long item specs stay readable.
+      if (Number(col.width)) {
+        const isSpec = String(col.field || '').toLowerCase() === 'spec' || String(col.label || '').toLowerCase().includes('spec');
+        if (isSpec) return Math.max(340, Math.min(Number(col.width), 420));
+        return Math.max(56, Math.min(Number(col.width), 320));
+      }
       const label = String(col.label || '').toLowerCase();
-      if (isImportChecklistColumn(col)) return 82;
-      if (label.includes('spec') || label.includes('remark')) return 320;
-      if (label.includes('item name')) return 260;
-      if (label.includes('vendor')) return 190;
-      if (label.includes('status')) return 132;
-      if (label.includes('date') || label.includes('actual') || ['etd', 'eta'].includes(col.field)) return 120;
-      if (isImportHyperlinkColumn(col)) return 190;
-      return 126;
+      if (isImportChecklistColumn(col)) return 70;
+      if (label.includes('spec') || label.includes('remark')) return 280;
+      if (label.includes('item name')) return 200;
+      if (label.includes('vendor')) return 140;
+      if (label.includes('status')) return 110;
+      if (label.includes('date') || label.includes('actual') || ['etd', 'eta'].includes(col.field)) return 100;
+      if (isImportHyperlinkColumn(col)) return 150;
+      return 110;
     };
     const tableWidth = Math.max(1100, visibleColumns.reduce((sum, col) => sum + colWidth(col), 0));
     const handleVendorUpload = async (e) => {
@@ -5230,9 +5259,14 @@ const App = () => {
       // <input type="date"> picker can parse it and show the calendar with
       // the correct day pre-selected. Without this, a value like "2 Jun"
       // would make the picker open blank (the input can't parse it).
-      const isDateField = ['po_send_date', 'po_date_by_email', 'req_dlv_date', 'source_req_dlv_date', 'reschedule', 'etd', 'eta'].includes(col.field) || String(col.label || '').toLowerCase().includes('date');
+      const isDateField = ['po_send_date', 'po_date_by_email', 'req_dlv_date', 'source_req_dlv_date', 'reschedule', 'etd', 'eta', 'payment_date'].includes(col.field) || String(col.label || '').toLowerCase().includes('date');
       const rawValue = String(row[col.field] ?? '');
-      setImportEditValue(isDateField ? toDateInputValue(rawValue) : rawValue);
+      // For payment_date, the backend may set a sentinel "Overdue" value
+      // when no real date has been entered. When opening the editor, treat
+      // "Overdue" as empty so the date picker opens blank — the user can
+      // then enter an actual date.
+      const effectiveValue = col.field === 'payment_date' && rawValue === 'Overdue' ? '' : rawValue;
+      setImportEditValue(isDateField ? toDateInputValue(effectiveValue) : effectiveValue);
     };
     const renderImportCell = (row, col) => {
       const key = `${row._row_key}:${col.field}`;
@@ -5282,9 +5316,80 @@ const App = () => {
         );
       }
 
+      // ── Payment dropdown (empty / "DONE") ──────────────────────────────
+      if (col.field === 'payment' || col.payment_dropdown) {
+        const current = String(value || '').trim().toUpperCase();
+        return (
+          <select
+            value={current === 'DONE' ? 'DONE' : ''}
+            onChange={(e) => updateImportCell(row._row_key, col.field, e.target.value)}
+            className={`w-full h-7 rounded-lg border px-1 py-0 text-[11px] font-bold outline-none cursor-pointer ${current === 'DONE' ? (darkMode ? 'bg-emerald-700 text-emerald-100 border-emerald-600' : 'bg-emerald-100 text-emerald-700 border-emerald-300') : (darkMode ? 'bg-gray-700 text-gray-200 border-gray-600' : 'bg-white text-gray-700 border-gray-300')}`}
+          >
+            <option value=""></option>
+            <option value="DONE">DONE</option>
+          </select>
+        );
+      }
+
+      // ── Payment Date — date picker with auto-"Overdue" red badge ───────
+      // Backend sets payment_date = "Overdue" when today > ETA + TOP days
+      // AND no real date has been entered yet. Render "Overdue" as a red
+      // pill; otherwise render the actual date (click to open date picker).
+      if (col.field === 'payment_date' || col.payment_date) {
+        const str = String(value ?? '').trim();
+        if (editing) {
+          // Date picker — uses the same date-input styling as other date fields.
+          const dateInputCls = `block w-full min-h-8 px-2 py-1 text-xs rounded-none outline-none focus:outline-none ${darkMode ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`;
+          const dateInputStyle = { outline: 'none', outlineStyle: 'none', outlineWidth: 0, borderColor: 'transparent', borderWidth: 0 };
+          return (
+            <input
+              type="date"
+              autoFocus
+              data-no-focus-ring=""
+              className={dateInputCls}
+              style={dateInputStyle}
+              value={toDateInputValue(importEditValue)}
+              onFocus={e => { try { e.currentTarget.showPicker?.(); } catch {} }}
+              onClick={e => { try { e.currentTarget.showPicker?.(); } catch {} }}
+              onChange={e => setImportEditValue(e.target.value)}
+              onBlur={e => updateImportCell(row._row_key, col.field, e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') updateImportCell(row._row_key, col.field, e.currentTarget.value);
+                if (e.key === 'Escape') setImportEditingCell(null);
+              }}
+            />
+          );
+        }
+        if (str === 'Overdue') {
+          return (
+            <button
+              type="button"
+              onClick={() => startImportEdit(row, col)}
+              className="block w-full text-center"
+              title="Overdue — click to enter a payment date"
+            >
+              <span className={`inline-flex h-6 items-center rounded-full px-2 text-[11px] font-bold ${darkMode ? 'bg-red-900/60 text-red-200 border border-red-700' : 'bg-red-100 text-red-700 border border-red-300'}`}>
+                Overdue
+              </span>
+            </button>
+          );
+        }
+        const display = importDisplayValue(value);
+        return (
+          <button
+            type="button"
+            className={`block w-full truncate whitespace-nowrap leading-6 text-left ${darkMode ? 'text-gray-200' : 'text-slate-700'} hover:underline decoration-dotted`}
+            title={display || 'Click to enter payment date'}
+            onClick={() => startImportEdit(row, col)}
+          >
+            {display || <span className="text-slate-400">-</span>}
+          </button>
+        );
+      }
+
       if (editing) {
         const isLong = ['spec', 'remark_yupi', 'import_remarks', 'soft_copy_doc'].includes(col.field);
-        const isDateField = ['po_send_date', 'po_date_by_email', 'req_dlv_date', 'source_req_dlv_date', 'reschedule', 'etd', 'eta'].includes(col.field) || String(col.label || '').toLowerCase().includes('date');
+        const isDateField = ['po_send_date', 'po_date_by_email', 'req_dlv_date', 'source_req_dlv_date', 'reschedule', 'etd', 'eta', 'payment_date'].includes(col.field) || String(col.label || '').toLowerCase().includes('date');
         // Input fills the td edge-to-edge with NO inner ring/outline — the td
         // itself already shows the blue outer outline when editingCellNow is
         // true (see the td className above). A second inner ring here would
@@ -5679,6 +5784,84 @@ const App = () => {
           </div>
         </div>
 
+        {/* ── KPI section ───────────────────────────────────────────────────
+            Five KPI cards across the top: Total PO, This Week Arrival (with
+            sub-count of rows whose SAP INPUT is still unchecked), Sales Amount,
+            PO Amount (IDR-converted by ETA-date FX rate), and Gross Margin
+            (= Sales − PO IDR). All values are computed backend-side across
+            the FULL filtered result set, so they don't change with pagination. */}
+        <div className={`px-5 py-3 border-b ${darkMode ? 'border-gray-700' : 'border-gray-100'}`}>
+          <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(5, minmax(0, 1fr))' }}>
+            {/* Total PO */}
+            <div className={`p-3 rounded-xl ${darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200'}`}>
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className={`text-xs font-semibold truncate ${txt2}`} title="Total PO">Total PO</p>
+                  <h3 className={`text-xl font-bold leading-tight ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>{fmtNum(importKpis.total_po)}</h3>
+                  <p className={`text-[11px] leading-tight ${txt2}`}>&nbsp;</p>
+                </div>
+                <div className={`p-1.5 rounded-lg flex-shrink-0 ${darkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-100 text-gray-600'}`}>
+                  <Ship className="w-3.5 h-3.5" />
+                </div>
+              </div>
+            </div>
+            {/* This Week Arrival — with sub-count of "no SAP input yet" */}
+            <div className={`p-3 rounded-xl ${darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200'}`}>
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className={`text-xs font-semibold truncate ${txt2}`} title="This Week Arrival">This Week Arrival</p>
+                  <h3 className={`text-xl font-bold leading-tight ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>{fmtNum(importKpis.this_week_arrival)}</h3>
+                  <p className={`text-[11px] leading-tight ${importKpis.this_week_no_sap > 0 ? 'text-red-500 font-semibold' : txt2}`} title="Rows arriving this week with SAP INPUT not yet checked">
+                    Belum input SAP: {fmtNum(importKpis.this_week_no_sap)}
+                  </p>
+                </div>
+                <div className={`p-1.5 rounded-lg flex-shrink-0 ${darkMode ? 'bg-amber-900/40 text-amber-200' : 'bg-amber-100 text-amber-700'}`}>
+                  <Calendar className="w-3.5 h-3.5" />
+                </div>
+              </div>
+            </div>
+            {/* Sales Amount */}
+            <div className={`p-3 rounded-xl ${darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200'}`}>
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className={`text-xs font-semibold truncate ${txt2}`} title="Sales Amount">Sales Amount</p>
+                  <h3 className={`text-xl font-bold leading-tight ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>Rp {fmtNum(importKpis.sales_amount)}</h3>
+                  <p className={`text-[11px] leading-tight ${txt2}`} title="Sum of AMOUNT column">Sum of AMOUNT</p>
+                </div>
+                <div className={`p-1.5 rounded-lg flex-shrink-0 ${darkMode ? 'bg-emerald-900/40 text-emerald-200' : 'bg-emerald-100 text-emerald-700'}`}>
+                  <DollarSign className="w-3.5 h-3.5" />
+                </div>
+              </div>
+            </div>
+            {/* PO Amount (IDR) */}
+            <div className={`p-3 rounded-xl ${darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200'}`}>
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className={`text-xs font-semibold truncate ${txt2}`} title="PO Amount (IDR-converted by ETA date)">PO Amount (IDR)</p>
+                  <h3 className={`text-xl font-bold leading-tight ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>Rp {fmtNum(importKpis.po_amount_idr)}</h3>
+                  <p className={`text-[11px] leading-tight ${txt2}`} title="Converted using ETA-date exchange rate">By ETA-date FX rate</p>
+                </div>
+                <div className={`p-1.5 rounded-lg flex-shrink-0 ${darkMode ? 'bg-blue-900/40 text-blue-200' : 'bg-blue-100 text-blue-700'}`}>
+                  <Wallet className="w-3.5 h-3.5" />
+                </div>
+              </div>
+            </div>
+            {/* Gross Margin = Sales − PO (IDR) */}
+            <div className={`p-3 rounded-xl ${darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-gray-50 border border-gray-200'}`}>
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className={`text-xs font-semibold truncate ${txt2}`} title="Gross Margin = Sales Amount − PO Amount (IDR)">Gross Margin</p>
+                  <h3 className={`text-xl font-bold leading-tight ${importKpis.gross_margin < 0 ? 'text-red-500' : (darkMode ? 'text-gray-100' : 'text-gray-800')}`}>Rp {fmtNum(importKpis.gross_margin)}</h3>
+                  <p className={`text-[11px] leading-tight ${txt2}`}>Sales − PO (IDR)</p>
+                </div>
+                <div className={`p-1.5 rounded-lg flex-shrink-0 ${importKpis.gross_margin < 0 ? (darkMode ? 'bg-red-900/50 text-red-200' : 'bg-red-100 text-red-700') : (darkMode ? 'bg-emerald-900/40 text-emerald-200' : 'bg-emerald-100 text-emerald-700')}`}>
+                  <TrendingUp className="w-3.5 h-3.5" />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <FilterPanel darkMode={darkMode}>
           <div className="flex flex-wrap items-end gap-2">
             <div className="min-w-[110px] flex-shrink-0">
@@ -5807,7 +5990,13 @@ const App = () => {
                     fillHighlighted = importFillRange.startRow === ownerRowIndex && colIdx >= importFillRange.minCol && colIdx <= importFillRange.maxCol && col.field !== importFillRange.startField;
                   }
                   const editingCellNow = importEditingCell === `${ownerRow._row_key}:${col.field}`;
-                  const directEdit = !(col.field === 'status' || col.type === 'status' || isImportChecklistColumn(col));
+                  // directEdit: cell types that DON'T auto-open a text editor
+                  // on click — they render their own interactive control
+                  // (dropdown/checkbox/date picker) inside the cell.
+                  const directEdit = !(col.field === 'status' || col.type === 'status'
+                    || isImportChecklistColumn(col)
+                    || col.field === 'payment' || col.payment_dropdown
+                    || col.field === 'payment_date' || col.payment_date);
                   return <td
                     key={col.field}
                     rowSpan={rowSpan > 1 ? rowSpan : undefined}
