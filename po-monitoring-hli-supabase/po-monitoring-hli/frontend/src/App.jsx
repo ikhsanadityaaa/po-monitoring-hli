@@ -5803,17 +5803,22 @@ const App = () => {
             <span className={`text-sm ${txt2}`}>({fmtNum(importTotal)} records)</span>
             <span className={`text-xs ${txt2}`} title={`Vendor Import: ${fmtNum(importVendorCount)}`}>Last Copy: {fmtWibDateTime(importLastCopyAt)}</span>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          {/* Action buttons — kept on a SINGLE line (no wrap) and right-aligned.
+              `flex-nowrap` prevents the buttons from stacking onto multiple
+              rows on narrower screens. On very small viewports the row scrolls
+              horizontally via `overflow-x-auto` rather than wrapping, which
+              avoids the "menumpuk" (stacking) effect the user reported. */}
+          <div className="flex flex-nowrap items-center justify-end gap-2 overflow-x-auto max-w-full -mx-1 px-1">
             {/* Vendor Import — single dropdown combining Template + Upload.
                 Keeps the header tidy and matches the "1 menu per logical
                 action" pattern used in other tables (RFQ, Item Registration). */}
-            <div className="relative">
+            <div className="relative flex-shrink-0">
               <button
                 ref={importVendorDropdown.triggerRef}
                 type="button"
                 onClick={() => setImportVendorMenuOpen(v => !v)}
                 onBlur={() => setTimeout(() => setImportVendorMenuOpen(false), 150)}
-                className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}
+                className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm whitespace-nowrap ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}
               >
                 <FileSpreadsheet className="w-4 h-4"/>Vendor Import
                 <svg className={`w-3 h-3 transition-transform ${importVendorMenuOpen ? 'rotate-180' : ''}`} viewBox="0 0 12 12" fill="none"><path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
@@ -5838,10 +5843,10 @@ const App = () => {
               )}
             </div>
             {/* Copy Sheet — triggers a fresh sync from the live Import tracker sheet. */}
-            <button onClick={() => fetchImportData(importPage, importPerPage, importAppliedSearch, true, importFilters, importReqDlvSort, importYupiPoSort)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><RotateCcw className="w-4 h-4"/>Copy Sheet</button>
+            <button onClick={() => fetchImportData(importPage, importPerPage, importAppliedSearch, true, importFilters, importReqDlvSort, importYupiPoSort)} className={`flex-shrink-0 flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm whitespace-nowrap ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><RotateCcw className="w-4 h-4"/>Copy Sheet</button>
             {/* Hide/Show Checklist — toggle visibility of the 8 checklist columns (SAP INPUT, BL/AWB, …, COO). */}
             {checklistCount > 0 && (
-              <button onClick={() => setShowImportChecklist(v => !v)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
+              <button onClick={() => setShowImportChecklist(v => !v)} className={`flex-shrink-0 flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm whitespace-nowrap ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
                 {showImportChecklist ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}
                 {showImportChecklist ? 'Hide Checklist' : 'Show Checklist'}
               </button>
@@ -5851,17 +5856,17 @@ const App = () => {
                 line per row (much narrower) for a quick overview without
                 the long Spec / Item Name / Remark columns. */}
             {detailCount > 0 && (
-              <button onClick={() => setShowImportDetail(v => !v)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
+              <button onClick={() => setShowImportDetail(v => !v)} className={`flex-shrink-0 flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm whitespace-nowrap ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
                 {showImportDetail ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}
                 {showImportDetail ? 'Hide Detail' : 'Show Detail'}
               </button>
             )}
             {/* Print PO — opens the Serveone PO printing tool in a new tab. */}
-            <a href="https://serveone.streamlit.app/" target="_blank" rel="noopener noreferrer" className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
+            <a href="https://serveone.streamlit.app/" target="_blank" rel="noopener noreferrer" className={`flex-shrink-0 flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm whitespace-nowrap ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
               <Printer className="w-4 h-4"/>Print PO
             </a>
             {/* Download Excel — exports the current filtered+sorted view. */}
-            <DownloadButton onClick={downloadImportExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
+            <DownloadButton onClick={downloadImportExcel} className="flex-shrink-0 flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm whitespace-nowrap">
               <Download className="w-4 h-4"/>Download Excel
             </DownloadButton>
           </div>
@@ -6023,7 +6028,7 @@ const App = () => {
         </FilterPanel>
 
         <DataTableScroll darkMode={darkMode}>
-          <table className="freeze-table-import table-fixed text-xs border-collapse border" style={{ width: `${tableWidth}px`, minWidth: `${tableWidth}px` }}>
+          <table className={`freeze-table-import table-fixed text-xs border-collapse border ${showImportDetail ? '' : 'import-detail-hidden'}`} style={{ width: `${tableWidth}px`, minWidth: `${tableWidth}px` }}>
             <colgroup>{visibleColumns.map(col => <col key={col.field} style={{ width: `${colWidth(col)}px` }} />)}</colgroup>
             <thead className={tblHd}>
               <tr>{visibleColumns.map((col, index) => (
@@ -7117,6 +7122,17 @@ const App = () => {
         .freeze-table-import tbody tr { height: 32px; }
         /* max-height only on non-date cells — date picker popup needs unrestricted height */
         .freeze-table-import td > *:not(input[type="date"]) { max-height: 28px; }
+        /* When detail columns are hidden, FORCE every row to be exactly 1 line
+           tall (32px) — no exceptions. This overrides any cell content that
+           would normally push the row taller (long remarks, multi-line text).
+           The user reported rows staying at original height even after Hide
+           Detail; this rule enforces the 1-line height strictly. */
+        .freeze-table-import.import-detail-hidden tbody tr { height: 32px !important; max-height: 32px !important; }
+        .freeze-table-import.import-detail-hidden tbody td { height: 32px !important; max-height: 32px !important; padding-top: 2px !important; padding-bottom: 2px !important; overflow: hidden !important; }
+        .freeze-table-import.import-detail-hidden tbody td > *:not(input[type="date"]) { max-height: 28px !important; overflow: hidden !important; }
+        .freeze-table-import.import-detail-hidden tbody td button,
+        .freeze-table-import.import-detail-hidden tbody td span,
+        .freeze-table-import.import-detail-hidden tbody td div { max-height: 28px !important; overflow: hidden !important; line-height: 1.2 !important; }
         .freeze-table-import input, .freeze-table-import textarea, .freeze-table-import select {
           outline: none !important;
           box-shadow: none !important;
