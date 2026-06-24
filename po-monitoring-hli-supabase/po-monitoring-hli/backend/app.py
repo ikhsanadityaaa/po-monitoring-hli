@@ -333,6 +333,7 @@ class ItemRegistration(db.Model):
     odr_unit = db.Column(db.String(50))
     bid_except_type = db.Column(db.String(255))
     vendor_name = db.Column(db.String(300))
+    vendor_id = db.Column(db.String(100), index=True)
     prod_price = db.Column(db.Float)
     curr = db.Column(db.String(20))
     hub_handling_check = db.Column(db.String(100))
@@ -647,7 +648,7 @@ def _ensure_extra_columns():
         except Exception: return set()
     migration_plan = {
         'so_data': [('specification', 'TEXT'), ('product_id', 'VARCHAR(100)'), ('vendor_id', 'VARCHAR(100)'), ('client_id', 'VARCHAR(100)'), ('manufacturer_name', 'VARCHAR(300)'), ('purchasing_currency', 'VARCHAR(10)'), ('purchasing_amount_idr', 'DOUBLE PRECISION'), ('purchasing_amount_idr_cached_at', 'TIMESTAMP'), ('pic_name', 'VARCHAR(100)')],
-        'item_registration': [('req_date', 'DATE'), ('existing_owner', 'VARCHAR(100)'), ('client_id', 'VARCHAR(100)'), ('operation_unit_name', 'VARCHAR(300)'), ('bid_except_type', 'VARCHAR(255)'), ('category_id', 'VARCHAR(100)'), ('pic_name', 'VARCHAR(200)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(50)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)'), ('remarks', 'TEXT')],
+        'item_registration': [('req_date', 'DATE'), ('existing_owner', 'VARCHAR(100)'), ('client_id', 'VARCHAR(100)'), ('operation_unit_name', 'VARCHAR(300)'), ('bid_except_type', 'VARCHAR(255)'), ('category_id', 'VARCHAR(100)'), ('pic_name', 'VARCHAR(200)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(50)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)'), ('remarks', 'TEXT'), ('vendor_id', 'VARCHAR(100)')],
         'product_id_db': [('specification', 'TEXT'), ('manufacturer_name', 'VARCHAR(255)'), ('vendor_name', 'VARCHAR(300)'), ('order_unit', 'VARCHAR(50)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(100)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)')],
         'import_vendor': [('origin', 'VARCHAR(100)'), ('top', 'VARCHAR(50)'), ('non_ski', 'VARCHAR(50)')],
     }
@@ -2775,6 +2776,21 @@ def apply_item_registration_pic_filter(query, pics):
 def item_registration_dict(row, registered_items=None, include_similarity=True):
     pic = resolve_item_registration_pic(row)
     similar_items = find_similar_registered_items(row, registered_items) if include_similarity else None
+    # Normalize vendor_id: strip leading zeros + .0 suffix. Also try to look
+    # up vendor_id from Vendor Control data by matching vendor_name (for rows
+    # that don't have vendor_id stored directly).
+    raw_vid = clean(getattr(row, 'vendor_id', None))
+    vid = normalize_vendor_id(raw_vid) if raw_vid else ''
+    if not vid and row.vendor_name:
+        # Fallback: look up vendor_id from Vendor Control by vendor_name match
+        try:
+            vc_rows, _ = vendor_control_rows(force=False)
+            for vc in vc_rows:
+                if clean(vc.get('vendor_name')) and clean(vc.get('vendor_name')).strip().lower() == clean(row.vendor_name).strip().lower():
+                    vid = normalize_vendor_id(vc.get('vendor_id')) or ''
+                    break
+        except Exception:
+            pass
     return {
         'id': row.id, 'proc_status': row.proc_status or '', 'req_date': row.req_date.isoformat() if row.req_date else '',
         'existing_owner': row.existing_owner or '', 'client_name': row.client_name or '',
@@ -2783,7 +2799,8 @@ def item_registration_dict(row, registered_items=None, include_similarity=True):
         'pic': pic, 'req_no': row.req_no or '', 'prod_id': row.prod_id or '', 'batch_grp_no': row.batch_grp_no or '',
         'prod_name': row.prod_name or '', 'spec': row.spec or '', 'mfr_name': row.mfr_name or '', 'odr_unit': row.odr_unit or '',
         'bid_except_type': row.bid_except_type or '',
-        'vendor_name': row.vendor_name or '', 'prod_price': row.prod_price or 0, 'curr': row.curr or '', 'remarks': row.remarks or '',
+        'vendor_name': row.vendor_name or '', 'vendor_id': vid,
+        'prod_price': row.prod_price or 0, 'curr': row.curr or '', 'remarks': row.remarks or '',
         'uploaded_at': utc_isoformat(row.uploaded_at), 'similar_items': similar_items,
         'similar_prod_ids': (similar_items or {}).get('product_ids', ''), 'similar_prod_name': (similar_items or {}).get('product_name', ''),
         'similar_spec': (similar_items or {}).get('specification', ''), 'similar_mfr_name': (similar_items or {}).get('manufacturer_name', ''),
@@ -2979,6 +2996,7 @@ def _item_registration_columns(df):
         'odr_unit': find_column(df, ['Odr. Unit', 'Odr. Unit.', 'Order Unit']),
         'bid_except_type': find_column(df, ['Bid Except Type', 'Bid/Except Type', 'Bid Type', 'Bid/Except. Type']),
         'vendor_name': find_column(df, ['Vendor Nm.', 'Vendor Nm', 'Vendor Name']),
+        'vendor_id': find_column(df, ['Vendor ID', 'Vendor Id', 'VendorID', 'Vendor Code', 'Supplier ID']),
         'prod_price': find_column(df, ['Prod. Price', 'Product Price', 'Price']),
         'curr': find_column(df, ['Curr.', 'Curr', 'Currency']),
         'hub_handling_check': find_column(df, ['HUB Handling Chk.', 'HUB Handling Chk', 'HUB Handling Check', 'Hub Handling Check', 'Hub Handling Chk.']),
@@ -3024,7 +3042,7 @@ def import_item_registration_dataframe(df, filename='Item Registration'):
             'batch_grp_no': clean(df_val(row, col['batch_grp_no'])), 'prod_name': prod_name, 'spec': clean(df_val(row, col['spec'])),
             'mfr_name': clean(df_val(row, col['mfr_name'])), 'odr_unit': clean(df_val(row, col['odr_unit'])),
             'bid_except_type': clean(df_val(row, col['bid_except_type'])),
-            'vendor_name': clean(df_val(row, col['vendor_name'])), 'prod_price': safe_float(df_val(row, col['prod_price'])),
+            'vendor_name': clean(df_val(row, col['vendor_name'])), 'vendor_id': normalize_vendor_id(clean(df_val(row, col['vendor_id'])) or '') if col.get('vendor_id') else '', 'prod_price': safe_float(df_val(row, col['prod_price'])),
             'curr': clean(df_val(row, col['curr'])), 'hub_handling_check': clean(df_val(row, col['hub_handling_check'])),
             'tax_type': clean(df_val(row, col['tax_type'])), 'registration_date': parse_date(df_val(row, col['registration_date'])),
             'product_registry_pic': clean(df_val(row, col['product_registry_pic'])), 'uploaded_at': datetime.utcnow(),
@@ -4940,6 +4958,152 @@ def apply_item_registration_request_filters(query):
         query = apply_item_registration_kpi_status_filter(query)
         query = query.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-'))
     return query
+
+
+@app.route('/api/item-registration/vendor-auto-approve', methods=['POST'])
+def item_registration_vendor_auto_approve():
+    """Vendor Auto Approve endpoint.
+
+    Accepts a list of req_no values from the Item Registration table.
+    Groups them by vendor_id (looked up from Vendor Control data by matching
+    vendor_name). For each vendor (processed SEQUENTIALLY, not in parallel):
+      1. Login to Serveone Mall using vendor credentials (V + vendor_id + password)
+      2. Navigate to Batch Unit Price Agreement menu
+      3. Find rows matching the req numbers in the Request Number column
+      4. Check matching rows
+      5. Click Agreement button
+      6. Handle confirmation + success popups
+    Returns a summary of which req numbers were processed vs not found.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        req_numbers = data.get('req_numbers', [])
+        if not req_numbers or not isinstance(req_numbers, list):
+            return jsonify({'error': 'req_numbers (list) is required'}), 400
+
+        # ── Step 1: Look up vendor info for each req_no ──────────────────
+        # Get ItemRegistration rows matching the req_numbers
+        req_set = {str(r).strip() for r in req_numbers if str(r).strip()}
+        items = ItemRegistration.query.filter(ItemRegistration.req_no.in_(list(req_set))).all()
+
+        # Build req_no → vendor_name map
+        req_to_vendor_name = {}
+        for item in items:
+            vn = clean(item.vendor_name)
+            if vn:
+                req_to_vendor_name[str(item.req_no).strip()] = vn
+
+        # Get Vendor Control rows (vendor_name → vendor_id + password)
+        try:
+            vc_rows, _ = vendor_control_rows(force=True)
+        except Exception as vc_exc:
+            return jsonify({'error': f'Failed to load Vendor Control data: {vc_exc}'}), 500
+
+        # Build vendor_name_lower → {vendor_id, password, vendor_name} map
+        vc_by_name = {}
+        for vc in vc_rows:
+            vname = clean(vc.get('vendor_name'))
+            if vname:
+                vc_by_name[vname.strip().lower()] = {
+                    'vendor_id': clean(vc.get('vendor_id')) or '',
+                    'password': clean(vc.get('password')) or '',
+                    'vendor_name': vname,
+                }
+
+        # Group req_numbers by vendor_id
+        # vendor_groups = {vendor_id: {'password': ..., 'vendor_name': ..., 'req_numbers': [...]}}
+        vendor_groups = {}
+        req_without_vendor = []
+        req_without_credentials = []
+
+        for req_no in req_set:
+            vendor_name = req_to_vendor_name.get(req_no)
+            if not vendor_name:
+                req_without_vendor.append(req_no)
+                continue
+            vc_info = vc_by_name.get(vendor_name.strip().lower())
+            if not vc_info or not vc_info.get('vendor_id') or not vc_info.get('password'):
+                req_without_credentials.append(req_no)
+                continue
+            vid = vc_info['vendor_id']
+            if vid not in vendor_groups:
+                vendor_groups[vid] = {
+                    'password': vc_info['password'],
+                    'vendor_name': vc_info['vendor_name'],
+                    'req_numbers': [],
+                }
+            vendor_groups[vid]['req_numbers'].append(req_no)
+
+        # ── Step 2: Process each vendor SEQUENTIALLY ─────────────────────
+        # Import the automation script
+        import sys
+        import os
+        scripts_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scripts')
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        try:
+            from vendor_auto_approve import run_vendor_auto_approve
+        except ImportError as imp_exc:
+            return jsonify({'error': f'Failed to import automation module: {imp_exc}. Ensure /scripts/vendor_auto_approve.py exists.'}), 500
+
+        all_results = []
+        all_processed = []
+        all_not_found = []
+        all_errors = []
+
+        for vid, info in vendor_groups.items():
+            vendor_result = {
+                'vendor_id': vid,
+                'vendor_name': info['vendor_name'],
+                'req_numbers': info['req_numbers'],
+                'processed': [],
+                'not_found': [],
+                'error': None,
+            }
+            try:
+                auto_result = run_vendor_auto_approve(
+                    vendor_id=vid,
+                    password=info['password'],
+                    req_numbers=info['req_numbers'],
+                    headless=True,
+                )
+                vendor_result['processed'] = auto_result.get('processed', [])
+                vendor_result['not_found'] = auto_result.get('not_found', [])
+                vendor_result['error'] = auto_result.get('error')
+                vendor_result['log'] = auto_result.get('log', [])
+                all_processed.extend(vendor_result['processed'])
+                all_not_found.extend(vendor_result['not_found'])
+                if vendor_result['error']:
+                    all_errors.append(f"Vendor {info['vendor_name']} ({vid}): {vendor_result['error']}")
+            except Exception as exc:
+                vendor_result['error'] = str(exc)
+                all_errors.append(f"Vendor {info['vendor_name']} ({vid}): {exc}")
+            all_results.append(vendor_result)
+
+        # ── Step 3: Build summary ────────────────────────────────────────
+        return jsonify({
+            'status': 'ok',
+            'total_req_numbers': len(req_set),
+            'vendors_processed': len(vendor_groups),
+            'processed': all_processed,
+            'not_found': all_not_found,
+            'without_vendor': req_without_vendor,
+            'without_credentials': req_without_credentials,
+            'vendor_results': all_results,
+            'errors': all_errors,
+            'summary': {
+                'total': len(req_set),
+                'processed': len(all_processed),
+                'not_found': len(all_not_found),
+                'without_vendor': len(req_without_vendor),
+                'without_credentials': len(req_without_credentials),
+                'errors': len(all_errors),
+            },
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/item-registration/template', methods=['GET'])
 def download_item_registration_batch_template():
