@@ -218,6 +218,7 @@ class SOData(db.Model):
     so_item = db.Column(db.String(100))
     so_status = db.Column(db.String(50))
     operation_unit_name = db.Column(db.String(200))
+    client_id = db.Column(db.String(100), index=True)
     vendor_id = db.Column(db.String(100))
     vendor_name = db.Column(db.String(200))
     customer_po_number = db.Column(db.String(200))
@@ -286,13 +287,38 @@ class MasterPIC(db.Model):
     pic_name = db.Column(db.String(100))
     updated_at = db.Column(db.DateTime, default=datetime.utcnow)
 
+class MasterClientPIC(db.Model):
+    __tablename__ = 'master_client_pic'
+    id = db.Column(db.Integer, primary_key=True)
+    client_id = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    client_name = db.Column(db.String(300))
+    pic_name = db.Column(db.String(100))
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class MasterVendorPIC(db.Model):
+    __tablename__ = 'master_vendor_pic'
+    id = db.Column(db.Integer, primary_key=True)
+    vendor_id = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    vendor_name = db.Column(db.String(300))
+    pic_name = db.Column(db.String(100))
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class MasterBidTypePIC(db.Model):
+    __tablename__ = 'master_bid_type_pic'
+    id = db.Column(db.Integer, primary_key=True)
+    bid_type = db.Column(db.String(255), unique=True, nullable=False, index=True)
+    pic_name = db.Column(db.String(100))
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+
 class ItemRegistration(db.Model):
     __tablename__ = 'item_registration'
     id = db.Column(db.Integer, primary_key=True)
     proc_status = db.Column(db.String(100))
     req_date = db.Column(db.Date, index=True)
     existing_owner = db.Column(db.String(100))
+    client_id = db.Column(db.String(100), index=True)
     client_name = db.Column(db.String(300), index=True)
+    operation_unit_name = db.Column(db.String(300), index=True)
     category = db.Column(db.String(255))
     category_id = db.Column(db.String(100))
     pic = db.Column(db.String(200))
@@ -305,6 +331,7 @@ class ItemRegistration(db.Model):
     spec = db.Column(db.Text)
     mfr_name = db.Column(db.String(300))
     odr_unit = db.Column(db.String(50))
+    bid_except_type = db.Column(db.String(255))
     vendor_name = db.Column(db.String(300))
     prod_price = db.Column(db.Float)
     curr = db.Column(db.String(20))
@@ -581,8 +608,8 @@ def _ensure_extra_columns():
             return {row[0].lower() for row in result}
         except Exception: return set()
     migration_plan = {
-        'so_data': [('specification', 'TEXT'), ('product_id', 'VARCHAR(100)'), ('vendor_id', 'VARCHAR(100)'), ('manufacturer_name', 'VARCHAR(300)'), ('purchasing_currency', 'VARCHAR(10)'), ('purchasing_amount_idr', 'DOUBLE PRECISION'), ('purchasing_amount_idr_cached_at', 'TIMESTAMP'), ('pic_name', 'VARCHAR(100)')],
-        'item_registration': [('req_date', 'DATE'), ('existing_owner', 'VARCHAR(100)'), ('category_id', 'VARCHAR(100)'), ('pic_name', 'VARCHAR(200)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(50)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)'), ('remarks', 'TEXT')],
+        'so_data': [('specification', 'TEXT'), ('product_id', 'VARCHAR(100)'), ('vendor_id', 'VARCHAR(100)'), ('client_id', 'VARCHAR(100)'), ('manufacturer_name', 'VARCHAR(300)'), ('purchasing_currency', 'VARCHAR(10)'), ('purchasing_amount_idr', 'DOUBLE PRECISION'), ('purchasing_amount_idr_cached_at', 'TIMESTAMP'), ('pic_name', 'VARCHAR(100)')],
+        'item_registration': [('req_date', 'DATE'), ('existing_owner', 'VARCHAR(100)'), ('client_id', 'VARCHAR(100)'), ('operation_unit_name', 'VARCHAR(300)'), ('bid_except_type', 'VARCHAR(255)'), ('category_id', 'VARCHAR(100)'), ('pic_name', 'VARCHAR(200)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(50)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)'), ('remarks', 'TEXT')],
         'product_id_db': [('specification', 'TEXT'), ('manufacturer_name', 'VARCHAR(255)'), ('vendor_name', 'VARCHAR(300)'), ('order_unit', 'VARCHAR(50)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(100)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)')],
     }
     for table_name, columns in migration_plan.items():
@@ -2406,9 +2433,12 @@ def item_registration_dict(row, registered_items=None, include_similarity=True):
     similar_items = find_similar_registered_items(row, registered_items) if include_similarity else None
     return {
         'id': row.id, 'proc_status': row.proc_status or '', 'req_date': row.req_date.isoformat() if row.req_date else '',
-        'existing_owner': row.existing_owner or '', 'client_name': row.client_name or '', 'category': source_category_level1(row.category),
+        'existing_owner': row.existing_owner or '', 'client_name': row.client_name or '',
+        'operation_unit_name': row.operation_unit_name or '',
+        'category': source_category_level1(row.category),
         'pic': pic, 'req_no': row.req_no or '', 'prod_id': row.prod_id or '', 'batch_grp_no': row.batch_grp_no or '',
         'prod_name': row.prod_name or '', 'spec': row.spec or '', 'mfr_name': row.mfr_name or '', 'odr_unit': row.odr_unit or '',
+        'bid_except_type': row.bid_except_type or '',
         'vendor_name': row.vendor_name or '', 'prod_price': row.prod_price or 0, 'curr': row.curr or '', 'remarks': row.remarks or '',
         'uploaded_at': utc_isoformat(row.uploaded_at), 'similar_items': similar_items,
         'similar_prod_ids': (similar_items or {}).get('product_ids', ''), 'similar_prod_name': (similar_items or {}).get('product_name', ''),
@@ -2460,6 +2490,19 @@ def normalize_category_id(value):
         # the magnitude correctly.
         return mantissa_digits
     return cat_id.strip()
+
+def normalize_vendor_id(value):
+    vid = clean(value)
+    if not vid: return ''
+    if re.match(r'^\d+\.0+$', vid): vid = vid.split('.', 1)[0]
+    vid = vid.lstrip('0') or '0'
+    return vid
+
+def normalize_client_id(value):
+    cid = clean(value)
+    if not cid: return ''
+    if re.match(r'^\d+\.0+$', cid): cid = cid.split('.', 1)[0]
+    return cid.strip()
 
 def normalize_category_name(value):
     category = source_category_level1(value)
@@ -2515,9 +2558,34 @@ def _lookup_pic_by_category(category_id=None, category_name=None):
     if cat_name and cat_name in by_name: return by_name[cat_name]
     return None
 
+def resolve_pic_with_overrides(category_id=None, category_name=None, client_id=None, vendor_id=None, bid_except_type=None):
+    if client_id:
+        cid = normalize_client_id(client_id)
+        if cid:
+            r = db.session.query(MasterClientPIC.pic_name).filter(MasterClientPIC.client_id == cid).first()
+            if r and clean(r[0]): return clean(r[0])
+    if bid_except_type:
+        bt = clean(bid_except_type)
+        if bt:
+            r = db.session.query(MasterBidTypePIC.pic_name).filter(MasterBidTypePIC.bid_type == bt).first()
+            if r and clean(r[0]): return clean(r[0])
+    if vendor_id:
+        vid = normalize_vendor_id(vendor_id)
+        if vid:
+            r = db.session.query(MasterVendorPIC.pic_name).filter(MasterVendorPIC.vendor_id == vid).first()
+            if r and clean(r[0]): return clean(r[0])
+    return _lookup_pic_by_category(category_id, category_name)
+
+
 def resolve_item_registration_pic(row):
-    mapped = _lookup_pic_by_category(row.category_id, row.category)
-    return canonical_pending_pic(mapped or row.pic or '', row.client_name)
+    client_id = getattr(row, 'client_id', None) or (row.get('client_id') if isinstance(row, dict) else None)
+    bid_except_type = getattr(row, 'bid_except_type', None) or (row.get('bid_except_type') if isinstance(row, dict) else None)
+    pic = resolve_pic_with_overrides(
+        category_id=row.category_id if hasattr(row, 'category_id') else row.get('category_id'),
+        category_name=row.category if hasattr(row, 'category') else row.get('category'),
+        client_id=client_id, vendor_id=None, bid_except_type=bid_except_type,
+    )
+    return canonical_pending_pic(pic or (row.pic if hasattr(row, 'pic') else row.get('pic')) or '', row.client_name if hasattr(row, 'client_name') else row.get('client_name'))
 
 def is_existing_owner_pur_pic(value): return (clean(value) or '').strip().lower() == 'pur. pic'
 
@@ -2539,7 +2607,10 @@ def refresh_item_registration_mappings():
         normalized_cat_id = normalize_category_id(row.category_id)
         if row.category_id != normalized_cat_id: row.category_id = normalized_cat_id; changed = True
         if row.category != category: row.category = category; changed = True
-        pic = _lookup_pic_by_category(normalized_cat_id, category) or ''
+        pic = resolve_pic_with_overrides(
+            category_id=normalized_cat_id, category_name=category,
+            client_id=row.client_id, vendor_id=None, bid_except_type=row.bid_except_type,
+        ) or ''
         if row.pic != pic: row.pic = pic; changed = True
     if changed: db.session.commit()
 
@@ -2548,7 +2619,9 @@ def _item_registration_columns(df):
         'proc_status': find_column(df, ['Proc. Status', 'Proc Status', 'Process Status']),
         'req_date': find_column(df, ['Req. Date', 'Req Date', 'Request Date']),
         'existing_owner': find_column(df, ['Existing Owner', 'Existing Owner.', 'Owner']),
+        'client_id': find_column(df, ['Client ID', 'Client Id', 'ClientID', 'Client Cd.', 'Client Cd', 'Client Code']),
         'client_name': find_column(df, ['Client Nm.', 'Client Nm', 'Client Name']),
+        'operation_unit_name': find_column(df, ['Op. Unit Nm.', 'Op. Unit Nm', 'Op Unit Nm', 'Operation Unit Nm.', 'Operation Unit Nm', 'Operation Unit Name', 'Op. Unit Name', 'Op Unit Name']),
         'category': find_column(df, ['Cat. Nm.', 'Cat. Nm', 'Category', 'Cate. Nm.', 'Category Name']),
         'category_id': find_column(df, ['Cat. ID', 'Cat. ID.', 'Category ID', 'Category Id', 'CategoryID']),
         'pic': find_column(df, ['PIC', 'Pur. PIC', 'Purchase PIC']),
@@ -2560,6 +2633,7 @@ def _item_registration_columns(df):
         'spec': find_column(df, ['Spec.', 'Spec', 'Specification']),
         'mfr_name': find_column(df, ['Mfr. Nm.', 'Mfr. Nm', 'Manufacturer Name', 'Maker Nm.']),
         'odr_unit': find_column(df, ['Odr. Unit', 'Odr. Unit.', 'Order Unit']),
+        'bid_except_type': find_column(df, ['Bid Except Type', 'Bid/Except Type', 'Bid Type', 'Bid/Except. Type']),
         'vendor_name': find_column(df, ['Vendor Nm.', 'Vendor Nm', 'Vendor Name']),
         'prod_price': find_column(df, ['Prod. Price', 'Product Price', 'Price']),
         'curr': find_column(df, ['Curr.', 'Curr', 'Currency']),
@@ -2597,11 +2671,15 @@ def import_item_registration_dataframe(df, filename='Item Registration'):
         category = source_category_level1(df_val(row, col['category']))
         incoming[req_no] = {
             'proc_status': clean(df_val(row, col['proc_status'])), 'req_date': parse_date(df_val(row, col['req_date'])),
-            'existing_owner': clean(df_val(row, col['existing_owner'])), 'client_name': clean(df_val(row, col['client_name'])),
+            'existing_owner': clean(df_val(row, col['existing_owner'])),
+            'client_id': clean(df_val(row, col['client_id'])),
+            'client_name': clean(df_val(row, col['client_name'])),
+            'operation_unit_name': clean(df_val(row, col['operation_unit_name'])),
             'category': category, 'category_id': category_id, 'pic': _lookup_pic_by_category(category_id, category) or '',
             'req_no': req_no, 'prod_id': prod_id, 'product_status': clean(df_val(row, col['product_status'])),
             'batch_grp_no': clean(df_val(row, col['batch_grp_no'])), 'prod_name': prod_name, 'spec': clean(df_val(row, col['spec'])),
             'mfr_name': clean(df_val(row, col['mfr_name'])), 'odr_unit': clean(df_val(row, col['odr_unit'])),
+            'bid_except_type': clean(df_val(row, col['bid_except_type'])),
             'vendor_name': clean(df_val(row, col['vendor_name'])), 'prod_price': safe_float(df_val(row, col['prod_price'])),
             'curr': clean(df_val(row, col['curr'])), 'hub_handling_check': clean(df_val(row, col['hub_handling_check'])),
             'tax_type': clean(df_val(row, col['tax_type'])), 'registration_date': parse_date(df_val(row, col['registration_date'])),
@@ -2651,7 +2729,10 @@ def so_dict(s):
     pa_idr = purchase_amount_idr_for_margin(s)
     return {
         'id': s.id, 'so_number': s.so_number, 'so_item': s.so_item, 'so_status': s.so_status,
-        'operation_unit_name': s.operation_unit_name, 'vendor_id': s.vendor_id or '', 'vendor_name': s.vendor_name,
+        'operation_unit_name': s.operation_unit_name,
+        'vendor_id': normalize_vendor_id(s.vendor_id) if s.vendor_id else '',
+        'client_id': normalize_client_id(s.client_id) if s.client_id else '',
+        'vendor_name': s.vendor_name,
         'customer_po_number': s.customer_po_number, 'delivery_memo': s.delivery_memo, 'product_name': s.product_name,
         'specification': s.specification, 'manufacturer_name': s.manufacturer_name or '', 'product_id': s.product_id,
         'category_name': category_name, 'svo_po': s.matched_po_number or '', 'so_qty': s.so_qty, 'sales_unit': s.sales_unit or '',
@@ -3058,7 +3139,7 @@ def get_all_so():
             SOData.purchasing_amount_idr, SOData.product_id, SOData.product_name,
             SOData.specification, SOData.matched_po_number, SOData.remarks,
             SOData.delivery_plan_date, SOData.sales_price, SOData.sales_unit,
-            SOData.vendor_id, SOData.currency,
+            SOData.vendor_id, SOData.currency, SOData.client_id,
         )
 
         if sort_order == 'oldest':
@@ -3112,13 +3193,22 @@ def get_all_so():
         vendors_opts  = sorted({s.vendor_name for s in option_source_sos if s.vendor_name})
         manufacturers_opts = sorted({s.manufacturer_name for s in option_source_sos if s.manufacturer_name})
         statuses_opts = sorted({s.so_status for s in option_source_sos if s.so_status})
-        pics_opts     = sorted({canonical_pending_pic(s.pic_name, s.operation_unit_name) for s in option_source_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) != 'Unassigned'})
+        pics_opts     = sorted(_all_known_so_pics)
 
-        pic_aggregations = {}
+        _all_cat_by_id, _all_cat_by_name = master_pic_maps()
+        _all_known_so_pics = set()
+        _all_known_so_pics.update(_all_cat_by_id.values())
+        _all_known_so_pics.update(_all_cat_by_name.values())
+        _all_known_so_pics.update(clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name))
+        _all_known_so_pics.update(clean(m.pic_name) for m in db.session.query(MasterVendorPIC).all() if clean(m.pic_name))
+        _all_known_so_pics.discard('')
+        _all_known_so_pics.discard(None)
+        _all_known_so_pics.update(canonical_pending_pic(s.pic_name, s.operation_unit_name) for s in kpi_source_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) != 'Unassigned')
+        pic_aggregations = {pic: {'pic': pic, 'count': 0, 'amount': 0.0} for pic in _all_known_so_pics}
         for s in kpi_source_sos:
             pic = canonical_pending_pic(s.pic_name, s.operation_unit_name)
             if not pic or pic == 'Unassigned': continue
-            if pic not in pic_aggregations: pic_aggregations[pic] = {'pic': pic, 'count': 0, 'amount': 0}
+            if pic not in pic_aggregations: pic_aggregations[pic] = {'pic': pic, 'count': 0, 'amount': 0.0}
             pic_aggregations[pic]['count'] += 1
             pic_aggregations[pic]['amount'] += float(s.sales_amount or 0)
         
@@ -3331,6 +3421,30 @@ def cleanup_item_registration_duplicates_only(): return cleanup_source_table_sna
 @app.route('/api/upload/scor', methods=['POST'])
 @app.route('/api/upload/smro-json', methods=['POST'])
 @app.route('/api/upload/smro', methods=['POST'])
+def _refresh_so_pic_names():
+    prod_map = {str(p.product_id).strip(): (p.category_id, p.category_name) for p in db.session.query(ProductIDDB).all() if p.product_id}
+    client_pic_cache = {normalize_client_id(m.client_id): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name)}
+    vendor_pic_cache = {normalize_vendor_id(m.vendor_id): clean(m.pic_name) for m in db.session.query(MasterVendorPIC).all() if clean(m.pic_name)}
+    cat_pic_cache = {}
+    so_rows = db.session.query(SOData).filter(SOData.product_id.isnot(None), SOData.product_id != '').all()
+    refreshed = 0
+    for s in so_rows:
+        cat_id, cat_name = prod_map.get(str(s.product_id).strip(), (None, None))
+        ck = (normalize_category_id(cat_id), normalize_category_name(cat_name))
+        if ck not in cat_pic_cache: cat_pic_cache[ck] = _lookup_pic_by_category(cat_id, cat_name)
+        new_pic = None
+        cid = normalize_client_id(s.client_id) if s.client_id else ''
+        if cid and cid in client_pic_cache: new_pic = client_pic_cache[cid]
+        if not new_pic:
+            vid = normalize_vendor_id(s.vendor_id) if s.vendor_id else ''
+            if vid and vid in vendor_pic_cache: new_pic = vendor_pic_cache[vid]
+        if not new_pic: new_pic = cat_pic_cache[ck]
+        if s.pic_name != new_pic: s.pic_name = new_pic; refreshed += 1
+    db.session.commit()
+    clear_runtime_caches()
+    return refreshed
+
+
 def upload_smro():
     try:
         uploads, upload_mode = request_upload_dataframes('smro')
@@ -3386,6 +3500,7 @@ def upload_smro():
             if not col_primary: return jsonify({'error': f'SO Item / SO Number column not found in "{filename}". Available columns: {df.columns.tolist()}'}), 400
             col_status   = find_column(df, ['SO Status', 'Status', 'Order Status', 'SO Status Code'])
             col_opunit   = find_column(df, ['Operation Unit Name', 'Op Unit', 'Client Name', 'Client', 'Operation Unit'])
+            col_client_id = find_column(df, ['Client ID', 'Client Id', 'ClientID', 'Client Cd.', 'Client Cd', 'Client Code'])
             col_vendor_id = find_column(df, ['Vendor ID', 'Vendor Id', 'Vendor Code', 'Supplier ID', 'Supplier Code'])
             col_vendor   = find_column(df, ['Vendor Name', 'Vendor', 'Supplier'])
             col_custpo   = find_column(df, ['Customer PO number', 'Customer PO Number', 'Customer PO', 'PO Ref', 'PO Reference'])
@@ -3426,7 +3541,9 @@ def upload_smro():
                 if pid_val: pid_filled += 1
                 new_data = {
                     'so_number': so_val, 'so_item': so_item_val, 'so_status': clean(df_val(row, col_status)),
-                    'operation_unit_name': clean(df_val(row, col_opunit)), 'vendor_id': clean(df_val(row, col_vendor_id)),
+                    'operation_unit_name': clean(df_val(row, col_opunit)),
+                    'client_id': normalize_client_id(clean(df_val(row, col_client_id))) if col_client_id else None,
+                    'vendor_id': normalize_vendor_id(clean(df_val(row, col_vendor_id)) or ''),
                     'vendor_name': clean(df_val(row, col_vendor)), 'customer_po_number': clean(df_val(row, col_custpo)),
                     'delivery_memo': clean(df_val(row, col_memo)), 'product_name': clean(df_val(row, col_prod)),
                     'specification': spec_val, 'manufacturer_name': clean(df_val(row, col_mfr)), 'product_id': pid_val,
@@ -3491,6 +3608,12 @@ def upload_smro():
         except Exception as fx_exc:
             db.session.rollback(); converted_fx_rows = 0; fx_warning = str(fx_exc)
         clear_runtime_caches()
+
+        try:
+            _refresh_so_pic_names()
+        except Exception as pic_exc:
+            import traceback; traceback.print_exc()
+
         diagnostics = diagnostics_by_file[-1] if diagnostics_by_file else {}
         if len(diagnostics_by_file) > 1: diagnostics = {**diagnostics, 'files': diagnostics_by_file}
         return jsonify({
@@ -3903,7 +4026,7 @@ def completed_summary():
             }
             with _COMPLETED_CACHE_LOCK: _COMPLETED_SUMMARY_CACHE[cache_key] = {'created_at': now_ts, 'payload': payload}
             return jsonify(payload)
-        completed_summary_fields = (SOData.so_number, SOData.so_item, SOData.operation_unit_name, SOData.vendor_name, SOData.so_qty, SOData.sales_amount, SOData.purchasing_price, SOData.purchasing_amount, SOData.purchasing_currency, SOData.purchasing_amount_idr, SOData.so_create_date)
+        completed_summary_fields = (SOData.so_number, SOData.so_item, SOData.operation_unit_name, SOData.vendor_name, SOData.vendor_id, SOData.client_id, SOData.so_qty, SOData.sales_amount, SOData.purchasing_price, SOData.purchasing_amount, SOData.purchasing_currency, SOData.purchasing_amount_idr, SOData.so_create_date)
         if not light_mode: completed_summary_fields = completed_summary_fields + (SOData.product_name, SOData.specification, SOData.product_id)
         purchase_summary_fields = (SOData.so_qty, SOData.purchasing_price, SOData.purchasing_amount, SOData.purchasing_currency, SOData.purchasing_amount_idr, SOData.so_create_date)
         rows = q.options(load_only(*completed_summary_fields)).all()
@@ -4104,6 +4227,8 @@ def get_item_registration_data():
         kpi_pic = (request.args.get('kpi_pic') or '').strip()
         proc_statuses = [s.strip() for s in request.args.getlist('proc_status') if s.strip()]
         mfr_names = [s.strip() for s in request.args.getlist('mfr_name') if s.strip()]
+        op_units = [s.strip() for s in request.args.getlist('op_unit') if s.strip()]
+        bid_types = [s.strip() for s in request.args.getlist('bid_except_type') if s.strip()]
         
         q = apply_item_registration_visible_status_filter(apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to))
         if clients: q = q.filter(ItemRegistration.client_name.in_(clients))
@@ -4112,17 +4237,41 @@ def get_item_registration_data():
         if categories: q = q.filter(ItemRegistration.category.in_(categories))
         if proc_statuses: q = q.filter(ItemRegistration.proc_status.in_(proc_statuses))
         if mfr_names: q = q.filter(ItemRegistration.mfr_name.in_(mfr_names))
+        if op_units: q = q.filter(ItemRegistration.operation_unit_name.in_(op_units))
+        if bid_types: q = q.filter(ItemRegistration.bid_except_type.in_(bid_types))
         if req_numbers: q = q.filter(ItemRegistration.req_no.in_(req_numbers))
         if search:
             pattern = f'%{search}%'
             q = q.filter(db.or_(ItemRegistration.req_no.ilike(pattern), ItemRegistration.prod_id.ilike(pattern), ItemRegistration.prod_name.ilike(pattern), ItemRegistration.vendor_name.ilike(pattern), ItemRegistration.mfr_name.ilike(pattern), ItemRegistration.remarks.ilike(pattern)))
 
         missing_q = apply_item_registration_kpi_status_filter(q).filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-'))
-        missing_rows_db = missing_q.with_entities(ItemRegistration.pic, ItemRegistration.client_name, func.count(ItemRegistration.id)).group_by(ItemRegistration.pic, ItemRegistration.client_name).all()
-        missing_by_pic = {}
-        for pic_val, client_val, count in missing_rows_db:
-            pic = canonical_pending_pic(clean(pic_val), client_val)
-            if pic and pic != 'Unassigned': missing_by_pic[pic] = missing_by_pic.get(pic, 0) + count
+        _client_pic_cache = {normalize_client_id(m.client_id): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name)}
+        _bid_type_pic_cache = {clean(m.bid_type): clean(m.pic_name) for m in db.session.query(MasterBidTypePIC).all() if clean(m.pic_name)}
+        _cat_by_id, _cat_by_name = master_pic_maps()
+        all_known_pics = set()
+        all_known_pics.update(_cat_by_id.values())
+        all_known_pics.update(_cat_by_name.values())
+        all_known_pics.update(_client_pic_cache.values())
+        all_known_pics.update(_bid_type_pic_cache.values())
+        all_known_pics.discard('')
+        all_known_pics.discard(None)
+        missing_rows = missing_q.all()
+        missing_by_pic = {pic: 0 for pic in all_known_pics}
+        for row in missing_rows:
+            pic = None
+            cid = normalize_client_id(row.client_id) if row.client_id else ''
+            if cid and cid in _client_pic_cache: pic = _client_pic_cache[cid]
+            if not pic and row.bid_except_type:
+                bt = clean(row.bid_except_type)
+                if bt and bt in _bid_type_pic_cache: pic = _bid_type_pic_cache[bt]
+            if not pic:
+                cat_id = normalize_category_id(row.category_id)
+                cat_name = normalize_category_name(row.category)
+                if cat_id and cat_id in _cat_by_id: pic = _cat_by_id[cat_id]
+                elif cat_name and cat_name in _cat_by_name: pic = _cat_by_name[cat_name]
+            pic = pic or row.pic or ''
+            pic = canonical_pending_pic(clean(pic), row.client_name)
+            if pic and pic != 'Unassigned': missing_by_pic[pic] = missing_by_pic.get(pic, 0) + 1
         missing_prod_id_by_pic = [{'pic': pic, 'count': count} for pic, count in sorted(missing_by_pic.items(), key=lambda item: (-item[1], item[0]))]
 
         q = apply_item_registration_pic_filter(q, pics)
@@ -4136,6 +4285,12 @@ def get_item_registration_data():
         option_q = apply_item_registration_visible_status_filter(apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to))
         if clients: option_q = option_q.filter(ItemRegistration.client_name.in_(clients))
         option_q = apply_item_registration_pic_filter(option_q, global_pics)
+        if item_clients: option_q = option_q.filter(ItemRegistration.client_name.in_(item_clients))
+        if op_units: option_q = option_q.filter(ItemRegistration.operation_unit_name.in_(op_units))
+        if bid_types: option_q = option_q.filter(ItemRegistration.bid_except_type.in_(bid_types))
+        if categories: option_q = option_q.filter(ItemRegistration.category.in_(categories))
+        if proc_statuses: option_q = option_q.filter(ItemRegistration.proc_status.in_(proc_statuses))
+        if mfr_names: option_q = option_q.filter(ItemRegistration.mfr_name.in_(mfr_names))
         if req_numbers: option_q = option_q.filter(ItemRegistration.req_no.in_(req_numbers))
         if search:
             pattern = f'%{search}%'
@@ -4145,14 +4300,28 @@ def get_item_registration_data():
             return sorted({clean(value) for (value,) in query.with_entities(column).distinct().all() if clean(value)})
 
         all_clients = distinct_options(option_q, ItemRegistration.client_name)
+        all_op_units = distinct_options(option_q, ItemRegistration.operation_unit_name)
+        all_bid_types = distinct_options(option_q, ItemRegistration.bid_except_type)
         all_categories = distinct_options(option_q, ItemRegistration.category)
         all_proc_statuses = distinct_options(option_q, ItemRegistration.proc_status)
         all_mfr_names = distinct_options(option_q, ItemRegistration.mfr_name)
         
-        pic_option_rows = option_q.with_entities(ItemRegistration.pic, ItemRegistration.client_name).distinct().all()
-        all_pics = set()
-        for pic_val, client_val in pic_option_rows:
-            resolved = canonical_pending_pic(clean(pic_val), client_val)
+        all_pics = set(all_known_pics)
+        pic_option_rows = option_q.all()
+        for row in pic_option_rows:
+            pic = None
+            cid = normalize_client_id(row.client_id) if row.client_id else ''
+            if cid and cid in _client_pic_cache: pic = _client_pic_cache[cid]
+            if not pic and row.bid_except_type:
+                bt = clean(row.bid_except_type)
+                if bt and bt in _bid_type_pic_cache: pic = _bid_type_pic_cache[bt]
+            if not pic:
+                cat_id = normalize_category_id(row.category_id)
+                cat_name = normalize_category_name(row.category)
+                if cat_id and cat_id in _cat_by_id: pic = _cat_by_id[cat_id]
+                elif cat_name and cat_name in _cat_by_name: pic = _cat_by_name[cat_name]
+            pic = pic or row.pic or ''
+            resolved = canonical_pending_pic(clean(pic), row.client_name)
             if resolved != 'Unassigned': all_pics.add(resolved)
         all_pics = sorted(list(all_pics))
 
@@ -4161,7 +4330,7 @@ def get_item_registration_data():
 
         payload = {
             'data': response_rows, 'total': total, 'page': page, 'per_page': per_page,
-            'client_options': all_clients, 'category_options': all_categories, 'pic_options': all_pics,
+            'client_options': all_clients, 'op_unit_options': all_op_units, 'bid_except_type_options': all_bid_types, 'category_options': all_categories, 'pic_options': all_pics,
             'proc_status_options': all_proc_statuses, 'mfr_name_options': all_mfr_names,
             'missing_prod_id_by_pic': missing_prod_id_by_pic, 'last_updated': utc_isoformat(last_upload),
         }
@@ -4230,10 +4399,14 @@ def apply_item_registration_request_filters(query):
     kpi_pic = (request.args.get('kpi_pic') or '').strip()
     proc_statuses = [s.strip() for s in request.args.getlist('proc_status') if s.strip()]
     mfr_names = [s.strip() for s in request.args.getlist('mfr_name') if s.strip()]
+    op_units = [s.strip() for s in request.args.getlist('op_unit') if s.strip()]
+    bid_types = [s.strip() for s in request.args.getlist('bid_except_type') if s.strip()]
     query = apply_item_registration_date_filter(query, date_year, date_from, date_to)
     if clients: query = query.filter(ItemRegistration.client_name.in_(clients))
     query = apply_item_registration_pic_filter(query, global_pics)
     if item_clients: query = query.filter(ItemRegistration.client_name.in_(item_clients))
+    if op_units: query = query.filter(ItemRegistration.operation_unit_name.in_(op_units))
+    if bid_types: query = query.filter(ItemRegistration.bid_except_type.in_(bid_types))
     if categories: query = query.filter(ItemRegistration.category.in_(categories))
     query = apply_item_registration_pic_filter(query, pics)
     if proc_statuses: query = query.filter(ItemRegistration.proc_status.in_(proc_statuses))
@@ -4290,17 +4463,18 @@ def export_item_registration():
         ws = wb.active
         ws.title = "Item Registration"
         headers = [
-            'Proc. Status', 'Client Nm.', 'Category', 'PIC', 'Req. No', 'Prod. ID',
-            'Prod. Nm.', 'Spec.', 'Mfr. Nm.', 'Odr. Unit', 'Prod. Price', 'Curr.', 'Remarks'
+            'Proc. Status', 'Client Nm.', 'Op. Unit Nm.', 'Category', 'PIC', 'Req. No', 'Prod. ID',
+            'Prod. Nm.', 'Spec.', 'Mfr. Nm.', 'Odr. Unit', 'Bid Except Type', 'Prod. Price', 'Curr.', 'Remarks'
         ]
-        _style_wb(ws, headers, num_cols=[11])
-        widths = [26, 34, 24, 16, 18, 18, 28, 48, 24, 14, 16, 12, 60]
+        _style_wb(ws, headers, num_cols=[12])
+        widths = [26, 34, 34, 24, 16, 18, 18, 28, 48, 24, 14, 28, 16, 12, 60]
         for i, width in enumerate(widths, 1):
             ws.column_dimensions[get_column_letter(i)].width = width
         for row in rows:
             ws.append([
                 row.proc_status or '',
                 row.client_name or '',
+                row.operation_unit_name or '',
                 source_category_level1(row.category),
                 row.pic or '',
                 row.req_no or '',
@@ -4309,6 +4483,7 @@ def export_item_registration():
                 row.spec or '',
                 row.mfr_name or '',
                 row.odr_unit or '',
+                row.bid_except_type or '',
                 row.prod_price or 0,
                 row.curr or '',
                 row.remarks or '',
@@ -4893,12 +5068,17 @@ def get_rfq_data():
                 filtered_cache[key] = rfq_filter_rows(search_rows, exclude_field)
             return filtered_cache[key]
 
-        kpi_rows = filtered_for({'purchase_pics', 'pic'})
-        pending_by_pic = {}
+        kpi_rows = filtered_for('pic')
+        all_rfq_pics = set()
+        for r in search_rows:
+            p = clean(r.get('purchase_pic'))
+            if p and p.lower() != 'unassigned': all_rfq_pics.add(p)
+        pending_by_pic = {p: 0 for p in all_rfq_pics}
         for row in kpi_rows:
-            if clean(row.get('check')) != 'open':
-                continue
             if clean_product_id(row.get('product_id')):
+                continue
+            check_val = clean(row.get('check', '')).lower()
+            if check_val in ('complete', 'reject'):
                 continue
             if not row.get('unit_price_missing'):
                 continue
@@ -4975,7 +5155,7 @@ def rfq_filtered_rows_from_request(force=False):
     if checks:
         rows = [row for row in rows if clean(row.get('check')) and clean(row.get('check')).lower() in checks]
     if pic:
-        rows = [row for row in rows if clean(row.get('purchase_pic')) == pic and clean(row.get('check')) == 'open' and row.get('unit_price_missing') and not clean_product_id(row.get('product_id'))]
+        rows = [row for row in rows if clean(row.get('purchase_pic')) == pic]
     return rows, fetched_at
 
 @app.route('/api/rfq/template', methods=['GET'])
@@ -6440,9 +6620,11 @@ def get_dashboard_status_detail():
             q = apply_so_pic_filter(q, pics)
             return apply_so_create_date_filter(q, date_year, date_from, date_to)
 
-        q = so_q(open_so_filter())
         if status:
-            q = q.filter(SOData.so_status == status)
+            q = so_q(so_countable_sql_filter())
+            q = q.filter(func.trim(func.coalesce(SOData.so_status, '')) == status)
+        else:
+            q = so_q(open_so_filter(), so_countable_sql_filter())
         if month:
             try:
                 month_date = datetime.strptime(month, '%b %Y')
