@@ -6057,7 +6057,7 @@ const App = () => {
             <colgroup>{visibleColumns.map(col => <col key={col.field} style={{ width: `${colWidth(col)}px` }} />)}</colgroup>
             <thead className={tblHd}>
               <tr>{visibleColumns.map((col, index) => (
-                <th key={col.field} data-col-index={index + 1} className={`px-2 py-2 h-10 text-center align-middle font-bold border-r whitespace-pre-line leading-tight ${darkMode ? 'border-gray-700 text-gray-200' : 'border-gray-200 text-slate-700'}`} title={col.sheet_col ? `${col.sheet_col} - ${col.label}` : col.label}>{renderFreezeHeader('import', index + 1, col.label)}</th>
+                <th key={col.field} data-col-index={index + 1} className={`px-2 py-1.5 h-12 text-center align-middle font-bold border-r leading-tight ${darkMode ? 'border-gray-700 text-gray-200' : 'border-gray-200 text-slate-700'}`} style={{ display: 'table-cell', verticalAlign: 'middle', maxWidth: `${colWidth(col)}px`, wordBreak: 'break-word', overflowWrap: 'anywhere', lineHeight: 1.15, maxHeight: '2.3em', overflow: 'hidden' }} title={col.sheet_col ? `${col.sheet_col} - ${col.label}` : col.label}>{renderFreezeHeader('import', index + 1, col.label)}</th>
               ))}</tr>
             </thead>
             <tbody className={`divide-y ${tblDv}`}>
