@@ -1586,8 +1586,8 @@ def import_dashboard_row_to_dict(row, columns, vendor_attrs_map=None):
     try: data = json.loads(row.data_json or '{}')
     except: data = {}
     data = apply_import_formula_columns(dict(data))
-    # Inject vendor attributes (Origin, TOP) from the ImportVendor table.
-    # These are looked up by the row's vendor name (case-insensitive).
+    # Inject vendor attributes (Origin, TOP, Non SKI) from the ImportVendor
+    # table. These are looked up by the row's vendor name (case-insensitive).
     if vendor_attrs_map is not None:
         row_vendor = import_nonblank(data.get('vendor')) or import_nonblank(data.get('vendor_name')) or import_nonblank(row.vendor_name)
         if row_vendor:
@@ -1600,6 +1600,11 @@ def import_dashboard_row_to_dict(row, columns, vendor_attrs_map=None):
                     data['origin'] = attrs.get('origin') or ''
                 if not import_nonblank(data.get('top')):
                     data['top'] = attrs.get('top') or ''
+                # Non SKI — injected from the vendor master so the rightmost
+                # column reflects what was uploaded in the Vendor Import
+                # template (col D "Non SKI").
+                if not import_nonblank(data.get('non_ski')):
+                    data['non_ski'] = attrs.get('non_ski') or ''
     out = {}
     for col in columns:
         field = col.get('field')
@@ -1773,20 +1778,29 @@ def sync_import_sheet_to_dashboard():
     # the dashboard. Source rows are appended to `sheet_rows` so they go
     # through the same upsert logic below.
     #
-    # We pass an EMPTY vendor_set so ALL rows are returned (no filtering).
-    # The vendor filter is applied later by the /api/import/data endpoint
-    # via import_vendor_filter_names() — but for sync we want everything.
+    # IMPORTANT: Only copy rows whose vendor matches the uploaded Vendor
+    # Import list. Rows with vendors NOT in the uploaded list are skipped
+    # at the source level (vendor_set filter) so they never enter the
+    # dashboard. If no vendors have been uploaded yet, we skip source-sheet
+    # sync entirely (no point pulling thousands of unfiltered rows).
+    filter_vendor_names, _filter_vendor_src = import_vendor_filter_names()
+    filter_vendor_set = {v.strip().lower() for v in filter_vendor_names if v and v.strip()}
     source_rows_added = 0
     source_errors = []
-    for source in IMPORT_SOURCE_SHEETS:
-        try:
-            # vendor_set=None (or empty set) → return ALL rows, no filter
-            src_rows = import_source_rows_fast(source, columns, set())
-            sheet_rows.extend(src_rows)
-            source_rows_added += len(src_rows)
-        except Exception as src_exc:
-            import traceback; traceback.print_exc()
-            source_errors.append({'source': source.get('key'), 'label': source.get('label'), 'error': str(src_exc)})
+    if filter_vendor_set:
+        for source in IMPORT_SOURCE_SHEETS:
+            try:
+                # vendor_set filter → only rows with matching vendors are returned
+                src_rows = import_source_rows_fast(source, columns, filter_vendor_set)
+                sheet_rows.extend(src_rows)
+                source_rows_added += len(src_rows)
+            except Exception as src_exc:
+                import traceback; traceback.print_exc()
+                source_errors.append({'source': source.get('key'), 'label': source.get('label'), 'error': str(src_exc)})
+    else:
+        # No uploaded vendors → don't pull from source sheets at all (would
+        # import the entire sheet unfiltered, which is not what the user wants).
+        source_errors.append({'source': 'all', 'label': 'All sources', 'error': 'No uploaded vendor list — source sheet sync skipped. Upload vendors via Vendor Import first.'})
 
     existing_rows = ImportDashboardRow.query.filter(
         db.or_(
@@ -1794,6 +1808,37 @@ def sync_import_sheet_to_dashboard():
             ImportDashboardRow.source_key == 'import_tracker'
         )
     ).order_by(ImportDashboardRow.id.asc()).all()
+
+    # ── CLEANUP: Remove already-copied rows whose vendor is NOT in the
+    # uploaded Vendor Import list. This handles the case where vendors were
+    # previously uploaded (so their rows got copied), but the vendor list
+    # has since been updated to a smaller set — the old vendor rows should
+    # be purged so they don't linger in the dashboard forever.
+    #
+    # We only purge when there IS an uploaded vendor list (filter_vendor_set
+    # is non-empty). If no vendors are uploaded, we skip purge so the user
+    # doesn't accidentally lose all their data.
+    purged_non_vendor = 0
+    if filter_vendor_set:
+        rows_to_purge = []
+        for ex_row in existing_rows:
+            try: ex_payload = json.loads(ex_row.data_json or '{}')
+            except: ex_payload = {}
+            ex_vendor = import_nonblank(ex_payload.get('vendor')) or import_nonblank(ex_payload.get('vendor_name')) or import_nonblank(ex_row.vendor_name)
+            if not ex_vendor:
+                # No vendor on the row — can't match, keep it (might be a
+                # legitimately blank-vendor row the user wants to keep).
+                continue
+            if ex_vendor.strip().lower() not in filter_vendor_set:
+                rows_to_purge.append(ex_row)
+        for row in rows_to_purge:
+            db.session.delete(row)
+            purged_non_vendor += 1
+        if purged_non_vendor:
+            try: db.session.commit()
+            except: db.session.rollback(); purged_non_vendor = 0
+            # Refresh existing_rows to exclude the purged ones
+            existing_rows = [r for r in existing_rows if r not in rows_to_purge]
     existing_by_uid = {}
     existing_by_sec_uid = {}
     existing_row_keys = set()
@@ -1870,6 +1915,7 @@ def sync_import_sheet_to_dashboard():
         'sheet_rows': len(sheet_rows),
         'source_rows_added': source_rows_added,
         'source_errors': source_errors,
+        'purged_non_vendor': purged_non_vendor,
         'vendor_count': vendor_count,
         'vendor_filter_count': len(filter_vendors),
         'vendor_filter_source': vendor_source,
@@ -6467,8 +6513,44 @@ def get_import_data():
             return True
 
         filtered_items = [item for item in parsed if passes(item)]
+
+        # ── Interdependent filter options ────────────────────────────────
+        # Each filter's option list is built from rows that pass ALL OTHER
+        # filters (but not itself). This means:
+        #   - If no rows have status "NEW", the status dropdown won't show "NEW"
+        #   - If you filter by vendor A, the YUPI PO dropdown only shows POs
+        #     from vendor A
+        #   - If you filter by status "DELIVERED", the days_left dropdown only
+        #     shows color zones that exist among delivered rows
+        # This matches the user's expectation: "jika tidak ada status yang
+        # new maka di drop down filternya tidak ada pilihan new".
         yupi_options = sorted({str(item.get('yupi_po') or '').strip() for item in parsed if str(item.get('yupi_po') or '').strip() and passes(item, ignore='yupi_po')}, key=lambda s: s.lower())
         vendor_options = sorted({str(item.get('vendor') or '').strip() for item in parsed if str(item.get('vendor') or '').strip() and passes(item, ignore='vendor')}, key=lambda s: s.lower())
+        # Status options — built from rows that pass all filters EXCEPT status.
+        # Only statuses that actually appear in the (otherwise-filtered) data
+        # are listed. NEW is included only if a row's status computed to NEW.
+        status_options = sorted({str((item.get('data') or {}).get('status') or '').strip().upper() for item in parsed if str((item.get('data') or {}).get('status') or '').strip() and passes(item, ignore='status')}, key=lambda s: s.lower())
+        # Days Left color options — built from rows that pass all filters
+        # EXCEPT days_left. Only color zones that actually appear are listed.
+        days_left_zone_options = []
+        _dl_zones_seen = set()
+        for item in parsed:
+            if not passes(item, ignore='days_left'): continue
+            raw = str((item.get('data') or {}).get('days_left') or '').strip()
+            if raw in ('✅', '❌', '', '-'): continue
+            try: dl = int(float(raw))
+            except (ValueError, TypeError): continue
+            if dl < 0 or dl <= 7: zone = 'red'
+            elif 8 <= dl <= 29: zone = 'yellow'
+            elif dl >= 30: zone = 'green'
+            elif dl == 0: zone = 'today'
+            else: continue
+            if zone not in _dl_zones_seen:
+                _dl_zones_seen.add(zone)
+                days_left_zone_options.append(zone)
+        # Sort: red, yellow, green, today (consistent order)
+        _zone_order = {'red': 0, 'yellow': 1, 'green': 2, 'today': 3}
+        days_left_zone_options.sort(key=lambda z: _zone_order.get(z, 99))
 
         def _import_req_date_key(item):
             data = item.get('data') or {}
@@ -6596,6 +6678,10 @@ def get_import_data():
             'filters': {
                 'yupi_po': yupi_options,
                 'vendors': vendor_options,
+                # Interdependent filter options — only show values that
+                # actually exist in the (otherwise-filtered) data.
+                'statuses': status_options,
+                'days_left_zones': days_left_zone_options,
             },
             'req_dlv_sort': req_dlv_sort,
             'yupi_po_sort': yupi_po_sort,
@@ -6822,11 +6908,11 @@ def export_import_data():
             ws.column_dimensions[get_column_letter(i)].width = width
 
         alt_fill = PatternFill(start_color='F0F4FF', end_color='F0F4FF', fill_type='solid')
-        # Build vendor-attr map once for the export so Origin/TOP can be
+        # Build vendor-attr map once for the export so Origin/TOP/Non SKI can be
         # injected into each row by matching the row's vendor name.
         _export_vendor_attrs = import_vendor_attrs_map()
         for row_idx, (db_row, data) in enumerate(filtered, 2):
-            # Inject vendor attributes (origin, top) if missing in row data.
+            # Inject vendor attributes (origin, top, non_ski) if missing in row data.
             row_vendor = import_nonblank(data.get('vendor')) or import_nonblank(data.get('vendor_name')) or import_nonblank(db_row.vendor_name)
             if row_vendor:
                 attrs = _export_vendor_attrs.get(str(row_vendor).strip().lower())
@@ -6835,6 +6921,8 @@ def export_import_data():
                         data['origin'] = attrs.get('origin') or ''
                     if not import_nonblank(data.get('top')):
                         data['top'] = attrs.get('top') or ''
+                    if not import_nonblank(data.get('non_ski')):
+                        data['non_ski'] = attrs.get('non_ski') or ''
             row_vals = []
             for col in visible_cols:
                 field = col.get('field', '')
