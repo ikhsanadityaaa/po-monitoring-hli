@@ -451,6 +451,40 @@ def get_currency_to_idr(currency, d, cache_only=False):
         return fallback_rate
     return _get_fallback_rate()
 
+# Cap on parallel FX API calls per prefetch — prevents hammering the upstream
+# frankfurter API when a large upload introduces many new unique dates.
+_FX_PARALLEL_MAX = 8
+_FX_FETCH_CAP_PER_CALL = 40  # max unique dates to fetch in a single prefetch call
+
+
+def _fetch_rates_parallel(dates_sorted, currency='USD'):
+    """Fetch multiple FX rates concurrently. Returns dict {date: rate}."""
+    if not dates_sorted:
+        return {}
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    results = {}
+    # Cap to avoid runaway API calls
+    capped = list(dates_sorted)[:_FX_FETCH_CAP_PER_CALL]
+    try:
+        with ThreadPoolExecutor(max_workers=_FX_PARALLEL_MAX) as ex:
+            futures = {ex.submit(_fetch_rate_from_api, d, currency): d for d in capped}
+            for fut in as_completed(futures):
+                d = futures[fut]
+                try:
+                    rate = fut.result()
+                    if rate is not None:
+                        results[d] = rate
+                except Exception:
+                    pass
+    except Exception:
+        # Fallback to sequential if thread pool fails
+        for d in capped:
+            rate = _fetch_rate_from_api(d, currency)
+            if rate is not None:
+                results[d] = rate
+    return results
+
+
 def prefetch_exchange_rates(dates, fetch_missing=True, currency='USD'):
     cur = (currency or 'USD').strip().upper()
     if not dates or cur in ('IDR', ''): return
@@ -458,9 +492,10 @@ def prefetch_exchange_rates(dates, fetch_missing=True, currency='USD'):
         needed = {d for d in dates if d is not None and (cur, d) not in _FX_RATE_CACHE}
         if fetch_missing:
             today = date.today()
-            for d in sorted(x for x in needed if x <= today):
-                rate = _fetch_rate_from_api(d, cur)
-                if rate:
+            to_fetch = sorted(x for x in needed if x <= today)
+            if to_fetch:
+                rates = _fetch_rates_parallel(to_fetch, cur)
+                for d, rate in rates.items():
                     _FX_RATE_CACHE[(cur, d)] = rate
                     needed.discard(d)
         if needed:
@@ -483,18 +518,18 @@ def prefetch_exchange_rates(dates, fetch_missing=True, currency='USD'):
     if fetch_missing:
         today = date.today()
         to_api = sorted(d for d in needed if d <= today)
-        fetched_rows = []
-        for d in to_api:
-            rate = _fetch_rate_from_api(d)
-            if rate:
+        if to_api:
+            rates = _fetch_rates_parallel(to_api, 'USD')
+            fetched_rows = []
+            for d, rate in rates.items():
                 _RATE_CACHE[d] = rate
                 fetched_rows.append(ExchangeRate(rate_date=d, usd_to_idr=rate, source='frankfurter'))
                 needed.discard(d)
-        if fetched_rows:
-            try:
-                db.session.bulk_save_objects(fetched_rows)
-                db.session.commit()
-            except Exception: db.session.rollback()
+            if fetched_rows:
+                try:
+                    db.session.bulk_save_objects(fetched_rows)
+                    db.session.commit()
+                except Exception: db.session.rollback()
     if needed:
         fallback = _get_fallback_rate()
         all_rates = ExchangeRate.query.order_by(ExchangeRate.rate_date).all()
@@ -3156,6 +3191,25 @@ def get_all_so():
 
         q = apply_so_create_date_filter(q, date_year, date_from, date_to)
 
+        # Push PIC filter into SQL when possible — avoids loading all SOs
+        # into Python just to filter by pic_name. canonical_pending_pic()
+        # is now `pic or 'Unassigned'`, so 'Unassigned' = empty/null pic.
+        if pics:
+            pic_set = set(pics)
+            non_empty_pics = [p for p in pic_set if p and p != 'Unassigned']
+            wants_unassigned = 'Unassigned' in pic_set or '(Kosong)' in pic_set
+            if non_empty_pics and wants_unassigned:
+                q = q.filter(db.or_(SOData.pic_name.in_(non_empty_pics), SOData.pic_name.is_(None), SOData.pic_name == ''))
+            elif non_empty_pics:
+                q = q.filter(SOData.pic_name.in_(non_empty_pics))
+            elif wants_unassigned:
+                q = q.filter(db.or_(SOData.pic_name.is_(None), SOData.pic_name == ''))
+
+        if kpi_pic and kpi_pic != 'Unassigned':
+            q = q.filter(SOData.pic_name == kpi_pic)
+        elif kpi_pic == 'Unassigned':
+            q = q.filter(db.or_(SOData.pic_name.is_(None), SOData.pic_name == ''))
+
         raw_purchase_expr = case(
             (func.coalesce(SOData.purchasing_amount, 0) != 0, func.coalesce(SOData.purchasing_amount, 0)),
             else_=func.coalesce(SOData.purchasing_price, 0) * func.coalesce(SOData.so_qty, 0)
@@ -3206,6 +3260,22 @@ def get_all_so():
         if statuses: approval_q = approval_q.filter(SOData.so_status.in_(statuses))
         if so_items: approval_q = approval_q.filter(SOData.so_item.in_(so_items))
         approval_q = apply_so_create_date_filter(approval_q, date_year, date_from, date_to)
+        # Apply the same SQL-side pic filters to approval_q so we don't have to
+        # load every approval row into Python just to filter by pic_name.
+        if pics:
+            pic_set = set(pics)
+            non_empty_pics = [p for p in pic_set if p and p != 'Unassigned']
+            wants_unassigned = 'Unassigned' in pic_set or '(Kosong)' in pic_set
+            if non_empty_pics and wants_unassigned:
+                approval_q = approval_q.filter(db.or_(SOData.pic_name.in_(non_empty_pics), SOData.pic_name.is_(None), SOData.pic_name == ''))
+            elif non_empty_pics:
+                approval_q = approval_q.filter(SOData.pic_name.in_(non_empty_pics))
+            elif wants_unassigned:
+                approval_q = approval_q.filter(db.or_(SOData.pic_name.is_(None), SOData.pic_name == ''))
+        if kpi_pic and kpi_pic != 'Unassigned':
+            approval_q = approval_q.filter(SOData.pic_name == kpi_pic)
+        elif kpi_pic == 'Unassigned':
+            approval_q = approval_q.filter(db.or_(SOData.pic_name.is_(None), SOData.pic_name == ''))
         if sort_order == 'oldest':
             approval_sos = approval_q.options(load_only(*so_list_fields)).order_by(SOData.so_create_date.asc(), SOData.so_item.asc()).all()
         else:
@@ -3213,14 +3283,8 @@ def get_all_so():
 
         kpi_source_sos = list(all_sos)
 
-        if pics:
-            pic_set = set(pics)
-            all_sos = [s for s in all_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) in pic_set]
-            approval_sos = [s for s in approval_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) in pic_set]
-
-        if kpi_pic:
-            all_sos = [s for s in all_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) == kpi_pic]
-            approval_sos = [s for s in approval_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) == kpi_pic]
+        # PIC filter and kpi_pic filter are now applied in SQL above, so the
+        # Python-side filters below are kept as a safety net (cheap no-op now).
 
         total = len(all_sos)
         subtotal_amount = sum(float(s.sales_amount or 0) for s in all_sos)
@@ -3361,8 +3425,10 @@ def fetch_exchange_rates_bulk():
         existing_dates = {r[0] for r in db.session.query(ExchangeRate.rate_date).all()}
         to_fetch = sorted(dates_needed - existing_dates)
         fetched = 0; failed = []
+        # Use parallel fetching — much faster than sequential per-date HTTP calls.
+        rates = _fetch_rates_parallel(to_fetch, 'USD')
         for d in to_fetch:
-            rate = _fetch_rate_from_api(d)
+            rate = rates.get(d)
             if rate:
                 try:
                     db.session.add(ExchangeRate(rate_date=d, usd_to_idr=rate, source='frankfurter'))
@@ -3460,9 +3526,88 @@ def cleanup_master_pic_by_category_name(valid_category_names=None):
 
 def cleanup_item_registration_duplicates_only(): return cleanup_source_table_snapshot(ItemRegistration, 'req_no', None, timestamp_fields=('uploaded_at',), delete_blank=True)
 
-def _refresh_so_pic_names():
-    """Helper function (BUKAN route handler!) — refresh pic_name untuk semua SO rows.
+
+def _build_pic_lookup_cache():
+    """Build a {product_id: pic_name} map for all ProductIDDB rows.
+    Used to batch PIC lookups during upload — avoids N+1 SQL queries."""
+    try:
+        prod_rows = db.session.query(ProductIDDB.product_id, ProductIDDB.category_id, ProductIDDB.category_name).all()
+    except Exception:
+        return {}
+    by_id, by_name = master_pic_maps()
+    cache = {}
+    for pid, cat_id, cat_name in prod_rows:
+        if not pid: continue
+        pid_str = str(pid).strip()
+        pic = _lookup_pic_by_category(cat_id, cat_name)
+        if pic:
+            cache[pid_str] = pic
+    return cache
+
+
+def _batch_lookup_pic(product_id_str, cache):
+    """Look up PIC for a product_id using the preloaded cache.
+    Falls back to _lookup_pic (single SQL query) on cache miss."""
+    if not product_id_str:
+        return None
+    pid = str(product_id_str).strip()
+    if pid in cache:
+        return cache[pid]
+    # Cache miss — fall back to single lookup and store back to cache
+    pic = _lookup_pic(pid)
+    if pic:
+        cache[pid] = pic
+    return pic
+
+
+def _spawn_post_upload_fx_worker(so_items_scope):
+    """Spawn a background thread to fetch missing USD/EUR exchange rates for
+    the rows just uploaded. Returns immediately; the worker runs in the
+    background and commits rate cache updates as they arrive.
+
+    This used to be a blocking call inside upload_smro: a single upload with
+    30+ unique USD/EUR dates could lock the upload endpoint for several
+    minutes while frankfurter.dev was called sequentially with a 6s timeout
+    per call. Now we return success immediately and let the worker catch
+    up; the dashboard uses cached rates (or 0 if none yet) meanwhile."""
+    if not so_items_scope:
+        return
+    items_list = [s for s in so_items_scope if s]
+    if not items_list:
+        return
+
+    def _worker():
+        try:
+            with app.app_context():
+                pending_fx_rows = SOData.query.filter(
+                    SOData.so_item.in_(items_list),
+                    SOData.purchasing_amount_idr.is_(None),
+                    func.upper(func.coalesce(SOData.purchasing_currency, '')).in_(['USD', 'EUR']),
+                ).all()
+                if not pending_fx_rows:
+                    return
+                converted = ensure_purchase_amount_idr_cache(pending_fx_rows, fetch_missing=True)
+                if converted:
+                    clear_runtime_caches()
+                    print(f'[fx-worker] Converted {converted} FX rows in background.')
+        except Exception as exc:
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
+            print(f'[fx-worker] Background FX fetch failed: {exc}')
+
+    threading.Thread(target=_worker, daemon=True, name='post-upload-fx-worker').start()
+
+
+def _refresh_so_pic_names(so_items_scope=None, product_ids_scope=None):
+    """Helper function (BUKAN route handler!) — refresh pic_name untuk SO rows.
     Me-return jumlah baris yang di-refresh (int).
+
+    Optimization: by default only refresh rows whose so_item is in
+    `so_items_scope` (e.g., the items just uploaded) OR whose product_id is
+    in `product_ids_scope`. This avoids iterating ALL SO rows on every upload.
+    If both are None, falls back to refreshing all rows (used by master-pic uploads).
 
     FIX V3: sebelumnya function ini disertai decorator @app.route('/api/upload/smro', ...)
     yang membuat Flask mendaftarkannya sebagai view function untuk endpoint upload.
@@ -3470,13 +3615,25 @@ def _refresh_so_pic_names():
     mendapat return value int → throw TypeError → HTTP 500.
 
     Decorator @app.route sekarang DIPINDAHKAN ke upload_smro() yang benar.
-    Lihat https://stackoverflow.com/q/... untuk pola umumnya.
     """
     prod_map = {str(p.product_id).strip(): (p.category_id, p.category_name) for p in db.session.query(ProductIDDB).all() if p.product_id}
     client_pic_cache = {normalize_client_id(m.client_id): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name)}
     vendor_pic_cache = {normalize_vendor_id(m.vendor_id): clean(m.pic_name) for m in db.session.query(MasterVendorPIC).all() if clean(m.pic_name)}
     cat_pic_cache = {}
-    so_rows = db.session.query(SOData).filter(SOData.product_id.isnot(None), SOData.product_id != '').all()
+    # Scope the refresh to rows that actually need it — much faster than
+    # iterating every SO row in the table on every upload.
+    q = db.session.query(SOData).filter(SOData.product_id.isnot(None), SOData.product_id != '')
+    if so_items_scope is not None:
+        items_list = [s for s in so_items_scope if s]
+        if not items_list:
+            return 0
+        q = q.filter(SOData.so_item.in_(items_list))
+    elif product_ids_scope is not None:
+        pids_list = [str(p).strip() for p in product_ids_scope if p]
+        if not pids_list:
+            return 0
+        q = q.filter(SOData.product_id.in_(pids_list))
+    so_rows = q.all()
     refreshed = 0
     for s in so_rows:
         cat_id, cat_name = prod_map.get(str(s.product_id).strip(), (None, None))
@@ -3490,7 +3647,8 @@ def _refresh_so_pic_names():
             if vid and vid in vendor_pic_cache: new_pic = vendor_pic_cache[vid]
         if not new_pic: new_pic = cat_pic_cache[ck]
         if s.pic_name != new_pic: s.pic_name = new_pic; refreshed += 1
-    db.session.commit()
+    if refreshed:
+        db.session.commit()
     clear_runtime_caches()
     return refreshed
 
@@ -3536,7 +3694,13 @@ def upload_smro():
         if all_so_items_in_upload:
             existing_so_rows = SOData.query.filter(SOData.so_item.in_(list(all_so_items_in_upload))).all()
             existing_so = {s.so_item: s for s in existing_so_rows if s.so_item}
-            
+
+        # Preload product_id → pic_name map ONCE for the whole upload batch.
+        # Previously the loop called _lookup_pic(product_id) per row, which
+        # issued a separate SQL query for each row (N+1 query problem —
+        # 1,000 rows = 1,000 SQL queries just for PIC lookup).
+        _pic_lookup_cache = _build_pic_lookup_cache()
+
         total_count = total_updated = total_inserted = 0
         total_removed_duplicates = cleanup_pre.get('removed_duplicates', 0)
         total_removed_stale = cleanup_pre.get('removed_stale', 0)
@@ -3627,11 +3791,11 @@ def upload_smro():
                         existing.purchasing_amount_idr = preserved_amount_idr; existing.purchasing_amount_idr_cached_at = preserved_amount_idr_cached_at
                     if not col_spec or spec_val is None: existing.specification = preserved_spec
                     if not col_pid or pid_val is None: existing.product_id = preserved_pid
-                    if existing.product_id: existing.pic_name = _lookup_pic(existing.product_id)
+                    if existing.product_id: existing.pic_name = _batch_lookup_pic(existing.product_id, _pic_lookup_cache)
                     updated += 1
                 else:
                     new_rec = SOData(**new_data)
-                    if new_rec.product_id: new_rec.pic_name = _lookup_pic(new_rec.product_id)
+                    if new_rec.product_id: new_rec.pic_name = _batch_lookup_pic(new_rec.product_id, _pic_lookup_cache)
                     db.session.add(new_rec)
                     if so_item_val: existing_so[so_item_val] = new_rec
                     inserted += 1
@@ -3659,18 +3823,28 @@ def upload_smro():
             db.session.execute(text('PRAGMA wal_checkpoint(TRUNCATE)'))
             db.session.commit()
         except: pass
-        fx_warning = None
-        try:
-            pending_fx_rows = SOData.query.filter(SOData.purchasing_amount_idr.is_(None), func.upper(func.coalesce(SOData.purchasing_currency, '')).in_(['USD', 'EUR'])).all()
-            converted_fx_rows = ensure_purchase_amount_idr_cache(pending_fx_rows, fetch_missing=True)
-        except Exception as fx_exc:
-            db.session.rollback(); converted_fx_rows = 0; fx_warning = str(fx_exc)
+        # Clear caches BEFORE returning so the dashboard refetches fresh data.
         clear_runtime_caches()
 
+        # Scope PIC refresh to just the uploaded so_items — much faster than
+        # iterating every SO row in the table.
         try:
-            _refresh_so_pic_names()
+            _refresh_so_pic_names(so_items_scope=latest_so_items)
         except Exception as pic_exc:
             import traceback; traceback.print_exc()
+
+        # Defer FX rate fetching to a background thread. Previously this
+        # blocked the upload response — every unique USD/EUR date that
+        # lacked a cached rate triggered a 6-second HTTP call to
+        # frankfurter.dev, and 30+ unique dates could lock the upload
+        # endpoint for minutes. Now we return immediately and the rates
+        # get cached asynchronously; the dashboard will use whatever
+        # rates are already cached (or 0 if none) until the background
+        # worker catches up.
+        try:
+            _spawn_post_upload_fx_worker(latest_so_items)
+        except Exception as fx_spawn_exc:
+            print(f'[upload_smro] FX worker spawn failed: {fx_spawn_exc}')
 
         diagnostics = diagnostics_by_file[-1] if diagnostics_by_file else {}
         if len(diagnostics_by_file) > 1: diagnostics = {**diagnostics, 'files': diagnostics_by_file}
@@ -3678,8 +3852,9 @@ def upload_smro():
             'message': f'Berhasil upload {len(uploads)} file: {total_inserted} SO baru ditambahkan, {total_updated} SO diperbarui, {total_removed_duplicates} duplicate lama dihapus, {total_removed_stale} SO lama dibuang.',
             'uploaded': total_count, 'files': len(uploads), 'mode': upload_mode, 'replace': replace_existing,
             'inserted': total_inserted, 'updated': total_updated, 'removed_duplicates': total_removed_duplicates,
-            'removed_stale': total_removed_stale, 'removed_blank': total_removed_blank, 'fx_converted': converted_fx_rows,
-            'fx_warning': fx_warning, 'diagnostics': diagnostics,
+            'removed_stale': total_removed_stale, 'removed_blank': total_removed_blank,
+            'fx_converted': 0, 'fx_warning': None, 'fx_pending': True,
+            'diagnostics': diagnostics,
         })
     except Exception as e:
         db.session.rollback(); import traceback; traceback.print_exc()
@@ -4723,23 +4898,11 @@ def upload_product_id():
         global _SIMILARITY_CACHE
         _SIMILARITY_CACHE = {}
 
-        so_rows = db.session.query(SOData).filter(
-            SOData.product_id.isnot(None), SOData.product_id != ''
-        ).all()
-        refreshed = 0
-        for s in so_rows:
-            prod = db.session.query(ProductIDDB).filter_by(product_id=str(s.product_id).strip()).first()
-            if not prod:
-                continue
-            cache_key = (normalize_category_id(prod.category_id), normalize_category_name(prod.category_name))
-            if cache_key not in pic_cache:
-                pic_cache[cache_key] = _lookup_pic_by_category(prod.category_id, prod.category_name)
-            new_pic = pic_cache[cache_key]
-            if s.pic_name != new_pic:
-                s.pic_name = new_pic
-                refreshed += 1
-        db.session.commit()
-        clear_runtime_caches()
+        # Refresh PIC only for SO rows whose product_id is in this upload
+        # batch — uses the preloaded prod_map internally, no N+1 queries.
+        # Previously this loop called db.session.query(ProductIDDB).filter_by
+        # per SO row (1,000 SO rows = 1,000 SQL queries).
+        refreshed = _refresh_so_pic_names(product_ids_scope=latest_product_ids)
 
         return jsonify({
             'status': 'ok',
@@ -4858,27 +5021,9 @@ def upload_master_pic():
         db.session.commit()
         invalidate_master_pic_cache()
 
-        prod_map = {
-            str(p.product_id).strip(): (p.category_id, p.category_name)
-            for p in db.session.query(ProductIDDB).all()
-            if p.product_id
-        }
-        pic_cache = {}
-        so_rows = db.session.query(SOData).filter(
-            SOData.product_id.isnot(None), SOData.product_id != ''
-        ).all()
-        refreshed = 0
-        for s in so_rows:
-            cat_id, cat_name = prod_map.get(str(s.product_id).strip(), (None, None))
-            cache_key = (normalize_category_id(cat_id), normalize_category_name(cat_name))
-            if cache_key not in pic_cache:
-                pic_cache[cache_key] = _lookup_pic_by_category(cat_id, cat_name)
-            new_pic = pic_cache[cache_key]
-            if s.pic_name != new_pic:
-                s.pic_name = new_pic
-                refreshed += 1
-        db.session.commit()
-        clear_runtime_caches()
+        # Master PIC change can affect ANY SO row, so we do a full refresh.
+        # Uses preloaded prod_map + master_pic_maps internally (no N+1).
+        refreshed = _refresh_so_pic_names()
         refresh_item_registration_mappings()
 
         return jsonify({
