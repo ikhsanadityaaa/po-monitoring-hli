@@ -366,6 +366,9 @@ class ImportVendor(db.Model):
     __tablename__ = 'import_vendor'
     id = db.Column(db.Integer, primary_key=True)
     vendor_name = db.Column(db.String(300), unique=True, nullable=False, index=True)
+    origin = db.Column(db.String(100))
+    top = db.Column(db.String(50))
+    non_ski = db.Column(db.String(50))
     uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class ImportDashboardRow(db.Model):
@@ -646,6 +649,7 @@ def _ensure_extra_columns():
         'so_data': [('specification', 'TEXT'), ('product_id', 'VARCHAR(100)'), ('vendor_id', 'VARCHAR(100)'), ('client_id', 'VARCHAR(100)'), ('manufacturer_name', 'VARCHAR(300)'), ('purchasing_currency', 'VARCHAR(10)'), ('purchasing_amount_idr', 'DOUBLE PRECISION'), ('purchasing_amount_idr_cached_at', 'TIMESTAMP'), ('pic_name', 'VARCHAR(100)')],
         'item_registration': [('req_date', 'DATE'), ('existing_owner', 'VARCHAR(100)'), ('client_id', 'VARCHAR(100)'), ('operation_unit_name', 'VARCHAR(300)'), ('bid_except_type', 'VARCHAR(255)'), ('category_id', 'VARCHAR(100)'), ('pic_name', 'VARCHAR(200)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(50)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)'), ('remarks', 'TEXT')],
         'product_id_db': [('specification', 'TEXT'), ('manufacturer_name', 'VARCHAR(255)'), ('vendor_name', 'VARCHAR(300)'), ('order_unit', 'VARCHAR(50)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(100)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)')],
+        'import_vendor': [('origin', 'VARCHAR(100)'), ('top', 'VARCHAR(50)'), ('non_ski', 'VARCHAR(50)')],
     }
     for table_name, columns in migration_plan.items():
         cols = existing_columns(table_name)
@@ -894,6 +898,9 @@ IMPORT_STATUS_OPTIONS = ['NEW', 'ON PROCESS', 'ON DELIVERY', 'DELIVERED', 'CANCE
 IMPORT_CHECKBOX_FIELDS = {'sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo'}
 IMPORT_FORMULA_FIELDS = {'days_left', 'site', 'vendor', 'arrival_check', 'purchase_amount', 'lt_days'}
 IMPORT_HYPERLINK_FIELDS = {'soft_copy_doc'}
+IMPORT_PAYMENT_DROPDOWN_FIELDS = {'payment'}
+IMPORT_PAYMENT_DATE_FIELDS = {'payment_date'}
+IMPORT_VENDOR_ATTR_FIELDS = {'origin', 'top'}  # populated from ImportVendor by vendor_name match
 IMPORT_DASHBOARD_LOCAL_FIELDS = {'po_send_date'}
 IMPORT_SOURCE_MANAGED_FIELDS = {
     'po_date_by_email', 'site', 'yupi_po', 'po_yupi', 'vendor',
@@ -913,6 +920,8 @@ IMPORT_LOCAL_EDIT_FIELDS = {
     'forwarder', 'bl_number', 'inv_no', 'non_ski',
     'sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo',
     'soft_copy_doc',
+    # NEW: payment + payment_date — local-only editable fields, never overwritten by source sync
+    'payment', 'payment_date',
 }
 
 IMPORT_USER_LOCAL_ONLY_FIELDS = IMPORT_LOCAL_EDIT_FIELDS - IMPORT_SOURCE_MANAGED_FIELDS
@@ -925,59 +934,68 @@ IMPORT_SOURCE_ONLY_COLUMNS = [
 IMPORT_SYNC_FIELD_ALIASES = {'yupi_po': 'po_yupi', 'req_dlv_date': 'source_req_dlv_date'}
 
 IMPORT_REFERENCE_VISIBLE_COLUMNS = [
-    {'sheet_col': 'A',  'field': 'status',              'label': 'STATUS',                 'width': 132, 'type': 'status'},
-    {'sheet_col': 'B',  'field': 'days_left',           'label': 'Days Left',              'width': 80,  'formula': True},
-    {'sheet_col': 'C',  'field': 'po_send_date',         'label': 'PO Send Date',          'width': 124, 'local': True, 'group_per_item': False, 'blue_text': True},
-    {'sheet_col': 'D',  'source_sheet_col': 'B',  'field': 'site',                'label': 'Site',                   'width': 78,  'formula': True, 'blue_text': True},
-    {'sheet_col': 'E',  'source_sheet_col': 'F',  'field': 'yupi_po',             'label': 'YUPI PO',                'width': 118, 'blue_text': True},
-    {'sheet_col': 'F',  'source_sheet_col': 'Q',  'field': 'vendor',              'label': 'Vendor',                 'width': 190, 'formula': True, 'blue_text': True},
-    {'sheet_col': 'G',  'source_sheet_col': 'K',  'field': 'req_dlv_date',        'label': 'Req Dlv Date',           'width': 122, 'blue_text': True},
-    {'sheet_col': 'H',  'field': 'etd',                 'label': 'ETD',                    'width': 116, 'blue_text': True},
-    {'sheet_col': 'I',  'field': 'eta',                 'label': 'ETA',                    'width': 116, 'blue_text': True},
-    {'sheet_col': 'J',  'field': 'arrival_check',       'label': 'Arrival Check',          'width': 154, 'formula': True, 'blue_text': True},
-    {'sheet_col': 'K',  'field': 'import_remarks',      'label': 'Import Remarks',         'width': 220, 'blue_text': True, 'bold_text': True},
+    {'sheet_col': 'A',  'field': 'status',              'label': 'STATUS',                 'width': 110, 'type': 'status'},
+    {'sheet_col': 'B',  'field': 'days_left',           'label': 'Days',                   'width': 64,  'formula': True},
+    {'sheet_col': 'C',  'field': 'po_send_date',         'label': 'PO Send Date',          'width': 100, 'local': True, 'group_per_item': False, 'blue_text': True},
+    {'sheet_col': 'D',  'source_sheet_col': 'B',  'field': 'site',                'label': 'Site',                   'width': 60,  'formula': True, 'blue_text': True},
+    {'sheet_col': 'E',  'source_sheet_col': 'F',  'field': 'yupi_po',             'label': 'YUPI PO',                'width': 100, 'blue_text': True},
+    {'sheet_col': 'F',  'source_sheet_col': 'Q',  'field': 'vendor',              'label': 'Vendor',                 'width': 140, 'formula': True, 'blue_text': True},
+    # NEW: Origin — populated from ImportVendor table by vendor_name match.
+    {'sheet_col': '',   'field': 'origin',              'label': 'Origin',                 'width': 80,  'vendor_attr': True, 'blue_text': True},
+    {'sheet_col': 'G',  'source_sheet_col': 'K',  'field': 'req_dlv_date',        'label': 'Req Dlv Date',           'width': 100, 'blue_text': True},
+    {'sheet_col': 'H',  'field': 'etd',                 'label': 'ETD',                    'width': 90,  'blue_text': True},
+    {'sheet_col': 'I',  'field': 'eta',                 'label': 'ETA',                    'width': 90,  'blue_text': True},
+    {'sheet_col': 'J',  'field': 'arrival_check',       'label': 'Arrival Check',          'width': 120, 'formula': True, 'blue_text': True},
+    {'sheet_col': 'K',  'field': 'import_remarks',      'label': 'Import Remarks',         'width': 180, 'blue_text': True, 'bold_text': True},
     # ── Shipment-level group columns (moved here per user request) ───────────
     # These are GROUP columns (no group_per_item flag) so they merge across
     # rows with the same YUPI PO + Req Dlv Date. Blue text applies from
     # PO Send Date through Inv No.
-    {'sheet_col': 'CU', 'field': 'lt_days',             'label': 'LT (Days)',              'width': 94,  'formula': True, 'number': True, 'blue_text': True},
-    {'sheet_col': 'CV', 'field': 'incoterm',            'label': 'Incoterm',               'width': 98,  'blue_text': True},
-    {'sheet_col': 'CW', 'field': 'forwarder',           'label': 'Forwarder',              'width': 150, 'blue_text': True},
-    {'sheet_col': 'CX', 'field': 'bl_number',           'label': 'BL Number',              'width': 150, 'blue_text': True},
-    {'sheet_col': 'CY', 'field': 'inv_no',              'label': 'Invoice No',             'width': 135, 'blue_text': True},
+    {'sheet_col': 'CU', 'field': 'lt_days',             'label': 'LT (Days)',              'width': 70,  'formula': True, 'number': True, 'blue_text': True},
+    {'sheet_col': 'CV', 'field': 'incoterm',            'label': 'Incoterm',               'width': 76,  'blue_text': True},
+    {'sheet_col': 'CW', 'field': 'forwarder',           'label': 'Forwarder',              'width': 110, 'blue_text': True},
+    {'sheet_col': 'CX', 'field': 'bl_number',           'label': 'BL Number',              'width': 110, 'blue_text': True},
+    {'sheet_col': 'CY', 'field': 'inv_no',              'label': 'Invoice No',             'width': 100, 'blue_text': True},
     # SAP INPUT moved here (right after Invoice No). NOT part of the checklist
     # group — always visible as a checkmark toggle.
-    {'sheet_col': 'DA', 'field': 'sap_input',           'label': 'SAP INPUT',              'width': 86,  'checkbox': True},
-    # SOFT COPY DOC moved here (right after SAP INPUT) per user request.
-    {'sheet_col': 'DI', 'field': 'soft_copy_doc',       'label': 'SOFT COPY DOC',          'width': 190, 'hyperlink': True},
+    {'sheet_col': 'DA', 'field': 'sap_input',           'label': 'SAP INPUT',              'width': 76,  'checkbox': True},
+    # NEW: TOP — populated from ImportVendor table by vendor_name match.
+    {'sheet_col': '',   'field': 'top',                 'label': 'TOP',                    'width': 60,  'vendor_attr': True, 'blue_text': True},
+    # NEW: Payment — dropdown with empty / "DONE".
+    {'sheet_col': '',   'field': 'payment',             'label': 'Payment',                'width': 86,  'payment_dropdown': True},
+    # NEW: Payment Date — date picker. Auto-shows "Overdue" (red) when
+    # today > ETA + TOP days AND payment is not DONE.
+    {'sheet_col': '',   'field': 'payment_date',        'label': 'Payment Date',           'width': 110, 'payment_date': True},
+    # SOFT COPY DOC moved here (right after Payment Date) per user request.
+    {'sheet_col': 'DI', 'field': 'soft_copy_doc',       'label': 'SOFT COPY DOC',          'width': 150, 'hyperlink': True},
     # ── Per-item columns (group_per_item=True → never merged across rows) ──────
-    {'sheet_col': 'L',                            'field': 'so',                  'label': 'SO',                     'width': 140, 'group_per_item': True},
-    {'sheet_col': 'M',  'source_sheet_col': 'A',  'field': 'group',               'label': 'GROUP',                  'width': 116, 'group_per_item': True},
-    {'sheet_col': 'O',  'source_sheet_col': 'C', 'field': 'po_date_by_email',    'label': 'PO DATE\n(By Email)',    'width': 132, 'group_per_item': True},
-    {'sheet_col': 'Q',  'source_sheet_col': 'E',  'field': 'po_sementara',        'label': 'PO SEMENTARA',           'width': 160, 'group_per_item': True},
-    {'sheet_col': 'S',  'source_sheet_col': 'G',  'field': 'item_yupi',           'label': 'Item Yupi',              'width': 130, 'group_per_item': True},
-    {'sheet_col': 'T',  'source_sheet_col': 'H',  'field': 'item_name',           'label': 'Item name',              'width': 260, 'group_per_item': True},
+    {'sheet_col': 'L',                            'field': 'so',                  'label': 'SO',                     'width': 110, 'group_per_item': True},
+    {'sheet_col': 'M',  'source_sheet_col': 'A',  'field': 'group',               'label': 'GROUP',                  'width': 90,  'group_per_item': True},
+    {'sheet_col': 'O',  'source_sheet_col': 'C', 'field': 'po_date_by_email',    'label': 'PO DATE\n(By Email)',    'width': 100, 'group_per_item': True},
+    {'sheet_col': 'Q',  'source_sheet_col': 'E',  'field': 'po_sementara',        'label': 'PO SEMENTARA',           'width': 120, 'group_per_item': True},
+    {'sheet_col': 'S',  'source_sheet_col': 'G',  'field': 'item_yupi',           'label': 'Item Yupi',              'width': 100, 'group_per_item': True},
+    {'sheet_col': 'T',  'source_sheet_col': 'H',  'field': 'item_name',           'label': 'Item name',              'width': 200, 'group_per_item': True},
     {'sheet_col': 'U',  'source_sheet_col': 'I',  'field': 'spec',                'label': 'Spec',                   'width': 340, 'group_per_item': True},
-    {'sheet_col': 'V',  'source_sheet_col': 'J',  'field': 'remark_yupi',         'label': 'REMARK YUPI',            'width': 340},
-    {'sheet_col': 'X',  'source_sheet_col': 'L',  'field': 'reschedule',          'label': 'RESCHEDULE',             'width': 120, 'group_per_item': True},
-    {'sheet_col': 'Y',  'source_sheet_col': 'M',  'field': 'ord_qty',             'label': "Ord. Q'ty",             'width': 100, 'number': True, 'group_per_item': True},
-    {'sheet_col': 'Z',  'source_sheet_col': 'N',  'field': 'unit',                'label': 'Unit',                   'width': 76,  'group_per_item': True},
-    {'sheet_col': 'AA', 'source_sheet_col': 'O',  'field': 'unit_price',          'label': 'Unit Price',             'width': 120, 'number': True, 'group_per_item': True},
-    {'sheet_col': 'AB', 'source_sheet_col': 'P',  'field': 'amount',              'label': 'AMOUNT',                 'width': 130, 'number': True, 'group_per_item': True},
-    {'sheet_col': 'AC', 'source_sheet_col': 'Q',  'field': 'vendor_name',         'label': 'Vendor Name',            'width': 190, 'group_per_item': True},
-    {'sheet_col': 'AG', 'source_sheet_col': 'U',  'field': 'purchase_price',      'label': 'PURCHASE PRICE',         'width': 128, 'number': True, 'group_per_item': True},
-    {'sheet_col': 'AH', 'source_sheet_col': 'V',  'field': 'currency',            'label': 'CURRENCY',               'width': 92,  'group_per_item': True},
-    {'sheet_col': 'AJ', 'source_sheet_col': 'X',  'field': 'purchase_amount',     'label': 'PURCHASE\nAMOUNT',       'width': 132, 'formula': True, 'number': True, 'group_per_item': True},
-    {'sheet_col': 'DB', 'field': 'bl_awb',              'label': 'BL / AWB',               'width': 86,  'checkbox': True},
-    {'sheet_col': 'DC', 'field': 'invoice',             'label': 'INVOICE',                'width': 86,  'checkbox': True},
-    {'sheet_col': 'DD', 'field': 'pl',                  'label': 'PL',                     'width': 74,  'checkbox': True},
-    {'sheet_col': 'DE', 'field': 'hc',                  'label': 'HC',                     'width': 74,  'checkbox': True},
-    {'sheet_col': 'DF', 'field': 'msds',                'label': 'MSDS',                   'width': 82,  'checkbox': True},
-    {'sheet_col': 'DG', 'field': 'coa',                 'label': 'COA',                    'width': 76,  'checkbox': True},
-    {'sheet_col': 'DH', 'field': 'coo',                 'label': 'COO',                    'width': 76,  'checkbox': True},
+    {'sheet_col': 'V',  'source_sheet_col': 'J',  'field': 'remark_yupi',         'label': 'REMARK YUPI',            'width': 260},
+    {'sheet_col': 'X',  'source_sheet_col': 'L',  'field': 'reschedule',          'label': 'RESCHEDULE',             'width': 96,  'group_per_item': True},
+    {'sheet_col': 'Y',  'source_sheet_col': 'M',  'field': 'ord_qty',             'label': "Ord. Q'ty",             'width': 76,  'number': True, 'group_per_item': True},
+    {'sheet_col': 'Z',  'source_sheet_col': 'N',  'field': 'unit',                'label': 'Unit',                   'width': 56,  'group_per_item': True},
+    {'sheet_col': 'AA', 'source_sheet_col': 'O',  'field': 'unit_price',          'label': 'Unit Price',             'width': 90,  'number': True, 'group_per_item': True},
+    {'sheet_col': 'AB', 'source_sheet_col': 'P',  'field': 'amount',              'label': 'AMOUNT',                 'width': 100, 'number': True, 'group_per_item': True},
+    # Vendor Name column removed — Vendor column on the left already covers it.
+    {'sheet_col': 'AG', 'source_sheet_col': 'U',  'field': 'purchase_price',      'label': 'PURCHASE PRICE',         'width': 96,  'number': True, 'group_per_item': True},
+    {'sheet_col': 'AH', 'source_sheet_col': 'V',  'field': 'currency',            'label': 'CURRENCY',               'width': 72,  'group_per_item': True},
+    {'sheet_col': 'AJ', 'source_sheet_col': 'X',  'field': 'purchase_amount',     'label': 'PURCHASE\nAMOUNT',       'width': 100, 'formula': True, 'number': True, 'group_per_item': True},
+    {'sheet_col': 'DB', 'field': 'bl_awb',              'label': 'BL / AWB',               'width': 76,  'checkbox': True},
+    {'sheet_col': 'DC', 'field': 'invoice',             'label': 'INVOICE',                'width': 76,  'checkbox': True},
+    {'sheet_col': 'DD', 'field': 'pl',                  'label': 'PL',                     'width': 56,  'checkbox': True},
+    {'sheet_col': 'DE', 'field': 'hc',                  'label': 'HC',                     'width': 56,  'checkbox': True},
+    {'sheet_col': 'DF', 'field': 'msds',                'label': 'MSDS',                   'width': 64,  'checkbox': True},
+    {'sheet_col': 'DG', 'field': 'coa',                 'label': 'COA',                    'width': 56,  'checkbox': True},
+    {'sheet_col': 'DH', 'field': 'coo',                 'label': 'COO',                    'width': 56,  'checkbox': True},
     # NON-SKI moved to rightmost column. Regular editable cell (free text
     # input) — NOT a checkbox or dropdown.
-    {'sheet_col': 'CZ', 'field': 'non_ski',             'label': 'NON-SKI',                'width': 90},
+    {'sheet_col': 'CZ', 'field': 'non_ski',             'label': 'NON-SKI',                'width': 70},
 ]
 
 IMPORT_COLUMN_ALIASES = {
@@ -1135,6 +1153,25 @@ def import_vendor_filter_names():
 def import_vendor_names(force_default=False):
     uploaded = import_uploaded_vendor_names()
     return uploaded or import_default_vendors_from_layout(force=force_default)
+
+
+def import_vendor_attrs_map():
+    """Build a {vendor_name_lower: {'origin':..., 'top':..., 'non_ski':...}}
+    map from the ImportVendor table. Used to inject Origin/TOP into import
+    rows by matching the row's vendor name."""
+    out = {}
+    try:
+        for v in db.session.query(ImportVendor).all():
+            key = (v.vendor_name or '').strip().lower()
+            if not key: continue
+            out[key] = {
+                'origin': (v.origin or '').strip(),
+                'top': (v.top or '').strip(),
+                'non_ski': (v.non_ski or '').strip(),
+            }
+    except Exception:
+        pass
+    return out
 
 def import_detect_data_start(df):
     for idx in range(min(len(df), 12)):
@@ -1457,6 +1494,32 @@ def apply_import_formula_columns(row):
     if price is not None and qty is not None: row['purchase_amount'] = import_format_number(price * qty)
     if etd_date and eta_date: row['lt_days'] = str((eta_date - etd_date).days)
     else: row['lt_days'] = ''
+    # NEW: Payment Date "Overdue" logic — if today > ETA + TOP days AND payment
+    # is not DONE AND the user hasn't entered a payment_date yet, mark
+    # payment_date as "Overdue" (red). The frontend reads this sentinel value
+    # and renders it in red. Actual user-entered payment_date values are
+    # preserved as-is — they take precedence over the auto-computed "Overdue".
+    payment_value = (clean(row.get('payment')) or '').upper()
+    payment_date_value = clean(row.get('payment_date'))
+    # Only auto-mark "Overdue" if payment_date is currently empty or already
+    # holds the sentinel (so we re-evaluate it each time as ETA/TOP changes).
+    # A real date string (YYYY-MM-DD) is preserved.
+    is_sentinel_or_empty = (not payment_date_value) or (payment_date_value == 'Overdue')
+    if payment_value != 'DONE' and is_sentinel_or_empty and eta_date:
+        try:
+            top_days_str = clean(row.get('top')) or '0'
+            # Strip non-digit chars (e.g. "30 days", "Net 30", "30D")
+            top_match = re.search(r'\d+', str(top_days_str))
+            top_days = int(top_match.group(0)) if top_match else 0
+            due_date = eta_date + timedelta(days=top_days)
+            if date.today() > due_date:
+                row['payment_date'] = 'Overdue'
+            else:
+                # Not overdue anymore — clear the sentinel if present.
+                if payment_date_value == 'Overdue':
+                    row['payment_date'] = ''
+        except Exception:
+            pass
     return row
 
 def import_row_payload(row, columns):
@@ -1512,10 +1575,31 @@ def merge_import_existing_payload(existing_payload, sheet_payload):
         if not import_blankish(old_value): merged[field] = old_value
     return apply_import_formula_columns(merged)
 
-def import_dashboard_row_to_dict(row, columns):
+def import_dashboard_row_to_dict(row, columns, vendor_attrs_map=None):
+    """Convert an ImportDashboardRow to a dict matching the column schema.
+
+    vendor_attrs_map (optional): {vendor_name_lower: {'origin':..., 'top':..., 'non_ski':...}}
+    When provided, Origin and TOP are injected from this map (matched by
+    the row's vendor name). Falls back to the row's stored data_json values
+    if no match is found.
+    """
     try: data = json.loads(row.data_json or '{}')
     except: data = {}
     data = apply_import_formula_columns(dict(data))
+    # Inject vendor attributes (Origin, TOP) from the ImportVendor table.
+    # These are looked up by the row's vendor name (case-insensitive).
+    if vendor_attrs_map is not None:
+        row_vendor = import_nonblank(data.get('vendor')) or import_nonblank(data.get('vendor_name')) or import_nonblank(row.vendor_name)
+        if row_vendor:
+            attrs = vendor_attrs_map.get(str(row_vendor).strip().lower())
+            if attrs:
+                # Only inject if not already present in data (data wins for
+                # backward-compat — though normally these fields are empty
+                # in data_json because they come from the vendor master).
+                if not import_nonblank(data.get('origin')):
+                    data['origin'] = attrs.get('origin') or ''
+                if not import_nonblank(data.get('top')):
+                    data['top'] = attrs.get('top') or ''
     out = {}
     for col in columns:
         field = col.get('field')
@@ -6117,7 +6201,91 @@ def get_import_data():
 
         total = len(filtered_items)
         page_items = filtered_items[(page - 1) * per_page: page * per_page]
-        rows = [import_dashboard_row_to_dict(item['row'], columns) for item in page_items]
+        # Load vendor attributes (origin, top) once for the whole page.
+        vendor_attrs_map = import_vendor_attrs_map()
+        rows = [import_dashboard_row_to_dict(item['row'], columns, vendor_attrs_map=vendor_attrs_map) for item in page_items]
+
+        # ── KPIs ───────────────────────────────────────────────────────────
+        # Computed across ALL filtered rows (not just the current page):
+        #  - Total PO           : count of distinct YUPI POs
+        #  - This Week Arrival  : count of rows whose ETA falls within this week
+        #    (Mon–Sun). Sub-KPI: of those, how many have SAP INPUT unchecked.
+        #  - Sales Amount       : sum of AMOUNT column across filtered rows.
+        #  - PO Amount (IDR)    : sum of PURCHASE AMOUNT converted to IDR using
+        #    the exchange rate for the row's ETA date.
+        #  - Gross Margin       : Sales Amount − PO Amount (IDR).
+        try:
+            today_wib = (datetime.utcnow() + timedelta(hours=7)).date()
+            # ISO week: Monday is the start.
+            week_start = today_wib - timedelta(days=today_wib.weekday())  # Monday 00:00
+            week_end = week_start + timedelta(days=6)  # Sunday
+            total_po = 0
+            this_week_arrival = 0
+            this_week_no_sap = 0
+            sales_amount_total = 0.0
+            po_amount_idr_total = 0.0
+            seen_yupi_pos = set()
+            # Pre-collect ETA dates per row for FX rate prefetching.
+            eta_dates_usd_eur = set()
+            for item in filtered_items:
+                data = item.get('data') or {}
+                yupi = import_nonblank(data.get('yupi_po')) or import_nonblank(data.get('po_yupi'))
+                if yupi:
+                    seen_yupi_pos.add(str(yupi).strip().lower())
+                eta_date = import_date_from_value(data.get('eta'))
+                if eta_date and week_start <= eta_date <= week_end:
+                    this_week_arrival += 1
+                    # SAP INPUT checkbox — if not checked, count as "no SAP input"
+                    sap_val = import_nonblank(data.get('sap_input'))
+                    if not import_normalize_checkbox(sap_val):
+                        this_week_no_sap += 1
+                # Sales Amount = AMOUNT column
+                amt = import_float_value(data.get('amount'))
+                if amt is not None:
+                    sales_amount_total += amt
+                # PO Amount (IDR) = PURCHASE AMOUNT converted using ETA-date FX rate
+                pa = import_float_value(data.get('purchase_amount'))
+                if pa is not None and pa > 0:
+                    cur = (clean(data.get('currency')) or 'IDR').strip().upper()
+                    if cur in ('', 'IDR'):
+                        po_amount_idr_total += pa
+                    elif cur in ('USD', 'EUR') and eta_date:
+                        eta_dates_usd_eur.add((cur, eta_date))
+            # Prefetch FX rates for the ETA dates we need (cache-only — no API
+            # calls in the KPI path; if rates are missing, those rows contribute
+            # 0 to the total rather than blocking the response).
+            for cur in ('USD', 'EUR'):
+                dates_for_cur = sorted({d for c, d in eta_dates_usd_eur if c == cur})
+                if dates_for_cur:
+                    prefetch_exchange_rates(dates_for_cur, fetch_missing=False, currency=cur)
+            # Now compute PO Amount (IDR) per row using cached rates.
+            for item in filtered_items:
+                data = item.get('data') or {}
+                pa = import_float_value(data.get('purchase_amount'))
+                if pa is None or pa <= 0: continue
+                cur = (clean(data.get('currency')) or 'IDR').strip().upper()
+                eta_date = import_date_from_value(data.get('eta'))
+                if cur in ('', 'IDR'):
+                    continue  # already added above
+                if cur in ('USD', 'EUR') and eta_date:
+                    rate = get_currency_to_idr(cur, eta_date, cache_only=True)
+                    po_amount_idr_total += pa * rate
+            total_po = len(seen_yupi_pos)
+            gross_margin = sales_amount_total - po_amount_idr_total
+            kpis = {
+                'total_po': total_po,
+                'this_week_arrival': this_week_arrival,
+                'this_week_no_sap': this_week_no_sap,
+                'sales_amount': round(sales_amount_total, 2),
+                'po_amount_idr': round(po_amount_idr_total, 2),
+                'gross_margin': round(gross_margin, 2),
+            }
+        except Exception as kpi_exc:
+            import traceback; traceback.print_exc()
+            kpis = {
+                'total_po': 0, 'this_week_arrival': 0, 'this_week_no_sap': 0,
+                'sales_amount': 0.0, 'po_amount_idr': 0.0, 'gross_margin': 0.0,
+            }
 
         last_copy_at = import_meta_get('last_copy_at') or ''
 
@@ -6137,6 +6305,7 @@ def get_import_data():
             'yupi_po_sort': yupi_po_sort,
             'sources': [{'key': s['key'], 'label': s['label']} for s in IMPORT_SOURCE_SHEETS],
             'sync': sync_info,
+            'kpis': kpis,
         })
     except Exception as e:
         db.session.rollback()
@@ -6253,7 +6422,7 @@ def update_import_cell():
         db.session.commit()
         clear_runtime_caches()
         columns = import_layout_columns()
-        updated_row = import_dashboard_row_to_dict(row, columns)
+        updated_row = import_dashboard_row_to_dict(row, columns, vendor_attrs_map=import_vendor_attrs_map())
         return jsonify({'success': True, 'row_key': row_key, 'field': field, 'value': value, 'row': updated_row, 'sheet_sync': sheet_sync})
     except Exception as e:
         db.session.rollback()
@@ -6357,7 +6526,19 @@ def export_import_data():
             ws.column_dimensions[get_column_letter(i)].width = width
 
         alt_fill = PatternFill(start_color='F0F4FF', end_color='F0F4FF', fill_type='solid')
+        # Build vendor-attr map once for the export so Origin/TOP can be
+        # injected into each row by matching the row's vendor name.
+        _export_vendor_attrs = import_vendor_attrs_map()
         for row_idx, (db_row, data) in enumerate(filtered, 2):
+            # Inject vendor attributes (origin, top) if missing in row data.
+            row_vendor = import_nonblank(data.get('vendor')) or import_nonblank(data.get('vendor_name')) or import_nonblank(db_row.vendor_name)
+            if row_vendor:
+                attrs = _export_vendor_attrs.get(str(row_vendor).strip().lower())
+                if attrs:
+                    if not import_nonblank(data.get('origin')):
+                        data['origin'] = attrs.get('origin') or ''
+                    if not import_nonblank(data.get('top')):
+                        data['top'] = attrs.get('top') or ''
             row_vals = []
             for col in visible_cols:
                 field = col.get('field', '')
@@ -6429,7 +6610,8 @@ def update_import_cells_batch():
                 sheet_sync = {'synced': False, 'reason': str(sync_exc)}
         db.session.commit()
         clear_runtime_caches()
-        updated_rows = [import_dashboard_row_to_dict(row_by_key[k], columns) for k in updated_keys if k in row_by_key]
+        _v_attrs_map = import_vendor_attrs_map()
+        updated_rows = [import_dashboard_row_to_dict(row_by_key[k], columns, vendor_attrs_map=_v_attrs_map) for k in updated_keys if k in row_by_key]
         return jsonify({'success': True, 'updated': len(sheet_items), 'rows': updated_rows, 'sheet_sync': sheet_sync})
     except Exception as e:
         db.session.rollback()
@@ -6533,12 +6715,30 @@ def download_import_vendor_template():
         wb = Workbook()
         ws = wb.active
         ws.title = 'Import Vendors'
-        ws.append(['Vendor Name'])
-        for vendor in import_vendor_names():
-            ws.append([vendor])
+        # Template now has 4 columns: Vendor Name, Origin, TOP, Non SKI.
+        # Pre-populated with existing vendor records (including their last
+        # saved origin/top/non_ski values) so the user can edit in place
+        # rather than re-entering everything.
+        ws.append(['Vendor Name', 'Origin', 'TOP', 'Non SKI'])
+        existing = db.session.query(ImportVendor).order_by(ImportVendor.vendor_name.asc()).all()
+        if existing:
+            for v in existing:
+                ws.append([v.vendor_name or '', v.origin or '', v.top or '', v.non_ski or ''])
+        else:
+            # Fall back to default vendor list (no attributes yet).
+            for vendor in import_vendor_names():
+                ws.append([vendor, '', '', ''])
+        # Column widths tuned for content.
         ws.column_dimensions['A'].width = 42
-        ws['A1'].font = Font(bold=True, color='FFFFFF')
-        ws['A1'].fill = PatternFill('solid', fgColor='2563EB')
+        ws.column_dimensions['B'].width = 18
+        ws.column_dimensions['C'].width = 14
+        ws.column_dimensions['D'].width = 14
+        # Style header row (bold white on blue).
+        for col_letter in ('A', 'B', 'C', 'D'):
+            cell = ws[f'{col_letter}1']
+            cell.font = Font(bold=True, color='FFFFFF')
+            cell.fill = PatternFill('solid', fgColor='2563EB')
+            cell.alignment = Alignment(horizontal='center', vertical='center')
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)
@@ -6553,7 +6753,9 @@ def upload_import_vendors():
         files = request.files.getlist('file') or request.files.getlist('files')
         if not files:
             return jsonify({'error': 'No file uploaded'}), 400
-        vendors = set()
+        # Collect vendor records as dicts so we can preserve origin/top/non_ski.
+        # Last definition wins on duplicate vendor names (case-insensitive).
+        vendors = {}
         for file in files:
             name = (file.filename or '').lower()
             if name.endswith('.csv'):
@@ -6562,18 +6764,43 @@ def upload_import_vendors():
                 df = pd.read_excel(file, dtype=str, keep_default_na=False)
             if df.empty:
                 continue
-            col = next((c for c in df.columns if str(c).strip().lower() in ('vendor name', 'vendor', 'vendor_name')), df.columns[0])
-            for value in df[col].tolist():
-                vendor = clean(value)
-                if vendor and vendor.lower() not in ('vendor', 'vendor name'):
-                    vendors.add(vendor)
+            df.columns = [str(c).strip() for c in df.columns]
+            # Identify the vendor column (case-insensitive header match).
+            vendor_col = next((c for c in df.columns if str(c).strip().lower() in ('vendor name', 'vendor', 'vendor_name')), df.columns[0] if len(df.columns) else None)
+            if not vendor_col:
+                continue
+            # Identify optional Origin / TOP / Non SKI columns by header.
+            origin_col = next((c for c in df.columns if str(c).strip().lower() in ('origin', 'orig', 'negara')), None)
+            top_col = next((c for c in df.columns if str(c).strip().lower() in ('top', 'term of payment', 'term_of_payment', 'payment term')), None)
+            non_ski_col = next((c for c in df.columns if str(c).strip().lower() in ('non ski', 'non-ski', 'nonski', 'non_ski')), None)
+            for _, row in df.iterrows():
+                vendor = clean(row.get(vendor_col))
+                if not vendor or vendor.lower() in ('vendor', 'vendor name'):
+                    continue
+                vendors[vendor.lower()] = {
+                    'vendor_name': vendor,
+                    'origin': clean(row.get(origin_col)) if origin_col else '',
+                    'top': clean(row.get(top_col)) if top_col else '',
+                    'non_ski': clean(row.get(non_ski_col)) if non_ski_col else '',
+                }
         ImportVendor.query.delete()
         now = datetime.utcnow()
-        for vendor in sorted(vendors, key=lambda s: s.lower()):
-            db.session.add(ImportVendor(vendor_name=vendor, uploaded_at=now))
+        for key in sorted(vendors.keys()):
+            rec = vendors[key]
+            db.session.add(ImportVendor(
+                vendor_name=rec['vendor_name'],
+                origin=rec.get('origin') or '',
+                top=rec.get('top') or '',
+                non_ski=rec.get('non_ski') or '',
+                uploaded_at=now,
+            ))
         db.session.commit()
         clear_runtime_caches()
-        return jsonify({'success': True, 'count': len(vendors), 'message': f'Import vendor list updated: {len(vendors)} vendors'})
+        return jsonify({
+            'success': True,
+            'count': len(vendors),
+            'message': f'Import vendor list updated: {len(vendors)} vendors',
+        })
     except Exception as e:
         db.session.rollback()
         import traceback; traceback.print_exc()
