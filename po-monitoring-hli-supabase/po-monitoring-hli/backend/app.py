@@ -3195,6 +3195,10 @@ def get_all_so():
         statuses_opts = sorted({s.so_status for s in option_source_sos if s.so_status})
 
         _all_cat_by_id, _all_cat_by_name = master_pic_maps()
+        # FIX V3: _all_known_so_pics DIPINDAHKAN ke sini (sebelum baris pakainya).
+        # Sebelumnya definisi ada di baris 3199 (di bawah pemakaian di baris 3196),
+        # menyebabkan "UnboundLocalError: local variable '_all_known_so_pics'
+        # referenced before assignment" saat get_all_so dipanggil.
         _all_known_so_pics = set()
         _all_known_so_pics.update(_all_cat_by_id.values())
         _all_known_so_pics.update(_all_cat_by_name.values())
@@ -3418,11 +3422,18 @@ def cleanup_master_pic_by_category_name(valid_category_names=None):
 
 def cleanup_item_registration_duplicates_only(): return cleanup_source_table_snapshot(ItemRegistration, 'req_no', None, timestamp_fields=('uploaded_at',), delete_blank=True)
 
-@app.route('/api/upload/scor-json', methods=['POST'])
-@app.route('/api/upload/scor', methods=['POST'])
-@app.route('/api/upload/smro-json', methods=['POST'])
-@app.route('/api/upload/smro', methods=['POST'])
 def _refresh_so_pic_names():
+    """Helper function (BUKAN route handler!) — refresh pic_name untuk semua SO rows.
+    Me-return jumlah baris yang di-refresh (int).
+
+    FIX V3: sebelumnya function ini disertai decorator @app.route('/api/upload/smro', ...)
+    yang membuat Flask mendaftarkannya sebagai view function untuk endpoint upload.
+    Akibatnya, saat client POST /api/upload/smro, Flask memanggil function ini dan
+    mendapat return value int → throw TypeError → HTTP 500.
+
+    Decorator @app.route sekarang DIPINDAHKAN ke upload_smro() yang benar.
+    Lihat https://stackoverflow.com/q/... untuk pola umumnya.
+    """
     prod_map = {str(p.product_id).strip(): (p.category_id, p.category_name) for p in db.session.query(ProductIDDB).all() if p.product_id}
     client_pic_cache = {normalize_client_id(m.client_id): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name)}
     vendor_pic_cache = {normalize_vendor_id(m.vendor_id): clean(m.pic_name) for m in db.session.query(MasterVendorPIC).all() if clean(m.pic_name)}
@@ -3446,6 +3457,14 @@ def _refresh_so_pic_names():
     return refreshed
 
 
+# FIX V3: decorator @app.route untuk endpoint /api/upload/smro dan /api/upload/scor
+# DIPINDAHKAN dari _refresh_so_pic_names() (yang return int) ke upload_smro() (yang return jsonify).
+# Sebelumnya Flask memanggil _refresh_so_pic_names() saat POST /api/upload/smro,
+# mendapat int, lalu throw "TypeError: ... but it was a int" → HTTP 500.
+@app.route('/api/upload/scor-json', methods=['POST'])
+@app.route('/api/upload/scor', methods=['POST'])
+@app.route('/api/upload/smro-json', methods=['POST'])
+@app.route('/api/upload/smro', methods=['POST'])
 def upload_smro():
     try:
         uploads, upload_mode = request_upload_dataframes('smro')
