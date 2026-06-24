@@ -943,8 +943,8 @@ IMPORT_REFERENCE_VISIBLE_COLUMNS = [
     # NEW: Origin — populated from ImportVendor table by vendor_name match.
     {'sheet_col': '',   'field': 'origin',              'label': 'Origin',                 'width': 80,  'vendor_attr': True, 'blue_text': True},
     {'sheet_col': 'G',  'source_sheet_col': 'K',  'field': 'req_dlv_date',        'label': 'Req Dlv Date',           'width': 100, 'blue_text': True},
-    {'sheet_col': 'H',  'field': 'etd',                 'label': 'ETD',                    'width': 90,  'blue_text': True},
-    {'sheet_col': 'I',  'field': 'eta',                 'label': 'ETA',                    'width': 90,  'blue_text': True},
+    {'sheet_col': 'H',  'field': 'etd',                 'label': 'ETD',                    'width': 110, 'blue_text': True},
+    {'sheet_col': 'I',  'field': 'eta',                 'label': 'ETA',                    'width': 110, 'blue_text': True},
     {'sheet_col': 'J',  'field': 'arrival_check',       'label': 'Arrival Check',          'width': 120, 'formula': True, 'blue_text': True},
     {'sheet_col': 'K',  'field': 'import_remarks',      'label': 'Import Remarks',         'width': 180, 'blue_text': True, 'bold_text': True},
     # ── Shipment-level group columns (moved here per user request) ───────────
@@ -953,9 +953,9 @@ IMPORT_REFERENCE_VISIBLE_COLUMNS = [
     # PO Send Date through Inv No.
     {'sheet_col': 'CU', 'field': 'lt_days',             'label': 'LT (Days)',              'width': 70,  'formula': True, 'number': True, 'blue_text': True},
     {'sheet_col': 'CV', 'field': 'incoterm',            'label': 'Incoterm',               'width': 76,  'blue_text': True},
-    {'sheet_col': 'CW', 'field': 'forwarder',           'label': 'Forwarder',              'width': 110, 'blue_text': True},
-    {'sheet_col': 'CX', 'field': 'bl_number',           'label': 'BL Number',              'width': 110, 'blue_text': True},
-    {'sheet_col': 'CY', 'field': 'inv_no',              'label': 'Invoice No',             'width': 100, 'blue_text': True},
+    {'sheet_col': 'CW', 'field': 'forwarder',           'label': 'Forwarder',              'width': 150, 'blue_text': True},
+    {'sheet_col': 'CX', 'field': 'bl_number',           'label': 'BL Number',              'width': 150, 'blue_text': True},
+    {'sheet_col': 'CY', 'field': 'inv_no',              'label': 'Invoice No',             'width': 130, 'blue_text': True},
     # SAP INPUT moved here (right after Invoice No). NOT part of the checklist
     # group — always visible as a checkmark toggle.
     {'sheet_col': 'DA', 'field': 'sap_input',           'label': 'SAP INPUT',              'width': 76,  'checkbox': True},
