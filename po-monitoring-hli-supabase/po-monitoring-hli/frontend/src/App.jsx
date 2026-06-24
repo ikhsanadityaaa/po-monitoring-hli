@@ -1720,13 +1720,14 @@ const App = () => {
   const [soSubtotalAmount, setSoSubtotalAmount] = useState(0);
   const [soFilterOptions, setSoFilterOptions] = useState({ op_units: [], vendors: [], manufacturers: [], statuses: [], pics: [] });
 
-  // SO filters
-  const [soFilters, setSoFilters] = useState({ op_units: [], vendors: [], manufacturers: [], statuses: [], aging: [], pics: [] });
-  const [soSearchNums, setSoSearchNums] = useState([]); // search SO Item
-  const [soMarginFilter, setSoMarginFilter] = useState('all'); // 'all' | 'positive' | 'negative'
-  const [soSortOrder, setSoSortOrder] = useState('oldest'); // 'oldest' | 'newest'
-  const [soPage, setSoPage] = useState(1);
-  const [soPerPage, setSoPerPage] = useState(10);
+  // SO filters — load from localStorage so filters persist across refresh
+  // (savedSoFilters is already declared above from loadFilterState('all-so'))
+  const [soFilters, setSoFilters] = useState(() => savedSoFilters.filters || { op_units: [], vendors: [], manufacturers: [], statuses: [], aging: [], pics: [] });
+  const [soSearchNums, setSoSearchNums] = useState(() => savedSoFilters.searchNums || []); // search SO Item
+  const [soMarginFilter, setSoMarginFilter] = useState(() => savedSoFilters.marginFilter || 'all'); // 'all' | 'positive' | 'negative'
+  const [soSortOrder, setSoSortOrder] = useState(() => savedSoFilters.sortOrder || 'oldest'); // 'oldest' | 'newest'
+  const [soPage, setSoPage] = useState(() => savedSoFilters.page || 1);
+  const [soPerPage, setSoPerPage] = useState(() => savedSoFilters.perPage || 10);
   const [pendingPicHighlight, setPendingPicHighlight] = useState('');
 
   // SO Approval Status filters (same as Open SO except Vendor Name)
@@ -2875,8 +2876,9 @@ const App = () => {
 
   useEffect(() => {
     if (activePage === 'rfq') {
-      fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter, rfqShowSimilarity);
+      fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, true, rfqFilters, rfqPicFilter, rfqShowSimilarity);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePage]);
 
   useEffect(() => {
