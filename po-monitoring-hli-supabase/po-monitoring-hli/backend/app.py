@@ -4335,6 +4335,9 @@ def get_item_registration_data():
         q = apply_item_registration_pic_filter(q, pics)
         if kpi_pic:
             q = apply_item_registration_pic_filter(q, [kpi_pic])
+            # Apply the SAME KPI status filter used for counting, so the
+            # table shows exactly the same rows as the KPI count.
+            q = apply_item_registration_kpi_status_filter(q)
             q = q.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-'))
 
         total = q.count()
