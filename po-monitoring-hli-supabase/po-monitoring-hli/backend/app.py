@@ -3193,7 +3193,6 @@ def get_all_so():
         vendors_opts  = sorted({s.vendor_name for s in option_source_sos if s.vendor_name})
         manufacturers_opts = sorted({s.manufacturer_name for s in option_source_sos if s.manufacturer_name})
         statuses_opts = sorted({s.so_status for s in option_source_sos if s.so_status})
-        pics_opts     = sorted(_all_known_so_pics)
 
         _all_cat_by_id, _all_cat_by_name = master_pic_maps()
         _all_known_so_pics = set()
@@ -3204,6 +3203,8 @@ def get_all_so():
         _all_known_so_pics.discard('')
         _all_known_so_pics.discard(None)
         _all_known_so_pics.update(canonical_pending_pic(s.pic_name, s.operation_unit_name) for s in kpi_source_sos if canonical_pending_pic(s.pic_name, s.operation_unit_name) != 'Unassigned')
+        pics_opts     = sorted(_all_known_so_pics)
+
         pic_aggregations = {pic: {'pic': pic, 'count': 0, 'amount': 0.0} for pic in _all_known_so_pics}
         for s in kpi_source_sos:
             pic = canonical_pending_pic(s.pic_name, s.operation_unit_name)
