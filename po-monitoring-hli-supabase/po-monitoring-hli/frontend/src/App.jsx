@@ -1753,6 +1753,12 @@ const App = () => {
   const [itemRegOptions, setItemRegOptions] = useState({ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] });
   const [itemRegMissingPicKpis, setItemRegMissingPicKpis] = useState([]);
   const [itemRegPicHighlight, setItemRegPicHighlight] = useState('');
+  // Item Registration row selection (for Vendor Auto Approve). Stores a Set
+  // of req_no strings. Check-all in the header toggles all filtered rows.
+  const [itemRegSelectedReqs, setItemRegSelectedReqs] = useState(new Set());
+  // Vendor Auto Approve results modal state
+  const [vendorAutoApproveResult, setVendorAutoApproveResult] = useState(null);
+  const [vendorAutoApproveLoading, setVendorAutoApproveLoading] = useState(false);
 
   // RFQ
   const [rfqData, setRfqData] = useState([]);
@@ -3160,6 +3166,41 @@ const App = () => {
     } catch (e) {
       setUploadProgress(null);
       addToast(`Failed to upload Item Registration batch: ${e.response?.data?.error || e.message}`, 'error');
+    }
+  };
+
+  // ── Vendor Auto Approve ──────────────────────────────────────────────
+  // Sends the selected req numbers to the backend, which:
+  // 1. Groups them by vendor_id (looked up from Vendor Control by vendor_name)
+  // 2. For each vendor (sequentially):
+  //    a. Logs in to Serveone Mall (V + vendor_id + password)
+  //    b. Navigates to Batch Unit Price Agreement menu
+  //    c. Finds rows matching the req numbers in the Request Number column
+  //    d. Checks matching rows
+  //    e. Clicks Agreement button + handles confirmation/success popups
+  // 3. Returns a summary of processed / not_found / errors
+  // The results are shown in a modal popup (English text).
+  const handleVendorAutoApprove = async () => {
+    const reqNumbers = Array.from(itemRegSelectedReqs).filter(r => r);
+    if (reqNumbers.length === 0) {
+      addToast('Please select at least one row first', 'warning');
+      return;
+    }
+    if (!window.confirm(`Auto-approve ${reqNumbers.length} req number(s) on Serveone Mall?\n\nThis will log in to each vendor's portal and process the Batch Unit Price Agreement sequentially. This may take several minutes.`)) return;
+    setVendorAutoApproveLoading(true);
+    setVendorAutoApproveResult(null);
+    try {
+      const res = await api.post('/api/item-registration/vendor-auto-approve', { req_numbers: reqNumbers }, { timeout: 600000 });
+      setVendorAutoApproveResult(res.data);
+      // Clear selection after processing
+      setItemRegSelectedReqs(new Set());
+    } catch (e) {
+      setVendorAutoApproveResult({
+        error: e.response?.data?.error || e.message || 'Unknown error',
+        summary: { total: reqNumbers.length, processed: 0, not_found: 0, without_vendor: 0, without_credentials: 0, errors: 1 },
+      });
+    } finally {
+      setVendorAutoApproveLoading(false);
     }
   };
 
@@ -6217,8 +6258,11 @@ const App = () => {
     };
     const baseColumns = [
       ['Proc. Status', 'proc_status'], ['Req. Date', 'req_date'], ['Client Nm.', 'client_name'], ['Category', 'category'], ['PIC', 'pic'],
-      ['Req. No', 'req_no'], ['Prod. ID', 'prod_id'], ['Prod. Nm.', 'prod_name'],
+      ['Req. No', 'req_no'],
+      ['✓', '__select__'],  // checkbox column (right after Req. No)
+      ['Prod. ID', 'prod_id'], ['Prod. Nm.', 'prod_name'],
       ['Spec.', 'spec'], ['Mfr. Nm.', 'mfr_name'], ['Unit', 'odr_unit'],
+      ['Vendor ID', 'vendor_id'], ['Vendor Nm.', 'vendor_name'],  // right after Unit
       ['Prod. Price', 'prod_price'], ['Curr.', 'curr']
     ];
     const columns = [...baseColumns, ['Remarks', 'remarks']];
@@ -6239,8 +6283,10 @@ const App = () => {
     ];
     const itemRegKpiCols = Math.max(1, itemRegPicKpis.length);
     const colWidth = (key) => ({
-      proc_status: 150, req_date: 110, client_name: 180, category: 170, pic: 90, req_no: 150, prod_id: 110,
-      prod_name: 240, spec: 220, mfr_name: 150, odr_unit: 80,
+      proc_status: 150, req_date: 110, client_name: 180, category: 170, pic: 90, req_no: 150,
+      __select__: 40,  // checkbox column
+      prod_id: 110, prod_name: 240, spec: 220, mfr_name: 150, odr_unit: 80,
+      vendor_id: 100, vendor_name: 180,  // new columns after Unit
       prod_price: 120, curr: 70, remarks: 560
     }[key] || 140);
     const colStyle = (key) => {
@@ -6266,6 +6312,18 @@ const App = () => {
               <FileSpreadsheet className="w-4 h-4"/>Batch Upload
               <input type="file" accept=".xlsx,.xls" onChange={handleItemRegistrationBatchUpload} className="hidden"/>
             </label>
+            {/* Vendor Auto Approve — uses the selected rows (checkbox column).
+                Disabled when no rows are selected. Shows a loading overlay
+                while the backend automation runs (sequential per vendor). */}
+            <button
+              onClick={handleVendorAutoApprove}
+              disabled={itemRegSelectedReqs.size === 0 || vendorAutoApproveLoading}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold shadow-sm transition-colors ${itemRegSelectedReqs.size === 0 || vendorAutoApproveLoading ? 'bg-gray-400 text-gray-200 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700 text-white'}`}
+              title={itemRegSelectedReqs.size === 0 ? 'Select rows to enable Vendor Auto Approve' : `Auto-approve ${itemRegSelectedReqs.size} selected req number(s) on Serveone Mall`}
+            >
+              <CheckCircle className="w-4 h-4"/>
+              {vendorAutoApproveLoading ? 'Processing...' : `Vendor Auto Approve${itemRegSelectedReqs.size > 0 ? ` (${itemRegSelectedReqs.size})` : ''}`}
+            </button>
             <DownloadButton onClick={downloadItemRegistrationExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
               <Download className="w-4 h-4"/>Download Excel
             </DownloadButton>
@@ -6348,12 +6406,66 @@ const App = () => {
         <DataTableScroll darkMode={darkMode}>
           <table className="freeze-table-item-registration table-fixed text-xs" style={{ width: `${itemRegTableWidth}px`, minWidth: `${itemRegTableWidth}px` }}>
             <colgroup>{columns.map(([, key]) => <col key={key} style={colStyle(key)}/>)}</colgroup>
-            <thead className={tblHd}><tr>{columns.map(([label], index) => <th key={label} data-col-index={index + 1} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{renderFreezeHeader('item-registration', index + 1, label)}</th>)}</tr></thead>
+            <thead className={tblHd}><tr>{columns.map(([label, key], index) => {
+              // Checkbox column header — "select all" toggle.
+              // Checks/unchecks ALL rows in the current filtered view (not just
+              // the current page — uses itemRegData which is the full filtered set).
+              if (key === '__select__') {
+                const allSelected = itemRegData.length > 0 && itemRegData.every(r => itemRegSelectedReqs.has(String(r.req_no || '').trim()));
+                const someSelected = itemRegData.some(r => itemRegSelectedReqs.has(String(r.req_no || '').trim()));
+                return (
+                  <th key={label} data-col-index={index + 1} className={`px-1 py-2 text-center font-bold ${txt2}`}>
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      ref={el => { if (el) el.indeterminate = !allSelected && someSelected; }}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          // Select all filtered rows
+                          const next = new Set(itemRegSelectedReqs);
+                          itemRegData.forEach(r => { const rn = String(r.req_no || '').trim(); if (rn) next.add(rn); });
+                          setItemRegSelectedReqs(next);
+                        } else {
+                          // Deselect only the filtered rows (keep selections from other pages/filters)
+                          const next = new Set(itemRegSelectedReqs);
+                          itemRegData.forEach(r => { const rn = String(r.req_no || '').trim(); next.delete(rn); });
+                          setItemRegSelectedReqs(next);
+                        }
+                      }}
+                      className="w-4 h-4 cursor-pointer"
+                      title="Select all filtered rows"
+                    />
+                  </th>
+                );
+              }
+              return <th key={label} data-col-index={index + 1} className={`px-2 py-2 text-center font-bold whitespace-nowrap ${txt2}`}>{renderFreezeHeader('item-registration', index + 1, label)}</th>;
+            })}</tr></thead>
             <tbody className={`divide-y ${tblDv}`}>
               {itemRegData.length === 0 ? <tr><td colSpan={columns.length} className={`px-4 py-12 text-center ${txt2}`}><Wrench className="w-10 h-10 mx-auto mb-2 opacity-40"/>No Item Registration data</td></tr>
               : itemRegData.map(row => {
                 return <tr key={row.id} className={`${trHov} transition-colors`}>
                 {columns.map(([label, key], colIdx) => {
+                  // Checkbox cell — toggles selection for this row's req_no
+                  if (key === '__select__') {
+                    const reqNo = String(row.req_no || '').trim();
+                    const checked = reqNo && itemRegSelectedReqs.has(reqNo);
+                    return (
+                      <td key={key} data-col-index={colIdx + 1} className="px-1 py-2 text-center">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            const next = new Set(itemRegSelectedReqs);
+                            if (e.target.checked) { if (reqNo) next.add(reqNo); }
+                            else { next.delete(reqNo); }
+                            setItemRegSelectedReqs(next);
+                          }}
+                          className="w-4 h-4 cursor-pointer"
+                          title={checked ? 'Unselect this row' : 'Select this row'}
+                        />
+                      </td>
+                    );
+                  }
                   const value = key === 'prod_price' ? fmtNum(row[key]) : key === 'req_date' ? fmtDateShort(row[key]) : (row[key] || '-');
                   if (key === 'proc_status') return <td key={key} data-col-index={colIdx + 1} className="px-2 py-2"><span className={`inline-flex max-w-full items-center px-2 py-0.5 rounded-full border text-[11px] font-semibold leading-snug truncate ${statusClass(row[key])}`}>{value}</span></td>;
                   if (key === 'pic') {
@@ -6370,7 +6482,7 @@ const App = () => {
                   ) : (
                     <span className="cursor-pointer text-blue-600 hover:underline" onClick={()=>{setEditingCell({id:row.id,field:'item_remarks'});setEditValue(row.remarks||'');}}>{row.remarks||'Add'}</span>
                   )}</td>;
-                  return <td key={key} data-col-index={colIdx + 1} className={`px-2 py-2 ${['req_no','prod_name'].includes(key) ? '' : 'truncate'} ${key === 'prod_price' ? `text-right font-semibold ${kpiValue}` : txt2} ${['req_date','req_no','prod_id','prod_name','odr_unit','curr'].includes(key) ? 'whitespace-nowrap' : ''}`} title={row[key]}>{value}</td>;
+                  return <td key={key} data-col-index={colIdx + 1} className={`px-2 py-2 ${['req_no','prod_name','vendor_id','vendor_name'].includes(key) ? '' : 'truncate'} ${key === 'prod_price' ? `text-right font-semibold ${kpiValue}` : txt2} ${['req_date','req_no','prod_id','prod_name','odr_unit','vendor_id','curr'].includes(key) ? 'whitespace-nowrap' : ''}`} title={row[key]}>{value}</td>;
                 })}
               </tr>;})}
             </tbody>
@@ -7572,7 +7684,141 @@ const App = () => {
         </div>
       </main>
 
-      {modal && <SOModal title={modal.title} data={modal.data} darkMode={darkMode} onClose={()=>setModal(null)} onUpdateCell={updateSOCell}/>} 
+      {modal && <SOModal title={modal.title} data={modal.data} darkMode={darkMode} onClose={()=>setModal(null)} onUpdateCell={updateSOCell}/>}
+
+      {/* ── Vendor Auto Approve: loading overlay ──────────────────────────
+          Shown while the backend automation runs (sequential per vendor).
+          The automation can take several minutes since it logs in to each
+          vendor's Serveone Mall portal, navigates to Batch Unit Price
+          Agreement, finds req numbers, checks rows, and clicks Agreement. */}
+      {vendorAutoApproveLoading && (
+        <div className="fixed inset-0 bg-black/60 z-[9999] flex items-center justify-center backdrop-blur-sm">
+          <div className={`${darkMode?'bg-gray-800 text-white':'bg-white text-gray-900'} p-8 rounded-2xl shadow-2xl flex flex-col items-center gap-4 w-96`}>
+            <Loader2 className="w-12 h-12 text-blue-600 animate-spin"/>
+            <h3 className="text-lg font-bold text-center">Vendor Auto Approve in Progress</h3>
+            <p className={`text-sm text-center ${txt2}`}>
+              Logging in to each vendor's Serveone Mall portal and processing
+              Batch Unit Price Agreement sequentially. This may take several
+              minutes — please do not close the browser.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Vendor Auto Approve: results modal ────────────────────────────
+          Shows a summary of what was processed, which req numbers were not
+          found on Serveone Mall, and any errors. All text in English per
+          user request. */}
+      {vendorAutoApproveResult && (
+        <div className="fixed inset-0 bg-black/60 z-[9999] flex items-center justify-center p-4 backdrop-blur-sm" onClick={()=>setVendorAutoApproveResult(null)}>
+          <div className={`rounded-2xl overflow-hidden shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col ${darkMode?'bg-gray-800 text-white':'bg-white text-gray-900'}`} onClick={e=>e.stopPropagation()}>
+            <div className={`flex justify-between items-center px-6 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'}`}>
+              <h3 className="font-bold text-lg">Vendor Auto Approve — Results</h3>
+              <button onClick={()=>setVendorAutoApproveResult(null)} className={`p-1 rounded-lg hover:bg-gray-200 ${darkMode?'hover:bg-gray-700':''}`}><X className="w-5 h-5"/></button>
+            </div>
+            <div className="overflow-y-auto p-6 space-y-4">
+              {vendorAutoApproveResult.error && !vendorAutoApproveResult.summary && (
+                <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-red-700">
+                  <p className="font-semibold">Error</p>
+                  <p className="text-sm mt-1">{vendorAutoApproveResult.error}</p>
+                </div>
+              )}
+              {vendorAutoApproveResult.summary && (
+                <>
+                  {/* Summary card */}
+                  <div className={`p-4 rounded-xl ${darkMode?'bg-gray-700':'bg-gray-50'}`}>
+                    <h4 className="font-bold mb-2">Summary</h4>
+                    <div className="grid grid-cols-3 gap-3 text-sm">
+                      <div><span className={txt2}>Total selected:</span> <span className="font-bold">{vendorAutoApproveResult.summary.total}</span></div>
+                      <div><span className={txt2}>Processed:</span> <span className="font-bold text-green-600">{vendorAutoApproveResult.summary.processed}</span></div>
+                      <div><span className={txt2}>Not found:</span> <span className="font-bold text-red-600">{vendorAutoApproveResult.summary.not_found}</span></div>
+                      <div><span className={txt2}>No vendor:</span> <span className="font-bold text-amber-600">{vendorAutoApproveResult.summary.without_vendor}</span></div>
+                      <div><span className={txt2}>No credentials:</span> <span className="font-bold text-amber-600">{vendorAutoApproveResult.summary.without_credentials}</span></div>
+                      <div><span className={txt2}>Errors:</span> <span className="font-bold text-red-600">{vendorAutoApproveResult.summary.errors}</span></div>
+                    </div>
+                  </div>
+
+                  {/* Processed req numbers */}
+                  {vendorAutoApproveResult.processed && vendorAutoApproveResult.processed.length > 0 && (
+                    <div>
+                      <h4 className="font-bold mb-1 text-green-600">✓ Successfully Processed ({vendorAutoApproveResult.processed.length})</h4>
+                      <div className="flex flex-wrap gap-1">
+                        {vendorAutoApproveResult.processed.map(rn => <span key={rn} className="px-2 py-0.5 rounded bg-green-100 text-green-700 text-xs font-mono">{rn}</span>)}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Not found req numbers */}
+                  {vendorAutoApproveResult.not_found && vendorAutoApproveResult.not_found.length > 0 && (
+                    <div>
+                      <h4 className="font-bold mb-1 text-red-600">✗ Not Found on Serveone Mall ({vendorAutoApproveResult.not_found.length})</h4>
+                      <p className={`text-xs mb-1 ${txt2}`}>These req numbers were not found in the Batch Unit Price Agreement table:</p>
+                      <div className="flex flex-wrap gap-1">
+                        {vendorAutoApproveResult.not_found.map(rn => <span key={rn} className="px-2 py-0.5 rounded bg-red-100 text-red-700 text-xs font-mono">{rn}</span>)}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Without vendor */}
+                  {vendorAutoApproveResult.without_vendor && vendorAutoApproveResult.without_vendor.length > 0 && (
+                    <div>
+                      <h4 className="font-bold mb-1 text-amber-600">⚠ No Vendor Name ({vendorAutoApproveResult.without_vendor.length})</h4>
+                      <p className={`text-xs mb-1 ${txt2}`}>These req numbers have no vendor name in Item Registration:</p>
+                      <div className="flex flex-wrap gap-1">
+                        {vendorAutoApproveResult.without_vendor.map(rn => <span key={rn} className="px-2 py-0.5 rounded bg-amber-100 text-amber-700 text-xs font-mono">{rn}</span>)}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Without credentials */}
+                  {vendorAutoApproveResult.without_credentials && vendorAutoApproveResult.without_credentials.length > 0 && (
+                    <div>
+                      <h4 className="font-bold mb-1 text-amber-600">⚠ No Vendor Credentials ({vendorAutoApproveResult.without_credentials.length})</h4>
+                      <p className={`text-xs mb-1 ${txt2}`}>Vendor not found in Vendor Control page (or missing vendor_id/password):</p>
+                      <div className="flex flex-wrap gap-1">
+                        {vendorAutoApproveResult.without_credentials.map(rn => <span key={rn} className="px-2 py-0.5 rounded bg-amber-100 text-amber-700 text-xs font-mono">{rn}</span>)}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Errors */}
+                  {vendorAutoApproveResult.errors && vendorAutoApproveResult.errors.length > 0 && (
+                    <div>
+                      <h4 className="font-bold mb-1 text-red-600">⚠ Errors ({vendorAutoApproveResult.errors.length})</h4>
+                      <div className="space-y-1">
+                        {vendorAutoApproveResult.errors.map((err, i) => <p key={i} className="text-xs text-red-600">{err}</p>)}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Per-vendor breakdown */}
+                  {vendorAutoApproveResult.vendor_results && vendorAutoApproveResult.vendor_results.length > 0 && (
+                    <div>
+                      <h4 className="font-bold mb-2">Per-Vendor Breakdown</h4>
+                      <div className="space-y-2">
+                        {vendorAutoApproveResult.vendor_results.map((vr, i) => (
+                          <div key={i} className={`p-3 rounded-lg border ${darkMode?'border-gray-600':'border-gray-200'}`}>
+                            <p className="font-semibold text-sm">{vr.vendor_name} <span className={txt2}>(ID: {vr.vendor_id})</span></p>
+                            <p className={`text-xs ${txt2}`}>
+                              {vr.req_numbers.length} req number(s) —
+                              <span className="text-green-600 ml-1">{vr.processed.length} processed</span>,
+                              <span className="text-red-600 ml-1">{vr.not_found.length} not found</span>
+                              {vr.error && <span className="text-red-600 ml-1">— Error: {vr.error}</span>}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+            <div className={`px-6 py-3 border-t flex justify-end ${darkMode?'border-gray-700':'border-gray-100'}`}>
+              <button onClick={()=>setVendorAutoApproveResult(null)} className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold">Close</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {marginDetailModal && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={()=>setMarginDetailModal(null)}>
