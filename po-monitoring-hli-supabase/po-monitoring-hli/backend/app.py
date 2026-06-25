@@ -1756,7 +1756,12 @@ def apply_import_formula_columns(row):
     # holds the sentinel (so we re-evaluate it each time as ETA/TOP changes).
     # A real date string (YYYY-MM-DD) is preserved.
     is_sentinel_or_empty = (not payment_date_value) or (payment_date_value == 'Overdue')
-    if payment_value != 'DONE' and is_sentinel_or_empty and eta_date:
+    # FIX V10: Kalau payment sudah DONE, JANGAN tampilkan 'Overdue' di payment_date.
+    # Clear sentinel 'Overdue' supaya field kosong (atau pakai real date kalau ada).
+    if payment_value == 'DONE':
+        if payment_date_value == 'Overdue':
+            row['payment_date'] = ''  # clear sentinel — payment sudah DONE, tidak overdue
+    elif is_sentinel_or_empty and eta_date:
         try:
             top_days_str = clean(row.get('top')) or '0'
             # Strip non-digit chars (e.g. "30 days", "Net 30", "30D")
