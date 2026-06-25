@@ -1854,17 +1854,25 @@ def merge_import_existing_payload(existing_payload, sheet_payload):
         if not import_blankish(old_value): merged[field] = old_value
     return apply_import_formula_columns(merged)
 
-def import_dashboard_row_to_dict(row, columns, vendor_attrs_map=None):
+def import_dashboard_row_to_dict(row, columns, vendor_attrs_map=None, pre_parsed_data=None):
     """Convert an ImportDashboardRow to a dict matching the column schema.
 
     vendor_attrs_map (optional): {vendor_name_lower: {'origin':..., 'top':..., 'non_ski':...}}
     When provided, Origin and TOP are injected from this map (matched by
     the row's vendor name). Falls back to the row's stored data_json values
     if no match is found.
+
+    pre_parsed_data (optional): FIX V10 — kalau sudah ada data yang di-parse
+    + apply_import_formula_columns sebelumnya (mis. di get_import_data),
+    lewatkan di sini supaya tidak panggil apply_import_formula_columns lagi
+    (function berat — parse tanggal, lookup PIC, dll).
     """
-    try: data = json.loads(row.data_json or '{}')
-    except: data = {}
-    data = apply_import_formula_columns(dict(data))
+    if pre_parsed_data is not None:
+        data = dict(pre_parsed_data)
+    else:
+        try: data = json.loads(row.data_json or '{}')
+        except: data = {}
+        data = apply_import_formula_columns(dict(data))
     # Inject vendor attributes (Origin, TOP, Non SKI) from the ImportVendor
     # table. These are looked up by the row's vendor name (case-insensitive).
     if vendor_attrs_map is not None:
@@ -7077,7 +7085,21 @@ def get_import_data():
         # if purge hasn't run yet (user hasn't clicked Copy Sheet), the
         # /data endpoint still hides non-matching rows so the user doesn't
         # see stale data.
-        uploaded_vendor_set_for_display = {v.strip().lower() for v in import_uploaded_vendor_names() if v and v.strip()}
+        # FIX V10: Performance optimization — cache uploaded vendor list dan vendor attrs
+        # supaya tidak query DB berulang kali. Sebelumnya, import_uploaded_vendor_names()
+        # dan import_vendor_attrs_map() di-call terpisah, masing-masing query DB.
+        _uploaded_vendor_names_cached = import_uploaded_vendor_names()
+        uploaded_vendor_set_for_display = {v.strip().lower() for v in _uploaded_vendor_names_cached if v and v.strip()}
+        _vendor_attrs_map_cached = import_vendor_attrs_map()
+
+        # FIX V10: Pre-parse semua data_json sekali, cache hasil apply_import_formula_columns
+        # supaya tidak panggil function berat berkali-kali untuk row yang sama.
+        # Sebelumnya, apply_import_formula_columns dipanggil di:
+        #   1. Loop parsed (line 7086)
+        #   2. passes() untuk filter options (4x loop)
+        #   3. import_dashboard_row_to_dict untuk page items
+        # Sekarang cache hasil di parsed item, reuse di tempat lain.
+        parsed = []
         for row in candidate_rows:
             try:
                 data = json.loads(row.data_json or '{}')
@@ -7141,6 +7163,22 @@ def get_import_data():
 
         filtered_items = [item for item in parsed if passes(item)]
 
+        # FIX V10: Performance — cache hasil passes() per item supaya tidak
+        # panggil passes() berulang kali (4x loop untuk filter options).
+        # Sebelumnya, passes() dipanggil untuk setiap item di:
+        #   1. filtered_items (1x per item)
+        #   2. yupi_options loop (ignore='yupi_po')
+        #   3. vendor_options loop (ignore='vendor')
+        #   4. status_options loop (ignore='status')
+        #   5. days_left_zone_options loop (ignore='days_left')
+        # Total: 5x per item. Sekarang cache hasil passes() dengan setiap ignore variant.
+        _passes_cache = {}
+        def passes_cached(item, ignore=None):
+            cache_key = (id(item), ignore)
+            if cache_key not in _passes_cache:
+                _passes_cache[cache_key] = passes(item, ignore=ignore)
+            return _passes_cache[cache_key]
+
         # ── Interdependent filter options ────────────────────────────────
         # Each filter's option list is built from rows that pass ALL OTHER
         # filters (but not itself). This means:
@@ -7151,18 +7189,18 @@ def get_import_data():
         #     shows color zones that exist among delivered rows
         # This matches the user's expectation: "jika tidak ada status yang
         # new maka di drop down filternya tidak ada pilihan new".
-        yupi_options = sorted({str(item.get('yupi_po') or '').strip() for item in parsed if str(item.get('yupi_po') or '').strip() and passes(item, ignore='yupi_po')}, key=lambda s: s.lower())
-        vendor_options = sorted({str(item.get('vendor') or '').strip() for item in parsed if str(item.get('vendor') or '').strip() and passes(item, ignore='vendor')}, key=lambda s: s.lower())
+        yupi_options = sorted({str(item.get('yupi_po') or '').strip() for item in parsed if str(item.get('yupi_po') or '').strip() and passes_cached(item, ignore='yupi_po')}, key=lambda s: s.lower())
+        vendor_options = sorted({str(item.get('vendor') or '').strip() for item in parsed if str(item.get('vendor') or '').strip() and passes_cached(item, ignore='vendor')}, key=lambda s: s.lower())
         # Status options — built from rows that pass all filters EXCEPT status.
         # Only statuses that actually appear in the (otherwise-filtered) data
         # are listed. NEW is included only if a row's status computed to NEW.
-        status_options = sorted({str((item.get('data') or {}).get('status') or '').strip().upper() for item in parsed if str((item.get('data') or {}).get('status') or '').strip() and passes(item, ignore='status')}, key=lambda s: s.lower())
+        status_options = sorted({str((item.get('data') or {}).get('status') or '').strip().upper() for item in parsed if str((item.get('data') or {}).get('status') or '').strip() and passes_cached(item, ignore='status')}, key=lambda s: s.lower())
         # Days Left color options — built from rows that pass all filters
         # EXCEPT days_left. Only color zones that actually appear are listed.
         days_left_zone_options = []
         _dl_zones_seen = set()
         for item in parsed:
-            if not passes(item, ignore='days_left'): continue
+            if not passes_cached(item, ignore='days_left'): continue
             raw = str((item.get('data') or {}).get('days_left') or '').strip()
             if raw in ('✅', '❌', '', '-'): continue
             try: dl = int(float(raw))
@@ -7206,9 +7244,13 @@ def get_import_data():
 
         total = len(filtered_items)
         page_items = filtered_items[(page - 1) * per_page: page * per_page]
-        # Load vendor attributes (origin, top) once for the whole page.
-        vendor_attrs_map = import_vendor_attrs_map()
-        rows = [import_dashboard_row_to_dict(item['row'], columns, vendor_attrs_map=vendor_attrs_map) for item in page_items]
+        # FIX V10: gunakan _vendor_attrs_map_cached + pre_parsed_data dari item
+        # supaya import_dashboard_row_to_dict tidak panggil apply_import_formula_columns
+        # lagi (data sudah di-parse di loop parsed atas).
+        rows = [import_dashboard_row_to_dict(item['row'], columns,
+                                              vendor_attrs_map=_vendor_attrs_map_cached,
+                                              pre_parsed_data=item['data'])
+                for item in page_items]
 
         # ── KPIs ───────────────────────────────────────────────────────────
         # Computed across ALL filtered rows (not just the current page):
