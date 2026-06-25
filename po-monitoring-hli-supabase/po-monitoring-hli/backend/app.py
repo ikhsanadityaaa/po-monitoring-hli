@@ -6926,7 +6926,8 @@ def get_import_data():
         # if purge hasn't run yet (user hasn't clicked Copy Sheet), the
         # /data endpoint still hides non-matching rows so the user doesn't
         # see stale data.
-        uploaded_vendor_set_for_display = {v.strip().lower() for v in import_uploaded_vendor_names() if v and v.strip()}
+        uploaded_vendor_names_for_display = import_uploaded_vendor_names()
+        uploaded_vendor_set_for_display = {v.strip().lower() for v in uploaded_vendor_names_for_display if v and v.strip()}
         for row in candidate_rows:
             try:
                 data = json.loads(row.data_json or '{}')
@@ -6939,8 +6940,13 @@ def get_import_data():
             # rows never enter `parsed`, so they don't show up in the table
             # or in any filter dropdown options. Rows with no vendor are also
             # excluded when an uploaded vendor list exists.
+            # FIX V10: pakai import_vendor_match() (fuzzy) bukan exact lower() NOT IN set,
+            # supaya konsisten dengan logic sync. Contoh: ImportVendor punya "CURT GEORGI"
+            # dan row di DB punya vendor "CURT GEORGI GMBH & CO" → exact match FAIL tapi
+            # fuzzy match PASS (prefix match). Sebaliknya sync berhasil copy row tersebut
+            # tapi display menyembunyikannya → data hilang dari dashboard.
             if uploaded_vendor_set_for_display:
-                if not vendor or vendor.strip().lower() not in uploaded_vendor_set_for_display:
+                if not vendor or not import_vendor_match(vendor, uploaded_vendor_set_for_display):
                     continue
             parsed.append({'row': row, 'data': data, 'yupi_po': yupi, 'vendor': vendor})
 
@@ -7350,8 +7356,9 @@ def export_import_data():
             vendor = import_nonblank(data.get('vendor_name')) or import_nonblank(data.get('vendor')) or import_nonblank(row.vendor_name)
             # Uploaded-vendor filter — skip rows whose vendor is not in the
             # uploaded list (or has no vendor at all).
+            # FIX V10: pakai import_vendor_match() (fuzzy) supaya konsisten dengan sync.
             if uploaded_vendor_set_for_export:
-                if not vendor or vendor.strip().lower() not in uploaded_vendor_set_for_export:
+                if not vendor or not import_vendor_match(vendor, uploaded_vendor_set_for_export):
                     continue
             if none_yupi_po or none_vendor:
                 continue
