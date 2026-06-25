@@ -1814,13 +1814,36 @@ def merge_import_existing_payload(existing_payload, sheet_payload):
     merged = dict(sheet_payload or {})
     existing_payload = existing_payload or {}
     row_exists_in_db = bool(existing_payload)
+
+    # FIX V10: Jika sheet row punya tanggal di kolom Reschedule, JANGAN overwrite
+    # Req Dlv Date dari sheet. User sudah manual update Req Dlv Date di dashboard
+    # berdasarkan tanggal reschedule. Tapi field lain (qty, vendor, dll) tetap
+    # di-upsert supaya kalau ada perubahan data lain, tetap ke-update.
+    #
+    # Logika:
+    # - has_reschedule = True kalau sheet row ada nilai di kolom 'reschedule'
+    # - Untuk field 'req_dlv_date' dan 'source_req_dlv_date':
+    #   - Kalau has_reschedule DAN existing (dashboard) ada nilai → KEEP existing (jangan overwrite)
+    #   - Kalau has_reschedule TAPI existing kosong → pakai sheet value (tidak ada data lama untuk dipertahankan)
+    #   - Kalau tidak has_reschedule → behavior normal (sheet value menang kalau tidak kosong)
+    has_reschedule = not import_blankish(sheet_payload.get('reschedule')) if sheet_payload else False
+
     for field in IMPORT_LOCAL_EDIT_FIELDS:
         old_value = existing_payload.get(field)
         new_value = merged.get(field)
         if field in IMPORT_USER_LOCAL_ONLY_FIELDS and row_exists_in_db:
             merged[field] = old_value; continue
         if field in IMPORT_SOURCE_MANAGED_FIELDS:
+            # FIX V10: protect req_dlv_date kalau row ada reschedule
+            if has_reschedule and field in ('req_dlv_date', 'source_req_dlv_date'):
+                if not import_blankish(old_value):
+                    # Existing (dashboard) ada nilai → KEEP, jangan overwrite dari sheet
+                    merged[field] = old_value
+                # Kalau existing kosong, biarkan new_value dari sheet (tidak ada data lama)
+                continue
+            # Behavior normal: kalau sheet ada nilai, pakai sheet value
             if not import_blankish(new_value): continue
+            # Kalau sheet kosong tapi existing ada, keep existing
             if not import_blankish(old_value): merged[field] = old_value
             continue
         if not import_blankish(old_value): merged[field] = old_value
@@ -2193,50 +2216,44 @@ def sync_import_sheet_to_dashboard():
     clear_runtime_caches()
 
     # FIX V10: Auto-cleanup duplicate rows SETELAH copy sheet.
-    # Kadang copy sheet menambahkan row baru padahal row dengan po_yupi + item_yupi
-    # sama sudah ada (mis. item di-reschedule muncul sebagai 2 baris terpisah di
-    # sheet source). Auto-cleanup ini akan merge duplicate tanpa perlu manual
-    # POST /api/admin/cleanup-import-duplicates.
+    # HANYA hapus row yang 100% IDENTICAL (semua field sama, termasuk req_dlv_date).
+    # JANGAN hapus row hanya karena po_yupi + item_yupi sama — 1 PO bisa punya
+    # multiple item dengan Req Dlv Date berbeda (reschedule history), itu entry
+    # valid yang harus dipertahankan.
     duplicates_cleaned = 0
     try:
         all_db_rows = ImportDashboardRow.query.filter(
             ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
-        ).order_by(ImportDashboardRow.updated_at.desc()).all()
-        by_identity = {}
+        ).all()
+        # Group by FULL data fingerprint (semua field sama = true duplicate)
+        by_fingerprint = {}
         for db_row in all_db_rows:
             try: db_data = json.loads(db_row.data_json or '{}')
             except: db_data = {}
-            po_yupi_key = (clean(db_data.get('po_yupi')) or clean(db_data.get('yupi_po')) or '').strip().lower()
-            item_yupi_key = (clean(db_data.get('item_yupi')) or '').strip().lower()
-            if not po_yupi_key: continue
-            identity_key = f"{po_yupi_key}|{item_yupi_key or '(none)'}"
-            by_identity.setdefault(identity_key, []).append({'row': db_row, 'data': db_data})
-        for identity_key, dup_rows in by_identity.items():
+            # Build fingerprint dari semua field yang ada (sort keys untuk konsistensi)
+            # Exclude field yang selalu berubah (updated_at, last_seen_at, dll) —
+            # hanya field bisnis yang menentukan duplicate.
+            biz_fields = {k: v for k, v in db_data.items()
+                          if k in IMPORT_LOCAL_EDIT_FIELDS and not import_blankish(v)}
+            fingerprint = json.dumps(biz_fields, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+            by_fingerprint.setdefault(fingerprint, []).append(db_row)
+
+        for fingerprint, dup_rows in by_fingerprint.items():
             if len(dup_rows) <= 1: continue
-            # Winner = updated_at terbaru
-            dup_rows.sort(key=lambda x: x['row'].updated_at or datetime.min, reverse=True)
+            # Row dengan fingerprint sama = 100% identical → hapus kecuali 1
+            # Keep row dengan id terkecil (paling lama, paling stabil)
+            dup_rows.sort(key=lambda x: x.id)
             winner = dup_rows[0]
             losers = dup_rows[1:]
-            # Merge: kalau winner kosong tapi loser ada nilai → ambil dari loser
-            winner_data = dict(winner['data'])
             for loser in losers:
-                loser_data = loser['data']
-                for field in IMPORT_LOCAL_EDIT_FIELDS:
-                    winner_val = winner_data.get(field)
-                    loser_val = loser_data.get(field)
-                    if import_blankish(winner_val) and not import_blankish(loser_val):
-                        winner_data[field] = loser_val
-            winner['row'].data_json = json.dumps(winner_data, ensure_ascii=False)
-            winner['row'].updated_at = datetime.utcnow()
-            for loser in losers:
-                db.session.delete(loser['row'])
+                db.session.delete(loser)
                 duplicates_cleaned += 1
         if duplicates_cleaned > 0:
             db.session.commit()
             db.session.execute(text('PRAGMA wal_checkpoint(TRUNCATE)'))
             db.session.commit()
             clear_runtime_caches()
-            print(f"[sync_import_sheet_to_dashboard] Auto-cleanup: {duplicates_cleaned} duplicate rows dihapus")
+            print(f"[sync_import_sheet_to_dashboard] Auto-cleanup: {duplicates_cleaned} identical duplicate rows dihapus")
     except Exception as cleanup_exc:
         try: db.session.rollback()
         except: pass
@@ -7390,92 +7407,71 @@ def import_debug_source():
 def admin_cleanup_import_duplicates():
     """Auto-cleanup duplicate rows di Import Dashboard.
 
-    FIX V10: Endpoint ini untuk hapus duplicate yang terjadi karena copy sheet
-    menambahkan row baru padahal row dengan po_yupi + item_yupi sama sudah ada
-    (mis. item di-reschedule muncul sebagai 2 baris terpisah).
+    FIX V10 (CORRECTED): HANYA hapus row yang 100% IDENTICAL (semua field bisnis
+    sama, termasuk req_dlv_date, item_yupi, dll). JANGAN hapus row hanya karena
+    po_yupi + item_yupi sama — 1 PO bisa punya multiple item dengan Req Dlv Date
+    berbeda (reschedule history), itu entry valid yang harus dipertahankan.
 
     Logika:
-    1. Group rows by (po_yupi + item_yupi) — case-insensitive
-    2. Kalau ada >1 row dengan kombinasi sama:
-       a. Pilih "winner" = row dengan updated_at terbaru
-       b. Merge data dari row lain ke winner (keep user edit, jangan overwrite)
-       c. Hapus row lain
-    3. Return summary: total duplicates, merged count, deleted count
+    1. Build fingerprint dari semua field bisnis (IMPORT_LOCAL_EDIT_FIELDS) yang tidak kosong
+    2. Group rows by fingerprint
+    3. Kalau ada >1 row dengan fingerprint sama (100% identical):
+       a. Keep row dengan id terkecil (paling lama, paling stabil)
+       b. Hapus row lain
+    4. Return summary
 
     Return:
     - total_rows_before: jumlah row sebelum cleanup
     - total_rows_after: jumlah row setelah cleanup
-    - duplicate_groups: jumlah group yang punya duplicate
-    - merged_count: jumlah row yang di-merge ke winner
+    - identical_duplicate_groups: jumlah group yang 100% identical
     - deleted_count: jumlah row yang dihapus
-    - details: list detail per group (po_yupi, item_yupi, kept_row_key, deleted_row_keys)
     """
     try:
         all_rows = ImportDashboardRow.query.filter(
             ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
-        ).order_by(ImportDashboardRow.updated_at.desc()).all()
+        ).all()
 
-        # Group by (po_yupi + item_yupi) — case-insensitive
-        by_identity = {}
+        # Group by FULL data fingerprint (semua field bisnis sama = true identical duplicate)
+        by_fingerprint = {}
         for row in all_rows:
             try: data = json.loads(row.data_json or '{}')
             except: data = {}
-            po_yupi = (clean(data.get('po_yupi')) or clean(data.get('yupi_po')) or '').strip().lower()
-            item_yupi = (clean(data.get('item_yupi')) or '').strip().lower()
-            if not po_yupi: continue  # skip row tanpa po_yupi
-            # Identity key: po_yupi + item_yupi (atau '(none)' kalau item_yupi kosong)
-            identity_key = f"{po_yupi}|{item_yupi or '(none)'}"
-            by_identity.setdefault(identity_key, []).append({
-                'row': row,
-                'data': data,
-                'po_yupi': po_yupi,
-                'item_yupi': item_yupi,
-            })
+            # Build fingerprint dari semua field bisnis yang tidak kosong
+            biz_fields = {k: v for k, v in data.items()
+                          if k in IMPORT_LOCAL_EDIT_FIELDS and not import_blankish(v)}
+            fingerprint = json.dumps(biz_fields, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+            by_fingerprint.setdefault(fingerprint, []).append(row)
 
-        # Find groups with duplicates
-        duplicate_groups = []
-        merged_count = 0
+        # Find groups with identical duplicates
+        duplicate_groups = 0
         deleted_count = 0
         details = []
 
-        for identity_key, rows in by_identity.items():
+        for fingerprint, rows in by_fingerprint.items():
             if len(rows) <= 1: continue  # no duplicate
 
-            # Sort by updated_at desc (winner = terbaru)
-            rows.sort(key=lambda x: x['row'].updated_at or datetime.min, reverse=True)
+            # Sort by id asc (keep paling lama = id terkecil)
+            rows.sort(key=lambda x: x.id)
             winner = rows[0]
             losers = rows[1:]
 
-            # Merge data dari losers ke winner (keep user edit, jangan overwrite)
-            winner_data = dict(winner['data'])
-            for loser in losers:
-                loser_data = loser['data']
-                # Merge: kalau winner kosong tapi loser ada nilai → ambil dari loser
-                for field in IMPORT_LOCAL_EDIT_FIELDS:
-                    winner_val = winner_data.get(field)
-                    loser_val = loser_data.get(field)
-                    if import_blankish(winner_val) and not import_blankish(loser_val):
-                        winner_data[field] = loser_val
-
-            # Update winner dengan merged data
-            winner['row'].data_json = json.dumps(winner_data, ensure_ascii=False)
-            winner['row'].updated_at = datetime.utcnow()
-
-            # Hapus losers
+            # Hapus losers (100% identical, tidak perlu merge karena datanya sama persis)
             deleted_row_keys = []
             for loser in losers:
-                deleted_row_keys.append(loser['row'].row_key)
-                db.session.delete(loser['row'])
+                deleted_row_keys.append(loser.row_key)
+                db.session.delete(loser)
                 deleted_count += 1
 
-            merged_count += len(losers)
-            duplicate_groups.append(identity_key)
+            duplicate_groups += 1
+            try: winner_data = json.loads(winner.data_json or '{}')
+            except: winner_data = {}
             details.append({
-                'po_yupi': winner['po_yupi'],
-                'item_yupi': winner['item_yupi'],
-                'kept_row_key': winner['row'].row_key,
+                'po_yupi': clean(winner_data.get('po_yupi')) or clean(winner_data.get('yupi_po')) or '',
+                'item_yupi': clean(winner_data.get('item_yupi')) or '',
+                'req_dlv_date': clean(winner_data.get('req_dlv_date')) or '',
+                'kept_row_key': winner.row_key,
                 'deleted_row_keys': deleted_row_keys,
-                'kept_updated_at': winner['row'].updated_at.isoformat() if winner['row'].updated_at else None,
+                'note': '100% identical — semua field bisnis sama',
             })
 
         # Commit changes
@@ -7493,11 +7489,11 @@ def admin_cleanup_import_duplicates():
             'success': True,
             'total_rows_before': len(all_rows),
             'total_rows_after': total_rows_after,
-            'duplicate_groups': len(duplicate_groups),
-            'merged_count': merged_count,
+            'identical_duplicate_groups': duplicate_groups,
             'deleted_count': deleted_count,
-            'details': details[:50],  # top 50 untuk response tidak terlalu besar
-            'message': f'Cleanup selesai: {deleted_count} duplicate row dihapus, {merged_count} row di-merge. Sisa: {total_rows_after} rows.',
+            'details': details[:50],
+            'message': f'Cleanup selesai: {deleted_count} identical duplicate row dihapus (hanya row dengan 100% field sama). Sisa: {total_rows_after} rows.',
+            'note': 'HANYA row yang 100% identical (semua field bisnis sama) yang dihapus. Row dengan po_yupi sama tapi req_dlv_date/item_yupi berbeda DIPERTAHANKAN.',
         })
     except Exception as e:
         db.session.rollback()
