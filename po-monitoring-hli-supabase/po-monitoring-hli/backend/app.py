@@ -6926,8 +6926,7 @@ def get_import_data():
         # if purge hasn't run yet (user hasn't clicked Copy Sheet), the
         # /data endpoint still hides non-matching rows so the user doesn't
         # see stale data.
-        uploaded_vendor_names_for_display = import_uploaded_vendor_names()
-        uploaded_vendor_set_for_display = {v.strip().lower() for v in uploaded_vendor_names_for_display if v and v.strip()}
+        uploaded_vendor_set_for_display = {v.strip().lower() for v in import_uploaded_vendor_names() if v and v.strip()}
         for row in candidate_rows:
             try:
                 data = json.loads(row.data_json or '{}')
@@ -6940,13 +6939,8 @@ def get_import_data():
             # rows never enter `parsed`, so they don't show up in the table
             # or in any filter dropdown options. Rows with no vendor are also
             # excluded when an uploaded vendor list exists.
-            # FIX V10: pakai import_vendor_match() (fuzzy) bukan exact lower() NOT IN set,
-            # supaya konsisten dengan logic sync. Contoh: ImportVendor punya "CURT GEORGI"
-            # dan row di DB punya vendor "CURT GEORGI GMBH & CO" → exact match FAIL tapi
-            # fuzzy match PASS (prefix match). Sebaliknya sync berhasil copy row tersebut
-            # tapi display menyembunyikannya → data hilang dari dashboard.
             if uploaded_vendor_set_for_display:
-                if not vendor or not import_vendor_match(vendor, uploaded_vendor_set_for_display):
+                if not vendor or vendor.strip().lower() not in uploaded_vendor_set_for_display:
                     continue
             parsed.append({'row': row, 'data': data, 'yupi_po': yupi, 'vendor': vendor})
 
@@ -7263,6 +7257,116 @@ def import_debug_source():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/import/debug-scan', methods=['GET'])
+def import_debug_scan():
+    """Scan SEMUA rows di source sheet, return statistic match/no-match + sample row yang gagal.
+
+    FIX V9: Endpoint ini untuk diagnose kenapa PO tertentu tidak tercopy.
+    Return:
+    - total_rows_scanned: jumlah row dengan data di sheet
+    - matched_rows: row yang vendor-nya match dengan uploaded vendor list
+    - unmatched_rows: row yang vendor-nya TIDAK match (dengan detail vendor yang terbaca)
+    - matched_sample: 5 row pertama yang match
+    - unmatched_sample: 5 row pertama yang tidak match (supaya user bisa lihat vendor apa yang tidak match)
+    - vendor_filter_used: daftar vendor yang di-upload ke ImportVendor table
+    """
+    try:
+        source_key = clean(request.args.get('source')) or 'source_1'
+        source = next((s for s in IMPORT_SOURCE_SHEETS if s['key'] == source_key), None)
+        if not source:
+            return jsonify({
+                'error': f"Unknown source key '{source_key}'",
+                'available_sources': [s['key'] for s in IMPORT_SOURCE_SHEETS],
+            }), 400
+
+        columns = import_layout_columns()
+        mapping_columns = import_all_mapping_columns(columns)
+        sheet_title, header_df = import_source_header_preview(source, force=True)
+        if header_df.empty:
+            return jsonify({'error': 'Could not read header preview', 'source': source_key}), 500
+
+        header_idx = import_detect_header_row(header_df)
+        source_map = import_source_column_map(header_df, mapping_columns)
+        header_row_values = [clean(v) for v in header_df.iloc[header_idx].tolist()] if len(header_df) else []
+
+        source_map_letters = {}
+        for field, idx in source_map.items():
+            try: source_map_letters[field] = column_letter_from_index(idx + 1)
+            except: source_map_letters[field] = f'(idx {idx})'
+
+        # Get uploaded vendor list
+        uploaded_vendor_names = import_uploaded_vendor_names()
+        uploaded_vendor_set = {v.strip().lower() for v in uploaded_vendor_names if v and v.strip()}
+
+        if not uploaded_vendor_set:
+            return jsonify({
+                'source_key': source_key,
+                'error': 'No uploaded vendor list! Source sheet sync di-skip entirely ketika vendor list kosong.',
+                'vendor_filter_used': [],
+                'fix': 'Upload vendor list dulu via tombol Upload Vendor di dashboard, atau via /api/import/vendors/upload.',
+            }), 200
+
+        # Scan ALL rows (tidak hanya 5 sample) dengan vendor_set = kosong (ambil semua)
+        # Lalu manual check match untuk setiap row
+        all_rows = import_source_rows_fast(source, columns, set())  # empty set = ambil semua
+        # Tunggu — empty set akan skip filter, tapi code cek `if vendor_set and not any(...)`.
+        # Kalau vendor_set kosong, `if vendor_set` False → tidak filter → ambil semua. ✓
+
+        matched_rows = []
+        unmatched_rows = []
+        for row in all_rows:
+            row_vendor = row.get('_vendor_name') or ''
+            is_match = import_vendor_match(row_vendor, uploaded_vendor_set) if row_vendor else False
+            row_info = {
+                'sheet_row': row.get('_sheet_row'),
+                'vendor_name_detected': row_vendor,
+                'po_yupi': row.get('po_yupi'),
+                'po_sementara': row.get('po_sementara'),
+                'item_name': row.get('item_name'),
+                'is_match': is_match,
+            }
+            if is_match:
+                matched_rows.append(row_info)
+            else:
+                unmatched_rows.append(row_info)
+
+        # Statistic vendor yang tidak match (group by vendor name)
+        unmatched_vendors = {}
+        for r in unmatched_rows:
+            v = r['vendor_name_detected'] or '(empty)'
+            unmatched_vendors[v] = unmatched_vendors.get(v, 0) + 1
+
+        return jsonify({
+            'source_key': source_key,
+            'sheet_title_used': sheet_title,
+            'detected_header_row_1based': header_idx + 1,
+            'column_map_field_to_letter': source_map_letters,
+            'header_row_raw_values': header_row_values[:25],
+            'vendor_fallback_letters': list(IMPORT_FALLBACK_SOURCE_VENDOR_LETTERS),
+            'vendor_filter_used': sorted(uploaded_vendor_set),
+            'vendor_filter_count': len(uploaded_vendor_set),
+            'total_rows_scanned': len(all_rows),
+            'matched_rows': len(matched_rows),
+            'unmatched_rows': len(unmatched_rows),
+            'unmatched_vendors_breakdown': unmatched_vendors,
+            'matched_sample': matched_rows[:5],
+            'unmatched_sample': unmatched_rows[:10],
+            'troubleshooting': (
+                "Jika PO yang dicari ada di unmatched_sample: "
+                "(1) Cek vendor_name_detected — apakah persis sama atau prefix dari vendor di vendor_filter_used? "
+                "(2) Kalau vendor belum di-upload, tambahkan via /api/import/vendors/upload. "
+                "(3) Fuzzy match aktif: prefix match (min 5 char) atau contains match (min 8 char). "
+                "Jika PO tidak ada di matched_sample DAN tidak ada di unmatched_sample: "
+                "(a) Cek total_rows_scanned — kalau 0, berarti header detection gagal. "
+                "(b) Cek header_row_raw_values — pastikan header terdeteksi benar. "
+                "(c) Cek column_map_field_to_letter — vendor_name dan po_yupi harus terpetakan."
+            ),
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/import/cell', methods=['PUT'])
 def update_import_cell():
     try:
@@ -7356,9 +7460,8 @@ def export_import_data():
             vendor = import_nonblank(data.get('vendor_name')) or import_nonblank(data.get('vendor')) or import_nonblank(row.vendor_name)
             # Uploaded-vendor filter — skip rows whose vendor is not in the
             # uploaded list (or has no vendor at all).
-            # FIX V10: pakai import_vendor_match() (fuzzy) supaya konsisten dengan sync.
             if uploaded_vendor_set_for_export:
-                if not vendor or not import_vendor_match(vendor, uploaded_vendor_set_for_export):
+                if not vendor or vendor.strip().lower() not in uploaded_vendor_set_for_export:
                     continue
             if none_yupi_po or none_vendor:
                 continue
@@ -7594,6 +7697,33 @@ def import_cleanup_duplicates():
         })
     except Exception as e:
         db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/import/vendors', methods=['GET'])
+def list_import_vendors():
+    """List semua vendor yang sudah di-upload ke ImportVendor table.
+
+    FIX V9: Endpoint GET untuk list vendor (sebelumnya hanya POST upload).
+    Return: daftar vendor dengan origin, top, non_ski, uploaded_at.
+    """
+    try:
+        vendors = ImportVendor.query.order_by(ImportVendor.vendor_name.asc()).all()
+        return jsonify({
+            'count': len(vendors),
+            'vendors': [
+                {
+                    'vendor_name': v.vendor_name,
+                    'origin': v.origin or '',
+                    'top': v.top or '',
+                    'non_ski': v.non_ski or '',
+                    'uploaded_at': utc_isoformat(v.uploaded_at) if v.uploaded_at else None,
+                }
+                for v in vendors
+            ],
+        })
+    except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
