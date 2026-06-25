@@ -194,10 +194,6 @@ else:
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
-# Threshold untuk fast-path upload Product ID: jika rows > ini, skip cleanup_pre
-# dan jalankan _refresh_so_pic_names di background thread.
-# 45 MB Excel = ~200k rows → harusnya masuk fast-path.
-MAX_ROWS_FOR_SYNC_CLEANUP = int(os.getenv('MAX_ROWS_FOR_SYNC_CLEANUP', '10000'))
 db = SQLAlchemy(app)
 
 @event.listens_for(Engine, 'connect')
@@ -777,11 +773,23 @@ def apply_item_registration_date_filter(query, date_year='', date_from='', date_
     return query
 
 def utc_isoformat(dt):
+    """Format datetime ke ISO 8601 dengan timezone UTC (+00:00 suffix).
+
+    FIX V7: Sebelumnya hanya menambah 'Z' tanpa cek apakah datetime sudah punya
+    tzinfo. Backend pakai datetime.utcnow() yang TIDAK punya tzinfo, jadi
+    isoformat() menghasilkan "2026-06-25T01:04:00" tanpa suffix.
+    Frontend lalu meng-interpret sebagai local time browser → jam tampil salah.
+
+    Sekarang: selalu tambahkan '+00:00' (UTC offset) kalau datetime naive
+    (tanpa tzinfo), supaya frontend tahu ini adalah UTC time.
+    """
     if dt is None: return None
-    s = dt.isoformat()
-    tail = s[10:]
-    if s.endswith('Z') or '+' in tail or '-' in tail: return s
-    return s + 'Z'
+    # Kalau datetime sudah punya tzinfo, pakai apa adanya
+    if dt.tzinfo is not None:
+        return dt.isoformat()
+    # Kalau naive (tidak punya tzinfo), asumsikan UTC (karena backend pakai utcnow())
+    # Tambahkan +00:00 suffix supaya frontend bisa konversi ke local time dengan benar
+    return dt.isoformat() + '+00:00'
 
 def has_internal_po_ref(customer_po_number, delivery_memo):
     for field in [customer_po_number, delivery_memo]:
@@ -1614,7 +1622,7 @@ def import_dashboard_row_to_dict(row, columns, vendor_attrs_map=None):
     for col in columns:
         field = col.get('field')
         out[field] = '' if data.get(field) is None else data.get(field, '')
-    out.update({'_row_key': row.row_key, '_source_key': row.source_key, '_source_label': row.source_label, '_source_uid': row.source_uid, '_sheet_row': row.sheet_row, '_vendor_name': row.vendor_name, '_dashboard_id': row.id, '_first_seen_at': row.first_seen_at.isoformat() if row.first_seen_at else '', '_last_seen_at': row.last_seen_at.isoformat() if row.last_seen_at else '', '_updated_at': row.updated_at.isoformat() if row.updated_at else ''})
+    out.update({'_row_key': row.row_key, '_source_key': row.source_key, '_source_label': row.source_label, '_source_uid': row.source_uid, '_sheet_row': row.sheet_row, '_vendor_name': row.vendor_name, '_dashboard_id': row.id, '_first_seen_at': utc_isoformat(row.first_seen_at) if row.first_seen_at else '', '_last_seen_at': utc_isoformat(row.last_seen_at) if row.last_seen_at else '', '_updated_at': utc_isoformat(row.updated_at) if row.updated_at else ''})
     return out
 
 def import_layout_tracker_visible_rows(columns=None):
@@ -2497,13 +2505,10 @@ def uploaded_files():
     return [f for f in files if f and f.filename]
 
 def read_upload_excel(file):
-    # FIX V6: Hindari double-read file besar (raw = file.read() lalu pd.read_excel(file)).
-    # Untuk file 45 MB, ini menghemat 45 MB memory spike di server PythonAnywhere.
-    # Cukup baca 4 byte pertama untuk deteksi format .xls (OLE2 magic bytes).
-    filename = (file.filename or '').lower()
-    head = file.read(4)
+    raw = file.read()
     file.seek(0)
-    is_xls_format = head == b'\xd0\xcf\x11\xe0'
+    filename = (file.filename or '').lower()
+    is_xls_format = raw[:4] == b'\xd0\xcf\x11\xe0'
     engine = 'xlrd' if is_xls_format or filename.endswith('.xls') else 'openpyxl'
     # Read ALL columns as strings so leading zeros in IDs (e.g. Category ID
     # "000200030000100007") are preserved. Pandas otherwise auto-infers
@@ -4183,6 +4188,63 @@ def admin_cleanup_discardable():
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+
+@app.route('/api/admin/cleanup-item-registration', methods=['POST'])
+def admin_cleanup_item_registration():
+    """One-time cleanup untuk hapus duplikat di tabel ItemRegistration.
+
+    FIX V8: Karena bug sebelumnya (replace_existing default False), data lama
+    menumpuk dan record menjadi 2x lipat (8000 vs 4000 asli). Endpoint ini
+    hapus duplikat req_no (keep yang terbaru berdasarkan uploaded_at), dan
+    hapus juga req_no yang proc_status-nya sudah "selesai" (tidak ada di sistem
+    source lagi).
+
+    Hapus req_no dengan proc_status berikut (data sudah selesai di sistem source):
+    - 'Registry Completed'
+    - 'Vendor Approved'
+    - 'Closed'
+    - 'Cancelled'
+    - 'Rejected'
+    """
+    try:
+        # 1. Hapus duplikat req_no (keep row dengan uploaded_at terbaru)
+        all_rows = db.session.query(ItemRegistration).order_by(ItemRegistration.uploaded_at.desc()).all()
+        seen_req_no = set()
+        duplicates_deleted = 0
+        for row in all_rows:
+            if row.req_no in seen_req_no:
+                db.session.delete(row)
+                duplicates_deleted += 1
+            else:
+                seen_req_no.add(row.req_no)
+        db.session.flush()
+
+        # 2. Hapus req_no dengan proc_status "selesai" (data sudah hilang dari sistem source)
+        # User bilang: "di sistem jika sudah selesai proses data akan hilang"
+        finished_statuses = ['Registry Completed', 'Vendor Approved', 'Closed', 'Cancelled', 'Rejected']
+        stale_deleted = db.session.query(ItemRegistration).filter(
+            ItemRegistration.proc_status.in_(finished_statuses)
+        ).delete(synchronize_session=False)
+        db.session.flush()
+
+        db.session.commit()
+        db.session.execute(text('PRAGMA wal_checkpoint(TRUNCATE)'))
+        db.session.commit()
+        clear_runtime_caches()
+
+        total_remaining = db.session.query(ItemRegistration).count()
+        return jsonify({
+            'duplicates_deleted': duplicates_deleted,
+            'stale_deleted': stale_deleted,
+            'total_deleted': duplicates_deleted + stale_deleted,
+            'total_remaining': total_remaining,
+            'message': f'Cleanup selesai: {duplicates_deleted} duplikat + {stale_deleted} data stale dihapus. Sisa: {total_remaining} records.'
+        })
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/upload/smro-backfill-spec-json', methods=['POST'])
 @app.route('/api/upload/smro-backfill-spec', methods=['POST'])
 def upload_smro_backfill_spec():
@@ -4891,7 +4953,13 @@ def upload_item_registration():
     try:
         uploads, upload_mode = request_upload_dataframes('item_registration')
         if not uploads: return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
-        replace_existing = upload_replace_mode()
+
+        # FIX V8: Item Registration selalu pakai replace mode (forced).
+        # Di sistem source, data yang sudah selesai proses akan hilang.
+        # Jadi req_no lama yang tidak ada di upload terbaru → harus dihapus.
+        # Sebelumnya: replace_existing default False → data lama menumpuk,
+        # record menjadi 2x lipat (8000 vs 4000 asli).
+        replace_existing = True  # forced, abaikan upload_replace_mode()
 
         summary = {'processed': 0, 'added': 0, 'updated': 0, 'removed_duplicates': 0, 'removed_stale': 0, 'removed_blank': 0}
         latest_req_numbers = set()
@@ -4902,7 +4970,9 @@ def upload_item_registration():
             for key in summary: summary[key] += result.get(key, 0)
 
         db.session.flush()
-        cleanup = cleanup_source_table_snapshot(ItemRegistration, 'req_no', latest_req_numbers if replace_existing else None, timestamp_fields=('uploaded_at',), delete_blank=True)
+        # FIX V8: selalu pass latest_req_numbers sebagai valid_keys (bukan None),
+        # supaya req_no lama yang tidak ada di upload terbaru dihapus.
+        cleanup = cleanup_source_table_snapshot(ItemRegistration, 'req_no', latest_req_numbers, timestamp_fields=('uploaded_at',), delete_blank=True)
         for key, value in cleanup.items(): summary[key] = summary.get(key, 0) + value
 
         db.session.commit()
@@ -5249,41 +5319,25 @@ def _lookup_pic(product_id_str):
 @app.route('/api/upload/product-id-json', methods=['POST'])
 @app.route('/api/upload/product-id', methods=['POST'])
 def upload_product_id():
-    """Upload Prod_ID Excel from SAP. Upserts product_id → category_id mapping.
-
-    FIX V6: Untuk file besar (>10k rows), gunakan fast-path:
-    - Skip cleanup_pre (scan tabel besar lambat)
-    - Chunked commit setiap 5000 baris (bukan 1 commit di akhir)
-    - _refresh_so_pic_names dijalankan di background thread (tidak block response)
-    """
+    """Upload Prod_ID Excel from SAP. Upserts product_id → category_id mapping."""
     try:
         uploads, upload_mode = request_upload_dataframes('product_id')
         if not uploads:
             return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
         replace_existing = upload_replace_mode()
 
-        # Hitung total rows untuk tentukan fast-path atau sync mode
-        total_rows = sum(len(upload['df']) for upload in uploads)
-        fast_path = total_rows > MAX_ROWS_FOR_SYNC_CLEANUP
-        if fast_path:
-            print(f'[upload_product_id] Fast-path mode: {total_rows} rows > {MAX_ROWS_FOR_SYNC_CLEANUP} threshold')
-
-        # Pre-cleanup: skip untuk file besar (akan dilakukan di akhir saja)
-        removed_duplicates = removed_stale = removed_blank = 0
-        if not fast_path:
-            cleanup_pre = cleanup_source_table_snapshot(
-                ProductIDDB,
-                'product_id',
-                None,
-                timestamp_fields=('updated_at',),
-                delete_blank=True,
-            )
-            db.session.flush()
-            removed_duplicates = cleanup_pre.get('removed_duplicates', 0)
-            removed_stale = cleanup_pre.get('removed_stale', 0)
-            removed_blank = cleanup_pre.get('removed_blank', 0)
-
+        cleanup_pre = cleanup_source_table_snapshot(
+            ProductIDDB,
+            'product_id',
+            None,
+            timestamp_fields=('updated_at',),
+            delete_blank=True,
+        )
+        db.session.flush()
         added = updated = 0
+        removed_duplicates = cleanup_pre.get('removed_duplicates', 0)
+        removed_stale = cleanup_pre.get('removed_stale', 0)
+        removed_blank = cleanup_pre.get('removed_blank', 0)
         latest_product_ids = set()
         pic_cache = {}  # category_id → pic_name
 
@@ -5309,18 +5363,8 @@ def upload_product_id():
         
         existing_pid_map = {}
         if all_pids_in_upload:
-            # FIX V6: chunked query untuk hindari SQLite parameter limit (999)
-            all_pids_list = list(all_pids_in_upload)
-            chunk_size = 900
-            for i in range(0, len(all_pids_list), chunk_size):
-                chunk = all_pids_list[i:i + chunk_size]
-                rows = db.session.query(ProductIDDB).filter(ProductIDDB.product_id.in_(chunk)).all()
-                for p in rows:
-                    existing_pid_map[p.product_id] = p
-
-        # FIX V6: chunked commit setiap 5000 baris untuk file besar
-        CHUNK_COMMIT_SIZE = 5000
-        rows_processed = 0
+            existing_pid_rows = db.session.query(ProductIDDB).filter(ProductIDDB.product_id.in_(list(all_pids_in_upload))).all()
+            existing_pid_map = {p.product_id: p for p in existing_pid_rows}
 
         for upload in uploads:
             df = upload['df']
@@ -5341,6 +5385,8 @@ def upload_product_id():
                     'product_status': clean(df_val(row, col['product_status'])),
                     'specification': clean(df_val(row, col['specification'])),
                     'manufacturer_name': clean(df_val(row, col['manufacturer_name'])),
+                    # vendor_name intentionally omitted — source Excel has no
+                    # Vendor column for product master data.
                     'order_unit': clean(df_val(row, col['order_unit'])),
                     'hub_handling_check': clean(df_val(row, col['hub_handling_check'])),
                     'tax_type': clean(df_val(row, col['tax_type'])),
@@ -5358,27 +5404,17 @@ def upload_product_id():
                     db.session.add(ProductIDDB(product_id=pid, **payload))
                     added += 1
 
-                rows_processed += 1
-                # FIX V6: commit setiap CHUNK_COMMIT_SIZE baris untuk file besar
-                if fast_path and rows_processed % CHUNK_COMMIT_SIZE == 0:
-                    db.session.flush()
-                    db.session.commit()
-                    print(f'[upload_product_id] Commit progress: {rows_processed}/{total_rows} rows (added={added}, updated={updated})')
-
         db.session.flush()
-
-        # Post-cleanup: skip untuk file besar (akan dilakukan terpisah)
-        if not fast_path:
-            cleanup_post = cleanup_source_table_snapshot(
-                ProductIDDB,
-                'product_id',
-                latest_product_ids if replace_existing else None,
-                timestamp_fields=('updated_at',),
-                delete_blank=True,
-            )
-            removed_duplicates += cleanup_post.get('removed_duplicates', 0)
-            removed_stale += cleanup_post.get('removed_stale', 0)
-            removed_blank += cleanup_post.get('removed_blank', 0)
+        cleanup_post = cleanup_source_table_snapshot(
+            ProductIDDB,
+            'product_id',
+            latest_product_ids if replace_existing else None,
+            timestamp_fields=('updated_at',),
+            delete_blank=True,
+        )
+        removed_duplicates += cleanup_post.get('removed_duplicates', 0)
+        removed_stale += cleanup_post.get('removed_stale', 0)
+        removed_blank += cleanup_post.get('removed_blank', 0)
 
         db.session.commit()
         _pid_category_cache_invalidate()
@@ -5387,23 +5423,11 @@ def upload_product_id():
         global _SIMILARITY_CACHE
         _SIMILARITY_CACHE = {}
 
-        # FIX V6: untuk file besar, jalankan _refresh_so_pic_names di background thread
-        # supaya response tidak timeout. Untuk file kecil, jalankan synchronous.
-        refreshed = 0
-        if fast_path:
-            # Spawn background thread untuk refresh SO pic names
-            pids_snapshot = list(latest_product_ids)
-            def _bg_refresh():
-                try:
-                    with app.app_context():
-                        _refresh_so_pic_names(product_ids_scope=pids_snapshot)
-                        print(f'[bg-refresh] SO pic refresh selesai untuk {len(pids_snapshot)} product IDs')
-                except Exception as exc:
-                    print(f'[bg-refresh] Error: {exc}')
-            threading.Thread(target=_bg_refresh, daemon=True, name='bg-pic-refresh').start()
-            refreshed = -1  # -1 = sedang di-refresh di background
-        else:
-            refreshed = _refresh_so_pic_names(product_ids_scope=latest_product_ids)
+        # Refresh PIC only for SO rows whose product_id is in this upload
+        # batch — uses the preloaded prod_map internally, no N+1 queries.
+        # Previously this loop called db.session.query(ProductIDDB).filter_by
+        # per SO row (1,000 SO rows = 1,000 SQL queries).
+        refreshed = _refresh_so_pic_names(product_ids_scope=latest_product_ids)
 
         return jsonify({
             'status': 'ok',
@@ -5414,8 +5438,6 @@ def upload_product_id():
             'removed_stale': removed_stale,
             'removed_blank': removed_blank,
             'so_pic_refreshed': refreshed,
-            'total_rows': total_rows,
-            'fast_path': fast_path,
             'total_in_db': db.session.query(ProductIDDB).count()
         })
     except ValueError as e:
@@ -5721,9 +5743,13 @@ def master_pic_status():
         last_pic = db.session.query(func.max(MasterPIC.updated_at)).scalar()
         return jsonify({
             'product_id_count': total_pid,
-            'last_product_id_upload': last_pid.isoformat() if last_pid else None,
+            # FIX V7: pakai utc_isoformat() supaya timestamp punya +00:00 suffix
+            # Sebelumnya: last_pid.isoformat() → "2026-06-25T01:04:00" (tanpa tz)
+            # Frontend interpret sebagai local time → jam tampil salah 7 jam
+            # Sekarang: "2026-06-25T01:04:00+00:00" → frontend bisa konversi ke WIB
+            'last_product_id_upload': utc_isoformat(last_pid),
             'master_pic_count': total_pic,
-            'last_pic_update': last_pic.isoformat() if last_pic else None,
+            'last_pic_update': utc_isoformat(last_pic),
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
