@@ -1045,10 +1045,17 @@ IMPORT_COMMON_SOURCE_FALLBACK_COLUMNS = {
 # Fallback letters di atas hanya dipakai kalau header detection gagal total.
 IMPORT_RM_SOURCE_FALLBACK_COLUMNS = {**IMPORT_COMMON_SOURCE_FALLBACK_COLUMNS, 'purchase_amount': 'X', 'so': 'AK'}
 IMPORT_SP_SOURCE_FALLBACK_COLUMNS = {**IMPORT_COMMON_SOURCE_FALLBACK_COLUMNS, 'purchase_amount': 'Y', 'so': 'AM'}
-# FIX V9: Vendor column fallback — pakai LIST of candidate letters (0-indexed di-convert).
-# Coba P dulu (Vendor Name di sheet 1), lalu Q (Vendor Name di sheet 2).
-# Code pemakai akan iterasi semua kandidat dan ambil yang tidak kosong.
-IMPORT_FALLBACK_SOURCE_VENDOR_LETTERS = ('P', 'Q')  # kolom vendor candidates
+# FIX V9: Vendor column fallback — HANYA Q (Vendor Name).
+# Sebelumnya ('P', 'Q') — P didahulukan. Tapi P = AMOUNT (kolom angka)!
+# Saat vendor name (Q) kosong di suatu row (merged cell/subtotal),
+# fallback ambil P = "168,000,000" → tidak match vendor list → row di-skip.
+# Kasus nyata: PO 410100301 dari CURT GEORGI tidak tercopy karena row-nya
+# ke-detect vendor = amount, bukan vendor name.
+#
+# Header detection (import_source_column_map) sudah dapat vendor_name = Q
+# dengan benar untuk kedua sheet. Fallback letter hanya dipakai kalau header
+# detection gagal total — dan kalau itu terjadi, Q lebih aman daripada P.
+IMPORT_FALLBACK_SOURCE_VENDOR_LETTERS = ('Q',)  # hanya Vendor Name, jangan AMOUNT
 # Hapus IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS lama (off-by-one bug: 16 dipakai sebagai
 # 0-indexed padahal harusnya 1-indexed P=16, 0-indexed P=15)
 
@@ -1515,6 +1522,11 @@ def import_source_rows_fast(source, columns, vendor_set):
             columns_by_idx[col_idx] = col_values
             max_len = max(max_len, len(col_values))
         rows = []
+        # FIX V9: carry-over vendor name untuk row yang vendor-nya kosong.
+        # Di sheet source, vendor name sering hanya diisi di row pertama untuk
+        # group yang sama, row berikutnya dikosongkan (merged cell visual).
+        # Tanpa carry-over, row berikutnya akan di-skip karena vendor kosong.
+        last_known_vendor = ''
         for offset in range(max_len):
             values_by_idx = {col_idx: (vals[offset] if offset < len(vals) else '') for col_idx, vals in columns_by_idx.items()}
             vendor_candidates = []
@@ -1529,6 +1541,20 @@ def import_source_rows_fast(source, columns, vendor_set):
                 except Exception: pass
             vendor_candidates = [clean(v) for v in vendor_candidates if clean(v)]
             row_vendor = next((v for v in vendor_candidates if v), '')
+
+            # FIX V9: carry-over vendor name dari row sebelumnya kalau row ini kosong.
+            # Tapi hanya kalau row ini punya data PO/item (bukan row blank/subtotal).
+            if not row_vendor and last_known_vendor:
+                # Cek apakah row ini punya konten lain (PO Yupi / item_name)
+                po_yupi_val = clean(values_by_idx.get(source_map.get('po_yupi', -1), '')) if 'po_yupi' in source_map else ''
+                item_name_val = clean(values_by_idx.get(source_map.get('item_name', -1), '')) if 'item_name' in source_map else ''
+                if po_yupi_val or item_name_val:
+                    row_vendor = last_known_vendor
+                    vendor_candidates = [row_vendor]
+
+            if row_vendor:
+                last_known_vendor = row_vendor
+
             # FIX V9: pakai import_vendor_match() (fuzzy matching) bukan exact match
             # supaya vendor "CURT GEORGI GMBH & CO" di ImportVendor match dengan
             # "CURT GEORGI GMBH & CO. KG" di sheet source.
@@ -7250,6 +7276,86 @@ def import_debug_source():
                 "(3) Cek column_map_field_to_letter — vendor_name dan po_yupi harus terpetakan. "
                 "(4) Fuzzy matching aktif: 'CURT GEORGI GMBH & CO' akan match dengan "
                 "'CURT GEORGI GMBH & CO. KG' (prefix match)."
+            ),
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/import/debug-row', methods=['GET'])
+def import_debug_row():
+    """Cek row spesifik di source sheet — tampilkan SEMUA kolom yang terbaca.
+
+    FIX V9: Endpoint ini untuk diagnose kenapa row tertentu (mis. row 144 dengan
+    PO 410100301) tidak tercopy. User bisa lihat persis nilai dari setiap kolom.
+
+    Query params:
+    - source: source_1 atau source_2
+    - row: nomor row (1-indexed, sesuai tampilan Google Sheet)
+    """
+    try:
+        source_key = clean(request.args.get('source')) or 'source_1'
+        row_num = int(clean(request.args.get('row')) or 0)
+        source = next((s for s in IMPORT_SOURCE_SHEETS if s['key'] == source_key), None)
+        if not source:
+            return jsonify({'error': f"Unknown source '{source_key}'"}), 400
+        if not row_num or row_num < 1:
+            return jsonify({'error': 'Param ?row= wajib (1-indexed row number)'}), 400
+
+        columns = import_layout_columns()
+        mapping_columns = import_all_mapping_columns(columns)
+        sheet_title, header_df = import_source_header_preview(source, force=True)
+        if header_df.empty:
+            return jsonify({'error': 'Could not read header preview'}), 500
+
+        header_idx = import_detect_header_row(header_df)
+        source_map = import_source_column_map(header_df, mapping_columns)
+
+        # Baca row spesifik langsung dari sheet
+        # row_num adalah 1-indexed (sesuai Google Sheet)
+        result = google_sheets_values_get(
+            source['spreadsheet_id'],
+            f"'{sheet_title}'!A{row_num}:ZZ{row_num}",
+            value_render_option='FORMATTED_VALUE'
+        )
+        values = result.get('values', [])
+        if not values or not values[0]:
+            return jsonify({
+                'source_key': source_key,
+                'row_requested': row_num,
+                'error': f'Row {row_num} kosong atau tidak terbaca',
+            }), 404
+
+        row_values = values[0]
+        # Petakan ke field name berdasarkan source_map
+        field_values = {}
+        for field, col_idx in source_map.items():
+            if col_idx is not None and col_idx < len(row_values):
+                field_values[field] = row_values[col_idx]
+            else:
+                field_values[field] = ''
+
+        # Header row untuk referensi
+        header_row = [clean(v) for v in header_df.iloc[header_idx].tolist()] if len(header_df) else []
+
+        return jsonify({
+            'source_key': source_key,
+            'sheet_title_used': sheet_title,
+            'row_requested': row_num,
+            'header_row_1based': header_idx + 1,
+            'header_row_values': header_row[:25],
+            'column_map_field_to_letter': {f: column_letter_from_index(idx + 1) for f, idx in source_map.items() if idx is not None},
+            'raw_row_values': row_values[:25],  # 25 kolom pertama
+            'field_values_detected': field_values,
+            'vendor_value_at_Q': row_values[16] if len(row_values) > 16 else '(empty)',  # Q = index 16
+            'amount_value_at_P': row_values[15] if len(row_values) > 15 else '(empty)',  # P = index 15
+            'troubleshooting': (
+                "Cek field_values_detected.vendor_name — kalau kosong padahal di sheet ada, "
+                "kemungkinan: (1) vendor di-merge cell, (2) header detection salah kolom. "
+                "Cek raw_row_values untuk lihat semua kolom. "
+                "Kalau vendor ada di kolom lain (mis. R, S), berarti header detection salah — "
+                "kirim screenshot ke developer untuk fix."
             ),
         })
     except Exception as e:
