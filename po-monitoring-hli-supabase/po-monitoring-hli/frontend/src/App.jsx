@@ -272,6 +272,22 @@ const fmtDate = (d) => { try { return d ? format(parseISO(d),'dd MMM yyyy') : '-
 const fmtDateTime = (d) => {
   if (!d) return '-';
   try {
+    // FIX V7: Backend mengirim timestamp dengan +00:00 suffix (UTC).
+    // Konversi ke WIB (Asia/Jakarta) supaya user lihat jam lokal yang benar.
+    // new Date("2026-06-25T01:04:00+00:00").toLocaleString('en-GB', {timeZone: 'Asia/Jakarta', ...})
+    // → "25 Jun 2026, 08:04" (UTC+7)
+    //
+    // Kalau timestamp tidak punya timezone suffix (data lama), fallback ke
+    // behavior lama (interpret sebagai local time browser).
+    const str = String(d);
+    const hasTz = /[+-]\d{2}:\d{2}$/.test(str) || str.endsWith('Z');
+    if (hasTz) {
+      return new Date(d).toLocaleString('en-GB', {
+        timeZone: 'Asia/Jakarta',
+        day: '2-digit', month: 'short', year: 'numeric',
+        hour: '2-digit', minute: '2-digit'
+      });
+    }
     return new Date(d).toLocaleString('en-GB', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' });
   } catch {
     return d || '-';
@@ -368,6 +384,15 @@ const MARGIN_DETAIL_COLUMNS = [
 const fmtUpdateShort = (d) => {
   if (!d) return '-';
   try {
+    // FIX V7: sama dengan fmtDateTime — konversi UTC ke WIB kalau ada timezone suffix
+    const str = String(d);
+    const hasTz = /[+-]\d{2}:\d{2}$/.test(str) || str.endsWith('Z');
+    if (hasTz) {
+      return new Date(d).toLocaleString('en-GB', {
+        timeZone: 'Asia/Jakarta',
+        day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit'
+      });
+    }
     return new Date(d).toLocaleString('en-GB', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' });
   } catch {
     return d || '-';
@@ -6302,7 +6327,8 @@ const App = () => {
             <Wrench className="w-5 h-5 text-blue-500 flex-shrink-0"/>
             <h2 className={`text-lg font-bold ${txt}`}>Item Registration</h2>
             <span className={`text-sm ${txt2}`}>({fmtNum(itemRegTotal)} records)</span>
-            {itemRegLastUpdated && <span className={`text-xs ${txt2}`}>Last update: {fmtDate(itemRegLastUpdated)}</span>}
+            {/* FIX V8: "Last update" dihapus karena membingungkan (beda source dengan header badge).
+                Last update yang akurat ada di header badge "Reg" yang pakai stats.last_updated_item_registration. */}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <button onClick={downloadItemRegistrationTemplate} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
