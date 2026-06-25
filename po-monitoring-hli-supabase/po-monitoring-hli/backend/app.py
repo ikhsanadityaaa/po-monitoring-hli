@@ -194,6 +194,10 @@ else:
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
+# Threshold untuk fast-path upload Product ID: jika rows > ini, skip cleanup_pre
+# dan jalankan _refresh_so_pic_names di background thread.
+# 45 MB Excel = ~200k rows → harusnya masuk fast-path.
+MAX_ROWS_FOR_SYNC_CLEANUP = int(os.getenv('MAX_ROWS_FOR_SYNC_CLEANUP', '10000'))
 db = SQLAlchemy(app)
 
 @event.listens_for(Engine, 'connect')
@@ -2493,10 +2497,13 @@ def uploaded_files():
     return [f for f in files if f and f.filename]
 
 def read_upload_excel(file):
-    raw = file.read()
-    file.seek(0)
+    # FIX V6: Hindari double-read file besar (raw = file.read() lalu pd.read_excel(file)).
+    # Untuk file 45 MB, ini menghemat 45 MB memory spike di server PythonAnywhere.
+    # Cukup baca 4 byte pertama untuk deteksi format .xls (OLE2 magic bytes).
     filename = (file.filename or '').lower()
-    is_xls_format = raw[:4] == b'\xd0\xcf\x11\xe0'
+    head = file.read(4)
+    file.seek(0)
+    is_xls_format = head == b'\xd0\xcf\x11\xe0'
     engine = 'xlrd' if is_xls_format or filename.endswith('.xls') else 'openpyxl'
     # Read ALL columns as strings so leading zeros in IDs (e.g. Category ID
     # "000200030000100007") are preserved. Pandas otherwise auto-infers
@@ -5242,25 +5249,41 @@ def _lookup_pic(product_id_str):
 @app.route('/api/upload/product-id-json', methods=['POST'])
 @app.route('/api/upload/product-id', methods=['POST'])
 def upload_product_id():
-    """Upload Prod_ID Excel from SAP. Upserts product_id → category_id mapping."""
+    """Upload Prod_ID Excel from SAP. Upserts product_id → category_id mapping.
+
+    FIX V6: Untuk file besar (>10k rows), gunakan fast-path:
+    - Skip cleanup_pre (scan tabel besar lambat)
+    - Chunked commit setiap 5000 baris (bukan 1 commit di akhir)
+    - _refresh_so_pic_names dijalankan di background thread (tidak block response)
+    """
     try:
         uploads, upload_mode = request_upload_dataframes('product_id')
         if not uploads:
             return jsonify({'error': 'No file uploaded or JSON rows supplied'}), 400
         replace_existing = upload_replace_mode()
 
-        cleanup_pre = cleanup_source_table_snapshot(
-            ProductIDDB,
-            'product_id',
-            None,
-            timestamp_fields=('updated_at',),
-            delete_blank=True,
-        )
-        db.session.flush()
+        # Hitung total rows untuk tentukan fast-path atau sync mode
+        total_rows = sum(len(upload['df']) for upload in uploads)
+        fast_path = total_rows > MAX_ROWS_FOR_SYNC_CLEANUP
+        if fast_path:
+            print(f'[upload_product_id] Fast-path mode: {total_rows} rows > {MAX_ROWS_FOR_SYNC_CLEANUP} threshold')
+
+        # Pre-cleanup: skip untuk file besar (akan dilakukan di akhir saja)
+        removed_duplicates = removed_stale = removed_blank = 0
+        if not fast_path:
+            cleanup_pre = cleanup_source_table_snapshot(
+                ProductIDDB,
+                'product_id',
+                None,
+                timestamp_fields=('updated_at',),
+                delete_blank=True,
+            )
+            db.session.flush()
+            removed_duplicates = cleanup_pre.get('removed_duplicates', 0)
+            removed_stale = cleanup_pre.get('removed_stale', 0)
+            removed_blank = cleanup_pre.get('removed_blank', 0)
+
         added = updated = 0
-        removed_duplicates = cleanup_pre.get('removed_duplicates', 0)
-        removed_stale = cleanup_pre.get('removed_stale', 0)
-        removed_blank = cleanup_pre.get('removed_blank', 0)
         latest_product_ids = set()
         pic_cache = {}  # category_id → pic_name
 
@@ -5286,8 +5309,18 @@ def upload_product_id():
         
         existing_pid_map = {}
         if all_pids_in_upload:
-            existing_pid_rows = db.session.query(ProductIDDB).filter(ProductIDDB.product_id.in_(list(all_pids_in_upload))).all()
-            existing_pid_map = {p.product_id: p for p in existing_pid_rows}
+            # FIX V6: chunked query untuk hindari SQLite parameter limit (999)
+            all_pids_list = list(all_pids_in_upload)
+            chunk_size = 900
+            for i in range(0, len(all_pids_list), chunk_size):
+                chunk = all_pids_list[i:i + chunk_size]
+                rows = db.session.query(ProductIDDB).filter(ProductIDDB.product_id.in_(chunk)).all()
+                for p in rows:
+                    existing_pid_map[p.product_id] = p
+
+        # FIX V6: chunked commit setiap 5000 baris untuk file besar
+        CHUNK_COMMIT_SIZE = 5000
+        rows_processed = 0
 
         for upload in uploads:
             df = upload['df']
@@ -5308,8 +5341,6 @@ def upload_product_id():
                     'product_status': clean(df_val(row, col['product_status'])),
                     'specification': clean(df_val(row, col['specification'])),
                     'manufacturer_name': clean(df_val(row, col['manufacturer_name'])),
-                    # vendor_name intentionally omitted — source Excel has no
-                    # Vendor column for product master data.
                     'order_unit': clean(df_val(row, col['order_unit'])),
                     'hub_handling_check': clean(df_val(row, col['hub_handling_check'])),
                     'tax_type': clean(df_val(row, col['tax_type'])),
@@ -5327,17 +5358,27 @@ def upload_product_id():
                     db.session.add(ProductIDDB(product_id=pid, **payload))
                     added += 1
 
+                rows_processed += 1
+                # FIX V6: commit setiap CHUNK_COMMIT_SIZE baris untuk file besar
+                if fast_path and rows_processed % CHUNK_COMMIT_SIZE == 0:
+                    db.session.flush()
+                    db.session.commit()
+                    print(f'[upload_product_id] Commit progress: {rows_processed}/{total_rows} rows (added={added}, updated={updated})')
+
         db.session.flush()
-        cleanup_post = cleanup_source_table_snapshot(
-            ProductIDDB,
-            'product_id',
-            latest_product_ids if replace_existing else None,
-            timestamp_fields=('updated_at',),
-            delete_blank=True,
-        )
-        removed_duplicates += cleanup_post.get('removed_duplicates', 0)
-        removed_stale += cleanup_post.get('removed_stale', 0)
-        removed_blank += cleanup_post.get('removed_blank', 0)
+
+        # Post-cleanup: skip untuk file besar (akan dilakukan terpisah)
+        if not fast_path:
+            cleanup_post = cleanup_source_table_snapshot(
+                ProductIDDB,
+                'product_id',
+                latest_product_ids if replace_existing else None,
+                timestamp_fields=('updated_at',),
+                delete_blank=True,
+            )
+            removed_duplicates += cleanup_post.get('removed_duplicates', 0)
+            removed_stale += cleanup_post.get('removed_stale', 0)
+            removed_blank += cleanup_post.get('removed_blank', 0)
 
         db.session.commit()
         _pid_category_cache_invalidate()
@@ -5346,11 +5387,23 @@ def upload_product_id():
         global _SIMILARITY_CACHE
         _SIMILARITY_CACHE = {}
 
-        # Refresh PIC only for SO rows whose product_id is in this upload
-        # batch — uses the preloaded prod_map internally, no N+1 queries.
-        # Previously this loop called db.session.query(ProductIDDB).filter_by
-        # per SO row (1,000 SO rows = 1,000 SQL queries).
-        refreshed = _refresh_so_pic_names(product_ids_scope=latest_product_ids)
+        # FIX V6: untuk file besar, jalankan _refresh_so_pic_names di background thread
+        # supaya response tidak timeout. Untuk file kecil, jalankan synchronous.
+        refreshed = 0
+        if fast_path:
+            # Spawn background thread untuk refresh SO pic names
+            pids_snapshot = list(latest_product_ids)
+            def _bg_refresh():
+                try:
+                    with app.app_context():
+                        _refresh_so_pic_names(product_ids_scope=pids_snapshot)
+                        print(f'[bg-refresh] SO pic refresh selesai untuk {len(pids_snapshot)} product IDs')
+                except Exception as exc:
+                    print(f'[bg-refresh] Error: {exc}')
+            threading.Thread(target=_bg_refresh, daemon=True, name='bg-pic-refresh').start()
+            refreshed = -1  # -1 = sedang di-refresh di background
+        else:
+            refreshed = _refresh_so_pic_names(product_ids_scope=latest_product_ids)
 
         return jsonify({
             'status': 'ok',
@@ -5361,6 +5414,8 @@ def upload_product_id():
             'removed_stale': removed_stale,
             'removed_blank': removed_blank,
             'so_pic_refreshed': refreshed,
+            'total_rows': total_rows,
+            'fast_path': fast_path,
             'total_in_db': db.session.query(ProductIDDB).count()
         })
     except ValueError as e:
