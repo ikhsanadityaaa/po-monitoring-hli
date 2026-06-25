@@ -7991,14 +7991,81 @@ def export_import_data():
         # Build vendor-attr map once for the export so Origin/TOP/Non SKI can be
         # injected into each row by matching the row's vendor name.
         _export_vendor_attrs = import_vendor_attrs_map()
-        # FIX V10: Carry-over field yang biasanya di-merge di dashboard (po_yupi,
-        # vendor_name, status, dll) supaya di Excel semua row di group dapat nilai
-        # yang sama, bukan hanya row pertama.
-        CARRYOVER_FIELDS = ('po_yupi', 'yupi_po', 'po_sementara', 'vendor_name', 'vendor',
-                           'status', 'site', 'group', 'operation_unit_name',
-                           'origin', 'top', 'non_ski')
-        last_carryover = {}
-        for row_idx, (db_row, data) in enumerate(filtered, 2):
+        # FIX V10: Carry-over field yang di-merge di dashboard supaya di Excel
+        # semua row di group dapat nilai yang sama.
+        #
+        # Frontend merge berdasarkan yupi_po + req_dlv_date sama (IMPORT_MERGE_KEY_FIELDS).
+        # Field yang di-merge (bukan group_per_item): status, days_left, vendor,
+        # po_send_date, etd, eta, dll — semua field EXCEPT yang group_per_item=True.
+        # Saat user edit cell di row pertama group, hanya row pertama yang di-update
+        # di DB. Row lain di group tetap kosong. Saat export, kita harus fill-down
+        # nilai dari row pertama ke semua row di group yang sama.
+        #
+        # Logika:
+        # 1. Group rows by (yupi_po + req_dlv_date) — sama seperti frontend
+        # 2. Untuk setiap group, cari nilai non-empty untuk setiap field dari row manapun
+        # 3. Apply nilai tersebut ke semua row di group
+        # Field yang TIDAK di-carry-over: yang group_per_item=True (item_name, ord_qty,
+        # unit_price, amount, spec, dll — ini unique per item)
+        GROUP_PER_ITEM_FIELDS = {'item_name', 'item_yupi', 'spec', 'remark_yupi', 'ord_qty',
+                                 'unit', 'unit_price', 'amount', 'purchase_price', 'purchase_amount',
+                                 'currency', 'lt_days', 'reschedule', 'req_dlv_date', 'source_req_dlv_date',
+                                 'po_sementara', 'days_left', 'arrival_check', 'po_date_by_email',
+                                 'so', 'soft_copy_doc', 'bl_number', 'inv_no', 'incoterm', 'forwarder',
+                                 'sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo',
+                                 'payment', 'payment_date', 'import_remarks', 'etd', 'eta'}
+        CARRYOVER_FIELDS = [col.get('field') for col in visible_cols
+                           if col.get('field') and col.get('field') not in GROUP_PER_ITEM_FIELDS]
+
+        # Group rows by (yupi_po + req_dlv_date)
+        groups = []
+        current_group = []
+        current_key = None
+        for db_row, data in filtered:
+            yupi = (clean(data.get('yupi_po')) or clean(data.get('po_yupi')) or '').strip()
+            req_dlv = clean(data.get('req_dlv_date')).strip()
+            group_key = f"{yupi}|{req_dlv}"
+            # Hanya group kalau yupi_po tidak kosong
+            if not yupi:
+                # Row tanpa yupi_po = group sendiri
+                if current_group:
+                    groups.append(current_group)
+                groups.append([(db_row, data)])
+                current_group = []
+                current_key = None
+                continue
+            if current_key is None or group_key != current_key:
+                if current_group:
+                    groups.append(current_group)
+                current_group = [(db_row, data)]
+                current_key = group_key
+            else:
+                current_group.append((db_row, data))
+        if current_group:
+            groups.append(current_group)
+
+        # Untuk setiap group, collect nilai non-empty per field, lalu apply ke semua row
+        processed_rows = []
+        for group in groups:
+            if len(group) == 1:
+                # Single row group, tidak perlu carry-over
+                processed_rows.append(group[0])
+                continue
+            # Collect nilai non-empty per field dari semua row di group
+            group_values = {}
+            for db_row, data in group:
+                for field in CARRYOVER_FIELDS:
+                    val = data.get(field)
+                    if not import_blankish(val) and field not in group_values:
+                        group_values[field] = val
+            # Apply nilai ke semua row di group
+            for db_row, data in group:
+                for field in CARRYOVER_FIELDS:
+                    if import_blankish(data.get(field)) and field in group_values:
+                        data[field] = group_values[field]
+                processed_rows.append((db_row, data))
+
+        for row_idx, (db_row, data) in enumerate(processed_rows, 2):
             # Inject vendor attributes (origin, top, non_ski) if missing in row data.
             row_vendor = import_nonblank(data.get('vendor')) or import_nonblank(data.get('vendor_name')) or import_nonblank(db_row.vendor_name)
             if row_vendor:
@@ -8010,24 +8077,6 @@ def export_import_data():
                         data['top'] = attrs.get('top') or ''
                     if not import_nonblank(data.get('non_ski')):
                         data['non_ski'] = attrs.get('non_ski') or ''
-            # FIX V10: Carry-over field yang kosong dari row sebelumnya.
-            # Hanya carry-over kalau row saat ini punya item_name atau ord_qty
-            # (tanda row ini bagian dari group yang sama, bukan row baru).
-            has_item_data = import_nonblank(data.get('item_name')) or import_nonblank(data.get('ord_qty'))
-            if has_item_data:
-                for field in CARRYOVER_FIELDS:
-                    if import_blankish(data.get(field)) and not import_blankish(last_carryover.get(field)):
-                        data[field] = last_carryover[field]
-                # Update last_carryover dengan nilai dari row ini (yang sudah di-carry-over)
-                for field in CARRYOVER_FIELDS:
-                    if not import_blankish(data.get(field)):
-                        last_carryover[field] = data[field]
-            else:
-                # Row tanpa item data = row baru/group baru, reset carryover
-                last_carryover = {}
-                for field in CARRYOVER_FIELDS:
-                    if not import_blankish(data.get(field)):
-                        last_carryover[field] = data[field]
             row_vals = []
             for col in visible_cols:
                 field = col.get('field', '')
