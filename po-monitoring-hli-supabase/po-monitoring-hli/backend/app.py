@@ -905,7 +905,11 @@ IMPORT_SOURCE_SHEETS = [
     {'key': 'source_2', 'spreadsheet_id': '17P7_JsUGF5mqlz-j2fdvFZ9-gX8l-WGPqZABjng5Hnc', 'gid': '0', 'label': 'Source 2'},
 ]
 IMPORT_LAYOUT_VENDOR_COLUMNS = (5, 28)
-IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS = (16,)
+# FIX V9: Hapus IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS lama (off-by-one bug).
+# Sebelumnya (16,) dipakai sebagai 0-indexed di import_row_vendor_candidates,
+# padahal 16 (0-indexed) = kolom Q (Vendor Address di sheet 1, kosong di sheet 2).
+# Vendor Name ada di P (sheet 1) atau Q (sheet 2) — tidak bisa hardcoded 1 kolom.
+# Sekarang pakai IMPORT_FALLBACK_SOURCE_VENDOR_LETTERS = ('P', 'Q') di atas.
 
 IMPORT_STATUS_OPTIONS = ['NEW', 'ON PROCESS', 'ON DELIVERY', 'DELIVERED', 'CANCELED']
 IMPORT_CHECKBOX_FIELDS = {'sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo'}
@@ -1032,8 +1036,21 @@ IMPORT_COMMON_SOURCE_FALLBACK_COLUMNS = {
     'reschedule': 'L', 'ord_qty': 'M', 'unit': 'N', 'unit_price': 'O', 'amount': 'P', 'vendor': 'Q', 'vendor_name': 'Q',
     'purchase_price': 'U', 'currency': 'V',
 }
+# FIX V9: Sheet 1 (source_1) dan Sheet 2 (source_2) punya layout kolom yang BERBEDA.
+# Sheet 1: header di row 4, Vendor Name di kolom P, PO YUPI di kolom E
+# Sheet 2: header di row 3, Vendor Name di kolom Q, PO YUPI di kolom F
+#
+# Header detection sudah DINAMIS (import_detect_header_row scan 60 baris),
+# jadi kalau user edit sheet dan pindah header ke row lain, masih bisa detect.
+# Fallback letters di atas hanya dipakai kalau header detection gagal total.
 IMPORT_RM_SOURCE_FALLBACK_COLUMNS = {**IMPORT_COMMON_SOURCE_FALLBACK_COLUMNS, 'purchase_amount': 'X', 'so': 'AK'}
 IMPORT_SP_SOURCE_FALLBACK_COLUMNS = {**IMPORT_COMMON_SOURCE_FALLBACK_COLUMNS, 'purchase_amount': 'Y', 'so': 'AM'}
+# FIX V9: Vendor column fallback — pakai LIST of candidate letters (0-indexed di-convert).
+# Coba P dulu (Vendor Name di sheet 1), lalu Q (Vendor Name di sheet 2).
+# Code pemakai akan iterasi semua kandidat dan ambil yang tidak kosong.
+IMPORT_FALLBACK_SOURCE_VENDOR_LETTERS = ('P', 'Q')  # kolom vendor candidates
+# Hapus IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS lama (off-by-one bug: 16 dipakai sebagai
+# 0-indexed padahal harusnya 1-indexed P=16, 0-indexed P=15)
 
 def import_source_kind_from_header(df, header_idx):
     try: headers = [import_header_key(v) for v in df.iloc[header_idx].tolist()]
@@ -1186,21 +1203,51 @@ def import_vendor_attrs_map():
         pass
     return out
 
-def import_detect_data_start(df):
-    for idx in range(min(len(df), 12)):
-        item = clean(df.iloc[idx, 7]) if df.shape[1] > 7 else ''
-        vendor = clean(df.iloc[idx, 16]) if df.shape[1] > 16 else ''
-        qty = clean(df.iloc[idx, 12]) if df.shape[1] > 12 else ''
-        if item and item.lower() != 'item name' and (vendor or qty): return idx
-    return 3
+def import_detect_data_start(df, header_idx=None):
+    """Deteksi baris pertama yang berisi DATA (bukan header/kosong).
+
+    FIX V9: Sebelumnya hardcode kolom 7, 12, 16 untuk cek 'item name', 'qty',
+    'vendor'. Itu salah untuk sheet yang layout-nya beda. Plus fallback `return 3`
+    adalah hardcode — kalau header di row 5, data tidak mungkin mulai row 3.
+
+    Sekarang: scan dari header_idx+1, cari row pertama yang punya ≥3 cell
+    non-empty. Tidak peduli kolom mana — asal row tersebut berisi data.
+    """
+    if df is None or getattr(df, 'empty', True): return 0
+    if header_idx is None:
+        # Kalau header_idx tidak diketahui, scan dari atas sampai ketemu header
+        header_idx = import_detect_header_row(df)
+    # Scan dari header_idx + 1, cari row dengan ≥3 cell non-empty
+    for idx in range(header_idx + 1, min(len(df), header_idx + 20)):
+        try:
+            row_values = [clean(v) for v in df.iloc[idx].tolist()]
+        except: continue
+        non_empty = sum(1 for v in row_values if v)
+        if non_empty >= 3:
+            return idx
+    # Fallback: header_idx + 1 (data biasanya langsung setelah header)
+    return header_idx + 1 if header_idx is not None else 3
 
 def import_detect_header_row(df):
+    """Deteksi baris yang berisi HEADER tabel.
+
+    FIX V9: Dinamis — scan sampai 60 baris pertama, tidak peduli di row berapa
+    header berada (bisa row 1, 3, 4, dst). Pakai scoring berdasarkan jumlah
+    header yang match alias.
+
+    Contoh:
+    - Sheet 1: header di row 4 (1-indexed) → deteksi sebagai idx 3 (0-indexed)
+    - Sheet 2: header di row 3 (1-indexed) → deteksi sebagai idx 2 (0-indexed)
+    - Kalau user edit sheet dan pindah header ke row 1, masih bisa deteksi.
+    """
     if df is None or getattr(df, 'empty', True): return 0
+    # Fast-path: cek 12 baris pertama untuk kombinasi header yang sangat spesifik
     for idx in range(min(len(df), 12)):
         try: labels = [import_header_key(v) for v in df.iloc[idx].tolist()]
         except: continue
         if 'poyupi' in labels and 'reqdlvdate' in labels: return idx
         if 'itemname' in labels and 'ordqty' in labels and 'vendorname' in labels: return idx
+    # Fallback: scoring-based detection (scan sampai 60 baris)
     alias_keys = set()
     for values in IMPORT_COLUMN_ALIASES.values():
         alias_keys.update(import_header_key(v) for v in values if v)
@@ -1220,6 +1267,7 @@ def import_detect_header_row(df):
         if score > best_score:
             best_idx = idx; best_score = score
     if best_idx is not None and best_score >= 4: return best_idx
+    # Last resort: pakai import_detect_data_start - 1
     return max(import_detect_data_start(df) - 1, 0)
 
 def import_source_header_score(df):
@@ -1269,6 +1317,19 @@ def import_source_header_preview(source, force=False):
     return title, pd.DataFrame()
 
 def import_source_column_map(df, columns):
+    """Build mapping {field_name: column_index_0_based} berdasarkan HEADER NAME detection.
+
+    FIX V9: Per-sheet header detection. Kedua sheet source punya layout kolom
+    yang BERBEDA (vendor di P untuk sheet 1, di Q untuk sheet 2; header row di 1
+    untuk sheet 1, di 3 untuk sheet 2). Karena itu kita detect header by NAME,
+    bukan by hardcoded column letter.
+
+    Logika:
+    1. Cari header row (bisa di row 1, 2, 3, dst — tergantung sheet)
+    2. Untuk setiap field, cari kolom yang header-nya match alias (case-insensitive,
+       hapus punctuation/spasi)
+    3. Kalau tidak match, fallback ke hardcoded letter (last resort)
+    """
     header_idx = import_detect_header_row(df)
     header_values = list(df.iloc[header_idx]) if len(df) else []
     source_fallbacks = import_source_fallback_columns(df, header_idx)
@@ -1294,6 +1355,21 @@ def import_source_column_map(df, columns):
             try: source_idx = column_index_from_letter(str(fallback_sheet_col)) - 1
             except: source_idx = None
         if source_idx is not None: source_map[field] = source_idx
+    # FIX V9: log hasil column detection untuk debugging
+    # (hanya field kritis yang sering bermasalah: vendor_name, po_yupi, po_date_by_email)
+    try:
+        import sys
+        debug_fields = ('vendor_name', 'vendor', 'po_yupi', 'yupi_po', 'po_date_by_email', 'item_name')
+        debug_map = {f: source_map.get(f) for f in debug_fields if f in source_map}
+        # Convert 0-indexed ke letter untuk log yang readable
+        debug_letters = {}
+        for f, idx in debug_map.items():
+            if idx is not None:
+                try: debug_letters[f] = column_letter_from_index(idx + 1)
+                except: debug_letters[f] = f'?{idx}'
+        print(f"[import_source_column_map] header_idx={header_idx}, detected: {debug_letters}", file=sys.stderr)
+    except Exception:
+        pass
     if 'po_yupi' in source_map and 'yupi_po' not in source_map: source_map['yupi_po'] = source_map['po_yupi']
     if 'yupi_po' in source_map and 'po_yupi' not in source_map: source_map['po_yupi'] = source_map['yupi_po']
     if 'source_req_dlv_date' in source_map and 'req_dlv_date' not in source_map: source_map['req_dlv_date'] = source_map['source_req_dlv_date']
@@ -1306,12 +1382,27 @@ def import_source_column_map(df, columns):
     return source_map
 
 def import_row_vendor_candidates(values, source_map, columns):
+    """Kumpulkan kandidat nilai vendor dari sebuah row.
+
+    FIX V9: Sebelumnya pakai IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS = (16,) yang
+    di-interpretasi sebagai 0-indexed → kolom Q (Vendor Address di sheet 1).
+    Itu bug — kolom Q berisi alamat, bukan nama vendor.
+
+    Sekarang: pakai IMPORT_FALLBACK_SOURCE_VENDOR_LETTERS = ('P', 'Q') yang
+    dikonversi ke 0-indexed. P (sheet 1: Vendor Name) dan Q (sheet 2: Vendor Name).
+    Code pemakai akan iterasi semua kandidat dan ambil yang tidak kosong.
+    """
     candidates = []
     for field in ('vendor_name', 'vendor'):
         col_idx = source_map.get(field)
         if col_idx is not None and col_idx < len(values): candidates.append(values[col_idx])
-    for col_idx in IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS:
-        if col_idx < len(values): candidates.append(values[col_idx])
+    # FIX V9: konversi letter ke 0-indexed column index
+    for letter in IMPORT_FALLBACK_SOURCE_VENDOR_LETTERS:
+        try:
+            col_idx = column_index_from_letter(letter) - 1  # 1-indexed → 0-indexed
+            if 0 <= col_idx < len(values): candidates.append(values[col_idx])
+        except Exception:
+            pass
     return [clean(v) for v in candidates if clean(v)]
 
 def import_vendor_match(vendor_candidate, vendor_set):
@@ -1375,7 +1466,22 @@ def import_source_rows_fast(source, columns, vendor_set):
         if header_df.empty: return []
         source_map = import_source_column_map(header_df, mapping_columns)
         header_idx = import_detect_header_row(header_df)
-        data_start_row = header_idx + 2
+        # FIX V9: deteksi data_start_row secara dinamis (bukan hardcode header_idx + 2).
+        # Sebelumnya +2 asumsi data mulai 2 baris setelah header (untuk skip sub-header
+        # atau blank row). Tapi itu tidak selalu benar — bisa saja data langsung di
+        # baris setelah header.
+        # Sekarang: pakai import_detect_data_start() yang scan dari header_idx+1
+        # untuk cari row pertama dengan ≥3 cell non-empty.
+        data_start_idx = import_detect_data_start(header_df, header_idx)
+        # Convert 0-indexed → 1-indexed untuk Google Sheets API
+        data_start_row = data_start_idx + 1
+        if data_start_row <= header_idx + 1:
+            # Safety: data tidak boleh mulai sebelum/sama dengan header
+            data_start_row = header_idx + 2
+        try:
+            import sys
+            print(f"[import_source_rows_fast] source={source['key']}, header_idx={header_idx} (row {header_idx+1} 1-indexed), data_start_row={data_start_row}", file=sys.stderr)
+        except Exception: pass
         source_fallbacks = import_source_fallback_columns(header_df, header_idx)
         for field in ('po_yupi', 'yupi_po', 'source_req_dlv_date', 'req_dlv_date', 'po_date_by_email', 'site', 'po_sementara', 'item_yupi', 'item_name', 'spec', 'remark_yupi', 'reschedule', 'ord_qty', 'unit', 'unit_price', 'amount', 'vendor_name', 'vendor', 'purchase_price', 'currency', 'purchase_amount', 'so'):
             if field not in source_map and source_fallbacks.get(field):
@@ -1384,7 +1490,12 @@ def import_source_rows_fast(source, columns, vendor_set):
         so_fallback_col = source_fallbacks.get('so')
         if so_fallback_col and _so_kind in ('rm', 'sp'):
             source_map['so'] = column_index_from_letter(so_fallback_col) - 1
-        needed_col_indexes = set(source_map.values()) | set(IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS)
+        # FIX V9: konversi IMPORT_FALLBACK_SOURCE_VENDOR_LETTERS ke 0-indexed indexes
+        _vendor_fallback_indexes = set()
+        for letter in IMPORT_FALLBACK_SOURCE_VENDOR_LETTERS:
+            try: _vendor_fallback_indexes.add(column_index_from_letter(letter) - 1)
+            except Exception: pass
+        needed_col_indexes = set(source_map.values()) | _vendor_fallback_indexes
         if not needed_col_indexes: return []
         needed_col_indexes = sorted(i for i in needed_col_indexes if i is not None and i >= 0)
         ranges = []
@@ -1410,8 +1521,12 @@ def import_source_rows_fast(source, columns, vendor_set):
             for field in ('vendor_name', 'vendor'):
                 col_idx = source_map.get(field)
                 if col_idx is not None: vendor_candidates.append(values_by_idx.get(col_idx, ''))
-            for col_idx in IMPORT_FALLBACK_SOURCE_VENDOR_COLUMNS:
-                vendor_candidates.append(values_by_idx.get(col_idx, ''))
+            # FIX V9: konversi letter ke 0-indexed, bukan pakai hardcoded tuple angka
+            for letter in IMPORT_FALLBACK_SOURCE_VENDOR_LETTERS:
+                try:
+                    col_idx = column_index_from_letter(letter) - 1
+                    vendor_candidates.append(values_by_idx.get(col_idx, ''))
+                except Exception: pass
             vendor_candidates = [clean(v) for v in vendor_candidates if clean(v)]
             row_vendor = next((v for v in vendor_candidates if v), '')
             # FIX V9: pakai import_vendor_match() (fuzzy matching) bukan exact match
@@ -1430,7 +1545,9 @@ def import_source_rows_fast(source, columns, vendor_set):
         df = read_public_sheet_csv(source['spreadsheet_id'], source['gid'])
         mapping_columns = import_all_mapping_columns(columns)
         source_map = import_source_column_map(df, mapping_columns)
-        start_idx = import_detect_header_row(df) + 1
+        # FIX V9: pakai import_detect_data_start untuk dynamic start detection
+        header_idx_fallback = import_detect_header_row(df)
+        start_idx = import_detect_data_start(df, header_idx_fallback)
         rows = []
         for idx in range(start_idx, len(df)):
             values = [clean(v) or '' for v in df.iloc[idx].tolist()]
@@ -7119,9 +7236,21 @@ def import_debug_source():
             'detected_kind': kind or '(none -> common fallback letters used)',
             'header_row_raw_values': header_row_values,
             'column_map_field_to_letter': source_map_letters,
+            'vendor_fallback_letters': list(IMPORT_FALLBACK_SOURCE_VENDOR_LETTERS),
             'vendor_filter_used': sorted(vendor_set),
             'matched_row_count': len(sample_rows),
             'sample_rows': sample_out,
+            # FIX V9: tambah hint troubleshooting kalau matched_row_count = 0
+            'troubleshooting': (
+                "Jika matched_row_count=0 padahal sheet ada data: "
+                "(1) Cek vendor_filter_used — pastikan vendor yang diupload persis match "
+                "atau jadi prefix dari vendor di sheet. "
+                "(2) Cek header_row_raw_values — pastikan header row terdeteksi benar "
+                "(mis. 'Vendor Name', 'PO YUPI', 'PO DATE By Email'). "
+                "(3) Cek column_map_field_to_letter — vendor_name dan po_yupi harus terpetakan. "
+                "(4) Fuzzy matching aktif: 'CURT GEORGI GMBH & CO' akan match dengan "
+                "'CURT GEORGI GMBH & CO. KG' (prefix match)."
+            ),
         })
     except Exception as e:
         import traceback; traceback.print_exc()
