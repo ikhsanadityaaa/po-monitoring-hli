@@ -7334,6 +7334,125 @@ def import_debug_source():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/admin/cleanup-import-duplicates', methods=['POST'])
+def admin_cleanup_import_duplicates():
+    """Auto-cleanup duplicate rows di Import Dashboard.
+
+    FIX V10: Endpoint ini untuk hapus duplicate yang terjadi karena copy sheet
+    menambahkan row baru padahal row dengan po_yupi + item_yupi sama sudah ada
+    (mis. item di-reschedule muncul sebagai 2 baris terpisah).
+
+    Logika:
+    1. Group rows by (po_yupi + item_yupi) — case-insensitive
+    2. Kalau ada >1 row dengan kombinasi sama:
+       a. Pilih "winner" = row dengan updated_at terbaru
+       b. Merge data dari row lain ke winner (keep user edit, jangan overwrite)
+       c. Hapus row lain
+    3. Return summary: total duplicates, merged count, deleted count
+
+    Return:
+    - total_rows_before: jumlah row sebelum cleanup
+    - total_rows_after: jumlah row setelah cleanup
+    - duplicate_groups: jumlah group yang punya duplicate
+    - merged_count: jumlah row yang di-merge ke winner
+    - deleted_count: jumlah row yang dihapus
+    - details: list detail per group (po_yupi, item_yupi, kept_row_key, deleted_row_keys)
+    """
+    try:
+        all_rows = ImportDashboardRow.query.filter(
+            ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
+        ).order_by(ImportDashboardRow.updated_at.desc()).all()
+
+        # Group by (po_yupi + item_yupi) — case-insensitive
+        by_identity = {}
+        for row in all_rows:
+            try: data = json.loads(row.data_json or '{}')
+            except: data = {}
+            po_yupi = (clean(data.get('po_yupi')) or clean(data.get('yupi_po')) or '').strip().lower()
+            item_yupi = (clean(data.get('item_yupi')) or '').strip().lower()
+            if not po_yupi: continue  # skip row tanpa po_yupi
+            # Identity key: po_yupi + item_yupi (atau '(none)' kalau item_yupi kosong)
+            identity_key = f"{po_yupi}|{item_yupi or '(none)'}"
+            by_identity.setdefault(identity_key, []).append({
+                'row': row,
+                'data': data,
+                'po_yupi': po_yupi,
+                'item_yupi': item_yupi,
+            })
+
+        # Find groups with duplicates
+        duplicate_groups = []
+        merged_count = 0
+        deleted_count = 0
+        details = []
+
+        for identity_key, rows in by_identity.items():
+            if len(rows) <= 1: continue  # no duplicate
+
+            # Sort by updated_at desc (winner = terbaru)
+            rows.sort(key=lambda x: x['row'].updated_at or datetime.min, reverse=True)
+            winner = rows[0]
+            losers = rows[1:]
+
+            # Merge data dari losers ke winner (keep user edit, jangan overwrite)
+            winner_data = dict(winner['data'])
+            for loser in losers:
+                loser_data = loser['data']
+                # Merge: kalau winner kosong tapi loser ada nilai → ambil dari loser
+                for field in IMPORT_LOCAL_EDIT_FIELDS:
+                    winner_val = winner_data.get(field)
+                    loser_val = loser_data.get(field)
+                    if import_blankish(winner_val) and not import_blankish(loser_val):
+                        winner_data[field] = loser_val
+
+            # Update winner dengan merged data
+            winner['row'].data_json = json.dumps(winner_data, ensure_ascii=False)
+            winner['row'].updated_at = datetime.utcnow()
+
+            # Hapus losers
+            deleted_row_keys = []
+            for loser in losers:
+                deleted_row_keys.append(loser['row'].row_key)
+                db.session.delete(loser['row'])
+                deleted_count += 1
+
+            merged_count += len(losers)
+            duplicate_groups.append(identity_key)
+            details.append({
+                'po_yupi': winner['po_yupi'],
+                'item_yupi': winner['item_yupi'],
+                'kept_row_key': winner['row'].row_key,
+                'deleted_row_keys': deleted_row_keys,
+                'kept_updated_at': winner['row'].updated_at.isoformat() if winner['row'].updated_at else None,
+            })
+
+        # Commit changes
+        if deleted_count > 0:
+            db.session.commit()
+            db.session.execute(text('PRAGMA wal_checkpoint(TRUNCATE)'))
+            db.session.commit()
+            clear_runtime_caches()
+
+        total_rows_after = ImportDashboardRow.query.filter(
+            ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
+        ).count()
+
+        return jsonify({
+            'success': True,
+            'total_rows_before': len(all_rows),
+            'total_rows_after': total_rows_after,
+            'duplicate_groups': len(duplicate_groups),
+            'merged_count': merged_count,
+            'deleted_count': deleted_count,
+            'details': details[:50],  # top 50 untuk response tidak terlalu besar
+            'message': f'Cleanup selesai: {deleted_count} duplicate row dihapus, {merged_count} row di-merge. Sisa: {total_rows_after} rows.',
+        })
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/import/debug-duplicates', methods=['GET'])
 def import_debug_duplicates():
     """Cari row di dashboard yang punya po_yupi sama tapi row_key berbeda (duplicate).
