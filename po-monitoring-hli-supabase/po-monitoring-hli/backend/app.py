@@ -7334,6 +7334,70 @@ def import_debug_source():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/import/debug-duplicates', methods=['GET'])
+def import_debug_duplicates():
+    """Cari row di dashboard yang punya po_yupi sama tapi row_key berbeda (duplicate).
+
+    FIX V10: Endpoint ini untuk diagnose kenapa item yang di-reschedule muncul
+    sebagai 2 baris terpisah di dashboard, padahal seharusnya 1 baris (update).
+
+    Return:
+    - duplicates: list of {po_yupi, rows: [{row_key, item_yupi, req_dlv_date, ...}]}
+    - summary: total duplicates found
+    """
+    try:
+        all_rows = ImportDashboardRow.query.filter(
+            ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
+        ).all()
+        # Group by po_yupi (case-insensitive)
+        by_po_yupi = {}
+        for row in all_rows:
+            try: data = json.loads(row.data_json or '{}')
+            except: data = {}
+            po_yupi = clean(data.get('po_yupi')) or clean(data.get('yupi_po')) or ''
+            if not po_yupi: continue
+            key = po_yupi.strip().lower()
+            by_po_yupi.setdefault(key, []).append({
+                'row_key': row.row_key,
+                'po_yupi': po_yupi,
+                'item_yupi': clean(data.get('item_yupi')) or '',
+                'po_sementara': clean(data.get('po_sementara')) or '',
+                'req_dlv_date': clean(data.get('req_dlv_date')) or '',
+                'source_req_dlv_date': clean(data.get('source_req_dlv_date')) or '',
+                'reschedule': clean(data.get('reschedule')) or '',
+                'vendor_name': clean(data.get('vendor_name')) or row.vendor_name or '',
+                'item_name': clean(data.get('item_name')) or '',
+                'source_uid': row.source_uid or '',
+                'sheet_row': row.sheet_row,
+            })
+        # Find duplicates (po_yupi with more than 1 row)
+        duplicates = []
+        for po_yupi_key, rows in by_po_yupi.items():
+            if len(rows) > 1:
+                duplicates.append({
+                    'po_yupi': rows[0]['po_yupi'],
+                    'row_count': len(rows),
+                    'rows': rows,
+                })
+        duplicates.sort(key=lambda x: x['row_count'], reverse=True)
+        return jsonify({
+            'total_rows': len(all_rows),
+            'unique_po_yupi_count': len(by_po_yupi),
+            'duplicate_po_yupi_count': len(duplicates),
+            'duplicates': duplicates[:20],  # top 20
+            'troubleshooting': (
+                "Kalau ada duplicate (po_yupi sama, row berbeda): "
+                "(1) Cek item_yupi — kalau beda, UID akan beda → dianggap row berbeda. "
+                "(2) Cek source_uid — kalau beda, berarti identity payload berbeda. "
+                "(3) Cek req_dlv_date — kalau beda, kemungkinan item di-reschedule. "
+                "Solusi: pastikan item_yupi konsisten di sheet source, atau update identity logic."
+            ),
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/import/debug-find', methods=['GET'])
 def import_debug_find():
     """Cari row di source sheet by PO Yupi number — tampilkan semua row yang cocok.
