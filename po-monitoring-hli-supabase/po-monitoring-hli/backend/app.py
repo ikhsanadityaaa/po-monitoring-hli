@@ -1314,6 +1314,60 @@ def import_row_vendor_candidates(values, source_map, columns):
         if col_idx < len(values): candidates.append(values[col_idx])
     return [clean(v) for v in candidates if clean(v)]
 
+def import_vendor_match(vendor_candidate, vendor_set):
+    """Cek apakah vendor_candidate cocok dengan salah satu vendor di vendor_set.
+
+    FIX V9: Sebelumnya pakai exact match case-insensitive:
+        v.strip().lower() in vendor_set
+
+    Masalah: Vendor di ImportVendor table sering ditulis singkat, misal
+    "CURT GEORGI GMBH & CO", tapi di sheet source tertulis lengkap
+    "CURT GEORGI GMBH & CO. KG" atau "CURT GEORGI GMBH & CO., LTD".
+    Exact match → tidak match → row di-skip → PO 410100301 tidak masuk dashboard.
+
+    Solusi: 3-tier matching:
+    1. Exact match (case-insensitive)
+    2. Prefix match: vendor_set adalah prefix dari candidate (atau sebaliknya)
+    3. Contains match: candidate mengandung vendor_set (atau sebaliknya)
+       — dipakai kalau keduanya minimal 8 karakter untuk hindari false positive
+
+    Return True kalau ada match.
+    """
+    if not vendor_candidate or not vendor_set:
+        return False
+    v = vendor_candidate.strip().lower()
+    if not v:
+        return False
+
+    # Tier 1: Exact match
+    if v in vendor_set:
+        return True
+
+    # Tier 2 & 3: prefix/contains match
+    # Normalisasi: hapus punctuation berlebih (titik, koma, &, dll) untuk matching
+    def normalize(s):
+        return re.sub(r'[^a-z0-9]+', '', s)
+
+    v_norm = normalize(v)
+    if not v_norm or len(v_norm) < 5:
+        return False
+
+    for target in vendor_set:
+        if not target:
+            continue
+        t_norm = normalize(target)
+        if not t_norm or len(t_norm) < 5:
+            continue  # skip terlalu pendek (false positive risk)
+        # Tier 2: prefix match
+        if v_norm.startswith(t_norm) or t_norm.startswith(v_norm):
+            return True
+        # Tier 3: contains match (min 8 chars untuk hindari false positive)
+        if len(t_norm) >= 8 and len(v_norm) >= 8 and (t_norm in v_norm or v_norm in t_norm):
+            return True
+
+    return False
+
+
 def import_source_rows_fast(source, columns, vendor_set):
     mapping_columns = import_all_mapping_columns(columns)
     try:
@@ -1360,7 +1414,10 @@ def import_source_rows_fast(source, columns, vendor_set):
                 vendor_candidates.append(values_by_idx.get(col_idx, ''))
             vendor_candidates = [clean(v) for v in vendor_candidates if clean(v)]
             row_vendor = next((v for v in vendor_candidates if v), '')
-            if vendor_set and not any(v.strip().lower() in vendor_set for v in vendor_candidates if v): continue
+            # FIX V9: pakai import_vendor_match() (fuzzy matching) bukan exact match
+            # supaya vendor "CURT GEORGI GMBH & CO" di ImportVendor match dengan
+            # "CURT GEORGI GMBH & CO. KG" di sheet source.
+            if vendor_set and not any(import_vendor_match(v, vendor_set) for v in vendor_candidates if v): continue
             row = {'_row_key': f"{source['key']}:{data_start_row + offset}", '_source_key': source['key'], '_source_label': source['label'], '_spreadsheet_id': source['spreadsheet_id'], '_gid': source['gid'], '_sheet_row': data_start_row + offset, '_vendor_name': row_vendor}
             for col in mapping_columns:
                 col_idx = source_map.get(col['field'])
@@ -1379,7 +1436,8 @@ def import_source_rows_fast(source, columns, vendor_set):
             values = [clean(v) or '' for v in df.iloc[idx].tolist()]
             vendor_candidates = import_row_vendor_candidates(values, source_map, columns)
             row_vendor = next((v for v in vendor_candidates if v), '')
-            if vendor_set and not any(v.strip().lower() in vendor_set for v in vendor_candidates if v): continue
+            # FIX V9: pakai import_vendor_match() (fuzzy matching) bukan exact match
+            if vendor_set and not any(import_vendor_match(v, vendor_set) for v in vendor_candidates if v): continue
             row = {'_row_key': f"{source['key']}:{idx + 1}", '_source_key': source['key'], '_source_label': source['label'], '_spreadsheet_id': source['spreadsheet_id'], '_gid': source['gid'], '_sheet_row': idx + 1, '_vendor_name': row_vendor}
             for col in mapping_columns:
                 col_idx = source_map.get(col['field'])
@@ -1420,6 +1478,18 @@ def import_date_from_value(value):
     for fmt in ('%d/%m/%Y', '%d-%m-%Y', '%Y-%m-%d', '%Y/%m/%d', '%m/%d/%Y', '%d/%m/%y', '%d-%b-%Y', '%d-%b-%y', '%d %b %Y', '%d %b %y'):
         try: return datetime.strptime(s, fmt).date()
         except: pass
+    # FIX V9: Yearless date formats (e.g. "10-Jun", "25 Dec") — sheet tidak punya
+    # kolom tahun, hanya dd-mmm.
+    #
+    # Logika LAMA (bug): selalu pakai tahun ini, kalau tanggal < today → naikkan
+    # ke tahun depan. Akibatnya tanggal 10-Jun diisi hari ini (25-Jun) jadi
+    # 10-Jun-2027 (tahun depan), padahal user maksudnya 10-Jun-2026 (yang baru
+    # lewat 15 hari).
+    #
+    # Logika BARU: pakai tahun berjalan (today.year). Kalau tanggal hasilnya
+    # lebih dari 6 bulan ke depan dari hari ini, asumsikan user maksud tahun lalu.
+    # Kenapa 6 bulan? Karena PO Date biasanya diisi untuk PO yang dikirim
+    # baru-baru ini (mundur maksimal ±6 bulan), bukan PO masa depan.
     yearless_formats = ('%d %b', '%d-%b', '%d %B', '%d-%B', '%b %d', '%b-%d', '%B %d', '%B-%d')
     today = date.today()
     for fmt in yearless_formats:
@@ -1427,9 +1497,16 @@ def import_date_from_value(value):
         except: continue
         try: d = d.replace(year=today.year)
         except: d = d.replace(year=today.year + 1)
-        if d < today:
-            try: d = d.replace(year=today.year + 1)
-            except: d = d.replace(year=today.year + 2)
+        # Kalau tanggal hasil > 6 bulan (183 hari) ke depan, asumsikan tahun lalu
+        # Contoh: today=25-Jun-2026, input "10-Dec" → 10-Dec-2026 (5.5 bln ke depan) → keep
+        #         today=25-Jun-2026, input "25-Feb" → 25-Feb-2026 (4 bln lalu) → keep
+        #         today=25-Jun-2026, input "10-Jan" → 10-Jan-2026 (5.5 bln lalu) → keep
+        #         today=25-Jun-2026, input "10-Aug" → 10-Aug-2026 (1.5 bln depan) → keep (wajar)
+        #         today=25-Jun-2026, input "10-May" → 10-May-2026 (1.5 bln lalu) → keep (wajar)
+        # Kalau tanggal hasil > 183 hari ke depan → pindah ke tahun lalu
+        if (d - today).days > 183:
+            try: d = d.replace(year=today.year - 1)
+            except: pass
         return d
     return parse_date(raw)
 
@@ -1860,7 +1937,10 @@ def sync_import_sheet_to_dashboard():
                 # re-add the vendor name in the source sheet and re-sync.)
                 rows_to_purge.append(ex_row)
                 continue
-            if ex_vendor.strip().lower() not in uploaded_vendor_set:
+            # FIX V9: pakai import_vendor_match() (fuzzy matching) bukan exact match
+            # supaya vendor yang sedikit beda penulisan (mis. "CURT GEORGI GMBH & CO"
+            # vs "CURT GEORGI GMBH & CO. KG") tidak ikut ter-purge.
+            if not import_vendor_match(ex_vendor, uploaded_vendor_set):
                 rows_to_purge.append(ex_row)
         for row in rows_to_purge:
             db.session.delete(row)
