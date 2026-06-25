@@ -4711,11 +4711,13 @@ def export_all_so():
             # Use IDR-converted purchase amount for margin (handles USD/EUR).
             po_amount = purchase_amount_idr_for_margin(s)
             sales_amount = float(s.sales_amount or 0)
-            # Margin valid only when purchase is present AND positive (in IDR).
-            # Empty/zero/negative purchase → margin = None.
+            # FIX V9: Margin valid only when purchase is present AND positive (in IDR)
+            # AND sales > 0. Kalau PO kosong/0 atau sales kosong/0 → margin = None.
             purchase_valid = po_amount > 0
-            margin = (sales_amount - po_amount) if purchase_valid else None
-            margin_pct = (margin / po_amount * 100) if (purchase_valid and po_amount) else None
+            sales_valid = sales_amount > 0
+            margin = (sales_amount - po_amount) if (purchase_valid and sales_valid) else None
+            # FIX V9: margin_pct hanya dihitung kalau po_amount > 0 (hindari division by zero)
+            margin_pct = (margin / po_amount * 100) if (purchase_valid and sales_valid and po_amount) else None
             ws.append([
                 get_aging_label(day), day if day is not None else '', s.so_create_date.isoformat() if s.so_create_date else '', s.so_item or '', s.matched_po_number or '', s.so_status or '',
                 product_category_level1(s.product_id), canonical_pending_pic(s.pic_name, s.operation_unit_name), s.product_id or '', s.product_name or '', s.specification or '', s.manufacturer_name or '',
@@ -4844,6 +4846,8 @@ def completed_summary():
             missing_conversion_count = q.filter(SOData.purchasing_amount_idr.is_(None), db.not_(currency_expr.in_(['', 'IDR'])), raw_purchase_expr > 0).count()
             payload = {
                 'total_count': total_count, 'total_sales': total_sales, 'total_purchase': total_purchase,
+                # FIX V9: total_margin hanya dihitung kalau total_purchase > 0 DAN total_sales > 0.
+                # Kalau semua PO kosong → total_margin = None (tidak menyesatkan dengan angka 0 atau negatif palsu).
                 'total_margin': (total_sales - total_purchase) if (total_sales > 0 and total_purchase > 0) else None,
                 'monthly_trend': monthly_trend, 'purchase_yoy_years': yoy_years, 'purchase_yoy_trend': purchase_yoy_trend,
                 'top_vendors': top_vendors, 'top_vendors_local': top_vendors_local, 'top_vendors_import': top_vendors_import,
@@ -4864,10 +4868,10 @@ def completed_summary():
         enriched = []
         for s in rows:
             po_amt = po_amt_of(s); sales = float(s.sales_amount or 0)
-            # Margin valid only when purchase (in IDR) is present AND positive.
-            # Uses purchase_amount_idr_for_margin which handles USD/EUR conversion.
+            # FIX V9: Margin valid only when purchase (in IDR) is present AND positive
+            # AND sales > 0. Kalau PO kosong/0 atau sales kosong/0 → margin = None.
             po_amt_margin = purchase_amount_idr_for_margin(s)
-            margin = (sales - po_amt_margin) if po_amt_margin > 0 else None
+            margin = (sales - po_amt_margin) if (po_amt_margin > 0 and sales > 0) else None
             enriched.append((s, po_amt, sales, margin))
         monthly = {}
         for s, po_amt, sales, _m in enriched:
@@ -4923,9 +4927,21 @@ def completed_summary():
         top_clients = sorted(client_map.values(), key=lambda x: x['sales_amount'], reverse=True)[:5]
         pos = neg = zero = 0
         total_sales = 0.0; total_purchase = 0.0
+        # FIX V9: Track total_margin secara terpisah (hanya dari row dengan valid margin).
+        # Sebelumnya total_margin = total_sales - total_purchase, yang salah karena
+        # total_sales dan total_purchase mencakup SEMUA row (termasuk yang PO-nya 0/kosong
+        # dan tidak punya margin). Margin seharusnya hanya dihitung dari row dengan
+        # po_amt > 0 DAN sales > 0.
+        total_margin_sum = 0.0
+        valid_margin_count = 0
         for _s, po_amt, sales, m in enriched:
             total_sales += sales; total_purchase += po_amt
             if m is not None:
+                # FIX V9: hanya hitung margin kalau sales > 0 juga (hindari margin
+                # dari row dengan sales kosong/0 yang menyesatkan).
+                if sales > 0:
+                    total_margin_sum += m
+                    valid_margin_count += 1
                 if m > 0: pos += 1
                 elif m < 0: neg += 1
                 else: zero += 1
@@ -4949,11 +4965,15 @@ def completed_summary():
             neg_txns = [(s, po_amt, sales, m) for s, po_amt, sales, m in enriched if m is not None and m < 0]
             neg_txns.sort(key=lambda x: x[3])
             for s, po_amt, sales, m in neg_txns[:30]:
-                pct = round(m / sales * 100, 1) if sales else None
+                # FIX V9: margin_pct hanya dihitung kalau sales > 0 (hindari division by zero)
+                pct = round(m / sales * 100, 1) if (m is not None and sales > 0) else None
                 worst_margin_transactions.append({'so_item': s.so_item, 'so_number': s.so_number, 'item_code': (s.item_code if hasattr(s, 'item_code') and s.item_code else (s.so_item or '-')), 'product': s.product_name or '-', 'vendor': s.vendor_name or '-', 'sales_amount': sales, 'purchase_amount': po_amt, 'margin': m, 'margin_pct': pct, 'count': 1, 'date': s.so_create_date.isoformat() if s.so_create_date else None})
         payload = {
             'total_count': len(rows), 'total_sales': total_sales, 'total_purchase': total_purchase,
-            'total_margin': (total_sales - total_purchase) if (total_sales > 0 and total_purchase > 0) else None,
+            # FIX V9: total_margin sekarang hanya dari row dengan valid margin (po > 0 dan sales > 0).
+            # Sebelumnya: (total_sales - total_purchase) yang mencakup row dengan PO kosong → margin menyesatkan.
+            'total_margin': round(total_margin_sum, 2) if valid_margin_count > 0 else None,
+            'valid_margin_count': valid_margin_count,
             'monthly_trend': monthly_trend, 'purchase_yoy_years': yoy_years, 'purchase_yoy_trend': purchase_yoy_trend,
             'top_vendors': top_vendors, 'top_vendors_local': top_vendors_local, 'top_vendors_import': top_vendors_import,
             'top_clients': top_clients, 'top_items': top_items, 'worst_margin_vendors': worst_margin_vendors,
@@ -4992,15 +5012,19 @@ def completed_margin_detail():
             # Margin valid only when purchase (in IDR) is positive.
             # Use purchase_amount_idr_for_margin for USD/EUR conversion.
             po_amt_margin = purchase_amount_idr_for_margin(s)
-            m = (float(s.sales_amount or 0) - po_amt_margin) if po_amt_margin > 0 else None
+            sales_val = float(s.sales_amount or 0)
+            # FIX V9: margin hanya dihitung kalau PO amount > 0 DAN sales > 0.
+            # Kalau PO kosong/0 atau sales kosong/0 → margin = None (tidak dihitung).
+            m = (sales_val - po_amt_margin) if (po_amt_margin > 0 and sales_val > 0) else None
             if m is None and category in ('positive', 'negative'): continue
             if category == 'positive' and (m is None or m <= 0): continue
             elif category == 'negative' and (m is None or m >= 0): continue
             elif category == 'zero' and (m is None or m != 0): continue
             result.append({
                 'id': s.id, 'so_item': s.so_item, 'so_number': s.so_number, 'product': s.product_name or '-', 'vendor': s.vendor_name or '-',
-                'item_code': (s.item_code if hasattr(s, 'item_code') and s.item_code else '-'), 'sales_amount': float(s.sales_amount or 0), 'purchase_amount': po_amt,
-                'margin': m, 'margin_pct': round(m / float(s.sales_amount) * 100, 1) if s.sales_amount else None, 'date': s.so_create_date.isoformat() if s.so_create_date else None,
+                'item_code': (s.item_code if hasattr(s, 'item_code') and s.item_code else '-'), 'sales_amount': sales_val, 'purchase_amount': po_amt,
+                # FIX V9: margin_pct hanya dihitung kalau sales > 0 (hindari division by zero)
+                'margin': m, 'margin_pct': round(m / sales_val * 100, 1) if (m is not None and sales_val > 0) else None, 'date': s.so_create_date.isoformat() if s.so_create_date else None,
                 'so_status': s.so_status, 'pic_name': canonical_pending_pic(s.pic_name, s.operation_unit_name), 'operation_unit_name': s.operation_unit_name,
             })
         result.sort(key=lambda x: x['margin'])
@@ -7283,6 +7307,85 @@ def import_debug_source():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/import/debug-find', methods=['GET'])
+def import_debug_find():
+    """Cari row di source sheet by PO Yupi number — tampilkan semua row yang cocok.
+
+    FIX V9: Endpoint ini untuk diagnose kenapa PO tertentu (mis. 410100301)
+    tidak tercopy. User bisa lihat persis di row berapa PO itu ada, dan apa
+    vendor yang terbaca di row tersebut.
+
+    Query params:
+    - source: source_1 atau source_2
+    - po: PO Yupi number (mis. 410100301)
+    """
+    try:
+        source_key = clean(request.args.get('source')) or 'source_1'
+        po_search = clean(request.args.get('po')) or ''
+        source = next((s for s in IMPORT_SOURCE_SHEETS if s['key'] == source_key), None)
+        if not source:
+            return jsonify({'error': f"Unknown source '{source_key}'"}), 400
+        if not po_search:
+            return jsonify({'error': 'Param ?po= wajib (PO Yupi number, mis. 410100301)'}), 400
+
+        columns = import_layout_columns()
+        mapping_columns = import_all_mapping_columns(columns)
+        sheet_title, header_df = import_source_header_preview(source, force=True)
+        if header_df.empty:
+            return jsonify({'error': 'Could not read header preview'}), 500
+
+        header_idx = import_detect_header_row(header_df)
+        source_map = import_source_column_map(header_df, mapping_columns)
+
+        # Get uploaded vendor list
+        uploaded_vendor_names = import_uploaded_vendor_names()
+        uploaded_vendor_set = {v.strip().lower() for v in uploaded_vendor_names if v and v.strip()}
+
+        # Scan ALL rows (empty set = ambil semua, tanpa filter vendor)
+        all_rows = import_source_rows_fast(source, columns, set())
+
+        # Cari row yang po_yupi-nya match
+        po_search_norm = po_search.strip().lower()
+        matching_rows = []
+        for row in all_rows:
+            row_po = clean(row.get('po_yupi')) or clean(row.get('yupi_po')) or ''
+            if row_po and row_po.strip().lower() == po_search_norm:
+                row_vendor = row.get('_vendor_name') or ''
+                is_match = import_vendor_match(row_vendor, uploaded_vendor_set) if row_vendor else False
+                matching_rows.append({
+                    'sheet_row': row.get('_sheet_row'),
+                    'po_yupi': row_po,
+                    'po_sementara': row.get('po_sementara'),
+                    'item_name': row.get('item_name'),
+                    'vendor_name_detected': row_vendor,
+                    'is_vendor_match': is_match,
+                    'all_fields': {k: v for k, v in row.items() if not k.startswith('_') and v},
+                })
+
+        return jsonify({
+            'source_key': source_key,
+            'po_searched': po_search,
+            'total_rows_scanned': len(all_rows),
+            'matching_rows_found': len(matching_rows),
+            'matched_rows_detail': matching_rows,
+            'vendor_filter_used': sorted(uploaded_vendor_set),
+            'troubleshooting': (
+                "Jika matching_rows_found = 0: PO tidak ada di sheet source (cek sheet langsung). "
+                "Jika matching_rows_found > 0 tapi is_vendor_match = false: "
+                "(1) Cek vendor_name_detected — apakah persis sama atau prefix dari vendor di vendor_filter_used? "
+                "(2) Kalau vendor_name_detected kosong, berika carry-over tidak aktif "
+                "(mungkin row tidak punya po_yupi/item_name yang terbaca). "
+                "(3) Kalau vendor_name_detected terisi tapi beda penulisan, "
+                "update vendor di ImportVendor table atau tambahkan variant nama. "
+                "Jika is_vendor_match = true tapi row belum tercopy di dashboard: "
+                "trigger sync via POST /api/import/copy-sheet."
+            ),
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/import/debug-row', methods=['GET'])
 def import_debug_row():
     """Cek row spesifik di source sheet — tampilkan SEMUA kolom yang terbaca.
@@ -8266,11 +8369,11 @@ def get_pic_kpi():
             sales = float(s.sales_amount or 0)
             # Use IDR-converted purchase amount for margin (handles USD/EUR).
             po_amount = purchase_amount_idr_for_margin(s)
-            # Margin valid only when purchase (in IDR) is positive (not empty/
-            # zero/negative). Invalid purchase → margin = None, excluded
-            # from KPI totals and counts.
+            # FIX V9: Margin valid only when purchase (in IDR) is positive AND sales > 0.
+            # Kalau PO kosong/0 atau sales kosong/0 → margin = None, excluded dari KPI.
             purchase_valid = po_amount > 0
-            margin = (sales - po_amount) if purchase_valid else None
+            sales_valid = sales > 0
+            margin = (sales - po_amount) if (purchase_valid and sales_valid) else None
 
             pic_map[pic]['total_sales'] += sales
             pic_map[pic]['total_purchase'] += po_amount if purchase_valid else 0
