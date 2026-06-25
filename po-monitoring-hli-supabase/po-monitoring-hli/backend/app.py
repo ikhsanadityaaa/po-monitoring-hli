@@ -2191,12 +2191,64 @@ def sync_import_sheet_to_dashboard():
         import_meta_set('last_copy_at', wib_now.strftime('%Y-%m-%d %H:%M'))
     except: pass
     clear_runtime_caches()
+
+    # FIX V10: Auto-cleanup duplicate rows SETELAH copy sheet.
+    # Kadang copy sheet menambahkan row baru padahal row dengan po_yupi + item_yupi
+    # sama sudah ada (mis. item di-reschedule muncul sebagai 2 baris terpisah di
+    # sheet source). Auto-cleanup ini akan merge duplicate tanpa perlu manual
+    # POST /api/admin/cleanup-import-duplicates.
+    duplicates_cleaned = 0
+    try:
+        all_db_rows = ImportDashboardRow.query.filter(
+            ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
+        ).order_by(ImportDashboardRow.updated_at.desc()).all()
+        by_identity = {}
+        for db_row in all_db_rows:
+            try: db_data = json.loads(db_row.data_json or '{}')
+            except: db_data = {}
+            po_yupi_key = (clean(db_data.get('po_yupi')) or clean(db_data.get('yupi_po')) or '').strip().lower()
+            item_yupi_key = (clean(db_data.get('item_yupi')) or '').strip().lower()
+            if not po_yupi_key: continue
+            identity_key = f"{po_yupi_key}|{item_yupi_key or '(none)'}"
+            by_identity.setdefault(identity_key, []).append({'row': db_row, 'data': db_data})
+        for identity_key, dup_rows in by_identity.items():
+            if len(dup_rows) <= 1: continue
+            # Winner = updated_at terbaru
+            dup_rows.sort(key=lambda x: x['row'].updated_at or datetime.min, reverse=True)
+            winner = dup_rows[0]
+            losers = dup_rows[1:]
+            # Merge: kalau winner kosong tapi loser ada nilai → ambil dari loser
+            winner_data = dict(winner['data'])
+            for loser in losers:
+                loser_data = loser['data']
+                for field in IMPORT_LOCAL_EDIT_FIELDS:
+                    winner_val = winner_data.get(field)
+                    loser_val = loser_data.get(field)
+                    if import_blankish(winner_val) and not import_blankish(loser_val):
+                        winner_data[field] = loser_val
+            winner['row'].data_json = json.dumps(winner_data, ensure_ascii=False)
+            winner['row'].updated_at = datetime.utcnow()
+            for loser in losers:
+                db.session.delete(loser['row'])
+                duplicates_cleaned += 1
+        if duplicates_cleaned > 0:
+            db.session.commit()
+            db.session.execute(text('PRAGMA wal_checkpoint(TRUNCATE)'))
+            db.session.commit()
+            clear_runtime_caches()
+            print(f"[sync_import_sheet_to_dashboard] Auto-cleanup: {duplicates_cleaned} duplicate rows dihapus")
+    except Exception as cleanup_exc:
+        try: db.session.rollback()
+        except: pass
+        print(f"[sync_import_sheet_to_dashboard] Auto-cleanup gagal: {cleanup_exc}")
+
     return {
         'added': added, 'updated': updated, 'seen': seen,
         'sheet_rows': len(sheet_rows),
         'source_rows_added': source_rows_added,
         'source_errors': source_errors,
         'purged_non_vendor': purged_non_vendor,
+        'duplicates_cleaned': duplicates_cleaned,
         'vendor_count': vendor_count,
         'vendor_filter_count': len(filter_vendors),
         'vendor_filter_source': vendor_source,
