@@ -7991,6 +7991,13 @@ def export_import_data():
         # Build vendor-attr map once for the export so Origin/TOP/Non SKI can be
         # injected into each row by matching the row's vendor name.
         _export_vendor_attrs = import_vendor_attrs_map()
+        # FIX V10: Carry-over field yang biasanya di-merge di dashboard (po_yupi,
+        # vendor_name, status, dll) supaya di Excel semua row di group dapat nilai
+        # yang sama, bukan hanya row pertama.
+        CARRYOVER_FIELDS = ('po_yupi', 'yupi_po', 'po_sementara', 'vendor_name', 'vendor',
+                           'status', 'site', 'group', 'operation_unit_name',
+                           'origin', 'top', 'non_ski')
+        last_carryover = {}
         for row_idx, (db_row, data) in enumerate(filtered, 2):
             # Inject vendor attributes (origin, top, non_ski) if missing in row data.
             row_vendor = import_nonblank(data.get('vendor')) or import_nonblank(data.get('vendor_name')) or import_nonblank(db_row.vendor_name)
@@ -8003,6 +8010,24 @@ def export_import_data():
                         data['top'] = attrs.get('top') or ''
                     if not import_nonblank(data.get('non_ski')):
                         data['non_ski'] = attrs.get('non_ski') or ''
+            # FIX V10: Carry-over field yang kosong dari row sebelumnya.
+            # Hanya carry-over kalau row saat ini punya item_name atau ord_qty
+            # (tanda row ini bagian dari group yang sama, bukan row baru).
+            has_item_data = import_nonblank(data.get('item_name')) or import_nonblank(data.get('ord_qty'))
+            if has_item_data:
+                for field in CARRYOVER_FIELDS:
+                    if import_blankish(data.get(field)) and not import_blankish(last_carryover.get(field)):
+                        data[field] = last_carryover[field]
+                # Update last_carryover dengan nilai dari row ini (yang sudah di-carry-over)
+                for field in CARRYOVER_FIELDS:
+                    if not import_blankish(data.get(field)):
+                        last_carryover[field] = data[field]
+            else:
+                # Row tanpa item data = row baru/group baru, reset carryover
+                last_carryover = {}
+                for field in CARRYOVER_FIELDS:
+                    if not import_blankish(data.get(field)):
+                        last_carryover[field] = data[field]
             row_vals = []
             for col in visible_cols:
                 field = col.get('field', '')
