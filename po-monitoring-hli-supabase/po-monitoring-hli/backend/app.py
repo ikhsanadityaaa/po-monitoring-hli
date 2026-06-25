@@ -924,8 +924,13 @@ IMPORT_SOURCE_MANAGED_FIELDS = {
     'req_dlv_date', 'source_req_dlv_date', 'so', 'group', 'po_sementara',
     'item_yupi', 'item_name', 'spec', 'remark_yupi', 'reschedule',
     'ord_qty', 'unit', 'unit_price', 'amount', 'vendor_name',
-    'purchase_price', 'currency', 'incoterm', 'forwarder', 'bl_number',
-    'inv_no', 'non_ski',
+    'purchase_price', 'currency',
+    # FIX V9: field-field di bawah DIPINDAH dari IMPORT_SOURCE_MANAGED_FIELDS ke
+    # IMPORT_USER_LOCAL_ONLY_FIELDS (lihat bawah). Sebelumnya, field-field ini
+    # di-overwrite saat sync dari source sheet — padahal user edit manual field-field
+    # ini di dashboard (incoterm, forwarder, bl_number, inv_no, non_ski).
+    # Sekarang field-field tersebut TIDAK akan di-overwrite oleh source sheet sync.
+    # 'incoterm', 'forwarder', 'bl_number', 'inv_no', 'non_ski',  ← DIPINDAH
 }
 
 IMPORT_LOCAL_EDIT_FIELDS = {
@@ -942,6 +947,19 @@ IMPORT_LOCAL_EDIT_FIELDS = {
 }
 
 IMPORT_USER_LOCAL_ONLY_FIELDS = IMPORT_LOCAL_EDIT_FIELDS - IMPORT_SOURCE_MANAGED_FIELDS
+# FIX V9: Pastikan field-field user-edit manual SELALU di USER_LOCAL_ONLY.
+# Field-field ini TIDAK BOLEH di-overwrite oleh source sheet sync:
+#   - incoterm, forwarder, bl_number, inv_no, non_ski (diisi user via dashboard)
+#   - status (di-set user via dashboard)
+#   - sap_input, bl_awb, invoice, pl, hc, msds, coa, coo, soft_copy_doc (checklist user)
+#   - etd, eta, import_remarks (diisi user via dashboard)
+#   - payment, payment_date (diisi user via dashboard)
+#   - po_send_date, _po_send_date_manual (diisi user via dashboard)
+assert {'incoterm', 'forwarder', 'bl_number', 'inv_no', 'non_ski',
+        'status', 'sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo',
+        'soft_copy_doc', 'etd', 'eta', 'import_remarks', 'payment', 'payment_date',
+        'po_send_date', '_po_send_date_manual'}.issubset(IMPORT_USER_LOCAL_ONLY_FIELDS), \
+    "Field user-edit harus di IMPORT_USER_LOCAL_ONLY_FIELDS"
 
 IMPORT_SOURCE_ONLY_COLUMNS = [
     {'source_only': True, 'source_sheet_col': 'F', 'sheet_col': 'R', 'field': 'po_yupi', 'label': 'PO YUPI'},
@@ -1926,10 +1944,19 @@ def _extract_po_yupi_from_po_sementara(po_sementara):
     return ''
 
 IMPORT_TRACKER_AUTHORITATIVE_FIELDS = {
-    'status', 'po_send_date', '_po_send_date_manual', 'etd', 'eta', 'import_remarks',
-    'incoterm', 'forwarder', 'bl_number', 'inv_no', 'non_ski',
-    'sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo',
-    'soft_copy_doc',
+    # FIX V9: Hanya field-field yang MEMANG diisi di tracker sheet yang authoritative.
+    # Field-field user-edit manual (status, incoterm, forwarder, checklist, dll)
+    # TIDAK boleh di sini — kalau ada, akan di-overwrite saat sync dari tracker.
+    #
+    # SEBELUMNYA (BUG): field-field ini ada di authoritative → saat sync, user edit
+    # status/incoterm/forwarder/checklist hilang karena di-overwrite dengan nilai dari
+    # tracker (yang biasanya kosong atau nilai lama).
+    #
+    # SESUDAH FIX: hanya field yang memang dikelola tracker sheet:
+    'po_send_date', '_po_send_date_manual', 'etd', 'eta', 'import_remarks',
+    # Field-field di bawah DIPINDAH ke USER_LOCAL_ONLY (tidak di-overwrite sync):
+    # 'status', 'incoterm', 'forwarder', 'bl_number', 'inv_no', 'non_ski',
+    # 'sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo', 'soft_copy_doc',
 }
 
 def merge_import_tracker_payload(existing_payload, tracker_payload):
