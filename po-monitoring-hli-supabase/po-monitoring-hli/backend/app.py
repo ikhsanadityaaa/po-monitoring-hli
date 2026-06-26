@@ -6431,23 +6431,18 @@ def download_rfq_batch_template():
         num_upload = len(upload_fields)
         total_cols = num_context + num_upload
 
-        # --- Row 1: instruction note spanning blue columns ---
-        note_cell = ws.cell(row=1, column=num_context + 1)
-        note_cell.value = 'Silahkan isi penawaran di Kolom Biru / Kindly fill in your quotation in the blue columns'
-        note_cell.font = Font(color='0070C0', italic=True)
-        ws.merge_cells(start_row=1, start_column=num_context + 1, end_row=1, end_column=total_cols)
+        thin_border = Border(
+            left=Side(style='thin', color='D9E2EF'),
+            right=Side(style='thin', color='D9E2EF'),
+            top=Side(style='thin', color='D9E2EF'),
+            bottom=Side(style='thin', color='D9E2EF'),
+        )
 
-        # --- Row 2: header row ---
-        ws.append([])  # placeholder row 1
+        # --- Row 1: header row (MUST be row 1 so pandas reads column names correctly) ---
         for i, hdr in enumerate(headers, 1):
-            cell = ws.cell(row=2, column=i, value=hdr)
+            cell = ws.cell(row=1, column=i, value=hdr)
             cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-            cell.border = Border(
-                left=Side(style='thin', color='D9E2EF'),
-                right=Side(style='thin', color='D9E2EF'),
-                top=Side(style='thin', color='D9E2EF'),
-                bottom=Side(style='thin', color='D9E2EF'),
-            )
+            cell.border = thin_border
             if i <= num_context:
                 cell.fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
                 cell.font = Font(bold=True, color='000000')
@@ -6455,18 +6450,20 @@ def download_rfq_batch_template():
                 cell.fill = PatternFill(start_color='2563EB', end_color='2563EB', fill_type='solid')
                 cell.font = Font(bold=True, color='FFFFFF')
 
-        ws.freeze_panes = 'A3'
-        ws.auto_filter.ref = f'A2:{get_column_letter(total_cols)}{ws.max_row + 1}'
+        # Add instruction as a comment on the first blue header cell so pandas doesn't see it
+        from openpyxl.comments import Comment
+        first_blue_cell = ws.cell(row=1, column=num_context + 1)
+        first_blue_cell.comment = Comment(
+            'Silahkan isi penawaran di Kolom Biru / Kindly fill in your quotation in the blue columns',
+            'System'
+        )
 
-        # --- Data rows (starting row 3) ---
+        ws.freeze_panes = 'A2'
+        ws.auto_filter.ref = f'A1:{get_column_letter(total_cols)}1'
+
+        # --- Data rows (starting row 2) ---
         ref_body_fill = PatternFill(start_color='EDEDED', end_color='EDEDED', fill_type='solid')
         blue_body_fill = PatternFill(start_color='DBEAFE', end_color='DBEAFE', fill_type='solid')
-        thin_border = Border(
-            left=Side(style='thin', color='D9E2EF'),
-            right=Side(style='thin', color='D9E2EF'),
-            top=Side(style='thin', color='D9E2EF'),
-            bottom=Side(style='thin', color='D9E2EF'),
-        )
 
         seen = set()
         for row in rows:
@@ -6491,9 +6488,9 @@ def download_rfq_batch_template():
         for i, width in enumerate(widths[:total_cols], 1):
             ws.column_dimensions[get_column_letter(i)].width = width
 
-        for row_idx in range(3, ws.max_row + 1):
+        for row_idx in range(2, ws.max_row + 1):
             ws.row_dimensions[row_idx].height = 30
-        ws.row_dimensions[2].height = 26
+        ws.row_dimensions[1].height = 26
 
         output = io.BytesIO()
         wb.save(output)
