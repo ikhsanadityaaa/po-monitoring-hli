@@ -532,7 +532,7 @@ const DownloadButton = ({ onClick, className, children, disabled }) => {
   );
 };
 
-const SOModal = ({ title, data, onClose, darkMode, onUpdateCell }) => {
+const SOModal = ({ title, data, onClose, darkMode, onUpdateCell, getPicColor }) => {
   const [dlPage, setDlPage] = useState(1);
   const [editing, setEditing] = useState(null);
   const [editValue, setEditValue] = useState('');
@@ -601,7 +601,7 @@ const SOModal = ({ title, data, onClose, darkMode, onUpdateCell }) => {
                   <td className="px-3 py-2 text-blue-600 font-medium whitespace-nowrap">{s.so_item||'-'}</td>
                   {!hasSoItem && <td className="px-3 py-2 whitespace-nowrap">{s.so_number}</td>}
                   <td className="px-3 py-2 whitespace-nowrap"><span className={`px-2 py-0.5 rounded-full text-xs font-medium ${s.so_status==='Delivery Completed'?'bg-green-100 text-green-700':s.so_status==='SO Cancel'?'bg-red-100 text-red-700':'bg-blue-100 text-blue-700'}`}>{s.so_status||'-'}</span></td>
-                  <td className="px-3 py-2 whitespace-nowrap text-center font-semibold text-slate-600">{s.pic_name||'-'}</td>
+                  <td className="px-3 py-2 whitespace-nowrap text-center">{s.pic_name ? (() => { const c = getPicColor ? getPicColor(s.pic_name) : null; return <span className={`inline-flex max-w-full truncate px-2 py-0.5 rounded-full text-xs font-semibold ${c ? `${c.bg} ${c.text}` : 'bg-slate-100 text-slate-600'}`}>{s.pic_name}</span>; })() : <span className="text-gray-400">-</span>}</td>
                   <td className="px-3 py-2 whitespace-nowrap min-w-[180px]">{s.operation_unit_name}</td>
                   <td className="px-3 py-2 whitespace-nowrap max-w-[140px] truncate">{s.vendor_name}</td>
                   <td className="px-3 py-2 max-w-[160px] truncate">{s.product_name}</td>
@@ -1564,7 +1564,7 @@ const StatusPie = ({ data, darkMode }) => {
 
 
 // ─── Date Range Filter ────────────────────────────────────────────────────
-const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = 'Filter SO Create Date', compact = false }) => {
+const DateRangeFilter = ({ darkMode, txt, txt2, card, onFilter, value, label = 'Date Filter', compact = false }) => {
   const [mode, setMode] = useState(value?.mode || 'all'); // all | today | week | month | year | range
   const [startDate, setStartDate] = useState(value?.start || '');
   const [endDate, setEndDate] = useState(value?.end || '');
@@ -3718,7 +3718,7 @@ const App = () => {
         <DateRangeFilter
           darkMode={darkMode} txt={txt} txt2={txt2} card={card}
           value={globalDateFilter}
-          label="Filter SO Create Date"
+          label="Date Filter"
           onFilter={(f) => {
             setGlobalDateFilter(f);
             setCompletedYear('all'); fetchCompletedData('all', f);
@@ -4040,7 +4040,7 @@ const App = () => {
             txt2={txt2}
             card={card}
             value={globalDateFilter}
-            label="Filter SO Create Date"
+            label="Date Filter"
             compact
             onFilter={(f) => { setGlobalDateFilter(f); if (activePage === 'item-registration') setItemRegPage(1); }}
           />
@@ -6541,6 +6541,7 @@ const App = () => {
     const statusMonthlyRows = stats?.so_status_monthly || [];
     const itemRegProcStatus = stats?.item_registration_proc_status || [];
     const itemRegClients = stats?.item_registration_clients || [];
+    const itemRegPics = stats?.item_registration_pics || [];
     const pendingVendors = stats?.top_vendors || [];
     const sumRows = (rows, key) => (rows || []).reduce((sum, row) => sum + (Number(row?.[key]) || 0), 0);
     const pendingMonthlyTotal = sumRows(pendingMonthly, 'so_count');
@@ -6780,8 +6781,9 @@ const App = () => {
           <h3 className={`text-base font-bold ${txt} flex items-center gap-2`}>
             <Wrench className="w-5 h-5 text-blue-600"/> Pending Item Registration
           </h3>
-           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+           <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
             {itemRegCategoryChart(itemRegProcStatus, 'Proc. Status')}
+            {itemRegCategoryChart(itemRegPics, 'PIC')}
             {itemRegCategoryChart(itemRegClients, 'Client Nm.')}
           </div>
         </div>
@@ -7710,7 +7712,7 @@ const App = () => {
         </div>
       </main>
 
-      {modal && <SOModal title={modal.title} data={modal.data} darkMode={darkMode} onClose={()=>setModal(null)} onUpdateCell={updateSOCell}/>}
+      {modal && <SOModal title={modal.title} data={modal.data} darkMode={darkMode} onClose={()=>setModal(null)} onUpdateCell={updateSOCell} getPicColor={getPicColor}/>}
 
       {/* ── Vendor Auto Approve: loading overlay ──────────────────────────
           Shown while the backend automation runs (sequential per vendor).
