@@ -6301,7 +6301,7 @@ def get_rfq_data():
                 result = [
                     row for row in result
                     if clean(row.get('purchase_pic')) == pic
-                    and clean(row.get('check')) == 'open'
+                    and clean(row.get('check')) not in ('complete', 'reject')
                     and row.get('unit_price_missing')
                     and not clean_product_id(row.get('product_id'))
                 ]
@@ -6406,7 +6406,11 @@ def rfq_filtered_rows_from_request(force=False):
     if checks:
         rows = [row for row in rows if clean(row.get('check')) and clean(row.get('check')).lower() in checks]
     if pic:
-        rows = [row for row in rows if clean(row.get('purchase_pic')) == pic]
+        rows = [row for row in rows
+                if clean(row.get('purchase_pic')) == pic
+                and clean(row.get('check')) not in ('complete', 'reject')
+                and row.get('unit_price_missing')
+                and not clean_product_id(row.get('product_id'))]
     return rows, fetched_at
 
 @app.route('/api/rfq/template', methods=['GET'])
@@ -6416,19 +6420,81 @@ def download_rfq_batch_template():
         wb = Workbook()
         ws = wb.active
         ws.title = 'RFQ Batch Upload'
-        context_fields = ['item_name', 'detail_spec']
-        headers = ['No'] + [rfq_label(field) for field in context_fields] + [rfq_label(field) for field in RFQ_BATCH_FIELDS]
-        _style_wb(ws, headers)
-        widths = [12, 28, 50, 20, 28, 18, 28, 42, 18, 14, 14, 18, 20, 28, 50]
-        for i, width in enumerate(widths, 1):
-            ws.column_dimensions[get_column_letter(i)].width = width
+
+        # Context fields (white columns – pre-filled, read-only reference)
+        context_fields = ['client_name', 'purchase_pic', 'item_name', 'detail_spec', 'brand_manufacturer', 'qty', 'unit', 'remark']
+        # Upload fields (blue columns – user fills in)
+        upload_fields = ['same_replacement', 'vendor_name', 'unit_price_idr', 'quoted_item_name', 'quoted_spec', 'quoted_brand', 'quoted_unit', 'moq', 'lead_time_days', 'valid_period', 'photo_url', 'remarks']
+
+        headers = ['No'] + [rfq_label(field) for field in context_fields] + [rfq_label(field) for field in upload_fields]
+        num_context = 1 + len(context_fields)  # No + context fields
+        num_upload = len(upload_fields)
+        total_cols = num_context + num_upload
+
+        # --- Row 1: instruction note spanning blue columns ---
+        note_cell = ws.cell(row=1, column=num_context + 1)
+        note_cell.value = 'Silahkan isi penawaran di Kolom Biru / Kindly fill in your quotation in the blue columns'
+        note_cell.font = Font(color='0070C0', italic=True)
+        ws.merge_cells(start_row=1, start_column=num_context + 1, end_row=1, end_column=total_cols)
+
+        # --- Row 2: header row ---
+        ws.append([])  # placeholder row 1
+        for i, hdr in enumerate(headers, 1):
+            cell = ws.cell(row=2, column=i, value=hdr)
+            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            cell.border = Border(
+                left=Side(style='thin', color='D9E2EF'),
+                right=Side(style='thin', color='D9E2EF'),
+                top=Side(style='thin', color='D9E2EF'),
+                bottom=Side(style='thin', color='D9E2EF'),
+            )
+            if i <= num_context:
+                cell.fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
+                cell.font = Font(bold=True, color='000000')
+            else:
+                cell.fill = PatternFill(start_color='2563EB', end_color='2563EB', fill_type='solid')
+                cell.font = Font(bold=True, color='FFFFFF')
+
+        ws.freeze_panes = 'A3'
+        ws.auto_filter.ref = f'A2:{get_column_letter(total_cols)}{ws.max_row + 1}'
+
+        # --- Data rows (starting row 3) ---
+        ref_body_fill = PatternFill(start_color='EDEDED', end_color='EDEDED', fill_type='solid')
+        blue_body_fill = PatternFill(start_color='DBEAFE', end_color='DBEAFE', fill_type='solid')
+        thin_border = Border(
+            left=Side(style='thin', color='D9E2EF'),
+            right=Side(style='thin', color='D9E2EF'),
+            top=Side(style='thin', color='D9E2EF'),
+            bottom=Side(style='thin', color='D9E2EF'),
+        )
+
         seen = set()
         for row in rows:
             no = clean(row.get('no'))
             if not no or no in seen:
                 continue
             seen.add(no)
-            ws.append([no] + [row.get(field) or '' for field in context_fields] + [row.get(field) or '' for field in RFQ_BATCH_FIELDS])
+            data_row = [no] + [row.get(field) or '' for field in context_fields] + [row.get(field) or '' for field in upload_fields]
+            ws.append(data_row)
+            row_idx = ws.max_row
+            for ci in range(1, total_cols + 1):
+                cell = ws.cell(row=row_idx, column=ci)
+                cell.alignment = Alignment(vertical='center', wrap_text=True)
+                cell.border = thin_border
+                if ci <= num_context:
+                    cell.fill = ref_body_fill
+                else:
+                    cell.fill = blue_body_fill
+
+        # Column widths matching the image layout
+        widths = [8, 18, 16, 28, 50, 20, 10, 10, 28, 20, 28, 18, 28, 18, 18, 10, 14, 18, 18, 28, 28]
+        for i, width in enumerate(widths[:total_cols], 1):
+            ws.column_dimensions[get_column_letter(i)].width = width
+
+        for row_idx in range(3, ws.max_row + 1):
+            ws.row_dimensions[row_idx].height = 30
+        ws.row_dimensions[2].height = 26
+
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)
@@ -6439,6 +6505,14 @@ def download_rfq_batch_template():
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
+# Fields that appear as blue/upload columns in the batch upload template.
+# Only these fields are processed during batch upload – context (white) columns are ignored.
+RFQ_TEMPLATE_UPLOAD_FIELDS = [
+    'same_replacement', 'vendor_name', 'unit_price_idr', 'quoted_item_name',
+    'quoted_spec', 'quoted_brand', 'quoted_unit', 'moq', 'lead_time_days',
+    'valid_period', 'photo_url', 'remarks',
+]
 
 @app.route('/api/rfq/batch-upload-json', methods=['POST'])
 @app.route('/api/rfq/batch-upload', methods=['POST'])
@@ -6457,6 +6531,7 @@ def batch_upload_rfq():
                 no_map.setdefault(no, []).append(row['row_key'])
 
         updated = 0
+        skipped_empty = 0
         not_found = 0
         sheet_updates = []
         local_updates = 0
@@ -6466,7 +6541,8 @@ def batch_upload_rfq():
             col_no = find_column(df, ['No'])
             if not col_no:
                 return jsonify({'error': f'Column "No" not found. Available: {df.columns.tolist()}'}), 400
-            col_map = {field: find_column(df, [rfq_label(field), field]) for field in RFQ_BATCH_FIELDS}
+            # Only map blue/upload column fields – context columns are read-only
+            col_map = {field: find_column(df, [rfq_label(field), field]) for field in RFQ_TEMPLATE_UPLOAD_FIELDS}
             for _, src in df.iterrows():
                 no = clean(df_val(src, col_no))
                 if not no or no.lower().startswith('example'):
@@ -6478,22 +6554,16 @@ def batch_upload_rfq():
                 for field, col in col_map.items():
                     if not col:
                         continue
-                    value = clean(df_val(src, col)) or ''
+                    value = clean(df_val(src, col))
+                    # Skip empty values – don't overwrite existing data with blanks
+                    if not value:
+                        skipped_empty += 1
+                        continue
                     for row_key in keys:
-                        if field in RFQ_DASHBOARD_ONLY_FIELDS:
-                            edit = RFQCellEdit.query.filter_by(row_key=row_key, field=field).first()
-                            if not edit:
-                                edit = RFQCellEdit(row_key=row_key, field=field)
-                                db.session.add(edit)
-                            edit.value = str(value)
-                            edit.updated_at = datetime.utcnow()
-                            set_rfq_dashboard_cell(row_key, field, str(value), dirty=False, commit=False)
-                            local_updates += 1
-                        else:
-                            base_row = row_by_key.get(row_key)
-                            if base_row:
-                                set_rfq_dashboard_cell(row_key, field, str(value), dirty=True, commit=False)
-                                sheet_updates.append({'row': base_row, 'field': field, 'value': str(value)})
+                        base_row = row_by_key.get(row_key)
+                        if base_row:
+                            set_rfq_dashboard_cell(row_key, field, str(value), dirty=True, commit=False)
+                            sheet_updates.append({'row': base_row, 'field': field, 'value': str(value)})
                         updated += 1
 
         db.session.commit()
@@ -6510,6 +6580,7 @@ def batch_upload_rfq():
             'updated': updated,
             'sheet_updates': len(sheet_updates),
             'local_updates': local_updates,
+            'skipped_empty': skipped_empty,
             'not_found': not_found,
             'files': len(uploads),
             'mode': upload_mode,
