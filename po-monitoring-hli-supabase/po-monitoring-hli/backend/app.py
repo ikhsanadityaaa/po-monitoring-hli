@@ -2638,6 +2638,26 @@ def google_sheets_access_token():
     creds.refresh(Request())
     return creds.token
 
+def _summarize_non_json_response(response):
+    """Turn a non-JSON (typically HTML) error body into a short, readable
+    diagnostic instead of dumping raw HTML/JS into the error message.
+
+    On PythonAnywhere free accounts, outbound requests to non-whitelisted
+    hosts (or requests that don't go through the platform's proxy) can be
+    intercepted and answered with an HTML block page instead of reaching
+    Google's servers at all. That HTML looks nothing like a Google API error
+    and is unreadable when shown verbatim in a toast, so detect it here.
+    """
+    text = (response.text or '').strip()
+    looks_like_html = text[:15].lower().lstrip().startswith(('<!doctype', '<html', '<head', '<script'))
+    if looks_like_html:
+        return ('Got an HTML page instead of a response from Google Sheets API — this usually means the '
+                'request never reached Google (blocked or intercepted by a network proxy/firewall before '
+                'reaching sheets.googleapis.com). If this server is on PythonAnywhere\'s free tier, outbound '
+                'requests must go through their proxy for *.googleapis.com to be reachable — check that the '
+                'HTTP_PROXY/HTTPS_PROXY environment variables are set for this web app.')
+    return text[:500]
+
 def google_sheets_request(method, spreadsheet_id, path, params=None, body=None):
     try:
         import requests
@@ -2646,7 +2666,7 @@ def google_sheets_request(method, spreadsheet_id, path, params=None, body=None):
     token = google_sheets_access_token()
     encoded_path = '/'.join(quote(str(part), safe='') for part in path)
     url = f'https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/{encoded_path}'
-    headers = {'Authorization': f'Bearer {token}'}
+    headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
     if body is not None: headers['Content-Type'] = 'application/json'
     proxies = {}
     if os.environ.get('HTTPS_PROXY'): proxies['https'] = os.environ.get('HTTPS_PROXY')
@@ -2654,26 +2674,42 @@ def google_sheets_request(method, spreadsheet_id, path, params=None, body=None):
     kwargs = {'headers': headers, 'params': params or {}, 'timeout': 60}
     if body is not None: kwargs['json'] = body
     if proxies: kwargs['proxies'] = proxies
-    response = requests.request(method, url, **kwargs)
+    try:
+        response = requests.request(method, url, **kwargs)
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f'Could not reach Google Sheets API ({method} {"/".join(path)}): {e}') from e
     if not response.ok:
-        detail = response.text[:500]
-        raise RuntimeError(f'Google Sheets API {method} {path} failed: {response.status_code} {detail}')
-    return response.json() if response.text else {}
+        detail = _summarize_non_json_response(response)
+        raise RuntimeError(f'Google Sheets API {method} {"/".join(path)} failed: {response.status_code} {detail}')
+    if not response.text:
+        return {}
+    try:
+        return response.json()
+    except ValueError as e:
+        detail = _summarize_non_json_response(response)
+        raise RuntimeError(f'Google Sheets API {method} {"/".join(path)} returned a non-JSON response (HTTP {response.status_code}): {detail}') from e
 
 def google_sheets_metadata(spreadsheet_id):
     try: import requests
     except ImportError as e: raise RuntimeError('requests is required for Google Sheets access') from e
     token = google_sheets_access_token()
     url = f'https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}'
-    headers = {'Authorization': f'Bearer {token}'}
+    headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
     proxies = {}
     if os.environ.get('HTTPS_PROXY'): proxies['https'] = os.environ.get('HTTPS_PROXY')
     if os.environ.get('HTTP_PROXY'): proxies['http'] = os.environ.get('HTTP_PROXY')
     kwargs = {'headers': headers, 'timeout': 60}
     if proxies: kwargs['proxies'] = proxies
-    response = requests.get(url, **kwargs)
-    if not response.ok: raise RuntimeError(f'Google Sheets metadata failed: {response.status_code} {response.text[:500]}')
-    return response.json()
+    try:
+        response = requests.get(url, **kwargs)
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f'Could not reach Google Sheets API (metadata): {e}') from e
+    if not response.ok:
+        raise RuntimeError(f'Google Sheets metadata failed: {response.status_code} {_summarize_non_json_response(response)}')
+    try:
+        return response.json()
+    except ValueError as e:
+        raise RuntimeError(f'Google Sheets metadata returned a non-JSON response (HTTP {response.status_code}): {_summarize_non_json_response(response)}') from e
 
 def google_sheets_values_get(spreadsheet_id, range_name, value_render_option='UNFORMATTED_VALUE'):
     return google_sheets_request('GET', spreadsheet_id, ['values', range_name], params={'valueRenderOption': value_render_option})
@@ -3577,8 +3613,18 @@ def get_dashboard_stats():
             c = int(row.count or 0); item['monthly'][month] = c; item['total'] += c; item['amount'] += float(row.amount or 0)
         status_months = sorted(status_months, key=lambda m: status_month_sort.get(m, m))
         so_status_monthly = sorted([{'name': name, 'monthly': data['monthly'], 'total': data['total'], 'percentage': round((data['total'] / total_open_for_pct) * 100, 1), 'amount': round(data['amount'], 2)} for name, data in status_acc.items()], key=lambda x: x['total'], reverse=True)
+        # "Pending Item Registration" must mirror the EXACT same definition used by
+        # the Item Registration page's "Total Pending Regist." KPI: status not in the
+        # excluded KPI statuses AND prod_id is empty/blank/'-' (i.e. not yet registered
+        # with a Product ID). Previously this only applied the status filter, so rows
+        # that already had a Product ID (and are therefore NOT pending) were still
+        # counted in these charts.
         item_reg_base_q = apply_item_registration_kpi_status_filter(db.session.query(ItemRegistration))
+        item_reg_base_q = item_reg_base_q.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-'))
         if clients: item_reg_base_q = item_reg_base_q.filter(ItemRegistration.client_name.in_(clients))
+        # These charts use the Date Filter control same as the rest of the dashboard,
+        # but Item Registration rows are dated by req_date, not so_create_date.
+        item_reg_base_q = apply_item_registration_date_filter(item_reg_base_q, date_year, date_from, date_to)
         def item_registration_distribution(column, limit=None):
             label_expr = func.coalesce(func.nullif(func.trim(column), ''), '(Kosong)')
             rows = item_reg_base_q.with_entities(label_expr.label('name'), func.count(ItemRegistration.id).label('value')).group_by(label_expr).order_by(func.count(ItemRegistration.id).desc(), label_expr.asc())
@@ -3586,6 +3632,39 @@ def get_dashboard_stats():
             return [{'name': name or '(Kosong)', 'value': int(value or 0)} for name, value in rows.all()]
         item_registration_proc_status = item_registration_distribution(ItemRegistration.proc_status)
         item_registration_clients = item_registration_distribution(ItemRegistration.client_name, limit=10)
+        # PIC pie chart — PIC is resolved dynamically (Master Client PIC / Bid Type PIC /
+        # Category PIC overrides), same as the per-PIC KPI cards on the Item Registration
+        # page, so it can't be a simple SQL GROUP BY on a stored column. Build the
+        # override caches once up front (same pattern as apply_item_registration_pic_filter)
+        # instead of resolving per-row, to avoid N+1 queries on large tables.
+        _ir_client_pic_cache = {normalize_client_id(m.client_id): clean(m.pic_name) for m in db.session.query(MasterClientPIC).all() if clean(m.pic_name)}
+        _ir_bid_type_pic_cache = {clean(m.bid_type): clean(m.pic_name) for m in db.session.query(MasterBidTypePIC).all() if clean(m.pic_name)}
+        _ir_cat_by_id, _ir_cat_by_name = master_pic_maps()
+        item_reg_pic_counts = {}
+        pic_rows = item_reg_base_q.with_entities(
+            ItemRegistration.client_id, ItemRegistration.bid_except_type,
+            ItemRegistration.category_id, ItemRegistration.category,
+            ItemRegistration.pic, ItemRegistration.client_name
+        ).all()
+        for cid_val, bt_val, cat_id_val, cat_val, pic_val, client_val in pic_rows:
+            pic = None
+            cid = normalize_client_id(cid_val) if cid_val else ''
+            if cid and cid in _ir_client_pic_cache: pic = _ir_client_pic_cache[cid]
+            if not pic and bt_val:
+                bt = clean(bt_val)
+                if bt and bt in _ir_bid_type_pic_cache: pic = _ir_bid_type_pic_cache[bt]
+            if not pic:
+                cat_id = normalize_category_id(cat_id_val)
+                cat_name = normalize_category_name(cat_val)
+                if cat_id and cat_id in _ir_cat_by_id: pic = _ir_cat_by_id[cat_id]
+                elif cat_name and cat_name in _ir_cat_by_name: pic = _ir_cat_by_name[cat_name]
+            pic = pic or clean(pic_val) or ''
+            pic = canonical_pending_pic(pic, client_val)
+            item_reg_pic_counts[pic] = item_reg_pic_counts.get(pic, 0) + 1
+        item_registration_pics = sorted(
+            [{'name': name, 'value': value} for name, value in item_reg_pic_counts.items()],
+            key=lambda x: (-x['value'], x['name'])
+        )
         option_q = base_open_q(apply_client=False, apply_pic=False)
         client_options = [r[0] for r in option_q.with_entities(SOData.operation_unit_name).filter(SOData.operation_unit_name.isnot(None), SOData.operation_unit_name != '').distinct().order_by(SOData.operation_unit_name).all()]
         raw_pic_options = [r[0] for r in option_q.with_entities(SOData.pic_name).filter(SOData.pic_name.isnot(None), SOData.pic_name != '').distinct().order_by(SOData.pic_name).all()]
@@ -3647,6 +3726,7 @@ def get_dashboard_stats():
             'total_so_count': total_so_count, 'total_open_so_amount': total_open_so_amount, 'monthly_trend': monthly_trend,
             'top_vendors': top_vendors, 'top_op_units': top_op_units, 'so_status': so_status, 'so_status_monthly': so_status_monthly,
             'status_months': status_months, 'item_registration_proc_status': item_registration_proc_status, 'item_registration_clients': item_registration_clients,
+            'item_registration_pics': item_registration_pics,
             'filters': {'clients': client_options, 'pics': pic_options}, 'last_updated': utc_isoformat(last_upload), 'last_updated_po': utc_isoformat(last_po_upload),
             'last_updated_smro': utc_isoformat(last_so_upload), 'last_updated_item_registration': utc_isoformat(last_item_reg_upload), 'last_updated_rfq': utc_isoformat(rfq_fetched_at),
             'so_covered_months': so_covered_months, 'so_updated_months_today': so_updated_months_today, 'so_updated_months_today_date': wib_today.isoformat(),
@@ -8721,6 +8801,8 @@ def get_dashboard_status_detail():
         date_year, date_from, date_to = parse_so_date_args()
         clients = selected_clients()
         pics = selected_pics()
+        is_sqlite = 'sqlite' in app.config.get('SQLALCHEMY_DATABASE_URI', '')
+        month_expr = func.strftime('%Y-%m', SOData.so_create_date) if is_sqlite else func.to_char(func.date_trunc('month', SOData.so_create_date), 'YYYY-MM')
 
         def so_q(*extra_filters):
             q = db.session.query(SOData).filter(*extra_filters) if extra_filters else db.session.query(SOData)
@@ -8730,15 +8812,33 @@ def get_dashboard_status_detail():
 
         if status:
             q = so_q(open_so_filter(), so_countable_sql_filter())
-            q = q.filter(func.trim(func.coalesce(SOData.so_status, '')) == status)
+            if status == 'Unknown':
+                # 'Unknown' is a display fallback (see status_label in get_dashboard_stats)
+                # for rows where so_status is NULL or blank — match that same condition
+                # here instead of comparing against the literal string 'Unknown'.
+                q = q.filter(func.trim(func.coalesce(SOData.so_status, '')) == '')
+            else:
+                q = q.filter(func.trim(func.coalesce(SOData.so_status, '')) == status)
         else:
             q = so_q(open_so_filter(), so_countable_sql_filter())
         if month:
-            try:
-                month_date = datetime.strptime(month, '%b %Y')
-                q = q.filter(func.strftime('%Y-%m', SOData.so_create_date) == month_date.strftime('%Y-%m'))
-            except Exception:
-                pass
+            # The frontend sends the raw aggregation key, which is 'YYYY-MM'
+            # (see month_expr / status_months in get_dashboard_stats) — NOT a
+            # 'Mon YYYY' label. Match that format directly. Keep a fallback
+            # parse for older links/bookmarks that may still use 'Mon YYYY'
+            # or 'Mon YY' so this stays backward compatible.
+            month_key = None
+            if re.match(r'^\d{4}-\d{2}$', month):
+                month_key = month
+            else:
+                for fmt in ('%b %Y', '%b %y'):
+                    try:
+                        month_key = datetime.strptime(month, fmt).strftime('%Y-%m')
+                        break
+                    except ValueError:
+                        continue
+            if month_key:
+                q = q.filter(month_expr == month_key)
 
         rows = q.all()
         result = []
@@ -9252,6 +9352,46 @@ def ping():
         return jsonify({'ok': True, 'db_checked': True, 'total_so': total_so, 'ts': datetime.utcnow().isoformat()})
     except Exception as e:
         return jsonify({'ok': False, 'db_checked': True, 'error': str(e)}), 200
+
+
+@app.route('/api/diagnostics/google-sheets', methods=['GET'])
+def diagnostics_google_sheets():
+    """Lightweight, secret-safe diagnostic for Google Sheets sync failures.
+    Checks: service-account credential presence/parse, token refresh, proxy
+    env vars, and one real metadata call against the RFQ sheet — without ever
+    echoing the credential, token, or proxy URL contents back to the caller.
+    """
+    result = {'credential_configured': False, 'token_ok': False, 'proxy_env': {}, 'sheets_api_reachable': False}
+    result['proxy_env'] = {
+        'HTTPS_PROXY': bool(os.environ.get('HTTPS_PROXY')),
+        'HTTP_PROXY': bool(os.environ.get('HTTP_PROXY')),
+        'https_proxy': bool(os.environ.get('https_proxy')),
+        'http_proxy': bool(os.environ.get('http_proxy')),
+    }
+    try:
+        credentials_info = rfq_sheet_sync_credentials()
+        result['credential_configured'] = bool(credentials_info)
+        if not credentials_info:
+            result['error'] = 'No GOOGLE_SERVICE_ACCOUNT_JSON / GOOGLE_SERVICE_ACCOUNT_FILE configured'
+            return jsonify(result), 200
+        result['service_account_email'] = credentials_info.get('client_email')
+    except Exception as e:
+        result['error'] = f'Failed to load/parse credential: {e}'
+        return jsonify(result), 200
+    try:
+        google_sheets_access_token()
+        result['token_ok'] = True
+    except Exception as e:
+        result['error'] = f'Failed to obtain access token: {e}'
+        return jsonify(result), 200
+    try:
+        meta = google_sheets_metadata(RFQ_SHEET_ID)
+        result['sheets_api_reachable'] = True
+        result['rfq_sheet_title'] = (meta.get('properties') or {}).get('title')
+    except Exception as e:
+        result['error'] = f'Metadata call to RFQ sheet failed: {e}'
+        return jsonify(result), 200
+    return jsonify(result), 200
 
 
 FRONTEND_DIST_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'frontend', 'dist'))
