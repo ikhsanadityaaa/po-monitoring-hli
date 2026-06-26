@@ -8893,19 +8893,19 @@ def download_master_pic_template():
 
         vendor_pics = db.session.query(MasterVendorPIC).order_by(MasterVendorPIC.vendor_id).all()
         for m in vendor_pics:
-            vid = clean(m.vendor_id) or ''
+            vid = normalize_vendor_id(m.vendor_id) or ''  # FIX: normalize strips .0 suffix
             vname = clean(m.vendor_name) or ''
             pic = clean(m.pic_name) or ''
             if vid or vname:
                 ws3.append([vid, vname, pic])
         # Also include vendors already referenced in SO_data that don't yet
         # have a MasterVendorPIC entry — gives the user a complete list.
-        existing_vendor_ids = {clean(m.vendor_id) for m in vendor_pics if clean(m.vendor_id)}
+        existing_vendor_ids = {normalize_vendor_id(m.vendor_id) for m in vendor_pics if normalize_vendor_id(m.vendor_id)}  # FIX: normalize
         so_vendors = db.session.query(SOData.vendor_id, SOData.vendor_name).filter(
             SOData.vendor_id.isnot(None), SOData.vendor_id != ''
         ).distinct().all()
         for vid_raw, vname in so_vendors:
-            vid = clean(vid_raw) or ''
+            vid = normalize_vendor_id(vid_raw) or ''  # FIX: normalize strips .0 suffix, prevents duplicates
             if vid and vid not in existing_vendor_ids:
                 ws3.append([vid, clean(vname) or '', ''])
                 existing_vendor_ids.add(vid)
@@ -8947,6 +8947,54 @@ def download_master_pic_template():
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  ADMIN: ONE-TIME CLEANUP
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/admin/fix-vendor-pic-ids', methods=['POST'])
+def fix_vendor_pic_ids():
+    """One-time cleanup: normalize vendor_id di MasterVendorPIC yang ada suffix .0
+    Contoh: "443395.0" → "443395". Duplikat setelah normalisasi dihapus (yang lebih
+    lama dihapus, yang lebih baru dipertahankan).
+    Panggil sekali via: POST /api/admin/fix-vendor-pic-ids
+    """
+    try:
+        fixed = 0
+        dupes = 0
+        all_rows = db.session.query(MasterVendorPIC).order_by(MasterVendorPIC.updated_at.desc()).all()
+        seen = {}
+        to_delete = []
+        for row in all_rows:
+            norm = normalize_vendor_id(row.vendor_id)
+            if not norm:
+                continue
+            if norm in seen:
+                # duplikat setelah normalisasi → tandai untuk dihapus (yang lebih lama)
+                to_delete.append(row)
+                dupes += 1
+            else:
+                if row.vendor_id != norm:
+                    row.vendor_id = norm
+                    row.updated_at = datetime.utcnow()
+                    fixed += 1
+                seen[norm] = row
+        for row in to_delete:
+            db.session.delete(row)
+        db.session.commit()
+        invalidate_master_pic_cache()
+        clear_runtime_caches()
+        return jsonify({
+            'ok': True,
+            'fixed': fixed,
+            'duplicates_removed': dupes,
+            'message': f'Normalized {fixed} vendor_id(s), removed {dupes} duplicate(s).'
+        })
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 
 # ═══════════════════════════════════════════════════════════════════════════
