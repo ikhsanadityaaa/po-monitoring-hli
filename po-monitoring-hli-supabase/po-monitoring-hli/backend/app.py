@@ -1788,21 +1788,52 @@ def import_row_identity_detail_fingerprint(row):
     return fingerprint if any(parts) else None
 
 def import_row_identity_payload(row):
+    # FIX V12: Primary identity key kini mengikutkan po_sementara + req_dlv_date
+    # (dari source_req_dlv_date, yaitu kolom K sheet asli — SEBELUM reschedule
+    # diterapkan ke req_dlv_date dashboard).
+    #
+    # Masalah sebelumnya:
+    #   Key = {po_yupi, item_yupi} — tidak membedakan 2 baris yang punya
+    #   po_yupi & item_yupi sama tapi req_dlv_date beda (mis. SVOI...-01 vs -02,
+    #   atau 1 PO yang belum di-reschedule vs yang sudah).
+    #   Akibatnya:
+    #   1. Saat sync, 2 baris sheet di-match ke 1 row DB yang sama → salah satu
+    #      baris tidak tersimpan.
+    #   2. Kalau req_dlv_date di dashboard di-update karena reschedule, hash
+    #      primary berubah → baris baru di-insert duplikat.
+    #
+    # Solusi: sertakan po_sementara + source_req_dlv_date dalam primary key.
+    # source_req_dlv_date = kolom K sheet asli = tanggal ASLI sebelum reschedule,
+    # sehingga reschedule (yg hanya mengubah req_dlv_date dashboard, bukan kolom K)
+    # TIDAK mengubah identity hash.
     po_yupi = (import_nonblank(row.get('po_yupi')) or import_nonblank(row.get('yupi_po')) or '').strip().upper()
     item_yupi = (import_nonblank(row.get('item_yupi')) or '').strip().upper()
     po_sementara = (import_nonblank(row.get('po_sementara')) or '').strip().upper()
+    # Pakai source_req_dlv_date (kolom K asli) sebagai bagian identity.
+    # Fallback ke req_dlv_date kalau source_req_dlv_date kosong.
+    req_dlv = (import_nonblank(row.get('source_req_dlv_date')) or import_nonblank(row.get('req_dlv_date')) or '').strip().upper()
     detail_fp = import_row_identity_detail_fingerprint(row)
-    if po_yupi and item_yupi: return {'po_yupi': po_yupi, 'item_yupi': item_yupi}
-    if po_yupi: return {'po_yupi': po_yupi, 'item_yupi': '(none)', 'detail': detail_fp or '(blank)'}
-    if po_sementara and item_yupi: return {'po_sementara': po_sementara, 'item_yupi': item_yupi}
-    if po_sementara: return {'po_sementara': po_sementara, 'item_yupi': '(none)', 'detail': detail_fp or '(blank)'}
+    if po_yupi and item_yupi and po_sementara:
+        return {'po_yupi': po_yupi, 'item_yupi': item_yupi, 'po_sementara': po_sementara, 'req_dlv_date': req_dlv}
+    if po_yupi and item_yupi:
+        return {'po_yupi': po_yupi, 'item_yupi': item_yupi, 'req_dlv_date': req_dlv}
+    if po_yupi:
+        return {'po_yupi': po_yupi, 'item_yupi': '(none)', 'req_dlv_date': req_dlv, 'detail': detail_fp or '(blank)'}
+    if po_sementara and item_yupi:
+        return {'po_sementara': po_sementara, 'item_yupi': item_yupi, 'req_dlv_date': req_dlv}
+    if po_sementara:
+        return {'po_sementara': po_sementara, 'item_yupi': '(none)', 'req_dlv_date': req_dlv, 'detail': detail_fp or '(blank)'}
     return {'source': clean(row.get('_source_key')) or '', 'sheet_row': str(row.get('_sheet_row') or '')}
 
 def import_row_identity_secondary(row):
+    # FIX V12: Secondary identity (fallback lookup) juga sertakan req_dlv_date
+    # supaya 2 baris dengan po_sementara + item_yupi sama tapi tanggal beda
+    # tidak di-merge ke 1 row yang sama lewat jalur secondary lookup.
     po_sementara = (import_nonblank(row.get('po_sementara')) or '').strip().upper()
     item_yupi = (import_nonblank(row.get('item_yupi')) or '').strip().upper()
+    req_dlv = (import_nonblank(row.get('source_req_dlv_date')) or import_nonblank(row.get('req_dlv_date')) or '').strip().upper()
     if not po_sementara: return None
-    return {'po_sementara': po_sementara, 'item_yupi': item_yupi or '(none)'}
+    return {'po_sementara': po_sementara, 'item_yupi': item_yupi or '(none)', 'req_dlv_date': req_dlv}
 
 def _identity_to_uid(payload):
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
@@ -2036,12 +2067,51 @@ def sync_import_tracker_to_dashboard(columns=None):
         for key in keys: existing_by_key.setdefault(key, row)
     return {'rows': len(tracker_rows), 'seen': seen, 'added': added, 'skipped': skipped}
 
+def _migrate_import_source_uid_v12():
+    """FIX V12 Migration: Re-compute source_uid semua row import yang ada di DB
+    supaya hash-nya menggunakan skema baru (po_yupi + item_yupi + po_sementara +
+    req_dlv_date). Row yang masih pakai hash skema lama (tanpa req_dlv_date) akan
+    gagal di-match saat copy sheet → dianggap baru → duplikat.
+
+    Fungsi ini dipanggil SEKALI di awal sync_import_sheet_to_dashboard.
+    Setelah semua row punya source_uid baru, copy sheet berjalan normal.
+    Idempoten: aman dipanggil berkali-kali (re-hash tidak mengubah hasil kalau
+    skema sudah baru).
+    """
+    try:
+        all_rows = ImportDashboardRow.query.filter(
+            ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
+        ).all()
+        migrated = 0
+        for row in all_rows:
+            try:
+                data = json.loads(row.data_json or '{}')
+            except Exception:
+                data = {}
+            new_uid = import_row_source_uid(data, [])
+            if row.source_uid != new_uid:
+                row.source_uid = new_uid
+                migrated += 1
+        if migrated:
+            db.session.commit()
+            print(f"[_migrate_import_source_uid_v12] Re-hashed {migrated} row(s) ke skema V12 (po_sementara + req_dlv_date dalam key)")
+    except Exception as exc:
+        try: db.session.rollback()
+        except: pass
+        print(f"[_migrate_import_source_uid_v12] Gagal: {exc}")
+
 def sync_import_sheet_to_dashboard():
     purged_legacy = 0
     sheet_rows = []
     columns = import_layout_columns(force=True)
     filter_vendors, vendor_source = [], 'none'
     vendor_count = len(import_uploaded_vendor_names())
+
+    # FIX V12: Jalankan migrasi hash sebelum apapun, supaya row lama yang
+    # punya source_uid skema lama (tanpa req_dlv_date) di-update terlebih
+    # dahulu dan bisa di-match dengan benar di loop upsert di bawah.
+    _migrate_import_source_uid_v12()
+
     try:
         stale = ImportDashboardRow.query.filter(ImportDashboardRow.source_key.in_(_LEGACY_IMPORT_SOURCE_KEYS)).all()
         purged_legacy = len(stale)
