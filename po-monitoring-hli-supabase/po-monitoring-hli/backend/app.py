@@ -2355,141 +2355,152 @@ def sync_import_sheet_to_dashboard():
             print(f"[sync_import_sheet_to_dashboard] Orphan purge gagal: {orphan_exc}")
 
 
-    # ── EXCESS ROW PURGE: Bandingkan jumlah row di DB vs sheet per business group.
+    # ── POST-SYNC CLEANUP: Sesuaikan jumlah row di DB dengan jumlah baris di sheet.
     #
-    # "Business group" = (po_yupi, item_yupi, po_sementara) — identitas PO tanpa
-    # mempertimbangkan tanggal, supaya kita tahu berapa banyak baris yang SEHARUSNYA
-    # ada untuk satu kombinasi PO + item + nomor sementara.
+    # Masalah: karena sheet_rows bisa datang dari 2 sumber (layout sheet + source sheet),
+    # row yang sama bisa masuk dua kali ke loop upsert → DB menumpuk lebih banyak row
+    # dari yang seharusnya. Rescue logic ini membandingkan jumlah row di DB vs jumlah
+    # unik di sheet per "business group" (po_yupi + item_yupi) lalu membuang kelebihan.
     #
-    # Contoh: sheet punya 2 baris untuk group (410100160, V102092012, SVOI...-01)
-    # tapi di dashboard ada 4 baris → 2 kelebihan. Kita hapus 2 yang paling sedikit
-    # punya data user-input (user richness score terendah).
-    #
-    # ATURAN TIDAK BOLEH DILANGGAR:
-    # - Row yang "user-rich" (ada isian di field IMPORT_USER_LOCAL_ONLY_FIELDS seperti
-    #   incoterm, forwarder, bl_number, status, etd, eta, import_remarks, dll)
-    #   TIDAK BOLEH dihapus kalau masih ada row lain di group yang bisa dikorbankan.
-    # - Di antara row dengan score sama, pertahankan row paling lama (id terkecil).
-    # - Kalau semua row di group punya score > 0, tetap hapus yang paling rendah
-    #   scorenya — kecuali group dari sheet memang punya jumlah sebanyak itu.
-    # - Hanya hapus row dari vendor yang ada di uploaded_vendor_set (safety guard).
-    #
-    # FASE 1: Hapus dulu yang 100% identical (full fingerprint sama) — ini aman.
-    # FASE 2: Excess count purge berdasarkan jumlah baris di sheet.
+    # PRINSIP UTAMA:
+    # 1. "Expected count" = jumlah baris UNIK di sheet untuk group ini
+    #    (deduplikasi berdasarkan source fingerprint dari IMPORT_SOURCE_MANAGED_FIELDS).
+    # 2. Kalau DB punya LEBIH dari expected → hapus kelebihan, dengan prioritas:
+    #    - Pertahankan row dengan USER RICHNESS tertinggi (paling banyak isian user)
+    #    - Tiebreak: pertahankan row paling lama (id terkecil)
+    # 3. Kalau DB punya KURANG dari expected → row baru sudah di-insert di upsert loop
+    #    di atas, jadi tidak perlu action tambahan di sini.
+    # 4. JANGAN hapus row dari vendor yang tidak di uploaded_vendor_set.
     duplicates_cleaned = 0
     excess_purged = 0
     try:
         all_db_rows = ImportDashboardRow.query.filter(
             ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
-        ).all()
+        ).order_by(ImportDashboardRow.id.asc()).all()
 
-        # ── FASE 1: Hapus yang 100% identical (full data fingerprint sama)
-        by_fingerprint = {}
+        # Cache semua parsed data sekaligus
+        db_row_data = {}
         for db_row in all_db_rows:
-            try: db_data = json.loads(db_row.data_json or '{}')
-            except: db_data = {}
-            biz_fields = {k: v for k, v in db_data.items()
-                          if k in IMPORT_LOCAL_EDIT_FIELDS and not import_blankish(v)}
-            fingerprint = json.dumps(biz_fields, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
-            by_fingerprint.setdefault(fingerprint, []).append(db_row)
+            try: db_row_data[db_row.id] = json.loads(db_row.data_json or '{}')
+            except: db_row_data[db_row.id] = {}
 
-        identical_losers = set()
-        for fingerprint, dup_rows in by_fingerprint.items():
-            if len(dup_rows) <= 1: continue
-            dup_rows.sort(key=lambda x: x.id)
-            for loser in dup_rows[1:]:
-                db.session.delete(loser)
-                identical_losers.add(loser.id)
-                duplicates_cleaned += 1
+        # User richness = jumlah field user-only yang terisi (makin banyak = makin berharga)
+        def _user_richness(data):
+            return sum(1 for f in IMPORT_USER_LOCAL_ONLY_FIELDS if not import_blankish(data.get(f)))
 
-        if duplicates_cleaned > 0:
-            db.session.commit()
-            all_db_rows = [r for r in all_db_rows if r.id not in identical_losers]
+        # Source fingerprint = hash dari field-field yang berasal dari sheet (bukan user-input).
+        # Dua row dengan source fingerprint sama = berasal dari baris sheet yang SAMA.
+        def _src_fingerprint(data):
+            src = {k: (data.get(k) or '').strip().upper()
+                   for k in IMPORT_SOURCE_MANAGED_FIELDS if not import_blankish(data.get(k))}
+            return json.dumps(src, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
 
-        # ── FASE 2: Excess count purge — bandingkan jumlah DB vs sheet per group.
-        #
-        # Hitung jumlah baris di sheet per business group key.
-        # group_key = (po_yupi_norm, item_yupi_norm, po_sementara_norm)
+        # Business group key = (po_yupi, item_yupi).
+        # Ini yang menentukan "berapa baris seharusnya ada untuk PO + item ini".
+        # TIDAK menyertakan req_dlv_date/po_sementara supaya semua varian tanggal
+        # dari PO yang sama masuk ke group yang sama dan bisa di-compare sebagai satu kesatuan.
         def _biz_group_key(data):
             po = (import_nonblank(data.get('po_yupi')) or import_nonblank(data.get('yupi_po')) or '').strip().upper()
             item = (import_nonblank(data.get('item_yupi')) or '').strip().upper()
             pos = (import_nonblank(data.get('po_sementara')) or '').strip().upper()
-            return (po, item, pos) if (po or pos) else None
+            if po: return (po, item)
+            if pos: return (pos, item)
+            return None
 
-        # Hitung expected count dari sheet_rows (sudah dibaca di atas)
-        sheet_group_count = {}
+        # ── Hitung expected count dari sheet_rows.
+        #
+        # sheet_rows bisa berisi duplikat karena datang dari 2 sumber (layout + source).
+        # Deduplikasi dengan source fingerprint: 2 sheet rows yang punya fingerprint sama
+        # = baris sheet yang sama, hanya dihitung 1x.
+        seen_src_fps = set()
+        sheet_group_count = {}  # biz_group_key → jumlah baris unik di sheet
         for sr in sheet_rows:
             sp = import_row_payload(sr, columns)
+            fp = _src_fingerprint(sp)
+            if fp in seen_src_fps:
+                continue
+            seen_src_fps.add(fp)
             gk = _biz_group_key(sp)
-            if gk: sheet_group_count[gk] = sheet_group_count.get(gk, 0) + 1
+            if gk:
+                sheet_group_count[gk] = sheet_group_count.get(gk, 0) + 1
 
-        # Hitung user richness score = jumlah IMPORT_USER_LOCAL_ONLY_FIELDS yang terisi
-        def _user_richness(data):
-            return sum(1 for f in IMPORT_USER_LOCAL_ONLY_FIELDS
-                       if not import_blankish(data.get(f)))
-
-        # Group DB rows per business group
-        db_by_group = {}
-        db_row_data = {}  # cache parsed data
+        # ── Group DB rows per business group, juga deduplikasi per source fingerprint.
+        #
+        # Kalau 2 DB rows punya source fingerprint sama → salah satu pasti duplikat.
+        # Di sini kita kumpulkan semua DB rows per group dan per src_fp supaya
+        # FASE 1 bisa hapus yang benar-benar identik dari sisi source data.
+        db_by_group = {}           # biz_group_key → [db_row, ...]
+        db_by_src_fp = {}          # src_fingerprint → [db_row, ...]
         for db_row in all_db_rows:
-            try: db_data = json.loads(db_row.data_json or '{}')
-            except: db_data = {}
-            db_row_data[db_row.id] = db_data
-            gk = _biz_group_key(db_data)
+            data = db_row_data.get(db_row.id, {})
+            gk = _biz_group_key(data)
             if gk:
                 db_by_group.setdefault(gk, []).append(db_row)
+            fp = _src_fingerprint(data)
+            db_by_src_fp.setdefault(fp, []).append(db_row)
 
-        excess_loser_ids = set()
-        for gk, db_rows_in_group in db_by_group.items():
-            expected = sheet_group_count.get(gk, 0)
-            if expected == 0:
-                # Tidak ada di sheet sama sekali → biarkan orphan purge yang handle
+        to_delete = set()  # set of db_row.id yang akan dihapus
+
+        # ── FASE 1: Hapus DB rows yang punya source fingerprint sama (= baris sheet sama).
+        #
+        # Di antara rows dengan fp sama, pertahankan yang paling banyak user-data-nya
+        # (richness tertinggi). Tiebreak: id terkecil.
+        for fp, fp_rows in db_by_src_fp.items():
+            if len(fp_rows) <= 1:
                 continue
-            excess = len(db_rows_in_group) - expected
-            if excess <= 0:
-                continue  # Jumlah pas atau kurang — tidak perlu hapus
+            fp_rows.sort(key=lambda r: (-_user_richness(db_row_data.get(r.id, {})), r.id))
+            for loser in fp_rows[1:]:
+                if loser.id not in to_delete:
+                    to_delete.add(loser.id)
+                    duplicates_cleaned += 1
+                    print(f"[sync] FASE1 src-identical purge: id={loser.id} "
+                          f"richness={_user_richness(db_row_data.get(loser.id, {}))} dihapus")
 
-            # Urutkan: richness DESCENDING (paling banyak user-data duluan),
-            # lalu id ASCENDING (paling lama = paling stabil) sebagai tiebreak.
-            # Yang akan dihapus = ekor list (richness rendah, id besar).
-            db_rows_in_group.sort(
-                key=lambda r: (-_user_richness(db_row_data.get(r.id, {})), r.id)
-            )
-            losers = db_rows_in_group[expected:]  # sisanya = kelebihan
+        # ── FASE 2: Excess count purge — setelah FASE 1, cek masih ada kelebihan?
+        #
+        # Rekonstruksi db_by_group tanpa row yang sudah ditandai untuk dihapus di FASE 1.
+        for gk, db_rows_in_group in db_by_group.items():
+            # Skip row yang sudah ditandai hapus di FASE 1
+            surviving = [r for r in db_rows_in_group if r.id not in to_delete]
+            expected = sheet_group_count.get(gk, 0)
+            if expected == 0 or len(surviving) <= expected:
+                continue  # pas atau kurang — tidak perlu hapus lagi
+
+            # Masih kelebihan setelah FASE 1 → hapus yang paling rendah richness-nya
+            surviving.sort(key=lambda r: (-_user_richness(db_row_data.get(r.id, {})), r.id))
+            losers = surviving[expected:]
             for loser in losers:
-                # Safety: jangan hapus row dari vendor yang tidak di-upload
+                if loser.id in to_delete:
+                    continue
                 loser_data = db_row_data.get(loser.id, {})
                 loser_vendor = (import_nonblank(loser_data.get('vendor')) or
                                 import_nonblank(loser_data.get('vendor_name')) or
                                 import_nonblank(loser.vendor_name))
                 if uploaded_vendor_set and loser_vendor:
                     if not import_vendor_match(loser_vendor, uploaded_vendor_set):
-                        continue  # skip — bukan vendor yang kita urus
-                db.session.delete(loser)
-                excess_loser_ids.add(loser.id)
+                        continue
+                to_delete.add(loser.id)
                 excess_purged += 1
-                print(f"[sync_import_sheet_to_dashboard] Excess purge: row id={loser.id} "
-                      f"group={gk} richness={_user_richness(loser_data)} dihapus "
-                      f"(expected={expected}, had={len(db_rows_in_group)})")
+                print(f"[sync] FASE2 excess purge: id={loser.id} group={gk} "
+                      f"richness={_user_richness(loser_data)} dihapus "
+                      f"(expected={expected}, surviving={len(surviving)})")
 
-        if excess_purged > 0:
+        # ── Eksekusi delete
+        if to_delete:
+            rows_to_del = [r for r in all_db_rows if r.id in to_delete]
+            for r in rows_to_del:
+                db.session.delete(r)
             db.session.commit()
             db.session.execute(text('PRAGMA wal_checkpoint(TRUNCATE)'))
             db.session.commit()
             clear_runtime_caches()
-            print(f"[sync_import_sheet_to_dashboard] Excess purge: {excess_purged} row kelebihan dihapus")
-        elif duplicates_cleaned > 0:
-            db.session.execute(text('PRAGMA wal_checkpoint(TRUNCATE)'))
-            db.session.commit()
-            clear_runtime_caches()
+            print(f"[sync_import_sheet_to_dashboard] Cleanup selesai: "
+                  f"{duplicates_cleaned} src-identical + {excess_purged} excess dihapus")
 
-        if duplicates_cleaned > 0 or excess_purged > 0:
-            print(f"[sync_import_sheet_to_dashboard] Auto-cleanup selesai: "
-                  f"{duplicates_cleaned} identical + {excess_purged} excess dihapus")
     except Exception as cleanup_exc:
         try: db.session.rollback()
         except: pass
-        print(f"[sync_import_sheet_to_dashboard] Auto-cleanup gagal: {cleanup_exc}")
+        print(f"[sync_import_sheet_to_dashboard] Cleanup gagal: {cleanup_exc}")
 
     return {
         'added': added, 'updated': updated, 'seen': seen,
