@@ -1827,7 +1827,12 @@ def merge_import_existing_payload(existing_payload, sheet_payload):
         old_value = existing_payload.get(field)
         new_value = merged.get(field)
         if field in IMPORT_USER_LOCAL_ONLY_FIELDS and row_exists_in_db:
-            merged[field] = old_value; continue
+            # Hanya restore old_value kalau memang ada isinya.
+            # Kalau old_value None/blank (field belum pernah diisi user),
+            # biarkan new_value dari sheet (jangan overwrite dengan None).
+            if not import_blankish(old_value):
+                merged[field] = old_value
+            continue
         if field in IMPORT_SOURCE_MANAGED_FIELDS:
             # Behavior normal: kalau sheet ada nilai, pakai sheet value
             if not import_blankish(new_value): continue
@@ -2222,7 +2227,65 @@ def sync_import_sheet_to_dashboard():
     except: pass
     clear_runtime_caches()
 
-    # FIX V10: Auto-cleanup duplicate rows SETELAH copy sheet.
+    # ORPHAN PURGE: Hapus row dari vendor yang ada di uploaded_vendor_set yang
+    # TIDAK ditemukan di sheet saat sync ini (last_seen_at tidak di-update = tidak ada di sheet).
+    # Menangani kasus row lama yang tertinggal setelah sheet diubah (reschedule dihapus,
+    # item tidak ada lagi di sheet, dll).
+    #
+    # Safety guards:
+    # 1. Hanya berlaku kalau ada uploaded_vendor_set (vendor filter aktif)
+    # 2. Hanya hapus row dari vendor yang ADA di uploaded_vendor_set
+    # 3. Hanya kalau sheet_rows > 0 (bukan gagal baca sheet -> sheet kosong palsu)
+    # 4. Toleransi 5 detik untuk menghindari false positive akibat clock skew
+    purged_orphan = 0
+    if uploaded_vendor_set and len(sheet_rows) > 0:
+        try:
+            sync_threshold = now - timedelta(seconds=5)
+            # Kumpulkan set row id yang di-touch di sync ini (last_seen_at >= threshold)
+            touched_ids = {
+                ex_row.id for ex_row in existing_rows
+                if ex_row.last_seen_at and ex_row.last_seen_at >= sync_threshold
+            }
+            # Tambahkan juga row baru yang baru saja di-insert (ada di existing_by_uid)
+            for uid_rows in existing_by_uid.values():
+                for r in uid_rows:
+                    if r.id:
+                        touched_ids.add(r.id)
+            all_vendor_rows = ImportDashboardRow.query.filter(
+                ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
+            ).all()
+            orphan_rows = []
+            for ex_row in all_vendor_rows:
+                # Skip row yang di-touch di sync ini
+                if ex_row.id in touched_ids:
+                    continue
+                # Skip row yang last_seen_at NULL (row lama sebelum fitur ini ada —
+                # tidak bisa dipastikan apakah ada di sheet atau tidak, jadi biarkan)
+                if ex_row.last_seen_at is None:
+                    continue
+                # Hanya purge row dari vendor yang ada di uploaded_vendor_set
+                try: ex_data = json.loads(ex_row.data_json or '{}')
+                except: ex_data = {}
+                ex_vendor = import_nonblank(ex_data.get('vendor')) or import_nonblank(ex_data.get('vendor_name')) or import_nonblank(ex_row.vendor_name)
+                if not ex_vendor:
+                    continue
+                if not import_vendor_match(ex_vendor, uploaded_vendor_set):
+                    continue
+                orphan_rows.append(ex_row)
+            for row in orphan_rows:
+                db.session.delete(row)
+                purged_orphan += 1
+            if purged_orphan > 0:
+                db.session.commit()
+                clear_runtime_caches()
+                print(f"[sync_import_sheet_to_dashboard] Orphan purge: {purged_orphan} row tidak ada di sheet dihapus")
+        except Exception as orphan_exc:
+            try: db.session.rollback()
+            except: pass
+            print(f"[sync_import_sheet_to_dashboard] Orphan purge gagal: {orphan_exc}")
+
+
+    # Auto-cleanup duplicate rows SETELAH copy sheet.
     # HANYA hapus row yang 100% IDENTICAL (semua field sama, termasuk req_dlv_date).
     # JANGAN hapus row hanya karena po_yupi + item_yupi sama — 1 PO bisa punya
     # multiple item dengan Req Dlv Date berbeda (reschedule history), itu entry
@@ -2272,6 +2335,7 @@ def sync_import_sheet_to_dashboard():
         'source_rows_added': source_rows_added,
         'source_errors': source_errors,
         'purged_non_vendor': purged_non_vendor,
+        'purged_orphan': purged_orphan,
         'duplicates_cleaned': duplicates_cleaned,
         'vendor_count': vendor_count,
         'vendor_filter_count': len(filter_vendors),
