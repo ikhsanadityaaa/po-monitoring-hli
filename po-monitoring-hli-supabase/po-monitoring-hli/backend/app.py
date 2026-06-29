@@ -2167,7 +2167,18 @@ def sync_import_sheet_to_dashboard():
         if not uid: uid = import_row_source_uid(existing_payload, columns) if existing_payload else None
         if uid: existing_by_uid.setdefault(uid, []).append(existing_row)
         sec_uid = import_row_secondary_uid(existing_payload)
-        if sec_uid and sec_uid != uid: existing_by_sec_uid.setdefault(sec_uid, []).append(existing_row)
+        # FIX V11: SELALU daftarkan row ke index secondary (po_sementara + item_yupi),
+        # bahkan kalau sec_uid == uid (primary). Sebelumnya hanya didaftarkan kalau
+        # berbeda, dengan asumsi itu redundant. Tapi itu salah: row yang BARU dibuat
+        # saat po_yupi belum ada punya primary uid == secondary uid (karena identity
+        # payload-nya sama-sama berbasis po_sementara). Begitu po_yupi terisi belakangan
+        # di sheet sumber, primary uid sheet row yang baru BERUBAH (sekarang berbasis
+        # po_yupi), sehingga lookup primary gagal match row lama. Fallback ke secondary
+        # lookup pun gagal kalau row lama tidak terdaftar di index ini — akibatnya row
+        # lama dianggap row baru sama sekali, dan semua field user-edit (status,
+        # checklist, incoterm, dll) hilang/balik ke default. Mendaftarkan tanpa
+        # pengecualian membuat fallback secondary selalu bisa menemukan row lama.
+        if sec_uid: existing_by_sec_uid.setdefault(sec_uid, []).append(existing_row)
     now = datetime.utcnow()
     added, updated, seen = 0, 0, 0
     duplicate_counts = {}
