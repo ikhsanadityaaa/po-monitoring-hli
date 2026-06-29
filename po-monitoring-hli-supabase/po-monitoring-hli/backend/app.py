@@ -2388,12 +2388,18 @@ def sync_import_sheet_to_dashboard():
         def _user_richness(data):
             return sum(1 for f in IMPORT_USER_LOCAL_ONLY_FIELDS if not import_blankish(data.get(f)))
 
-        # Source fingerprint = hash dari field-field yang berasal dari sheet (bukan user-input).
-        # Dua row dengan source fingerprint sama = berasal dari baris sheet yang SAMA.
+        # IDENTITY KEY: field yang pasti konsisten antara layout sheet dan source sheet.
+        # Field seperti remark_yupi, reschedule bisa beda antar sumber (layout vs source)
+        # sehingga TIDAK bisa dipakai untuk dedup. Pakai hanya field identity inti.
+        _DEDUP_FIELDS = ('po_yupi', 'yupi_po', 'po_sementara', 'item_yupi', 'source_req_dlv_date', 'req_dlv_date')
+
         def _src_fingerprint(data):
-            src = {k: (data.get(k) or '').strip().upper()
-                   for k in IMPORT_SOURCE_MANAGED_FIELDS if not import_blankish(data.get(k))}
-            return json.dumps(src, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+            # Fingerprint hanya dari field identity inti — konsisten antar sumber.
+            po = (import_nonblank(data.get('po_yupi')) or import_nonblank(data.get('yupi_po')) or '').strip().upper()
+            item = (import_nonblank(data.get('item_yupi')) or '').strip().upper()
+            pos = (import_nonblank(data.get('po_sementara')) or '').strip().upper()
+            req = (import_nonblank(data.get('source_req_dlv_date')) or import_nonblank(data.get('req_dlv_date')) or '').strip().upper()
+            return f"{po}|{item}|{pos}|{req}"
 
         # Business group key = (po_yupi, item_yupi).
         # Ini yang menentukan "berapa baris seharusnya ada untuk PO + item ini".
