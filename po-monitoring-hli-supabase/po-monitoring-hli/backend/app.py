@@ -2328,6 +2328,13 @@ def sync_import_sheet_to_dashboard():
     added, updated, seen = 0, 0, 0
     duplicate_counts = {}
     consumed_per_uid = {}
+    # FIX V13b: Track row yang BENAR-BENAR di-touch di upsert loop (update atau insert).
+    # Sebelumnya, orphan purge pakai existing_by_uid.values() yang terlalu luas —
+    # termasuk row yang sudah ada di DB tapi TIDAK di-update (duplikat source_uid
+    # yang kalah di candidates[used]). Akibatnya row duplikat lama tidak pernah
+    # di-purge karena dianggap "touched". Sekarang kita track explicit.
+    touched_in_upsert_ids = set()     # id row existing yang di-update
+    newly_inserted_rows = []          # objek row baru yang di-insert (id di-assign setelah commit)
     for sheet_row in sheet_rows:
         sheet_payload = import_row_payload(sheet_row, columns)
         source_uid = import_row_source_uid(sheet_payload, columns)
@@ -2344,6 +2351,9 @@ def sync_import_sheet_to_dashboard():
         target_row = candidates[used] if used < len(candidates) else None
         if target_row is not None:
             consumed_per_uid[used_key] = used + 1
+            # FIX V13b: tandai row ini sebagai benar-benar di-touch
+            if target_row.id:
+                touched_in_upsert_ids.add(target_row.id)
             try: existing_payload = json.loads(target_row.data_json or '{}')
             except: existing_payload = {}
             merged_payload = merge_import_existing_payload(existing_payload, sheet_payload)
@@ -2373,6 +2383,8 @@ def sync_import_sheet_to_dashboard():
         new_row = ImportDashboardRow(row_key=row_key, source_key=IMPORT_LAYOUT_SOURCE_KEY, source_label=sheet_row.get('_source_label') or '', source_uid=source_uid, sheet_row=sheet_row.get('_sheet_row'), vendor_name=sheet_row.get('_vendor_name') or '', data_json=json.dumps(sheet_payload, ensure_ascii=False), first_seen_at=now, last_seen_at=now, updated_at=now)
         db.session.add(new_row)
         added += 1
+        # FIX V13b: simpan objek row baru supaya id-nya bisa di-track setelah commit
+        newly_inserted_rows.append(new_row)
         existing_row_keys.add(row_key)
         existing_by_uid.setdefault(source_uid, []).append(new_row)
         consumed_per_uid[source_uid] = consumed_per_uid.get(source_uid, 0) + 1
@@ -2398,16 +2410,16 @@ def sync_import_sheet_to_dashboard():
     if uploaded_vendor_set and len(sheet_rows) > 0:
         try:
             sync_threshold = now - timedelta(seconds=5)
-            # Kumpulkan set row id yang di-touch di sync ini (last_seen_at >= threshold)
-            touched_ids = {
-                ex_row.id for ex_row in existing_rows
-                if ex_row.last_seen_at and ex_row.last_seen_at >= sync_threshold
-            }
-            # Tambahkan juga row baru yang baru saja di-insert (ada di existing_by_uid)
-            for uid_rows in existing_by_uid.values():
-                for r in uid_rows:
-                    if r.id:
-                        touched_ids.add(r.id)
+            # FIX V13b: Hanya row yang BENAR-BENAR di-touch di upsert loop yang
+            # masuk touched_ids. Sebelumnya, kode pakai existing_by_uid.values()
+            # yang juga meng-include row existing yang TIDAK di-update (duplikat
+            # source_uid yang kalah di candidates[used]). Akibatnya duplikat lama
+            # dianggap "touched" dan tidak pernah di-purge.
+            touched_ids = set(touched_in_upsert_ids)
+            # Tambahkan row baru yang baru saja di-insert (id di-assign setelah commit)
+            for r in newly_inserted_rows:
+                if r.id:
+                    touched_ids.add(r.id)
             all_vendor_rows = ImportDashboardRow.query.filter(
                 ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
             ).all()
@@ -2541,6 +2553,66 @@ def sync_import_sheet_to_dashboard():
             db_by_src_fp.setdefault(fp, []).append(db_row)
 
         to_delete = set()  # set of db_row.id yang akan dihapus
+
+        # ── FASE 0: Hapus DB rows yang punya source_uid sama.
+        #
+        # FIX V13c: FASE 1 dedup by source_fingerprint tidak menangkap kasus di mana
+        # qty / unit_price / field source LAINNYA berubah di sheet (mis. qty 62.5 → 63).
+        # Source fingerprint berubah karena field-field itu ikut di-hash, padahal
+        # source_uid (identity key) TIDAK berubah karena tidak meng-include field
+        # tersebut. Akibatnya 2 row DB — satu dengan qty lama (62.5, dari sync lampau)
+        # dan satu dengan qty baru (63, dari sync terbaru) — punya source_uid SAMA tapi
+        # source_fingerprint BEDA → FASE 1 lewat, duplikat tetap nangkring.
+        #
+        # Prinsip FASE 0: source_uid = identity. Kalau 2 row DB punya source_uid sama,
+        # itu PASTI duplikat (atau row lama yang seharusnya sudah di-update). Simpan
+        # yang paling up-to-date (last_seen_at terbaru — yaitu row yang baru saja
+        # di-touch di sync ini). Kalau tie, ambil id terbesar (asumsi: id lebih besar
+        # = row lebih baru di-insert). Sebelum hapus, MERGE field user-edit dari row
+        # loser ke row winner supaya data user (status, checklist, incoterm, dll) tidak
+        # hilang.
+        #
+        # Tujuan khusus: membersihkan residu duplikat dari sync-sync LAMPAU yang
+        # menggunakan logika buggy (sebelum FIX V13). Sync-sync itu meninggalkan
+        # row duplikat di DB yang tidak pernah di-purge.
+        db_by_uid = {}  # source_uid → [db_row, ...]
+        for db_row in all_db_rows:
+            uid = (db_row.source_uid or '').strip()
+            if uid:
+                db_by_uid.setdefault(uid, []).append(db_row)
+
+        for uid, uid_rows in db_by_uid.items():
+            if len(uid_rows) <= 1:
+                continue
+            # Sort: winner = last_seen_at terbaru, tiebreak id terbesar
+            uid_rows.sort(key=lambda r: (
+                r.last_seen_at or datetime.min,
+                r.id
+            ), reverse=True)
+            winner = uid_rows[0]
+            winner_data = dict(db_row_data.get(winner.id, {}))
+            for loser in uid_rows[1:]:
+                if loser.id in to_delete:
+                    continue
+                loser_data = db_row_data.get(loser.id, {})
+                # MERGE field user-edit dari loser ke winner (jangan overwrite yang
+                # sudah terisi di winner, hanya isi yang masih kosong).
+                for field in IMPORT_LOCAL_EDIT_FIELDS:
+                    loser_v = loser_data.get(field)
+                    if import_blankish(loser_v):
+                        continue
+                    if import_blankish(winner_data.get(field)):
+                        winner_data[field] = loser_v
+                # Cek apakah winner_data berubah → perlu persist
+                if winner_data != db_row_data.get(winner.id, {}):
+                    winner.data_json = json.dumps(winner_data, ensure_ascii=False)
+                    winner.updated_at = now
+                    db_row_data[winner.id] = winner_data
+                to_delete.add(loser.id)
+                duplicates_cleaned += 1
+                print(f"[sync] FASE0 source_uid dup purge: id={loser.id} "
+                      f"uid={uid[:12]}... richness_loser={_user_richness(loser_data)} "
+                      f"→ merged ke winner id={winner.id}")
 
         # ── FASE 1: Hapus DB rows yang punya source fingerprint sama (= baris sheet sama).
         #
