@@ -1820,32 +1820,15 @@ def merge_import_existing_payload(existing_payload, sheet_payload):
     existing_payload = existing_payload or {}
     row_exists_in_db = bool(existing_payload)
 
-    # FIX V10: Jika sheet row punya tanggal di kolom Reschedule, JANGAN overwrite
-    # Req Dlv Date dari sheet. User sudah manual update Req Dlv Date di dashboard
-    # berdasarkan tanggal reschedule. Tapi field lain (qty, vendor, dll) tetap
-    # di-upsert supaya kalau ada perubahan data lain, tetap ke-update.
-    #
-    # Logika:
-    # - has_reschedule = True kalau sheet row ada nilai di kolom 'reschedule'
-    # - Untuk field 'req_dlv_date' dan 'source_req_dlv_date':
-    #   - Kalau has_reschedule DAN existing (dashboard) ada nilai → KEEP existing (jangan overwrite)
-    #   - Kalau has_reschedule TAPI existing kosong → pakai sheet value (tidak ada data lama untuk dipertahankan)
-    #   - Kalau tidak has_reschedule → behavior normal (sheet value menang kalau tidak kosong)
-    has_reschedule = not import_blankish(sheet_payload.get('reschedule')) if sheet_payload else False
-
+    # Req Dlv Date selalu mengikuti sheet (source-managed, behavior normal).
+    # Kalau ada reschedule, row di-highlight kuning di frontend — tidak ada
+    # proteksi khusus di backend untuk req_dlv_date.
     for field in IMPORT_LOCAL_EDIT_FIELDS:
         old_value = existing_payload.get(field)
         new_value = merged.get(field)
         if field in IMPORT_USER_LOCAL_ONLY_FIELDS and row_exists_in_db:
             merged[field] = old_value; continue
         if field in IMPORT_SOURCE_MANAGED_FIELDS:
-            # FIX V10: protect req_dlv_date kalau row ada reschedule
-            if has_reschedule and field in ('req_dlv_date', 'source_req_dlv_date'):
-                if not import_blankish(old_value):
-                    # Existing (dashboard) ada nilai → KEEP, jangan overwrite dari sheet
-                    merged[field] = old_value
-                # Kalau existing kosong, biarkan new_value dari sheet (tidak ada data lama)
-                continue
             # Behavior normal: kalau sheet ada nilai, pakai sheet value
             if not import_blankish(new_value): continue
             # Kalau sheet kosong tapi existing ada, keep existing
