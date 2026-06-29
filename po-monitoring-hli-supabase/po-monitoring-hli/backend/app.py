@@ -2355,45 +2355,137 @@ def sync_import_sheet_to_dashboard():
             print(f"[sync_import_sheet_to_dashboard] Orphan purge gagal: {orphan_exc}")
 
 
-    # Auto-cleanup duplicate rows SETELAH copy sheet.
-    # HANYA hapus row yang 100% IDENTICAL (semua field sama, termasuk req_dlv_date).
-    # JANGAN hapus row hanya karena po_yupi + item_yupi sama — 1 PO bisa punya
-    # multiple item dengan Req Dlv Date berbeda (reschedule history), itu entry
-    # valid yang harus dipertahankan.
+    # ── EXCESS ROW PURGE: Bandingkan jumlah row di DB vs sheet per business group.
+    #
+    # "Business group" = (po_yupi, item_yupi, po_sementara) — identitas PO tanpa
+    # mempertimbangkan tanggal, supaya kita tahu berapa banyak baris yang SEHARUSNYA
+    # ada untuk satu kombinasi PO + item + nomor sementara.
+    #
+    # Contoh: sheet punya 2 baris untuk group (410100160, V102092012, SVOI...-01)
+    # tapi di dashboard ada 4 baris → 2 kelebihan. Kita hapus 2 yang paling sedikit
+    # punya data user-input (user richness score terendah).
+    #
+    # ATURAN TIDAK BOLEH DILANGGAR:
+    # - Row yang "user-rich" (ada isian di field IMPORT_USER_LOCAL_ONLY_FIELDS seperti
+    #   incoterm, forwarder, bl_number, status, etd, eta, import_remarks, dll)
+    #   TIDAK BOLEH dihapus kalau masih ada row lain di group yang bisa dikorbankan.
+    # - Di antara row dengan score sama, pertahankan row paling lama (id terkecil).
+    # - Kalau semua row di group punya score > 0, tetap hapus yang paling rendah
+    #   scorenya — kecuali group dari sheet memang punya jumlah sebanyak itu.
+    # - Hanya hapus row dari vendor yang ada di uploaded_vendor_set (safety guard).
+    #
+    # FASE 1: Hapus dulu yang 100% identical (full fingerprint sama) — ini aman.
+    # FASE 2: Excess count purge berdasarkan jumlah baris di sheet.
     duplicates_cleaned = 0
+    excess_purged = 0
     try:
         all_db_rows = ImportDashboardRow.query.filter(
             ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
         ).all()
-        # Group by FULL data fingerprint (semua field sama = true duplicate)
+
+        # ── FASE 1: Hapus yang 100% identical (full data fingerprint sama)
         by_fingerprint = {}
         for db_row in all_db_rows:
             try: db_data = json.loads(db_row.data_json or '{}')
             except: db_data = {}
-            # Build fingerprint dari semua field yang ada (sort keys untuk konsistensi)
-            # Exclude field yang selalu berubah (updated_at, last_seen_at, dll) —
-            # hanya field bisnis yang menentukan duplicate.
             biz_fields = {k: v for k, v in db_data.items()
                           if k in IMPORT_LOCAL_EDIT_FIELDS and not import_blankish(v)}
             fingerprint = json.dumps(biz_fields, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
             by_fingerprint.setdefault(fingerprint, []).append(db_row)
 
+        identical_losers = set()
         for fingerprint, dup_rows in by_fingerprint.items():
             if len(dup_rows) <= 1: continue
-            # Row dengan fingerprint sama = 100% identical → hapus kecuali 1
-            # Keep row dengan id terkecil (paling lama, paling stabil)
             dup_rows.sort(key=lambda x: x.id)
-            winner = dup_rows[0]
-            losers = dup_rows[1:]
-            for loser in losers:
+            for loser in dup_rows[1:]:
                 db.session.delete(loser)
+                identical_losers.add(loser.id)
                 duplicates_cleaned += 1
+
         if duplicates_cleaned > 0:
+            db.session.commit()
+            all_db_rows = [r for r in all_db_rows if r.id not in identical_losers]
+
+        # ── FASE 2: Excess count purge — bandingkan jumlah DB vs sheet per group.
+        #
+        # Hitung jumlah baris di sheet per business group key.
+        # group_key = (po_yupi_norm, item_yupi_norm, po_sementara_norm)
+        def _biz_group_key(data):
+            po = (import_nonblank(data.get('po_yupi')) or import_nonblank(data.get('yupi_po')) or '').strip().upper()
+            item = (import_nonblank(data.get('item_yupi')) or '').strip().upper()
+            pos = (import_nonblank(data.get('po_sementara')) or '').strip().upper()
+            return (po, item, pos) if (po or pos) else None
+
+        # Hitung expected count dari sheet_rows (sudah dibaca di atas)
+        sheet_group_count = {}
+        for sr in sheet_rows:
+            sp = import_row_payload(sr, columns)
+            gk = _biz_group_key(sp)
+            if gk: sheet_group_count[gk] = sheet_group_count.get(gk, 0) + 1
+
+        # Hitung user richness score = jumlah IMPORT_USER_LOCAL_ONLY_FIELDS yang terisi
+        def _user_richness(data):
+            return sum(1 for f in IMPORT_USER_LOCAL_ONLY_FIELDS
+                       if not import_blankish(data.get(f)))
+
+        # Group DB rows per business group
+        db_by_group = {}
+        db_row_data = {}  # cache parsed data
+        for db_row in all_db_rows:
+            try: db_data = json.loads(db_row.data_json or '{}')
+            except: db_data = {}
+            db_row_data[db_row.id] = db_data
+            gk = _biz_group_key(db_data)
+            if gk:
+                db_by_group.setdefault(gk, []).append(db_row)
+
+        excess_loser_ids = set()
+        for gk, db_rows_in_group in db_by_group.items():
+            expected = sheet_group_count.get(gk, 0)
+            if expected == 0:
+                # Tidak ada di sheet sama sekali → biarkan orphan purge yang handle
+                continue
+            excess = len(db_rows_in_group) - expected
+            if excess <= 0:
+                continue  # Jumlah pas atau kurang — tidak perlu hapus
+
+            # Urutkan: richness DESCENDING (paling banyak user-data duluan),
+            # lalu id ASCENDING (paling lama = paling stabil) sebagai tiebreak.
+            # Yang akan dihapus = ekor list (richness rendah, id besar).
+            db_rows_in_group.sort(
+                key=lambda r: (-_user_richness(db_row_data.get(r.id, {})), r.id)
+            )
+            losers = db_rows_in_group[expected:]  # sisanya = kelebihan
+            for loser in losers:
+                # Safety: jangan hapus row dari vendor yang tidak di-upload
+                loser_data = db_row_data.get(loser.id, {})
+                loser_vendor = (import_nonblank(loser_data.get('vendor')) or
+                                import_nonblank(loser_data.get('vendor_name')) or
+                                import_nonblank(loser.vendor_name))
+                if uploaded_vendor_set and loser_vendor:
+                    if not import_vendor_match(loser_vendor, uploaded_vendor_set):
+                        continue  # skip — bukan vendor yang kita urus
+                db.session.delete(loser)
+                excess_loser_ids.add(loser.id)
+                excess_purged += 1
+                print(f"[sync_import_sheet_to_dashboard] Excess purge: row id={loser.id} "
+                      f"group={gk} richness={_user_richness(loser_data)} dihapus "
+                      f"(expected={expected}, had={len(db_rows_in_group)})")
+
+        if excess_purged > 0:
             db.session.commit()
             db.session.execute(text('PRAGMA wal_checkpoint(TRUNCATE)'))
             db.session.commit()
             clear_runtime_caches()
-            print(f"[sync_import_sheet_to_dashboard] Auto-cleanup: {duplicates_cleaned} identical duplicate rows dihapus")
+            print(f"[sync_import_sheet_to_dashboard] Excess purge: {excess_purged} row kelebihan dihapus")
+        elif duplicates_cleaned > 0:
+            db.session.execute(text('PRAGMA wal_checkpoint(TRUNCATE)'))
+            db.session.commit()
+            clear_runtime_caches()
+
+        if duplicates_cleaned > 0 or excess_purged > 0:
+            print(f"[sync_import_sheet_to_dashboard] Auto-cleanup selesai: "
+                  f"{duplicates_cleaned} identical + {excess_purged} excess dihapus")
     except Exception as cleanup_exc:
         try: db.session.rollback()
         except: pass
@@ -2407,6 +2499,7 @@ def sync_import_sheet_to_dashboard():
         'purged_non_vendor': purged_non_vendor,
         'purged_orphan': purged_orphan,
         'duplicates_cleaned': duplicates_cleaned,
+        'excess_purged': excess_purged,
         'vendor_count': vendor_count,
         'vendor_filter_count': len(filter_vendors),
         'vendor_filter_source': vendor_source,
