@@ -2166,6 +2166,93 @@ def sync_import_sheet_to_dashboard():
         # import the entire sheet unfiltered, which is not what the user wants).
         source_errors.append({'source': 'all', 'label': 'All sources', 'error': 'No uploaded vendor list — source sheet sync skipped. Upload vendors via Vendor Import first.'})
 
+    # ── FIX V13: Deduplikasi sheet_rows berdasarkan source_uid SEBELUM upsert loop.
+    #
+    # MASALAH:
+    #   sheet_rows bisa berisi baris yang sama berkali-kali karena:
+    #   1. Dual-source pull: row yang sama datang dari layout tracker sheet
+    #      DAN dari source sheet (RM/SP). Kedua sumber biasanya berbeda di
+    #      kolom `so` (layout sheet sering kosong, source sheet terisi).
+    #   2. Akibatnya, 1 baris sheet asli → 2 (atau lebih) baris di sheet_rows.
+    #
+    #   Loop upsert di bawah menggunakan counter `consumed_per_uid` yang
+    #   AKAN BERTAMBAH setiap kali baris dengan source_uid yang sama di-proses.
+    #   Jika ada 2 sheet_rows dengan source_uid sama, sheet_row kedua tidak
+    #   menemukan slot kandidat (karena candidates hanya 1) → DIANGGAP BARU
+    #   → di-insert jadi row baru di DB → duplikat.
+    #
+    # SOLUSI:
+    #   Group sheet_rows by source_uid. Untuk setiap group, simpan hanya 1 row
+    #   — pilih row dengan field paling lengkap (paling banyak field non-blank,
+    #   priority ke `so` terisi karena itu field yang paling sering beda antara
+    #   layout vs source sheet). Kalau ada row A yang punya `so` dan row B yang
+    #   tidak, simpan row A; field-field lain di-merge dari keduanya.
+    #
+    # EFEK:
+    #   - Duplikat hilang: 1 baris sheet asli → 1 source_uid → 1 DB row.
+    #   - Penambahan baris tetap bekerja: kalau sheet bertambah dari 2 → 3 baris
+    #     untuk PO yang sama (dengan req_dlv_date beda), ketiganya punya
+    #     source_uid berbeda → 3 DB row.
+    try:
+        _dedup_before_upsert = {}
+        _dedup_seen_payloads = {}
+        for _sr in sheet_rows:
+            _sp = import_row_payload(_sr, columns)
+            _uid = import_row_source_uid(_sp, columns)
+            if not _uid:
+                # Tanpa uid, tidak bisa dedup → simpan apa adanya
+                _dedup_before_upsert.setdefault('__no_uid__', []).append(_sr)
+                continue
+            # Hitung richness = jumlah field non-blank (makin banyak makin baik)
+            _rich = sum(1 for _v in _sp.values() if not import_blankish(_v))
+            _has_so = 1 if not import_blankish(_sp.get('so')) else 0
+            _has_reschedule = 1 if not import_blankish(_sp.get('reschedule')) else 0
+            _has_poso = 1 if not import_blankish(_sp.get('po_sementara')) else 0
+            _score = (_has_so, _has_reschedule, _has_poso, _rich)
+            _prev = _dedup_seen_payloads.get(_uid)
+            if _prev is None:
+                _dedup_seen_payloads[_uid] = (_score, _sr, _sp)
+            else:
+                _prev_score, _prev_sr, _prev_sp = _prev
+                if _score > _prev_score:
+                    # Row baru lebih lengkap → merge field-field yang ada di prev
+                    # tapi tidak di row baru, lalu simpan row baru.
+                    _merged_sp = dict(_sp)
+                    for _k, _v in _prev_sp.items():
+                        if import_blankish(_merged_sp.get(_k)) and not import_blankish(_v):
+                            _merged_sp[_k] = _v
+                    # Update _sr in-place supaya perubahan tersimpan ke DB
+                    for _col in columns:
+                        _field = _col.get('field')
+                        if _field and _field in _merged_sp:
+                            _sr[_field] = _merged_sp[_field]
+                    _dedup_seen_payloads[_uid] = (_score, _sr, _merged_sp)
+                else:
+                    # Row lama lebih lengkap → merge field-field dari row baru
+                    # yang tidak ada di row lama, lalu update row lama.
+                    _prev_sp_updated = dict(_prev_sp)
+                    for _k, _v in _sp.items():
+                        if import_blankish(_prev_sp_updated.get(_k)) and not import_blankish(_v):
+                            _prev_sp_updated[_k] = _v
+                    for _col in columns:
+                        _field = _col.get('field')
+                        if _field and _field in _prev_sp_updated:
+                            _prev_sr[_field] = _prev_sp_updated[_field]
+                    _dedup_seen_payloads[_uid] = (_prev_score, _prev_sr, _prev_sp_updated)
+        # Bangun sheet_rows baru: 1 row per source_uid + rows tanpa uid
+        _new_sheet_rows = [_entry[1] for _entry in _dedup_seen_payloads.values()]
+        _new_sheet_rows.extend(_dedup_before_upsert.get('__no_uid__', []))
+        _dup_removed = len(sheet_rows) - len(_new_sheet_rows)
+        if _dup_removed > 0:
+            print(f"[sync_import_sheet_to_dashboard] FIX V13: {_dup_removed} duplikat "
+                  f"sheet_rows dihapus sebelum upsert "
+                  f"({len(sheet_rows)} → {len(_new_sheet_rows)})")
+        sheet_rows = _new_sheet_rows
+    except Exception as _dedup_exc:
+        import traceback; traceback.print_exc()
+        # Kalau dedup gagal, lanjutkan dengan sheet_rows asli — jangan blok sync
+        print(f"[sync_import_sheet_to_dashboard] FIX V13 dedup gagal: {_dedup_exc}")
+
     existing_rows = ImportDashboardRow.query.filter(
         db.or_(
             ImportDashboardRow.source_key == IMPORT_LAYOUT_SOURCE_KEY,
@@ -2388,18 +2475,26 @@ def sync_import_sheet_to_dashboard():
         def _user_richness(data):
             return sum(1 for f in IMPORT_USER_LOCAL_ONLY_FIELDS if not import_blankish(data.get(f)))
 
-        # IDENTITY KEY: field yang pasti konsisten antara layout sheet dan source sheet.
-        # Field seperti remark_yupi, reschedule bisa beda antar sumber (layout vs source)
-        # sehingga TIDAK bisa dipakai untuk dedup. Pakai hanya field identity inti.
-        _DEDUP_FIELDS = ('po_yupi', 'yupi_po', 'po_sementara', 'item_yupi', 'source_req_dlv_date', 'req_dlv_date')
-
+        # Source fingerprint = hash dari field-field yang berasal dari sheet (bukan user-input).
+        # Dua row dengan source fingerprint sama = berasal dari baris sheet yang SAMA.
+        #
+        # FIX V13: EXCLUDE field `so` dari fingerprint. Alasannya:
+        #   - Layout tracker sheet dan source sheet (RM/SP) sering berbeda di kolom `so`
+        #     (layout sering kosong, source terisi — atau sebaliknya).
+        #   - Akibatnya, 2 baris di DB yang berasal dari baris sheet yang SAMA bisa
+        #     punya fingerprint berbeda → tidak di-dedup oleh FASE 1 → duplikat tetap ada.
+        #   - Setelah exclude `so`, kedua baris tersebut akan dianggap identik dan
+        #     salah satunya akan dihapus (yang lebih rendah richness-nya).
+        #   - Field `so` sendiri tetap disimpan di DB (tidak hilang) — kita hanya
+        #     tidak menggunakannya sebagai pembeda identitas.
+        # Field lain yang juga sering drift antara layout vs source sheet bisa
+        # ditambahkan ke set ini kalau ditemukan kasus serupa di masa depan.
+        _SRC_FP_EXCLUDE_FIELDS = {'so'}
         def _src_fingerprint(data):
-            # Fingerprint hanya dari field identity inti — konsisten antar sumber.
-            po = (import_nonblank(data.get('po_yupi')) or import_nonblank(data.get('yupi_po')) or '').strip().upper()
-            item = (import_nonblank(data.get('item_yupi')) or '').strip().upper()
-            pos = (import_nonblank(data.get('po_sementara')) or '').strip().upper()
-            req = (import_nonblank(data.get('source_req_dlv_date')) or import_nonblank(data.get('req_dlv_date')) or '').strip().upper()
-            return f"{po}|{item}|{pos}|{req}"
+            src = {k: (data.get(k) or '').strip().upper()
+                   for k in IMPORT_SOURCE_MANAGED_FIELDS
+                   if k not in _SRC_FP_EXCLUDE_FIELDS and not import_blankish(data.get(k))}
+            return json.dumps(src, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
 
         # Business group key = (po_yupi, item_yupi).
         # Ini yang menentukan "berapa baris seharusnya ada untuk PO + item ini".
