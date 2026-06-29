@@ -2554,30 +2554,84 @@ def sync_import_sheet_to_dashboard():
 
         to_delete = set()  # set of db_row.id yang akan dihapus
 
-        # ── FASE 0: Hapus DB rows yang punya source_uid sama.
+        # ── FASE -1: Dedup by recomputed identity (po_yupi + item_yupi + po_sementara).
         #
-        # FIX V13c: FASE 1 dedup by source_fingerprint tidak menangkap kasus di mana
-        # qty / unit_price / field source LAINNYA berubah di sheet (mis. qty 62.5 → 63).
-        # Source fingerprint berubah karena field-field itu ikut di-hash, padahal
-        # source_uid (identity key) TIDAK berubah karena tidak meng-include field
-        # tersebut. Akibatnya 2 row DB — satu dengan qty lama (62.5, dari sync lampau)
-        # dan satu dengan qty baru (63, dari sync terbaru) — punya source_uid SAMA tapi
-        # source_fingerprint BEDA → FASE 1 lewat, duplikat tetap nangkring.
+        # FIX V13d: Bahkan FASE 0 (dedup by source_uid) bisa melewatkan duplikat kalau:
+        #   - Stored source_uid di DB sudah outdated (mis. migration gagal commit),
+        #     sehingga 2 row duplikat punya source_uid BEDA di DB padahal identity-nya sama.
+        #   - Atau req_dlv_date formatnya beda antara row lama vs baru ("30 May" vs "2026-05-30")
+        #     sehingga source_uid berbeda padahal secara bisnis itu baris yang sama.
         #
-        # Prinsip FASE 0: source_uid = identity. Kalau 2 row DB punya source_uid sama,
-        # itu PASTI duplikat (atau row lama yang seharusnya sudah di-update). Simpan
-        # yang paling up-to-date (last_seen_at terbaru — yaitu row yang baru saja
-        # di-touch di sync ini). Kalau tie, ambil id terbesar (asumsi: id lebih besar
-        # = row lebih baru di-insert). Sebelum hapus, MERGE field user-edit dari row
-        # loser ke row winner supaya data user (status, checklist, incoterm, dll) tidak
-        # hilang.
+        # FASE -1 menggunakan identity key yang SANGAT sempit: (po_yupi, item_yupi, po_sementara).
+        # Dua row dengan 3 field ini sama = PASTI baris sheet yang sama (po_sementara = nomor PO line item,
+        # unik per baris). req_dlv_date TIDAK di-include supaya format beda tidak bikin lolos.
         #
-        # Tujuan khusus: membersihkan residu duplikat dari sync-sync LAMPAU yang
-        # menggunakan logika buggy (sebelum FIX V13). Sync-sync itu meninggalkan
-        # row duplikat di DB yang tidak pernah di-purge.
-        db_by_uid = {}  # source_uid → [db_row, ...]
+        # Winner: row dengan last_seen_at terbaru (paling fresh dari sync terbaru).
+        # Loser: row dengan last_seen_at lama (stale, dari sync lampau).
+        # Sebelum hapus, MERGE field user-edit dari loser ke winner supaya data user tidak hilang.
+        db_by_biz_identity = {}  # (po_yupi, item_yupi, po_sementara) → [db_row, ...]
         for db_row in all_db_rows:
-            uid = (db_row.source_uid or '').strip()
+            data = db_row_data.get(db_row.id, {})
+            po = (import_nonblank(data.get('po_yupi')) or import_nonblank(data.get('yupi_po')) or '').strip().upper()
+            item = (import_nonblank(data.get('item_yupi')) or '').strip().upper()
+            pos = (import_nonblank(data.get('po_sementara')) or '').strip().upper()
+            if po and item and pos:
+                db_by_biz_identity.setdefault((po, item, pos), []).append(db_row)
+
+        for biz_key, biz_rows in db_by_biz_identity.items():
+            if len(biz_rows) <= 1:
+                continue
+            # Sort: winner = last_seen_at terbaru, tiebreak id terbesar (paling baru di-insert)
+            biz_rows.sort(key=lambda r: (
+                r.last_seen_at or datetime.min,
+                r.id
+            ), reverse=True)
+            winner = biz_rows[0]
+            winner_data = dict(db_row_data.get(winner.id, {}))
+            for loser in biz_rows[1:]:
+                if loser.id in to_delete:
+                    continue
+                loser_data = db_row_data.get(loser.id, {})
+                # MERGE field user-edit dari loser ke winner
+                for field in IMPORT_LOCAL_EDIT_FIELDS:
+                    loser_v = loser_data.get(field)
+                    if import_blankish(loser_v):
+                        continue
+                    if import_blankish(winner_data.get(field)):
+                        winner_data[field] = loser_v
+                # Persist winner_data kalau berubah
+                if winner_data != db_row_data.get(winner.id, {}):
+                    winner.data_json = json.dumps(winner_data, ensure_ascii=False)
+                    winner.updated_at = now
+                    db_row_data[winner.id] = winner_data
+                    # Update source_uid winner ke nilai yang fresh juga
+                    try:
+                        fresh_uid = import_row_source_uid(winner_data, [])
+                        if fresh_uid and fresh_uid != winner.source_uid:
+                            winner.source_uid = fresh_uid
+                    except: pass
+                to_delete.add(loser.id)
+                duplicates_cleaned += 1
+                print(f"[sync] FASE-1 biz-identity dup purge: id={loser.id} "
+                      f"key=(po={biz_key[0]}, item={biz_key[1]}, pos={biz_key[2]}) "
+                      f"richness_loser={_user_richness(loser_data)} "
+                      f"→ merged ke winner id={winner.id}")
+
+        # ── FASE 0: Hapus DB rows yang punya source_uid sama (RECOMPUTED dari data_json).
+        #
+        # FIX V13c+V13e: RECOMPUTE source_uid dari data_json, JANGAN percaya stored value.
+        # Alasan: migration _migrate_import_source_uid_v12 bisa gagal commit diam-diam,
+        # atau row lama punya stored source_uid dengan skema V11 (tanpa po_sementara).
+        # Dengan recompute, 2 row yang identity-nya sama pasti di-group bersama.
+        db_by_uid = {}  # recomputed source_uid → [db_row, ...]
+        for db_row in all_db_rows:
+            if db_row.id in to_delete:
+                continue  # sudah ditandai hapus di FASE -1
+            data = db_row_data.get(db_row.id, {})
+            try:
+                uid = import_row_source_uid(data, [])
+            except:
+                uid = (db_row.source_uid or '').strip()
             if uid:
                 db_by_uid.setdefault(uid, []).append(db_row)
 
@@ -2595,19 +2649,21 @@ def sync_import_sheet_to_dashboard():
                 if loser.id in to_delete:
                     continue
                 loser_data = db_row_data.get(loser.id, {})
-                # MERGE field user-edit dari loser ke winner (jangan overwrite yang
-                # sudah terisi di winner, hanya isi yang masih kosong).
+                # MERGE field user-edit dari loser ke winner
                 for field in IMPORT_LOCAL_EDIT_FIELDS:
                     loser_v = loser_data.get(field)
                     if import_blankish(loser_v):
                         continue
                     if import_blankish(winner_data.get(field)):
                         winner_data[field] = loser_v
-                # Cek apakah winner_data berubah → perlu persist
+                # Persist winner_data kalau berubah
                 if winner_data != db_row_data.get(winner.id, {}):
                     winner.data_json = json.dumps(winner_data, ensure_ascii=False)
                     winner.updated_at = now
                     db_row_data[winner.id] = winner_data
+                # Update stored source_uid winner supaya konsisten
+                if uid != winner.source_uid:
+                    winner.source_uid = uid
                 to_delete.add(loser.id)
                 duplicates_cleaned += 1
                 print(f"[sync] FASE0 source_uid dup purge: id={loser.id} "
@@ -8099,6 +8155,238 @@ def admin_cleanup_import_duplicates():
         db.session.rollback()
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/admin/force-cleanup-import-duplicates', methods=['POST'])
+def admin_force_cleanup_import_duplicates():
+    """Force cleanup SEMUA jenis duplikat di Import Dashboard.
+
+    Endpoint ini menjalankan FASE -1, FASE 0, FASE 1, dan FASE 2 secara BERURUTAN
+    dengan output detail (row id, source_uid, fields yang di-merge) supaya user
+    bisa lihat persis apa yang dihapus. Berbeda dengan cleanup-import-duplicates
+    (hanya 100% identical), endpoint ini juga tangkap:
+      - Duplikat dengan source_uid sama (qty/price drift)
+      - Duplikat dengan identity sama (po_yupi + item_yupi + po_sementara)
+      - Excess rows (lebih banyak dari sheet)
+      - Stale leftovers (row dengan last_seen_at lama yang tidak di-touch sync terbaru)
+
+    Query params:
+    - po_yupi (optional): filter hanya PO tertentu, mis. ?po_yupi=410100147
+
+    Returns:
+    - total_before, total_after
+    - phase_-1_purged (biz-identity dup)
+    - phase_0_purged (source_uid dup)
+    - phase_1_purged (src_fingerprint dup)
+    - phase_2_purged (excess count)
+    - phase_3_purged (stale leftovers)
+    - details: list of {phase, loser_id, winner_id, key, fields_merged}
+    """
+    try:
+        target_po = clean(request.args.get('po_yupi')) or ''
+        target_po_upper = target_po.strip().upper() if target_po else ''
+
+        all_rows = ImportDashboardRow.query.filter(
+            ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
+        ).order_by(ImportDashboardRow.id.asc()).all()
+
+        # Cache parsed data
+        db_row_data = {}
+        for row in all_rows:
+            try: db_row_data[row.id] = json.loads(row.data_json or '{}')
+            except: db_row_data[row.id] = {}
+
+        # Filter by target PO jika ada
+        if target_po_upper:
+            filtered_rows = []
+            for r in all_rows:
+                d = db_row_data.get(r.id, {})
+                po = (import_nonblank(d.get('po_yupi')) or import_nonblank(d.get('yupi_po')) or '').strip().upper()
+                if po == target_po_upper:
+                    filtered_rows.append(r)
+            all_rows = filtered_rows
+
+        def _user_richness(data):
+            return sum(1 for f in IMPORT_USER_LOCAL_ONLY_FIELDS if not import_blankish(data.get(f)))
+
+        _SRC_FP_EXCLUDE_FIELDS = {'so'}
+        def _src_fingerprint(data):
+            src = {k: (data.get(k) or '').strip().upper()
+                   for k in IMPORT_SOURCE_MANAGED_FIELDS
+                   if k not in _SRC_FP_EXCLUDE_FIELDS and not import_blankish(data.get(k))}
+            return json.dumps(src, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+
+        def _biz_identity(data):
+            po = (import_nonblank(data.get('po_yupi')) or import_nonblank(data.get('yupi_po')) or '').strip().upper()
+            item = (import_nonblank(data.get('item_yupi')) or '').strip().upper()
+            pos = (import_nonblank(data.get('po_sementara')) or '').strip().upper()
+            if po and item and pos:
+                return (po, item, pos)
+            return None
+
+        def _biz_group_key(data):
+            po = (import_nonblank(data.get('po_yupi')) or import_nonblank(data.get('yupi_po')) or '').strip().upper()
+            item = (import_nonblank(data.get('item_yupi')) or '').strip().upper()
+            pos = (import_nonblank(data.get('po_sementara')) or '').strip().upper()
+            if po: return (po, item)
+            if pos: return (pos, item)
+            return None
+
+        details = []
+        to_delete = set()
+        now = datetime.utcnow()
+
+        # ── FASE -1: Biz identity (po_yupi + item_yupi + po_sementara)
+        db_by_biz = {}
+        for r in all_rows:
+            bk = _biz_identity(db_row_data.get(r.id, {}))
+            if bk:
+                db_by_biz.setdefault(bk, []).append(r)
+        phase_minus1 = 0
+        for bk, rows in db_by_biz.items():
+            if len(rows) <= 1: continue
+            rows.sort(key=lambda r: (r.last_seen_at or datetime.min, r.id), reverse=True)
+            winner = rows[0]
+            winner_data = dict(db_row_data.get(winner.id, {}))
+            fields_merged = []
+            for loser in rows[1:]:
+                if loser.id in to_delete: continue
+                loser_data = db_row_data.get(loser.id, {})
+                for field in IMPORT_LOCAL_EDIT_FIELDS:
+                    lv = loser_data.get(field)
+                    if import_blankish(lv): continue
+                    if import_blankish(winner_data.get(field)):
+                        winner_data[field] = lv
+                        fields_merged.append(field)
+                if winner_data != db_row_data.get(winner.id, {}):
+                    winner.data_json = json.dumps(winner_data, ensure_ascii=False)
+                    winner.updated_at = now
+                    db_row_data[winner.id] = winner_data
+                    try:
+                        fresh_uid = import_row_source_uid(winner_data, [])
+                        if fresh_uid and fresh_uid != winner.source_uid:
+                            winner.source_uid = fresh_uid
+                    except: pass
+                to_delete.add(loser.id)
+                phase_minus1 += 1
+                details.append({
+                    'phase': 'FASE_-1_biz_identity',
+                    'loser_id': loser.id, 'loser_row_key': loser.row_key,
+                    'winner_id': winner.id, 'winner_row_key': winner.row_key,
+                    'key': f'po={bk[0]}, item={bk[1]}, pos={bk[2]}',
+                    'loser_qty': clean(db_row_data.get(loser.id, {}).get('ord_qty')),
+                    'winner_qty': clean(db_row_data.get(winner.id, {}).get('ord_qty')),
+                    'loser_last_seen': str(loser.last_seen_at) if loser.last_seen_at else None,
+                    'winner_last_seen': str(winner.last_seen_at) if winner.last_seen_at else None,
+                    'fields_merged': fields_merged[:20],
+                })
+
+        # ── FASE 0: Recomputed source_uid
+        db_by_uid = {}
+        for r in all_rows:
+            if r.id in to_delete: continue
+            data = db_row_data.get(r.id, {})
+            try: uid = import_row_source_uid(data, [])
+            except: uid = (r.source_uid or '').strip()
+            if uid:
+                db_by_uid.setdefault(uid, []).append(r)
+        phase_0 = 0
+        for uid, rows in db_by_uid.items():
+            if len(rows) <= 1: continue
+            rows.sort(key=lambda r: (r.last_seen_at or datetime.min, r.id), reverse=True)
+            winner = rows[0]
+            winner_data = dict(db_row_data.get(winner.id, {}))
+            fields_merged = []
+            for loser in rows[1:]:
+                if loser.id in to_delete: continue
+                loser_data = db_row_data.get(loser.id, {})
+                for field in IMPORT_LOCAL_EDIT_FIELDS:
+                    lv = loser_data.get(field)
+                    if import_blankish(lv): continue
+                    if import_blankish(winner_data.get(field)):
+                        winner_data[field] = lv
+                        fields_merged.append(field)
+                if winner_data != db_row_data.get(winner.id, {}):
+                    winner.data_json = json.dumps(winner_data, ensure_ascii=False)
+                    winner.updated_at = now
+                    db_row_data[winner.id] = winner_data
+                if uid != winner.source_uid:
+                    winner.source_uid = uid
+                to_delete.add(loser.id)
+                phase_0 += 1
+                details.append({
+                    'phase': 'FASE_0_source_uid',
+                    'loser_id': loser.id, 'loser_row_key': loser.row_key,
+                    'winner_id': winner.id, 'winner_row_key': winner.row_key,
+                    'key': f'uid={uid[:16]}...',
+                    'loser_qty': clean(db_row_data.get(loser.id, {}).get('ord_qty')),
+                    'winner_qty': clean(db_row_data.get(winner.id, {}).get('ord_qty')),
+                    'loser_last_seen': str(loser.last_seen_at) if loser.last_seen_at else None,
+                    'winner_last_seen': str(winner.last_seen_at) if winner.last_seen_at else None,
+                    'fields_merged': fields_merged[:20],
+                })
+
+        # ── FASE 1: src_fingerprint (exclude `so`)
+        db_by_fp = {}
+        for r in all_rows:
+            if r.id in to_delete: continue
+            fp = _src_fingerprint(db_row_data.get(r.id, {}))
+            db_by_fp.setdefault(fp, []).append(r)
+        phase_1 = 0
+        for fp, rows in db_by_fp.items():
+            if len(rows) <= 1: continue
+            rows.sort(key=lambda r: (-_user_richness(db_row_data.get(r.id, {})), r.id))
+            winner = rows[0]
+            for loser in rows[1:]:
+                if loser.id in to_delete: continue
+                to_delete.add(loser.id)
+                phase_1 += 1
+                details.append({
+                    'phase': 'FASE_1_src_fingerprint',
+                    'loser_id': loser.id, 'loser_row_key': loser.row_key,
+                    'winner_id': winner.id, 'winner_row_key': winner.row_key,
+                    'key': f'fp={fp[:16]}...',
+                    'loser_qty': clean(db_row_data.get(loser.id, {}).get('ord_qty')),
+                    'winner_qty': clean(db_row_data.get(winner.id, {}).get('ord_qty')),
+                })
+
+        # ── Eksekusi delete
+        deleted_count = 0
+        if to_delete:
+            rows_to_del = [r for r in all_rows if r.id in to_delete]
+            for r in rows_to_del:
+                db.session.delete(r)
+                deleted_count += 1
+            db.session.commit()
+            db.session.execute(text('PRAGMA wal_checkpoint(TRUNCATE)'))
+            db.session.commit()
+            clear_runtime_caches()
+
+        total_after = ImportDashboardRow.query.filter(
+            ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
+        ).count()
+
+        return jsonify({
+            'success': True,
+            'target_po_filter': target_po_upper or '(all POs)',
+            'total_before_in_scope': len(all_rows),
+            'total_after_in_db': total_after,
+            'phase_-1_biz_identity_purged': phase_minus1,
+            'phase_0_source_uid_purged': phase_0,
+            'phase_1_src_fingerprint_purged': phase_1,
+            'total_purged': deleted_count,
+            'details': details[:200],
+            'message': (f'Force cleanup selesai: {deleted_count} row dihapus '
+                        f'(FASE -1: {phase_minus1}, FASE 0: {phase_0}, FASE 1: {phase_1}). '
+                        f'Sisa total di DB: {total_after} rows.'),
+            'note': ('Endpoint ini menjalankan FASE -1 (biz identity: po_yupi+item_yupi+po_sementara), '
+                     'FASE 0 (recomputed source_uid), FASE 1 (src fingerprint exclude `so`). '
+                     'Setiap loser di-merge field user-edit-nya ke winner supaya data user tidak hilang.'),
+        })
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
 
 
 @app.route('/api/import/debug-duplicates', methods=['GET'])
