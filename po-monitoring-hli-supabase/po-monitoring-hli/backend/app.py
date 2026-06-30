@@ -27,7 +27,7 @@ except ImportError:
     _APSCHEDULER_AVAILABLE = False
     print('[scheduler] APScheduler not installed – auto copy-sheet disabled.')
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static')
 
 _HOLIDAY_CACHE = None
 _HOLIDAY_CACHE_KEY = None
@@ -10087,22 +10087,6 @@ def diagnostics_google_sheets():
     return jsonify(result), 200
 
 
-FRONTEND_DIST_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'frontend', 'dist'))
-
-@app.route('/', defaults={'path': ''})
-@app.route('/<path:path>')
-def serve_frontend(path):
-    if path.startswith('api/'):
-        return jsonify({'error': 'Not found'}), 404
-    if os.path.isdir(FRONTEND_DIST_DIR):
-        target = os.path.join(FRONTEND_DIST_DIR, path)
-        if path and os.path.isfile(target):
-            return send_from_directory(FRONTEND_DIST_DIR, path)
-        index_path = os.path.join(FRONTEND_DIST_DIR, 'index.html')
-        if os.path.isfile(index_path):
-            return send_from_directory(FRONTEND_DIST_DIR, 'index.html')
-    return jsonify({'status': 'ok', 'message': 'PO Monitoring API running'}), 200
-
 warm_dashboard_stats_cache_async()
 warm_completed_summary_cache_async()
 warm_rfq_dashboard_cache_async()
@@ -10158,6 +10142,44 @@ def import_scheduler_status():
         'disable_env': 'PO_MONITOR_DISABLE_SCHEDULER=1',
         'last_copy_at': import_meta_get('last_copy_at') or '',
     })
+
+
+# ============================================================
+# SERVE FRONTEND (React build) — supaya dashboard tidak lagi
+# perlu di-hosting di Vercel (diblokir kebijakan OfficeKeeper).
+# Frontend di-build ke folder backend/static/ (lihat vite.config.js),
+# lalu Flask serve langsung dari domain PythonAnywhere yang sama
+# dengan backend API. Letakkan blok ini SETELAH semua @app.route('/api/...')
+# supaya tidak menabrak route API yang sudah ada.
+# ============================================================
+_FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
+
+@app.route('/')
+def serve_frontend_index():
+    return send_from_directory(_FRONTEND_DIR, 'index.html')
+
+@app.route('/assets/<path:filename>')
+def serve_frontend_assets(filename):
+    # Vite build menaruh JS/CSS hasil bundle di static/assets/.
+    return send_from_directory(os.path.join(_FRONTEND_DIR, 'assets'), filename)
+
+@app.route('/favicon.svg')
+@app.route('/icons.svg')
+def serve_frontend_root_files():
+    filename = request.path.lstrip('/')
+    return send_from_directory(_FRONTEND_DIR, filename)
+
+@app.route('/<path:path>')
+def serve_frontend_catchall(path):
+    # Catch-all untuk React Router (client-side routing). Kalau user
+    # refresh di URL seperti /import atau /rfq, kembalikan index.html
+    # supaya React Router yang menentukan halaman, BUKAN Flask 404.
+    # Route /api/* tidak akan pernah sampai sini karena Flask selalu
+    # mencocokkan route yang lebih spesifik (decorator di atas) duluan.
+    full_path = os.path.join(_FRONTEND_DIR, path)
+    if os.path.isfile(full_path):
+        return send_from_directory(_FRONTEND_DIR, path)
+    return send_from_directory(_FRONTEND_DIR, 'index.html')
 
 
 if __name__ == '__main__':
