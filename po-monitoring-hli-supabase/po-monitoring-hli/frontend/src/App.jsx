@@ -19,7 +19,7 @@ import * as XLSX from 'xlsx';
 import { saveAs } from 'file-saver';
 import { useLocation, useNavigate } from 'react-router-dom';
 
-const BACKEND = import.meta.env.VITE_API_URL || 'http://127.0.0.1:5001';
+const BACKEND = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://127.0.0.1:5001');
 const api = axios.create({ baseURL: BACKEND, timeout: 600000 });
 const DASHBOARD_SUMMARY_CACHE_PREFIX = 'po-monitoring:dashboard-summary:';
 const DASHBOARD_STATS_CACHE_KEY = 'po-monitoring:dashboard-stats';
@@ -108,28 +108,40 @@ const loadOfflineQueue = () => {
 };
 
 const saveOfflineQueue = (queue) => {
-  if (typeof window === 'undefined') return;
+  if (typeof window === 'undefined') return true;
   try {
     window.localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(queue));
+    return true;
   } catch {
-    /* storage full — drop oldest entries */
+    // Storage full. DO NOT silently drop entries — that loses user input
+    // without any warning. Try clearing non-essential caches first so the
+    // queue (which holds real unsynced edits) gets priority over caches.
     try {
-      const trimmed = queue.slice(-50);
-      window.localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(trimmed));
-    } catch {}
+      storageRemoveWhere((key) => key.startsWith(DASHBOARD_SUMMARY_CACHE_PREFIX)
+        || key.startsWith(DASHBOARD_STATS_CACHE_KEY)
+        || key.startsWith(DASHBOARD_AGING_CACHE_KEY)
+        || key.startsWith(DASHBOARD_PENDING_TOTAL_CACHE_KEY));
+      window.localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(queue));
+      return true;
+    } catch {
+      // Still full even after clearing caches — the queue itself is too
+      // large. Caller must be told so it can warn the user instead of
+      // pretending the edit was saved.
+      return false;
+    }
   }
 };
 
 const enqueueOfflineUpdate = (kind, payload) => {
   const queue = loadOfflineQueue();
-  queue.push({ kind, payload, queuedAt: Date.now() });
-  saveOfflineQueue(queue);
+  queue.push({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`, kind, payload, queuedAt: Date.now() });
+  return saveOfflineQueue(queue);
 };
 
-const removeFromOfflineQueue = (index) => {
+const removeFromOfflineQueueById = (id) => {
   const queue = loadOfflineQueue();
-  queue.splice(index, 1);
-  saveOfflineQueue(queue);
+  const next = queue.filter(item => item.id !== id);
+  saveOfflineQueue(next);
 };
 
 const normalizeDashboardCacheQuery = (qs = '') => {
@@ -2310,10 +2322,8 @@ const App = () => {
   const replayOfflineQueue = useCallback(async () => {
     const queue = loadOfflineQueue();
     if (!queue.length) return;
-    let remaining = [...queue];
-    let changed = false;
-    for (let i = 0; i < queue.length; i++) {
-      const item = queue[i];
+    const succeededIds = new Set();
+    for (const item of queue) {
       try {
         if (item.kind === 'import-cell') {
           await api.put('/api/import/cell', item.payload);
@@ -2323,29 +2333,34 @@ const App = () => {
           await api.put(`/api/rfq/${encodeURIComponent(item.payload.row_key)}`, { field: item.payload.field, value: item.payload.value });
         } else if (item.kind === 'rfq-cells') {
           await api.put('/api/rfq/batch-cells', item.payload);
+        } else if (item.kind === 'item-registration-cell') {
+          await api.put(`/api/item-registration/${item.payload.itemId}`, { [item.payload.field]: item.payload.value });
+        } else if (item.kind === 'so-cell') {
+          await api.put(item.payload.endpoint, { [item.payload.field]: item.payload.value });
         } else {
-          // Unknown kind — drop it so we don't loop forever.
-          remaining = remaining.filter((_, j) => j !== i);
-          changed = true;
+          // Unknown/legacy kind — drop it so we don't loop forever on
+          // something this app version no longer supports.
+          succeededIds.add(item.id);
           continue;
         }
-        // Success: remove this entry from remaining.
-        remaining = remaining.filter(x => x !== item);
-        changed = true;
+        succeededIds.add(item.id);
       } catch (e) {
-        // Stop on first failure — connection probably still bad. Leave
-        // this entry and everything after it in the queue for the next
-        // `online` event.
+        // Stop replaying further entries — connection is likely still bad.
+        // Everything from here on (including this failed item) stays
+        // queued, in original order, for the next `online` event.
         break;
       }
     }
-    if (changed) {
-      saveOfflineQueue(remaining);
-      if (remaining.length === 0) {
-        addToast(`Offline edits synced successfully`, 'success');
-      } else {
-        addToast(`${remaining.length} edit(s) still pending — will retry`, 'warning');
-      }
+    if (succeededIds.size === 0) return;
+    // Remove only the entries that actually synced. Anything queued by the
+    // user *during* this replay (race with a new edit) is preserved because
+    // we filter the freshest copy of the queue, not the stale snapshot.
+    const remaining = loadOfflineQueue().filter(item => !succeededIds.has(item.id));
+    saveOfflineQueue(remaining);
+    if (remaining.length === 0) {
+      addToast(`Offline edits synced successfully`, 'success');
+    } else {
+      addToast(`${remaining.length} edit(s) still pending — will retry`, 'warning');
     }
   }, [addToast]);
 
@@ -2835,12 +2850,14 @@ const App = () => {
       // Network/HTTP failure → queue for replay when online. DO NOT revert
       // the local edit (user input is preserved).
       if (typeof navigator === 'undefined' || !navigator.onLine || e.message?.includes('Network') || e.code === 'ERR_NETWORK' || e.response == null) {
-        if (isGroupSync && groupRowKeys.length > 1) {
-          enqueueOfflineUpdate('import-cells', { updates: groupRowKeys.map(rk => ({ row_key: rk, field, value })) });
+        const queued = (isGroupSync && groupRowKeys.length > 1)
+          ? enqueueOfflineUpdate('import-cells', { updates: groupRowKeys.map(rk => ({ row_key: rk, field, value })) })
+          : enqueueOfflineUpdate('import-cell', { row_key: rowKey, field, value });
+        if (queued) {
+          addToast(`Saved offline — will sync when connection returns`, 'warning');
         } else {
-          enqueueOfflineUpdate('import-cell', { row_key: rowKey, field, value });
+          addToast(`Offline storage is full — this edit could not be saved. Please reconnect and retry.`, 'error');
         }
-        addToast(`Saved offline — will sync when connection returns`, 'warning');
       } else {
         addToast(`Failed to update Import data: ${e.response?.data?.error || e.message}`, 'error');
       }
@@ -2873,8 +2890,12 @@ const App = () => {
     } catch (e) {
       // Network/HTTP failure → queue for replay. Keep local edits intact.
       if (typeof navigator === 'undefined' || !navigator.onLine || e.message?.includes('Network') || e.code === 'ERR_NETWORK' || e.response == null) {
-        enqueueOfflineUpdate('import-cells', { updates: safeUpdates });
-        addToast(`Saved offline — will sync when connection returns`, 'warning');
+        const queued = enqueueOfflineUpdate('import-cells', { updates: safeUpdates });
+        if (queued) {
+          addToast(`Saved offline — will sync when connection returns`, 'warning');
+        } else {
+          addToast(`Offline storage is full — these edits could not be saved. Please reconnect and retry.`, 'error');
+        }
       } else {
         addToast(`Failed to update Import data: ${e.response?.data?.error || e.message}`, 'error');
       }
@@ -3435,22 +3456,48 @@ const App = () => {
 
   const updateSOCell = async (soId, field, value) => {
     setEditingCell(null);
+    const isNumericId = typeof soId === 'number' || /^\d+$/.test(String(soId));
+    const endpoint = isNumericId ? `/api/data/so/${soId}` : `/api/data/so/by-item/${encodeURIComponent(soId)}`;
+    const matches = (s) => (isNumericId ? String(s.id) === String(soId) : String(s.so_item) === String(soId));
+    // OPTIMISTIC: apply locally first so the input (e.g. remarks, delivery
+    // plan date) is never lost, even if the network call below fails.
+    setAllSOData(prev => prev.map(s => matches(s) ? { ...s, [field]: value } : s));
+    setModal(prev => prev ? { ...prev, data: (prev.data || []).map(s => matches(s) ? { ...s, [field]: value } : s) } : prev);
     try {
-      const isNumericId = typeof soId === 'number' || /^\d+$/.test(String(soId));
-      const endpoint = isNumericId ? `/api/data/so/${soId}` : `/api/data/so/by-item/${encodeURIComponent(soId)}`;
       await api.put(endpoint, { [field]: value });
-      const matches = (s) => (isNumericId ? String(s.id) === String(soId) : String(s.so_item) === String(soId));
-      setAllSOData(prev => prev.map(s => matches(s) ? { ...s, [field]: value } : s));
-      setModal(prev => prev ? { ...prev, data: (prev.data || []).map(s => matches(s) ? { ...s, [field]: value } : s) } : prev);
-    } catch (e) { addToast(`❌ Failed to update: ${e.message}`, 'error'); }
+    } catch (e) {
+      if (typeof navigator === 'undefined' || !navigator.onLine || e.message?.includes('Network') || e.code === 'ERR_NETWORK' || e.response == null) {
+        const queued = enqueueOfflineUpdate('so-cell', { endpoint, field, value });
+        if (queued) {
+          addToast(`Saved offline — will sync when connection returns`, 'warning');
+        } else {
+          addToast(`Offline storage is full — this edit could not be saved. Please reconnect and retry.`, 'error');
+        }
+      } else {
+        addToast(`❌ Failed to update: ${e.message}`, 'error');
+      }
+    }
   };
 
   const updateItemRegistrationCell = async (itemId, field, value) => {
     setEditingCell(null);
+    // OPTIMISTIC: apply locally first so the input is never lost, even if
+    // the network call below fails and the edit has to be queued.
+    setItemRegData(prev => prev.map(row => row.id === itemId ? { ...row, [field]: value } : row));
     try {
       await api.put(`/api/item-registration/${itemId}`, { [field]: value });
-      setItemRegData(prev => prev.map(row => row.id === itemId ? { ...row, [field]: value } : row));
-    } catch (e) { addToast(`Failed to update Item Registration: ${e.response?.data?.error || e.message}`, 'error'); }
+    } catch (e) {
+      if (typeof navigator === 'undefined' || !navigator.onLine || e.message?.includes('Network') || e.code === 'ERR_NETWORK' || e.response == null) {
+        const queued = enqueueOfflineUpdate('item-registration-cell', { itemId, field, value });
+        if (queued) {
+          addToast(`Saved offline — will sync when connection returns`, 'warning');
+        } else {
+          addToast(`Offline storage is full — this edit could not be saved. Please reconnect and retry.`, 'error');
+        }
+      } else {
+        addToast(`Failed to update Item Registration: ${e.response?.data?.error || e.message}`, 'error');
+      }
+    }
   };
 
   const applyRFQLocalUpdates = (updates) => {
@@ -3553,8 +3600,14 @@ const App = () => {
       // Network/HTTP failure → queue for replay. KEEP the optimistic local
       // edit (don't revert) so user input is preserved, Google-Sheets-style.
       if (typeof navigator === 'undefined' || !navigator.onLine || e.message?.includes('Network') || e.code === 'ERR_NETWORK' || e.response == null) {
-        enqueueOfflineUpdate('rfq-cell', { row_key: rowKey, field, value, options });
-        if (!quiet) addToast(`Saved offline — will sync when connection returns`, 'warning');
+        const queued = enqueueOfflineUpdate('rfq-cell', { row_key: rowKey, field, value });
+        if (!quiet) {
+          if (queued) {
+            addToast(`Saved offline — will sync when connection returns`, 'warning');
+          } else {
+            addToast(`Offline storage is full — this edit could not be saved. Please reconnect and retry.`, 'error');
+          }
+        }
       } else {
         if (!quiet) addToast(`Failed to update RFQ: ${e.response?.data?.error || e.message}`, 'error');
       }
@@ -3581,8 +3634,12 @@ const App = () => {
     } catch (e) {
       // Offline / network failure → queue. Keep local edits intact.
       if (typeof navigator === 'undefined' || !navigator.onLine || e.message?.includes('Network') || e.code === 'ERR_NETWORK' || e.response == null) {
-        enqueueOfflineUpdate('rfq-cells', { updates: cleanUpdates });
-        addToast(`Saved offline — will sync when connection returns`, 'warning');
+        const queued = enqueueOfflineUpdate('rfq-cells', { updates: cleanUpdates });
+        if (queued) {
+          addToast(`Saved offline — will sync when connection returns`, 'warning');
+        } else {
+          addToast(`Offline storage is full — these edits could not be saved. Please reconnect and retry.`, 'error');
+        }
       } else {
         addToast(`Failed to update RFQ batch: ${e.response?.data?.error || e.message}`, 'error');
       }
