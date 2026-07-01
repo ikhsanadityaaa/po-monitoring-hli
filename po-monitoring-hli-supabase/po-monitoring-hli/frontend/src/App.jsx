@@ -1274,14 +1274,14 @@ const FilterPanel = ({ children, darkMode, className = '' }) => (
   </div>
 );
 
-const PagePagination = ({ darkMode, txt2, page, totalPages, total, perPage, onPageChange, onPerPageChange }) => {
+const PagePagination = ({ darkMode, txt2, page, totalPages, total, perPage, onPageChange, onPerPageChange, unitLabel = 'Rows' }) => {
   const from = total ? (page - 1) * perPage + 1 : 0;
   const to = Math.min(page * perPage, total);
   return (
     <div className={`px-5 py-3 border-t ${darkMode ? 'border-gray-700' : 'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
       <div className="flex items-center gap-3">
         <span className={`text-sm ${txt2}`}>Showing {from}-{to} of {fmtNum(total)}</span>
-        <label className={`flex items-center gap-1 text-xs ${txt2}`}>Rows
+        <label className={`flex items-center gap-1 text-xs ${txt2}`}>{unitLabel}
           <select
             className={`px-2 py-1 rounded-lg text-xs border ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200'}`}
             value={perPage}
@@ -6225,7 +6225,7 @@ const App = () => {
           <div className="flex items-center gap-2 min-w-0 flex-shrink-0">
             <Ship className="w-5 h-5 text-blue-500 flex-shrink-0" />
             <h2 className={`text-lg font-bold ${txt}`}>Import</h2>
-            <span className={`text-sm ${txt2}`}>({fmtNum(importTotal)} records)</span>
+            <span className={`text-sm ${txt2}`}>({fmtNum(importTotal)} Yupi POs)</span>
             <span className={`text-xs ${txt2}`} title={`Vendor Import: ${fmtNum(importVendorCount)}`}>Last Copy: {fmtWibDateTime(importLastCopyAt)}</span>
           </div>
           {/* Action buttons — kept on a SINGLE line (no wrap) and right-aligned.
@@ -6579,7 +6579,7 @@ const App = () => {
           </table>
         </DataTableScroll>
 
-        <PagePagination darkMode={darkMode} txt2={txt2} page={importPage} totalPages={totalPages} total={importTotal} perPage={importPerPage} onPageChange={(p)=>{ setImportPage(p); fetchImportData(p, importPerPage, importAppliedSearch, false, importFilters, importReqDlvSort, importYupiPoSort); }} onPerPageChange={(next)=>{ setImportPerPage(next); setImportPage(1); fetchImportData(1, next, importAppliedSearch, false, importFilters, importReqDlvSort, importYupiPoSort); }} />
+        <PagePagination darkMode={darkMode} txt2={txt2} page={importPage} totalPages={totalPages} total={importTotal} perPage={importPerPage} unitLabel="Yupi POs" onPageChange={(p)=>{ setImportPage(p); fetchImportData(p, importPerPage, importAppliedSearch, false, importFilters, importReqDlvSort, importYupiPoSort); }} onPerPageChange={(next)=>{ setImportPerPage(next); setImportPage(1); fetchImportData(1, next, importAppliedSearch, false, importFilters, importReqDlvSort, importYupiPoSort); }} />
 
         {/* Hidden file input for Vendor Import upload — lives OUTSIDE the
             dropdown so it's always mounted. The dropdown's "Upload Vendor
