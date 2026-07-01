@@ -1028,10 +1028,12 @@ IMPORT_REFERENCE_VISIBLE_COLUMNS = [
     # SOFT COPY DOC moved here (right after Payment Date) per user request.
     {'sheet_col': 'DI', 'field': 'soft_copy_doc',       'label': 'SOFT COPY DOC',          'width': 150, 'hyperlink': True},
     # ── Per-item columns (group_per_item=True → never merged across rows) ──────
-    {'sheet_col': 'L',                            'field': 'so',                  'label': 'SO',                     'width': 110, 'group_per_item': True},
+    # FIX V20: widen SO (110→150) dan PO SEMENTARA (120→160) supaya nomor tidak
+    # ter-truncate. User spec: "perlebar sedikit kolom SO dan PO Sementara".
+    {'sheet_col': 'L',                            'field': 'so',                  'label': 'SO',                     'width': 150, 'group_per_item': True},
     {'sheet_col': 'M',  'source_sheet_col': 'A',  'field': 'group',               'label': 'GROUP',                  'width': 90,  'group_per_item': True},
     {'sheet_col': 'O',  'source_sheet_col': 'C', 'field': 'po_date_by_email',    'label': 'PO DATE\n(By Email)',    'width': 100, 'group_per_item': True},
-    {'sheet_col': 'Q',  'source_sheet_col': 'E',  'field': 'po_sementara',        'label': 'PO SEMENTARA',           'width': 120, 'group_per_item': True},
+    {'sheet_col': 'Q',  'source_sheet_col': 'E',  'field': 'po_sementara',        'label': 'PO SEMENTARA',           'width': 160, 'group_per_item': True},
     {'sheet_col': 'S',  'source_sheet_col': 'G',  'field': 'item_yupi',           'label': 'Item Yupi',              'width': 100, 'group_per_item': True},
     {'sheet_col': 'T',  'source_sheet_col': 'H',  'field': 'item_name',           'label': 'Item name',              'width': 200, 'group_per_item': True},
     {'sheet_col': 'U',  'source_sheet_col': 'I',  'field': 'spec',                'label': 'Spec',                   'width': 340, 'group_per_item': True},
@@ -1908,6 +1910,30 @@ def import_row_business_uid(row):
         return _identity_to_uid({'po_sementara': po_sementara, 'item_yupi': item_yupi})
     return None
 
+def import_row_po_sementara_uid(row):
+    """FIX V20: Universal fallback identity = (po_sementara + item_yupi) TANPA
+    po_yupi dan TANPA source_req_dlv_date. Dipakai sebagai 4th fallback match
+    di upsert loop supaya row yang po_yupi-nya baru terisi (sebelumnya kosong
+    di DB) tetap match ke row lama yang sama — bukan di-insert duplikat.
+
+    Scenario yang diperbaiki:
+      - DB row lama: po_yupi='' (kosong, dari sync lama sebelum po_yupi diisi),
+        po_sementara='SVOI-001', item_yupi='ITM-X'
+      - Sheet row baru: po_yupi='410100326', po_sementara='SVOI-001',
+        item_yupi='ITM-X'
+      - import_row_business_uid: sheet → hash({po_yupi, item_yupi, po_sementara}),
+        DB → hash({po_sementara, item_yupi}) → BEDA, tidak match.
+      - import_row_po_sementara_uid: both → hash({po_sementara, item_yupi}) →
+        SAMA, match! Row lama di-update (po_yupi diisi), bukan duplikat.
+
+    Return None kalau po_sementara atau item_yupi kosong.
+    """
+    item_yupi = (import_nonblank(row.get('item_yupi')) or '').strip().upper()
+    po_sementara = (import_nonblank(row.get('po_sementara')) or '').strip().upper()
+    if not po_sementara or not item_yupi:
+        return None
+    return _identity_to_uid({'po_sementara': po_sementara, 'item_yupi': item_yupi})
+
 def merge_import_existing_payload(existing_payload, sheet_payload):
     merged = dict(sheet_payload or {})
     existing_payload = existing_payload or {}
@@ -2381,7 +2407,11 @@ def sync_import_sheet_to_dashboard():
     # INSERT new row, supaya upstream edit ke kolom K (req_dlv_date sheet)
     # tidak menyebabkan row lama dianggap "tidak match" → row baru di-insert
     # kosong → user data di row lama hilang setelah orphan purge.
+    # FIX V20: Tambah index by po_sementara uid (po_sementara + item_yupi TANPA
+    # po_yupi). Dipakai sebagai 4th fallback supaya row yang po_yupi-nya baru
+    # terisi (sebelumnya kosong di DB) tetap match ke row lama — bukan duplikat.
     existing_by_biz_key = {}
+    existing_by_po_sementara_uid = {}
     for existing_row in existing_rows:
         existing_row_keys.add(existing_row.row_key)
         try: existing_payload = json.loads(existing_row.data_json or '{}')
@@ -2406,6 +2436,12 @@ def sync_import_sheet_to_dashboard():
         try: ex_biz = import_row_business_uid(existing_payload)
         except: ex_biz = None
         if ex_biz: existing_by_biz_key.setdefault(ex_biz, []).append(existing_row)
+        # FIX V20: register by po_sementara uid (po_sementara + item_yupi, tanpa po_yupi).
+        # Ini Universal fallback — selalu dihitung walau po_yupi ada, supaya sheet row
+        # yang po_yupi-nya baru terisi bisa match DB row lama yang po_yupi-nya kosong.
+        try: ex_pos_uid = import_row_po_sementara_uid(existing_payload)
+        except: ex_pos_uid = None
+        if ex_pos_uid: existing_by_po_sementara_uid.setdefault(ex_pos_uid, []).append(existing_row)
     now = datetime.utcnow()
     added, updated, seen = 0, 0, 0
     duplicate_counts = {}
@@ -2439,6 +2475,18 @@ def sync_import_sheet_to_dashboard():
             if biz_uid_new:
                 candidates = existing_by_biz_key.get(biz_uid_new) or []
                 if candidates: used_key = f'biz:{biz_uid_new}'
+        # FIX V20: 4th fallback — match by po_sementara uid (po_sementara + item_yupi,
+        # TANPA po_yupi). Ini catch kasus duplikat: sheet row sekarang punya po_yupi
+        # (mis. 410100326), tapi DB row lama po_yupi-nya kosong (dari sync sebelum
+        # po_yupi diisi di sheet). biz-key fallback tidak match karena biz-key sheet
+        # row pakai po_yupi, sedangkan biz-key DB row lama tidak. po_sementara uid
+        # mengabaikan po_yupi, jadi keduanya match → row lama di-update (po_yupi
+        # diisi dari sheet), bukan di-insert duplikat.
+        if not candidates:
+            pos_uid_new = import_row_po_sementara_uid(sheet_payload)
+            if pos_uid_new:
+                candidates = existing_by_po_sementara_uid.get(pos_uid_new) or []
+                if candidates: used_key = f'pos:{pos_uid_new}'
         used = consumed_per_uid.get(used_key, 0)
         target_row = candidates[used] if used < len(candidates) else None
         if target_row is not None:
@@ -2687,6 +2735,73 @@ def sync_import_sheet_to_dashboard():
 
         to_delete = set()  # set of db_row.id yang akan dihapus
 
+        # ── FASE -2: Dedup by po_sementara + item_yupi (TANPA po_yupi).
+        #
+        # FIX V20: Catch duplikat yang FASE -1 lewatkan. FASE -1 pakai
+        # (po_yupi, item_yupi, po_sementara) dan hanya group row yang punya
+        # KETIGA field. Tapi kalau salah satu row po_yupi-nya kosong (dari
+        # sync lama sebelum po_yupi diisi di sheet), FASE -1 tidak group
+        # mereka bersama → duplikat tetap ada.
+        #
+        # FASE -2 pakai (po_sementara, item_yupi) SAJA. Dua row dengan 2 field
+        # ini sama = PASTI line item yang sama (po_sementara = nomor PO line
+        # item, unik per baris; item_yupi = kode item). po_yupi TIDAK di-include
+        # supaya row yang po_yupi-nya baru terisi bisa di-merge ke row lama yang
+        # po_yupi-nya kosong.
+        #
+        # Winner: row dengan po_yupi TERISI (lebih informatif), tiebreak
+        # last_seen_at terbaru. Loser: row dengan po_yupi kosong (atau lebih lama).
+        # Sebelum hapus, MERGE field user-edit dari loser ke winner.
+        db_by_po_sementara_identity = {}  # (po_sementara, item_yupi) → [db_row, ...]
+        for db_row in all_db_rows:
+            data = db_row_data.get(db_row.id, {})
+            item = (import_nonblank(data.get('item_yupi')) or '').strip().upper()
+            pos = (import_nonblank(data.get('po_sementara')) or '').strip().upper()
+            if pos and item:
+                db_by_po_sementara_identity.setdefault((pos, item), []).append(db_row)
+
+        for pos_key, pos_rows in db_by_po_sementara_identity.items():
+            if len(pos_rows) <= 1:
+                continue
+            # Sort: winner = po_yupi TERISI duluan, tiebreak last_seen_at terbaru,
+            # tiebreak id terbesar (paling baru di-insert).
+            def _po_sementara_sort_key(r):
+                data = db_row_data.get(r.id, {})
+                po = (import_nonblank(data.get('po_yupi')) or import_nonblank(data.get('yupi_po')) or '').strip().upper()
+                return (1 if po else 0, r.last_seen_at or datetime.min, r.id)
+            pos_rows.sort(key=_po_sementara_sort_key, reverse=True)
+            winner = pos_rows[0]
+            winner_data = dict(db_row_data.get(winner.id, {}))
+            for loser in pos_rows[1:]:
+                if loser.id in to_delete:
+                    continue
+                loser_data = db_row_data.get(loser.id, {})
+                # MERGE field user-edit dari loser ke winner
+                for field in IMPORT_LOCAL_EDIT_FIELDS:
+                    loser_v = loser_data.get(field)
+                    if import_blankish(loser_v):
+                        continue
+                    if import_blankish(winner_data.get(field)):
+                        winner_data[field] = loser_v
+                # Persist winner_data kalau berubah
+                if winner_data != db_row_data.get(winner.id, {}):
+                    winner.data_json = json.dumps(winner_data, ensure_ascii=False)
+                    winner.updated_at = now
+                    db_row_data[winner.id] = winner_data
+                    # Update source_uid winner ke nilai yang fresh juga
+                    try:
+                        fresh_uid = import_row_source_uid(winner_data, [])
+                        if fresh_uid and fresh_uid != winner.source_uid:
+                            winner.source_uid = fresh_uid
+                    except: pass
+                to_delete.add(loser.id)
+                duplicates_cleaned += 1
+                loser_po = (import_nonblank(loser_data.get('po_yupi')) or import_nonblank(loser_data.get('yupi_po')) or '').strip().upper()
+                print(f"[sync] FASE-2 po-sementara dup purge: id={loser.id} "
+                      f"key=(pos={pos_key[0]}, item={pos_key[1]}) "
+                      f"loser_po_yupi={loser_po or '(empty)'} "
+                      f"→ merged ke winner id={winner.id}")
+
         # ── FASE -1: Dedup by recomputed identity (po_yupi + item_yupi + po_sementara).
         #
         # FIX V13d: Bahkan FASE 0 (dedup by source_uid) bisa melewatkan duplikat kalau:
@@ -2704,6 +2819,9 @@ def sync_import_sheet_to_dashboard():
         # Sebelum hapus, MERGE field user-edit dari loser ke winner supaya data user tidak hilang.
         db_by_biz_identity = {}  # (po_yupi, item_yupi, po_sementara) → [db_row, ...]
         for db_row in all_db_rows:
+            # FIX V20: skip row yang sudah ditandai hapus di FASE -2.
+            if db_row.id in to_delete:
+                continue
             data = db_row_data.get(db_row.id, {})
             po = (import_nonblank(data.get('po_yupi')) or import_nonblank(data.get('yupi_po')) or '').strip().upper()
             item = (import_nonblank(data.get('item_yupi')) or '').strip().upper()
