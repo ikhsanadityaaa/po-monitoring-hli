@@ -208,6 +208,41 @@ const moveToDeadQueue = (item, reason) => {
   } catch {}
 };
 
+// FIX V15: Centralised shouldQueueOffline(e) helper.
+// Sebelumnya (V14) kondisi retryable inline di 6 update handler — duplikatif
+// dan drift-prone. Sekarang terpusat di sini, dipakai semua handler.
+//
+// Coverage lebih luas dari V14 (yang hanya cek `e.response.status >= 500`):
+//   - 408 Request Timeout  — request tidak pernah sampai ke backend logic
+//   - 425 Too Early        — rare tapi retryable (HTTP/2 early data)
+//   - 429 Too Many Requests — penting kalau backend di-belakang rate limiter
+//                             (PythonAnywhere free tier, Cloudflare, dll.)
+//   - 500/502/503/504       — server errors & gateway timeouts
+//   - ECONNABORTED          — axios timeout code (request timeout di client)
+//
+// ECONNABORTED critical karena axios default timeout di file ini = 600.000ms
+// (line ~23). Kalau request timeout di layer axios (bukan HTTP), `e.response`
+// adalah null tapi `e.code === 'ECONNABORTED'`. Tanpa check ini, edit tidak
+// di-queue dan user kehilangan input.
+const RETRYABLE_HTTP_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const RETRYABLE_AXIOS_CODES = new Set(['ERR_NETWORK', 'ECONNABORTED']);
+
+const shouldQueueOffline = (e) => {
+  // Browser offline (most reliable signal).
+  if (typeof navigator === 'undefined' || !navigator.onLine) return true;
+  // Axios network errors (DNS, connection refused, CORS preflight fail, dll.)
+  if (e?.message?.includes('Network')) return true;
+  if (e?.code && RETRYABLE_AXIOS_CODES.has(e.code)) return true;
+  // No response object — request tidak pernah complete (network drop, abort, dll.)
+  if (e?.response == null) return true;
+  // Retryable HTTP status code.
+  const status = e.response.status;
+  if (RETRYABLE_HTTP_STATUSES.has(status)) return true;
+  // 4xx selain di atas = permanent failure (404 row terhapus, 400 bad request,
+  // 403 forbidden, dll.) → tidak di-queue, langsung rollback + error toast.
+  return false;
+};
+
 const normalizeDashboardCacheQuery = (qs = '') => {
   const raw = String(qs || '').replace(/^\?/, '');
   return raw || DASHBOARD_CACHE_KEY_ALL;
@@ -2504,36 +2539,11 @@ const App = () => {
     }
   }, [addToast]);
 
-  // Replay on mount (if online) + whenever `online` event fires.
-  // FIX V14: tambah periodic replay timer (30s) supaya queue tetap diproses
-  // walau user tidak trigger event online (mis. tetap online tapi backend
-  // sempat 5xx lalu recover). Sebelumnya, kalau mount replay gagal dan user
-  // tidak pernah offline→online lagi, queue stuck sampai tab di-refresh.
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    if (typeof navigator !== 'undefined' && navigator.onLine) {
-      // Slight delay so React state (rfqData, importData) has time to mount.
-      const t = setTimeout(replayOfflineQueue, 1500);
-      // FIX V14: periodic replay every 30s kalau online.
-      const interval = setInterval(() => {
-        if (typeof navigator === 'undefined' || navigator.onLine) {
-          replayOfflineQueue();
-        }
-      }, 30_000);
-      return () => {
-        clearTimeout(t);
-        clearInterval(interval);
-      };
-    }
-    const onOnline = () => {
-      addToast(`Connection restored — syncing offline edits...`, 'success');
-      replayOfflineQueue();
-    };
-    window.addEventListener('online', onOnline);
-    return () => window.removeEventListener('online', onOnline);
-  }, [replayOfflineQueue, addToast]);
-
   // Also expose the pending count so the user can see it (optional badge).
+  // FIX V15: pindahkan deklarasi ini SEBELUM useEffect yang pakai offlineQueueCount
+  // di dependency array (line ~2577). Sebelumnya deklarasi ada setelah useEffect,
+  // yang menyebabkan temporal dead zone (TDZ) ReferenceError kalau useEffect
+  // dependency array di-evaluate sebelum deklarasi dieksekusi.
   const [offlineQueueCount, setOfflineQueueCount] = useState(0);
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -2546,6 +2556,46 @@ const App = () => {
       window.removeEventListener('storage', update);
     };
   }, []);
+
+  // Replay on mount (if online) + whenever `online` event fires.
+  // FIX V14: tambah periodic replay timer (30s) supaya queue tetap diproses
+  // walau user tidak trigger event online (mis. tetap online tapi backend
+  // sempat 5xx lalu recover). Sebelumnya, kalau mount replay gagal dan user
+  // tidak pernah offline→online lagi, queue stuck sampai tab di-refresh.
+  // FIX V15: short-circuit periodic timer kalau `offlineQueueCount === 0`
+  // supaya tidak ada setInterval idle yang bunyi tiap 30s saat queue kosong
+  // (hemat baterai/CPU, penting untuk laptop & mobile). Versi V14 firing
+  // unconditional tiap 30s walau queue kosong.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (typeof navigator !== 'undefined' && navigator.onLine) {
+      // Slight delay so React state (rfqData, importData) has time to mount.
+      const t = setTimeout(replayOfflineQueue, 1500);
+      // FIX V15: periodic replay hanya kalau ada item di queue.
+      // Kalau queue kosong, skip setInterval supaya tidak bunyi idle.
+      if (offlineQueueCount > 0) {
+        const interval = setInterval(() => {
+          if (typeof navigator === 'undefined' || navigator.onLine) {
+            replayOfflineQueue();
+          }
+        }, 30_000);
+        return () => {
+          clearTimeout(t);
+          clearInterval(interval);
+        };
+      }
+      return () => clearTimeout(t);
+    }
+    const onOnline = () => {
+      addToast(`Connection restored — syncing offline edits...`, 'success');
+      replayOfflineQueue();
+    };
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
+  }, [replayOfflineQueue, addToast, offlineQueueCount]);
+
+  // Also expose the pending count so the user can see it (optional badge).
+  // (declaration moved above — see comment near line 2542)
 
   function appendMultiParam(params, key, value) {
     if (value === '__NONE__') {
@@ -3015,12 +3065,8 @@ const App = () => {
       }
       return true;
     } catch (e) {
-      // FIX V14: Extend offline detection — 5xx juga di-queue (server down).
-      const isRetryable = typeof navigator === 'undefined' || !navigator.onLine
-        || e.message?.includes('Network') || e.code === 'ERR_NETWORK'
-        || e.response == null
-        || (e.response && e.response.status >= 500);
-      if (isRetryable) {
+      // FIX V15: pakai centralised shouldQueueOffline(e) helper.
+      if (shouldQueueOffline(e)) {
         const queued = (isGroupSync && groupRowKeys.length > 1)
           ? enqueueOfflineUpdate('import-cells', { updates: groupRowKeys.map(rk => ({ row_key: rk, field, value, ...bizKeyContext })) })
           : enqueueOfflineUpdate('import-cell', { row_key: rowKey, field, value, ...bizKeyContext });
@@ -3079,12 +3125,8 @@ const App = () => {
       }
       return true;
     } catch (e) {
-      // FIX V14: Extend offline detection — 5xx juga di-queue.
-      const isRetryable = typeof navigator === 'undefined' || !navigator.onLine
-        || e.message?.includes('Network') || e.code === 'ERR_NETWORK'
-        || e.response == null
-        || (e.response && e.response.status >= 500);
-      if (isRetryable) {
+      // FIX V15: pakai centralised shouldQueueOffline(e) helper.
+      if (shouldQueueOffline(e)) {
         const queued = enqueueOfflineUpdate('import-cells', { updates: enrichedUpdates });
         if (queued) {
           addToast(`Saved offline — will sync when connection returns`, 'warning');
@@ -3666,12 +3708,8 @@ const App = () => {
     try {
       await api.put(endpoint, { [field]: value });
     } catch (e) {
-      // FIX V14: Extend offline detection — 5xx juga di-queue (server down).
-      const isRetryable = typeof navigator === 'undefined' || !navigator.onLine
-        || e.message?.includes('Network') || e.code === 'ERR_NETWORK'
-        || e.response == null
-        || (e.response && e.response.status >= 500);
-      if (isRetryable) {
+      // FIX V15: pakai centralised shouldQueueOffline(e) helper.
+      if (shouldQueueOffline(e)) {
         const queued = enqueueOfflineUpdate('so-cell', { endpoint, field, value });
         if (queued) {
           addToast(`Saved offline — will sync when connection returns`, 'warning');
@@ -3701,12 +3739,8 @@ const App = () => {
     try {
       await api.put(`/api/item-registration/${itemId}`, { [field]: value });
     } catch (e) {
-      // FIX V14: Extend offline detection — 5xx juga di-queue (server down).
-      const isRetryable = typeof navigator === 'undefined' || !navigator.onLine
-        || e.message?.includes('Network') || e.code === 'ERR_NETWORK'
-        || e.response == null
-        || (e.response && e.response.status >= 500);
-      if (isRetryable) {
+      // FIX V15: pakai centralised shouldQueueOffline(e) helper.
+      if (shouldQueueOffline(e)) {
         const queued = enqueueOfflineUpdate('item-registration-cell', { itemId, field, value });
         if (queued) {
           addToast(`Saved offline — will sync when connection returns`, 'warning');
@@ -3820,12 +3854,8 @@ const App = () => {
       }).filter(row => !rfqPicFilter || rfqEditedRowKeys.has(row.row_key) || (row.purchase_pic === rfqPicFilter && row.check === 'open' && row.unit_price_missing && !row.product_id)));
       return true;
     } catch (e) {
-      // FIX V14: Extend offline detection — 5xx juga di-queue (server down).
-      const isRetryable = typeof navigator === 'undefined' || !navigator.onLine
-        || e.message?.includes('Network') || e.code === 'ERR_NETWORK'
-        || e.response == null
-        || (e.response && e.response.status >= 500);
-      if (isRetryable) {
+      // FIX V15: pakai centralised shouldQueueOffline(e) helper.
+      if (shouldQueueOffline(e)) {
         const queued = enqueueOfflineUpdate('rfq-cell', { row_key: rowKey, field, value });
         if (!quiet) {
           if (queued) {
@@ -3862,12 +3892,8 @@ const App = () => {
       }
       return true;
     } catch (e) {
-      // FIX V14: Extend offline detection — 5xx juga di-queue (server down).
-      const isRetryable = typeof navigator === 'undefined' || !navigator.onLine
-        || e.message?.includes('Network') || e.code === 'ERR_NETWORK'
-        || e.response == null
-        || (e.response && e.response.status >= 500);
-      if (isRetryable) {
+      // FIX V15: pakai centralised shouldQueueOffline(e) helper.
+      if (shouldQueueOffline(e)) {
         const queued = enqueueOfflineUpdate('rfq-cells', { updates: cleanUpdates });
         if (queued) {
           addToast(`Saved offline — will sync when connection returns`, 'warning');
