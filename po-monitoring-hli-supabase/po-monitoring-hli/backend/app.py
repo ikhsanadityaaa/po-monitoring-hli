@@ -244,6 +244,11 @@ class SOData(db.Model):
     remarks = db.Column(db.Text)
     pic_name = db.Column(db.String(100))
     uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # FIX: updated_at dibump setiap kali user edit remarks/delivery_plan_date
+    # lewat PUT /api/data/so/<id> atau /by-item/<so_item>. Dipakai untuk
+    # optimistic-concurrency check di masa depan dan untuk mendeteksi
+    # stale write saat replay offline queue.
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class UploadLog(db.Model):
     __tablename__ = 'upload_log'
@@ -342,6 +347,11 @@ class ItemRegistration(db.Model):
     product_registry_pic = db.Column(db.String(200))
     remarks = db.Column(db.Text)
     uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # FIX: updated_at dibump setiap kali user edit remarks lewat
+    # PUT /api/item-registration/<id>. Dipakai untuk optimistic-concurrency
+    # check di masa depan dan untuk mendeteksi stale write saat replay
+    # offline queue.
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class RFQCellEdit(db.Model):
     __tablename__ = 'rfq_cell_edit'
@@ -647,8 +657,8 @@ def _ensure_extra_columns():
             return {row[0].lower() for row in result}
         except Exception: return set()
     migration_plan = {
-        'so_data': [('specification', 'TEXT'), ('product_id', 'VARCHAR(100)'), ('vendor_id', 'VARCHAR(100)'), ('client_id', 'VARCHAR(100)'), ('manufacturer_name', 'VARCHAR(300)'), ('purchasing_currency', 'VARCHAR(10)'), ('purchasing_amount_idr', 'DOUBLE PRECISION'), ('purchasing_amount_idr_cached_at', 'TIMESTAMP'), ('pic_name', 'VARCHAR(100)')],
-        'item_registration': [('req_date', 'DATE'), ('existing_owner', 'VARCHAR(100)'), ('client_id', 'VARCHAR(100)'), ('operation_unit_name', 'VARCHAR(300)'), ('bid_except_type', 'VARCHAR(255)'), ('category_id', 'VARCHAR(100)'), ('pic_name', 'VARCHAR(200)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(50)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)'), ('remarks', 'TEXT'), ('vendor_id', 'VARCHAR(100)')],
+        'so_data': [('specification', 'TEXT'), ('product_id', 'VARCHAR(100)'), ('vendor_id', 'VARCHAR(100)'), ('client_id', 'VARCHAR(100)'), ('manufacturer_name', 'VARCHAR(300)'), ('purchasing_currency', 'VARCHAR(10)'), ('purchasing_amount_idr', 'DOUBLE PRECISION'), ('purchasing_amount_idr_cached_at', 'TIMESTAMP'), ('pic_name', 'VARCHAR(100)'), ('updated_at', 'TIMESTAMP')],
+        'item_registration': [('req_date', 'DATE'), ('existing_owner', 'VARCHAR(100)'), ('client_id', 'VARCHAR(100)'), ('operation_unit_name', 'VARCHAR(300)'), ('bid_except_type', 'VARCHAR(255)'), ('category_id', 'VARCHAR(100)'), ('pic_name', 'VARCHAR(200)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(50)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)'), ('remarks', 'TEXT'), ('vendor_id', 'VARCHAR(100)'), ('updated_at', 'TIMESTAMP')],
         'product_id_db': [('specification', 'TEXT'), ('manufacturer_name', 'VARCHAR(255)'), ('vendor_name', 'VARCHAR(300)'), ('order_unit', 'VARCHAR(50)'), ('product_status', 'VARCHAR(100)'), ('hub_handling_check', 'VARCHAR(100)'), ('tax_type', 'VARCHAR(100)'), ('registration_date', 'DATE'), ('product_registry_pic', 'VARCHAR(200)')],
         'import_vendor': [('origin', 'VARCHAR(100)'), ('top', 'VARCHAR(50)'), ('non_ski', 'VARCHAR(50)')],
     }
@@ -1846,6 +1856,29 @@ def import_row_secondary_uid(row):
     sec = import_row_identity_secondary(row)
     return _identity_to_uid(sec) if sec else None
 
+def import_row_business_uid(row):
+    """FIX V14: Business identity = (po_yupi + item_yupi + po_sementara), TANPA
+    source_req_dlv_date. Dipakai sebagai tertiary fallback match di upsert loop
+    supaya upstream edit ke kolom K (req_dlv_date sheet) tidak menyebabkan
+    row lama dianggap "tidak match" → row baru di-insert kosong → user data
+    di row lama hilang setelah orphan purge.
+
+    Return None kalau po_yupi/item_yupi/po_sementara semua kosong — artinya
+    row belum cukup teridentifikasi untuk biz-key match.
+    """
+    po_yupi = (import_nonblank(row.get('po_yupi')) or import_nonblank(row.get('yupi_po')) or '').strip().upper()
+    item_yupi = (import_nonblank(row.get('item_yupi')) or '').strip().upper()
+    po_sementara = (import_nonblank(row.get('po_sementara')) or '').strip().upper()
+    # Pilihan key: prioritaskan po_yupi+item_yupi+po_sementara (paling stabil),
+    # fallback ke po_sementara+item_yupi (untuk row yang po_yupi belum ada).
+    if po_yupi and item_yupi and po_sementara:
+        return _identity_to_uid({'po_yupi': po_yupi, 'item_yupi': item_yupi, 'po_sementara': po_sementara})
+    if po_yupi and item_yupi:
+        return _identity_to_uid({'po_yupi': po_yupi, 'item_yupi': item_yupi})
+    if po_sementara and item_yupi:
+        return _identity_to_uid({'po_sementara': po_sementara, 'item_yupi': item_yupi})
+    return None
+
 def merge_import_existing_payload(existing_payload, sheet_payload):
     merged = dict(sheet_payload or {})
     existing_payload = existing_payload or {}
@@ -2304,6 +2337,12 @@ def sync_import_sheet_to_dashboard():
     existing_by_uid = {}
     existing_by_sec_uid = {}
     existing_row_keys = set()
+    # FIX V14: Tambah index by business key (po_yupi + item_yupi + po_sementara,
+    # TANPA source_req_dlv_date). Dipakai sebagai tertiary fallback sebelum
+    # INSERT new row, supaya upstream edit ke kolom K (req_dlv_date sheet)
+    # tidak menyebabkan row lama dianggap "tidak match" → row baru di-insert
+    # kosong → user data di row lama hilang setelah orphan purge.
+    existing_by_biz_key = {}
     for existing_row in existing_rows:
         existing_row_keys.add(existing_row.row_key)
         try: existing_payload = json.loads(existing_row.data_json or '{}')
@@ -2324,6 +2363,10 @@ def sync_import_sheet_to_dashboard():
         # checklist, incoterm, dll) hilang/balik ke default. Mendaftarkan tanpa
         # pengecualian membuat fallback secondary selalu bisa menemukan row lama.
         if sec_uid: existing_by_sec_uid.setdefault(sec_uid, []).append(existing_row)
+        # FIX V14: register by biz key (po_yupi + item_yupi + po_sementara, tanpa req_dlv_date).
+        try: ex_biz = import_row_business_uid(existing_payload)
+        except: ex_biz = None
+        if ex_biz: existing_by_biz_key.setdefault(ex_biz, []).append(existing_row)
     now = datetime.utcnow()
     added, updated, seen = 0, 0, 0
     duplicate_counts = {}
@@ -2347,6 +2390,16 @@ def sync_import_sheet_to_dashboard():
             if sec_uid_new:
                 candidates = existing_by_sec_uid.get(sec_uid_new) or []
                 if candidates: used_key = sec_uid_new
+        # FIX V14: Tertiary fallback — match by biz key (po_yupi+item_yupi+po_sementara,
+        # TANPA source_req_dlv_date). Ini catch kasus paling umum penyebab data loss:
+        # upstream tim edit kolom K (req_dlv_date) di Google Sheet → SHA1 uid drift →
+        # primary & secondary lookup gagal → row lama (berisi user data) dianggap
+        # orphan dan di-hard-delete, sementara row baru di-insert kosong.
+        if not candidates:
+            biz_uid_new = import_row_business_uid(sheet_payload)
+            if biz_uid_new:
+                candidates = existing_by_biz_key.get(biz_uid_new) or []
+                if candidates: used_key = f'biz:{biz_uid_new}'
         used = consumed_per_uid.get(used_key, 0)
         target_row = candidates[used] if used < len(candidates) else None
         if target_row is not None:
@@ -2424,6 +2477,7 @@ def sync_import_sheet_to_dashboard():
                 ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
             ).all()
             orphan_rows = []
+            skipped_orphan_with_user_data = 0
             for ex_row in all_vendor_rows:
                 # Skip row yang di-touch di sync ini
                 if ex_row.id in touched_ids:
@@ -2440,6 +2494,24 @@ def sync_import_sheet_to_dashboard():
                     continue
                 if not import_vendor_match(ex_vendor, uploaded_vendor_set):
                     continue
+                # FIX V14: RICHNESS GUARD. Jangan hard-delete row yang masih punya
+                # user-edit data (status, soft_copy_doc, po_send_date, checklist
+                # incoterm/forwarder/bl_number/dll, etd/eta, import_remarks,
+                # payment/payment_date). Row-row ini kemungkinan besar row lama
+                # yang identity-nya (source_uid) drift karena upstream edit kolom
+                # K (req_dlv_date), BUKAN row yang benar-benar hilang dari sheet.
+                #
+                # Sebelum fix ini, row lama yang menyimpan user data di-hard-delete
+                # dan user data hilang permanen — manifest dari bug "Status & Soft
+                # copy doc hilang ganti hari".
+                user_richness = sum(1 for f in IMPORT_USER_LOCAL_ONLY_FIELDS
+                                    if not import_blankish(ex_data.get(f)))
+                if user_richness > 0:
+                    skipped_orphan_with_user_data += 1
+                    print(f"[orphan-purge] SKIP row id={ex_row.id} row_key={ex_row.row_key} "
+                          f"vendor={ex_vendor} — has {user_richness} user-edit field(s); "
+                          f"not auto-deleting to preserve user data.")
+                    continue
                 orphan_rows.append(ex_row)
             for row in orphan_rows:
                 db.session.delete(row)
@@ -2448,6 +2520,8 @@ def sync_import_sheet_to_dashboard():
                 db.session.commit()
                 clear_runtime_caches()
                 print(f"[sync_import_sheet_to_dashboard] Orphan purge: {purged_orphan} row tidak ada di sheet dihapus")
+            if skipped_orphan_with_user_data > 0:
+                print(f"[sync_import_sheet_to_dashboard] Orphan purge: {skipped_orphan_with_user_data} row dengan user data DILEWATI (tidak dihapus)")
         except Exception as orphan_exc:
             try: db.session.rollback()
             except: pass
@@ -4663,7 +4737,19 @@ def _latest_nonblank_value(rows, field, timestamp_fields=('uploaded_at', 'update
     if not candidates: return None
     return getattr(_latest_row(candidates, timestamp_fields), field)
 
-def cleanup_source_table_snapshot(model, key_attr, valid_keys=None, *, manual_fields=(), timestamp_fields=('uploaded_at', 'updated_at'), delete_blank=True, key_normalizer=_norm_key):
+def cleanup_source_table_snapshot(model, key_attr, valid_keys=None, *, manual_fields=(), timestamp_fields=('uploaded_at', 'updated_at'), delete_blank=True, key_normalizer=_norm_key, preserve_stale_with_manual=False):
+    """Cleanup tabel snapshot dari upload.
+
+    FIX: parameter baru `preserve_stale_with_manual` (default False).
+    Kalau True, row yang key-nya TIDAK ada di `valid_keys` (stale) TIDAK
+    akan dihapus kalau salah satu `manual_fields` punya nilai non-blank.
+    Row-row ini dipertahankan supaya user-edit (mis. remarks, delivery_plan_date)
+    tidak hilang saat upload baru tidak menyertakan row itu.
+
+    Use case utama: Item Registration upload yang force-replace — tanpa
+    flag ini, queued remarks edit yang masuk saat user offline akan
+    di-drop permanen karena row-nya dihapus.
+    """
     valid_set = None if valid_keys is None else {key_normalizer(k) for k in valid_keys if key_normalizer(k)}
     groups = {}; blank_rows = []
     for row in db.session.query(model).order_by(model.id.asc()).all():
@@ -4671,10 +4757,28 @@ def cleanup_source_table_snapshot(model, key_attr, valid_keys=None, *, manual_fi
         if not key: blank_rows.append(row); continue
         groups.setdefault(key, []).append(row)
     removed_duplicates = removed_stale = removed_blank = 0
+    preserved_stale_with_manual = 0
     if delete_blank:
         for row in blank_rows: db.session.delete(row); removed_blank += 1
     for key, rows in groups.items():
         if valid_set is not None and key not in valid_set:
+            # FIX: kalau preserve_stale_with_manual=True, cek apakah row
+            # punya manual_fields non-blank. Kalau ya, SKIP delete dan
+            # log supaya admin bisa audit. Ini mencegah data loss untuk
+            # user-edit yang sudah disimpan tapi row source-nya hilang
+            # dari upload terbaru.
+            if preserve_stale_with_manual and manual_fields:
+                has_manual = False
+                for row in rows:
+                    for field in manual_fields:
+                        val = getattr(row, field, None)
+                        if val is not None and str(val).strip():
+                            has_manual = True
+                            break
+                    if has_manual: break
+                if has_manual:
+                    preserved_stale_with_manual += len(rows)
+                    continue
             for row in rows: db.session.delete(row); removed_stale += 1
             continue
         if len(rows) <= 1: continue
@@ -4685,7 +4789,7 @@ def cleanup_source_table_snapshot(model, key_attr, valid_keys=None, *, manual_fi
         for row in rows:
             if row is winner: continue
             db.session.delete(row); removed_duplicates += 1
-    return {'removed_duplicates': removed_duplicates, 'removed_stale': removed_stale, 'removed_blank': removed_blank}
+    return {'removed_duplicates': removed_duplicates, 'removed_stale': removed_stale, 'removed_blank': removed_blank, 'preserved_stale_with_manual': preserved_stale_with_manual}
 
 def cleanup_master_pic_by_category_name(valid_category_names=None):
     valid_set = None if valid_category_names is None else {normalize_category_name(x) for x in valid_category_names if normalize_category_name(x)}
@@ -5193,8 +5297,12 @@ def update_so(so_id):
         if not so: return jsonify({'error': 'Not found'}), 404
         if 'delivery_plan_date' in data: so.delivery_plan_date = parse_date(data['delivery_plan_date'])
         if 'remarks' in data: so.remarks = data['remarks']
+        # FIX: bump updated_at supaya bisa dipakai untuk optimistic-concurrency
+        # check di masa depan dan untuk mendeteksi stale write saat replay
+        # offline queue (edit lama dari user A vs edit baru dari user B).
+        so.updated_at = datetime.utcnow()
         db.session.commit()
-        return jsonify({'success': True})
+        return jsonify({'success': True, 'updated_at': so.updated_at.isoformat() if so.updated_at else None})
     except Exception as e:
         db.session.rollback(); return jsonify({'error': str(e)}), 500
 
@@ -5206,8 +5314,10 @@ def update_so_by_item(so_item):
         if not so: return jsonify({'error': 'Not found'}), 404
         if 'delivery_plan_date' in data: so.delivery_plan_date = parse_date(data['delivery_plan_date'])
         if 'remarks' in data: so.remarks = data['remarks']
+        # FIX: bump updated_at (sama dengan update_so).
+        so.updated_at = datetime.utcnow()
         db.session.commit()
-        return jsonify({'success': True, 'id': so.id, 'so_item': so.so_item})
+        return jsonify({'success': True, 'id': so.id, 'so_item': so.so_item, 'updated_at': so.updated_at.isoformat() if so.updated_at else None})
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
@@ -5869,7 +5979,13 @@ def upload_item_registration():
         db.session.flush()
         # FIX V8: selalu pass latest_req_numbers sebagai valid_keys (bukan None),
         # supaya req_no lama yang tidak ada di upload terbaru dihapus.
-        cleanup = cleanup_source_table_snapshot(ItemRegistration, 'req_no', latest_req_numbers, timestamp_fields=('uploaded_at',), delete_blank=True)
+        # FIX V14: pass manual_fields=('remarks',) + preserve_stale_with_manual=True
+        # supaya row yang punya remarks user-edit TIDAK dihapus saat upload
+        # baru tidak menyertakan req_no itu. Ini mencegah data loss untuk
+        # user yang lagi offline dan punya queued remarks edit — sebelumnya
+        # row dihapus saat admin upload, lalu replay PUT /api/item-registration/<id>
+        # kena 404 → queued edit stuck di head-of-line blocking.
+        cleanup = cleanup_source_table_snapshot(ItemRegistration, 'req_no', latest_req_numbers, timestamp_fields=('uploaded_at', 'updated_at'), delete_blank=True, manual_fields=('remarks',), preserve_stale_with_manual=True)
         for key, value in cleanup.items(): summary[key] = summary.get(key, 0) + value
 
         db.session.commit()
@@ -5893,8 +6009,12 @@ def update_item_registration(item_id):
         item = db.session.get(ItemRegistration, item_id)
         if not item: return jsonify({'error': 'Not found'}), 404
         if 'remarks' in data: item.remarks = data['remarks'] or ''
+        # FIX: bump updated_at supaya bisa dipakai untuk optimistic-concurrency
+        # check di masa depan dan untuk mendeteksi stale write saat replay
+        # offline queue (edit lama dari user A vs edit baru dari user B).
+        item.updated_at = datetime.utcnow()
         db.session.commit()
-        return jsonify({'success': True})
+        return jsonify({'success': True, 'updated_at': item.updated_at.isoformat() if item.updated_at else None})
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
@@ -8736,6 +8856,32 @@ def update_import_cell():
         if not column:
             return jsonify({'error': 'Unknown import column'}), 400
         row = ImportDashboardRow.query.filter_by(row_key=row_key).first()
+        fuzzy_matched = False
+        # FIX V14: kalau row_key tidak ketemu (kemungkinan karena daily sync
+        # identity drift mengubah row_key), coba fuzzy match by biz key.
+        if not row:
+            po_yupi_p = clean(payload.get('po_yupi'))
+            item_yupi_p = clean(payload.get('item_yupi'))
+            po_sementara_p = clean(payload.get('po_sementara'))
+            if po_yupi_p or item_yupi_p or po_sementara_p:
+                biz_key_from_payload = import_row_business_uid({
+                    'po_yupi': po_yupi_p, 'yupi_po': po_yupi_p,
+                    'item_yupi': item_yupi_p, 'po_sementara': po_sementara_p,
+                })
+                if biz_key_from_payload:
+                    all_import_rows = ImportDashboardRow.query.filter(
+                        ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
+                    ).all()
+                    for _r in all_import_rows:
+                        try: _d = json.loads(_r.data_json or '{}')
+                        except: _d = {}
+                        try: _bk = import_row_business_uid(_d)
+                        except: _bk = None
+                        if _bk == biz_key_from_payload:
+                            row = _r
+                            fuzzy_matched = True
+                            print(f"[import/cell] FUZZY MATCH row_key={row_key} → {row.row_key} (biz key match)")
+                            break
         if not row:
             return jsonify({'error': 'Import dashboard row not found'}), 404
         try:
@@ -8758,7 +8904,7 @@ def update_import_cell():
         clear_runtime_caches()
         columns = import_layout_columns()
         updated_row = import_dashboard_row_to_dict(row, columns, vendor_attrs_map=import_vendor_attrs_map())
-        return jsonify({'success': True, 'row_key': row_key, 'field': field, 'value': value, 'row': updated_row, 'sheet_sync': sheet_sync})
+        return jsonify({'success': True, 'row_key': row.row_key, 'original_row_key': row_key, 'field': field, 'value': value, 'row': updated_row, 'sheet_sync': sheet_sync, 'fuzzy_matched': fuzzy_matched})
     except Exception as e:
         db.session.rollback()
         import traceback; traceback.print_exc()
@@ -9000,8 +9146,27 @@ def update_import_cells_batch():
         row_keys = [clean(item.get('row_key')) for item in updates if clean(item.get('row_key'))]
         rows = ImportDashboardRow.query.filter(ImportDashboardRow.row_key.in_(row_keys)).all() if row_keys else []
         row_by_key = {r.row_key: r for r in rows}
+        # FIX V14: Pre-build biz-key index supaya bisa fuzzy re-match row_key yang
+        # sudah berubah karena daily sync identity drift. Sebelumnya, kalau user
+        # edit offline lalu sync harian mengubah row_key (karena SHA1 uid drift),
+        # replay PUT /api/import/cells akan silent-skip (continue) tanpa warning.
+        # Sekarang kita fuzzy match by business key (po_yupi+item_yupi+po_sementara)
+        # supaya edit tetap sampai ke row yang benar.
+        all_import_rows = ImportDashboardRow.query.filter(
+            ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
+        ).all() if row_keys else []
+        biz_key_to_row = {}
+        for _r in all_import_rows:
+            try: _d = json.loads(_r.data_json or '{}')
+            except: _d = {}
+            try: _bk = import_row_business_uid(_d)
+            except: _bk = None
+            if _bk and _bk not in biz_key_to_row:
+                biz_key_to_row[_bk] = _r
         sheet_items = []
         updated_keys = set()
+        skipped_missing = 0
+        fuzzy_matched_keys = set()
         for item in updates:
             row_key = clean(item.get('row_key'))
             field = clean(item.get('field'))
@@ -9009,7 +9174,26 @@ def update_import_cells_batch():
             if not row_key or not field or field not in valid_fields:
                 continue
             row = row_by_key.get(row_key)
+            # FIX V14: kalau row_key tidak ketemu, coba fuzzy match by biz key.
+            # Frontend harus kirim po_yupi/item_yupi/po_sementara di item payload
+            # supaya ini jalan. Kalau tidak ada, fallback ke row_key string match
+            # (sudah dilakukan di atas) dan skip.
             if not row:
+                biz_key_from_payload = None
+                po_yupi_p = clean(item.get('po_yupi'))
+                item_yupi_p = clean(item.get('item_yupi'))
+                po_sementara_p = clean(item.get('po_sementara'))
+                if po_yupi_p or item_yupi_p or po_sementara_p:
+                    biz_key_from_payload = import_row_business_uid({
+                        'po_yupi': po_yupi_p, 'yupi_po': po_yupi_p,
+                        'item_yupi': item_yupi_p, 'po_sementara': po_sementara_p,
+                    })
+                if biz_key_from_payload and biz_key_from_payload in biz_key_to_row:
+                    row = biz_key_to_row[biz_key_from_payload]
+                    fuzzy_matched_keys.add(row.row_key)
+            if not row:
+                skipped_missing += 1
+                print(f"[import/cells] SKIP row_key={row_key} field={field} — not found (and no fuzzy match)")
                 continue
             try:
                 data = json.loads(row.data_json or '{}')
@@ -9022,7 +9206,7 @@ def update_import_cells_batch():
             sheet_items.append({'row': row, 'field': field, 'value': value})
             if field in ('purchase_price', 'ord_qty') and clean(data.get('purchase_amount')):
                 sheet_items.append({'row': row, 'field': 'purchase_amount', 'value': data.get('purchase_amount')})
-            updated_keys.add(row_key)
+            updated_keys.add(row.row_key)
         sheet_sync = {'synced': False, 'reason': 'No mapped Import sheet cells to sync'}
         if sheet_items:
             try:
@@ -9032,8 +9216,17 @@ def update_import_cells_batch():
         db.session.commit()
         clear_runtime_caches()
         _v_attrs_map = import_vendor_attrs_map()
-        updated_rows = [import_dashboard_row_to_dict(row_by_key[k], columns, vendor_attrs_map=_v_attrs_map) for k in updated_keys if k in row_by_key]
-        return jsonify({'success': True, 'updated': len(sheet_items), 'rows': updated_rows, 'sheet_sync': sheet_sync})
+        updated_rows = [import_dashboard_row_to_dict(row_by_key[k] if k in row_by_key else next((r for r in all_import_rows if r.row_key == k), None), columns, vendor_attrs_map=_v_attrs_map) for k in updated_keys]
+        # FIX V14: surface skipped_missing + fuzzy_matched count supaya frontend
+        # bisa warning user kalau ada edit yang tidak bisa di-apply.
+        return jsonify({
+            'success': True,
+            'updated': len(sheet_items),
+            'rows': [r for r in updated_rows if r is not None],
+            'sheet_sync': sheet_sync,
+            'skipped_missing': skipped_missing,
+            'fuzzy_matched': len(fuzzy_matched_keys),
+        })
     except Exception as e:
         db.session.rollback()
         import traceback; traceback.print_exc()
