@@ -2459,6 +2459,17 @@ def sync_import_sheet_to_dashboard():
     # 2. Hanya hapus row dari vendor yang ADA di uploaded_vendor_set
     # 3. Hanya kalau sheet_rows > 0 (bukan gagal baca sheet -> sheet kosong palsu)
     # 4. Toleransi 5 detik untuk menghindari false positive akibat clock skew
+    # 5. FIX V15: 26-jam orphan grace period (defense-in-depth). Row orphan
+    #    yang last_seen_at < 26 jam yang lalu TIDAK dihapus — beri kesempatan
+    #    untuk upstream sheet recover (mis. req_dlv_date di-rollback) atau
+    #    untuk admin manual rescue via /api/admin/force-cleanup-import-duplicates.
+    #    Ini Lapisan TAMBAHAN di atas V14 richness guard:
+    #      - V14 richness guard: cegah delete row dengan user data (PERMANENT).
+    #      - V15 grace period: cegah delete row orphan yang masih "muda" (TRANSIENT).
+    #    Tujuannya: kalau upstream sheet sementara kosong/hilang karena bug
+    #    spreadsheet atau sync gagal sebagian, row yang belum stabil tidak
+    #    langsung di-purge.
+    ORPHAN_GRACE_PERIOD = timedelta(hours=26)
     purged_orphan = 0
     if uploaded_vendor_set and len(sheet_rows) > 0:
         try:
@@ -2478,6 +2489,7 @@ def sync_import_sheet_to_dashboard():
             ).all()
             orphan_rows = []
             skipped_orphan_with_user_data = 0
+            skipped_orphan_in_grace_period = 0
             for ex_row in all_vendor_rows:
                 # Skip row yang di-touch di sync ini
                 if ex_row.id in touched_ids:
@@ -2485,6 +2497,12 @@ def sync_import_sheet_to_dashboard():
                 # Skip row yang last_seen_at NULL (row lama sebelum fitur ini ada —
                 # tidak bisa dipastikan apakah ada di sheet atau tidak, jadi biarkan)
                 if ex_row.last_seen_at is None:
+                    continue
+                # FIX V15: Orphan grace period — row yang last_seen_at masih
+                # dalam 26 jam terakhir di-skip. Beri kesempatan untuk upstream
+                # sheet recover sebelum hard-delete.
+                if ex_row.last_seen_at > (now - ORPHAN_GRACE_PERIOD):
+                    skipped_orphan_in_grace_period += 1
                     continue
                 # Hanya purge row dari vendor yang ada di uploaded_vendor_set
                 try: ex_data = json.loads(ex_row.data_json or '{}')
@@ -2521,7 +2539,9 @@ def sync_import_sheet_to_dashboard():
                 clear_runtime_caches()
                 print(f"[sync_import_sheet_to_dashboard] Orphan purge: {purged_orphan} row tidak ada di sheet dihapus")
             if skipped_orphan_with_user_data > 0:
-                print(f"[sync_import_sheet_to_dashboard] Orphan purge: {skipped_orphan_with_user_data} row dengan user data DILEWATI (tidak dihapus)")
+                print(f"[sync_import_sheet_to_dashboard] Orphan purge: {skipped_orphan_with_user_data} row dengan user data DILEWATI (V14 richness guard)")
+            if skipped_orphan_in_grace_period > 0:
+                print(f"[sync_import_sheet_to_dashboard] Orphan purge: {skipped_orphan_in_grace_period} row masih dalam grace period 26 jam (V15 defense-in-depth)")
         except Exception as orphan_exc:
             try: db.session.rollback()
             except: pass
