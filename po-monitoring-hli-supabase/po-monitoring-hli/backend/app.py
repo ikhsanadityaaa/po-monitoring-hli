@@ -931,10 +931,18 @@ IMPORT_VENDOR_ATTR_FIELDS = {'origin', 'top'}  # populated from ImportVendor by 
 IMPORT_DASHBOARD_LOCAL_FIELDS = {'po_send_date'}
 IMPORT_SOURCE_MANAGED_FIELDS = {
     'po_date_by_email', 'site', 'yupi_po', 'po_yupi', 'vendor',
-    'req_dlv_date', 'source_req_dlv_date', 'so', 'group', 'po_sementara',
+    'source_req_dlv_date', 'so', 'group', 'po_sementara',
     'item_yupi', 'item_name', 'spec', 'remark_yupi', 'reschedule',
     'ord_qty', 'unit', 'unit_price', 'amount', 'vendor_name',
     'purchase_price', 'currency',
+    # FIX V18: req_dlv_date DIPINDAH dari IMPORT_SOURCE_MANAGED_FIELDS ke
+    # IMPORT_USER_LOCAL_ONLY_FIELDS (lihat bawah). Sebelumnya, req_dlv_date
+    # di-overwrite saat sync dari source sheet — padahal user bisa reschedule
+    # req_dlv_date di dashboard (tampilan). source_req_dlv_date (kolom K sheet
+    # asli) TETAP source-managed dan tidak berubah saat reschedule.
+    # Sekarang req_dlv_date TIDAK akan di-overwrite oleh source sheet sync
+    # kalau user sudah reschedule.
+    # 'req_dlv_date',  ← DIPINDAH ke USER_LOCAL_ONLY_FIELDS (V18)
     # FIX V9: field-field di bawah DIPINDAH dari IMPORT_SOURCE_MANAGED_FIELDS ke
     # IMPORT_USER_LOCAL_ONLY_FIELDS (lihat bawah). Sebelumnya, field-field ini
     # di-overwrite saat sync dari source sheet — padahal user edit manual field-field
@@ -944,7 +952,8 @@ IMPORT_SOURCE_MANAGED_FIELDS = {
 }
 
 IMPORT_LOCAL_EDIT_FIELDS = {
-    'status', 'days_left', 'po_send_date', '_po_send_date_manual', 'po_date_by_email', 'site', 'yupi_po', 'po_yupi', 'vendor',
+    'status', 'days_left', 'po_send_date', '_po_send_date_manual', '_req_dlv_date_manual',
+    'po_date_by_email', 'site', 'yupi_po', 'po_yupi', 'vendor',
     'req_dlv_date', 'source_req_dlv_date', 'etd', 'eta', 'arrival_check', 'import_remarks',
     'so', 'group', 'po_sementara', 'item_yupi', 'item_name', 'spec', 'remark_yupi',
     'reschedule', 'ord_qty', 'unit', 'unit_price', 'amount', 'vendor_name',
@@ -965,10 +974,15 @@ IMPORT_USER_LOCAL_ONLY_FIELDS = IMPORT_LOCAL_EDIT_FIELDS - IMPORT_SOURCE_MANAGED
 #   - etd, eta, import_remarks (diisi user via dashboard)
 #   - payment, payment_date (diisi user via dashboard)
 #   - po_send_date, _po_send_date_manual (diisi user via dashboard)
+# FIX V18: req_dlv_date, _req_dlv_date_manual juga di USER_LOCAL_ONLY.
+#   req_dlv_date bisa di-reschedule user di dashboard — TIDAK boleh di-overwrite
+#   oleh source sheet sync. _req_dlv_date_manual = flag bahwa req_dlv_date
+#   sudah di-set manual (reschedule).
 assert {'incoterm', 'forwarder', 'bl_number', 'inv_no', 'non_ski',
         'status', 'sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo',
         'soft_copy_doc', 'etd', 'eta', 'import_remarks', 'payment', 'payment_date',
-        'po_send_date', '_po_send_date_manual'}.issubset(IMPORT_USER_LOCAL_ONLY_FIELDS), \
+        'po_send_date', '_po_send_date_manual',
+        'req_dlv_date', '_req_dlv_date_manual'}.issubset(IMPORT_USER_LOCAL_ONLY_FIELDS), \
     "Field user-edit harus di IMPORT_USER_LOCAL_ONLY_FIELDS"
 
 IMPORT_SOURCE_ONLY_COLUMNS = [
@@ -1726,11 +1740,23 @@ def apply_import_formula_columns(row):
     row['po_yupi'] = po_yupi; row['yupi_po'] = po_yupi
     row['vendor'] = import_nonblank(row.get('vendor')) or import_nonblank(row.get('vendor_name'))
     try:
+        # FIX V18: req_dlv_date hanya di-derive dari source_req_dlv_date kalau
+        # user BELUM pernah reschedule (tidak ada _req_dlv_date_manual flag).
+        # Kalau user sudah reschedule (set req_dlv_date manual di dashboard),
+        # JANGAN overwrite req_dlv_date dengan source_req_dlv_date — itu akan
+        # revert tanggal ke nilai lama (kolom K sheet asli).
         req_raw = import_nonblank(row.get('source_req_dlv_date')) or import_nonblank(row.get('req_dlv_date'))
         row['source_req_dlv_date'] = req_raw
+        req_manual = clean(row.get('_req_dlv_date_manual')) == '1'
         if req_raw:
             req_parsed = import_date_from_value(req_raw)
-            if req_parsed: row['req_dlv_date'] = req_parsed.isoformat()
+            if req_parsed:
+                # Hanya set source_req_dlv_date (kolom K asli). req_dlv_date
+                # (dashboard date) HANYA di-derive kalau belum ada manual override.
+                if not req_manual:
+                    row['req_dlv_date'] = req_parsed.isoformat()
+                # Kalau req_manual=True, biarkan req_dlv_date apa adanya
+                # (sudah di-set user via PUT /api/import/cell).
         for _date_field in ('po_date_by_email', 'etd', 'eta', 'reschedule'):
             _raw = import_nonblank(row.get(_date_field))
             if not _raw: continue
@@ -1739,7 +1765,10 @@ def apply_import_formula_columns(row):
     except: pass
     etd_date = import_date_from_value(row.get('etd'))
     eta_date = import_date_from_value(row.get('eta'))
-    req_date = req_parsed if 'req_parsed' in locals() else None
+    # FIX V18: req_date untuk days_left / arrival_check HARUS pakai req_dlv_date
+    # (dashboard date, yang bisa di-reschedule user), BUKAN req_parsed yang
+    # berasal dari source_req_dlv_date (kolom K asli).
+    req_date = import_date_from_value(row.get('req_dlv_date'))
     status_upper = (clean(row.get('status')) or '').upper()
     if not has_business_data: row['days_left'] = ''
     elif status_upper == 'DELIVERED': row['days_left'] = '✅'
@@ -1884,9 +1913,15 @@ def merge_import_existing_payload(existing_payload, sheet_payload):
     existing_payload = existing_payload or {}
     row_exists_in_db = bool(existing_payload)
 
-    # Req Dlv Date selalu mengikuti sheet (source-managed, behavior normal).
-    # Kalau ada reschedule, row di-highlight kuning di frontend — tidak ada
-    # proteksi khusus di backend untuk req_dlv_date.
+    # FIX V18: req_dlv_date sekarang di IMPORT_USER_LOCAL_ONLY_FIELDS, jadi
+    # saat sync, existing req_dlv_date (yang mungkin sudah di-reschedule user)
+    # TIDAK akan di-overwrite oleh sheet's source_req_dlv_date (kolom K asli).
+    # source_req_dlv_date TETAP source-managed dan akan di-update dari sheet.
+    #
+    # Ini memperbaiki bug: "untuk item yang di-reschedule, saat di klik copy
+    # sheet, req_dlv_date yang sudah di-update selalu kembali ke tanggal lama".
+    # Sekarang req_dlv_date yang sudah di-reschedule akan bertahan pakai tanggal
+    # baru walau sync dijalankan berkali-kali.
     for field in IMPORT_LOCAL_EDIT_FIELDS:
         old_value = existing_payload.get(field)
         new_value = merged.get(field)
@@ -1949,6 +1984,10 @@ def import_dashboard_row_to_dict(row, columns, vendor_attrs_map=None, pre_parsed
         field = col.get('field')
         out[field] = '' if data.get(field) is None else data.get(field, '')
     out.update({'_row_key': row.row_key, '_source_key': row.source_key, '_source_label': row.source_label, '_source_uid': row.source_uid, '_sheet_row': row.sheet_row, '_vendor_name': row.vendor_name, '_dashboard_id': row.id, '_first_seen_at': utc_isoformat(row.first_seen_at) if row.first_seen_at else '', '_last_seen_at': utc_isoformat(row.last_seen_at) if row.last_seen_at else '', '_updated_at': utc_isoformat(row.updated_at) if row.updated_at else ''})
+    # FIX V18: expose _req_dlv_date_manual flag supaya frontend bisa tunjukkan
+    # indicator "rescheduled" pada cell req_dlv_date (warna amber / badge).
+    # Flag ini diset saat user edit req_dlv_date via PUT /api/import/cell(s).
+    out['_req_dlv_date_manual'] = clean(data.get('_req_dlv_date_manual'))
     return out
 
 def import_layout_tracker_visible_rows(columns=None):
@@ -7511,9 +7550,25 @@ def set_import_payload_field_aliases(data, field, value):
     elif field == 'po_yupi':
         data['yupi_po'] = value
     elif field == 'req_dlv_date':
-        data['source_req_dlv_date'] = value
+        # FIX V18: JANGAN set source_req_dlv_date = value! Sebelumnya, edit
+        # req_dlv_date di dashboard juga menimpa source_req_dlv_date (kolom K
+        # sheet asli) — itu menghancurkan tanggal asli, sehingga:
+        #   1. Identity hash (yang pakai source_req_dlv_date) berubah → row
+        #      dianggap row baru saat sync → duplikat.
+        #   2. apply_import_formula_columns re-derive req_dlv_date dari
+        #      source_req_dlv_date yang sudah ditimpa → tanggal revert ke
+        #      nilai reschedule (kelihatannya OK, tapi kalau ada bug merge,
+        #      tanggal bisa revert ke tanggal lama).
+        # Sekarang: set flag _req_dlv_date_manual='1' supaya
+        # apply_import_formula_columns TIDAK overwrite req_dlv_date dengan
+        # source_req_dlv_date. source_req_dlv_date tetap tanggal asli (kolom K).
+        data['_req_dlv_date_manual'] = '1' if clean(value) else ''
     elif field == 'source_req_dlv_date':
-        data['req_dlv_date'] = value
+        # source_req_dlv_date = kolom K sheet asli. Kalau di-edit (jarang,
+        # biasanya dari sync), derive req_dlv_date juga HANYA kalau belum
+        # ada manual override.
+        if clean(data.get('_req_dlv_date_manual')) != '1':
+            data['req_dlv_date'] = value
     return data
 
 def sync_import_cells_to_source_sheets(items):
@@ -7971,23 +8026,47 @@ def get_import_data():
             d = import_sort_date_value(import_nonblank(data.get('req_dlv_date')) or import_nonblank(data.get('source_req_dlv_date')))
             try:
                 if d is None or pd.isna(d):
-                    return (1, 0)
-                # Konversi ke date Python murni untuk hindari error NaT pandas
-                if isinstance(d, datetime):
-                    d = d.date()
-                elif hasattr(d, 'to_pydatetime'):
-                    d = d.to_pydatetime().date()
-                ordinal = d.toordinal()
+                    date_part = (1, 0)
+                else:
+                    # Konversi ke date Python murni untuk hindari error NaT pandas
+                    if isinstance(d, datetime):
+                        d = d.date()
+                    elif hasattr(d, 'to_pydatetime'):
+                        d = d.to_pydatetime().date()
+                    ordinal = d.toordinal()
+                    date_part = (0, ordinal if req_dlv_sort == 'oldest' else -ordinal)
             except Exception:
-                return (1, 0)
-            return (0, ordinal if req_dlv_sort == 'oldest' else -ordinal)
+                date_part = (1, 0)
+            # FIX V19: Status NEW selalu muncul paling atas (sebagai prioritas
+            # karena ini belum di proses). User spec: "Jika ada Status yang New
+            # dia akan selalu muncul paling atas (sebagai prioritas karena ini
+            # belum di proses)."
+            #
+            # Sort key = (is_not_new, date_key). NEW = priority 0, lainnya = 1.
+            # Dengan Python stable sort, NEW items akan muncul duluan, lalu
+            # sorted by req_dlv_date (oldest/newest) di masing-masing kelompok.
+            status = str(data.get('status') or '').strip().upper()
+            is_new_priority = 0 if status == 'NEW' else 1
+            return (is_new_priority, date_part[0], date_part[1])
 
         if yupi_po_sort:
             filtered_items.sort(key=_import_req_date_key)
-            with_yupi = [item for item in filtered_items if str(item.get('yupi_po') or '').strip()]
-            without_yupi = [item for item in filtered_items if not str(item.get('yupi_po') or '').strip()]
+            # FIX V19: Pecah jadi 2 kelompok (NEW priority vs non-NEW) lebih
+            # dulu, supaya NEW selalu di atas walau yupi_po_sort aktif.
+            new_items = [item for item in filtered_items if str((item.get('data') or {}).get('status') or '').strip().upper() == 'NEW']
+            non_new_items = [item for item in filtered_items if item not in new_items]
+            # NEW items: sort by req_dlv_date (sudah di-sort di atas, tetap)
+            # Non-NEW items: pecah jadi with_yupi / without_yupi lalu sort by yupi_po.
+            with_yupi = [item for item in non_new_items if str(item.get('yupi_po') or '').strip()]
+            without_yupi = [item for item in non_new_items if not str(item.get('yupi_po') or '').strip()]
             with_yupi.sort(key=lambda item: str(item.get('yupi_po') or '').strip().lower(), reverse=(yupi_po_sort == 'desc'))
-            filtered_items = with_yupi + without_yupi
+            # NEW items juga dipecah supaya yupi_po_sort tetap konsisten dalam
+            # kelompok NEW (kalau user sort by yupi_po asc, NEW items juga asc).
+            new_with_yupi = [item for item in new_items if str(item.get('yupi_po') or '').strip()]
+            new_without_yupi = [item for item in new_items if not str(item.get('yupi_po') or '').strip()]
+            new_with_yupi.sort(key=lambda item: str(item.get('yupi_po') or '').strip().lower(), reverse=(yupi_po_sort == 'desc'))
+            # Gabung: NEW duluan (dengan yupi, lalu tanpa yupi), lalu non-NEW.
+            filtered_items = new_with_yupi + new_without_yupi + with_yupi + without_yupi
         else:
             filtered_items.sort(key=_import_req_date_key)
 
