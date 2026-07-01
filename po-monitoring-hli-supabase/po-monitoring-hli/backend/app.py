@@ -8006,25 +8006,40 @@ def get_import_data():
         # (mirip hasMergeKey di App_v15.jsx:5667 dan export logic di
         # app_v15.py:9069-9094).
         #
-        # Stability: filtered_items sudah di-sort (by req_dlv_date, atau by
-        # yupi_po kalau yupi_po_sort set) — lihat line 7985-7992. Kita lakukan
-        # stable secondary sort by group_key supaya item-item dengan group key
-        # sama menjadi contiguous. Python sort bersifat stable, jadi ordering
-        # sebelumnya (req_dlv_date / yupi_po) tetap preserved di level group.
+        # FIX V17 (sort bug fix): JANGAN re-sort by group_key! Sebelumnya V16
+        # melakukan `indexed.sort(key=lambda pair: (_import_group_key(pair[1]),
+        # pair[0]))` yang justru MENGUBAH urutan utama dari req_dlv_date menjadi
+        # urutan Yupi PO. Ini menyebabkan bug "data belum urut sesuai oldest".
+        #
+        # filtered_items SUDAH di-sort (by req_dlv_date ascending kalau default,
+        # atau by yupi_po kalau yupi_po_sort set) — lihat line 7985-7992. Karena
+        # frontend merge key = (yupi_po, req_dlv_date), item-item dengan group
+        # key sama OTOMATIS contiguous setelah sort by req_dlv_date (karena
+        # mereka share req_dlv_date yang sama). Jadi kita hanya perlu walk
+        # through list yang sudah sorted dan group consecutive same-key items.
+        #
+        # Reschedule handling: sort key (line 7971) pakai `req_dlv_date`
+        # (dashboard date = tanggal setelah reschedule), fallback
+        # `source_req_dlv_date` (kolom K asli). Jadi kalau upstream sheet
+        # reschedule tanggal, daily sync update `req_dlv_date` di DB, dan
+        # sort otomatis pakai tanggal baru → list re-arrange. ✓
         def _import_group_key(item):
             yupi = str(item.get('yupi_po') or '').strip()
             data = item.get('data') or {}
             req_dlv = import_nonblank(data.get('req_dlv_date')) or import_nonblank(data.get('source_req_dlv_date')) or ''
             return f"{yupi}|{str(req_dlv).strip()}"
 
-        # Stable secondary sort: kelompokkan item dengan group key sama jadi
-        # contiguous, preserve urutan sebelumnya sebagai tie-breaker.
-        indexed = list(enumerate(filtered_items))
-        indexed.sort(key=lambda pair: (_import_group_key(pair[1]), pair[0]))
-        sorted_items = [item for _, item in indexed]
+        # FIX V17: pakai filtered_items langsung (SUDAH sorted by req_dlv_date
+        # atau yupi_po). JANGAN re-sort. Cukup group consecutive same-key items.
+        # Same-group items sudah contiguous karena:
+        #   - Sort by req_dlv_date: items dengan same (yupi_po, req_dlv_date)
+        #     share req_dlv_date → adjacent.
+        #   - Sort by yupi_po: items dengan same yupi_po adjacent, dan within
+        #     same yupi_po sorted by req_dlv_date → same (yupi_po, req_dlv_date)
+        #     adjacent.
+        sorted_items = filtered_items
 
-        # Build groups of consecutive same-key items (setelah sort di atas,
-        # item dengan group key sama sudah contiguous).
+        # Build groups of consecutive same-key items.
         groups = []
         current_group = []
         current_key = None
