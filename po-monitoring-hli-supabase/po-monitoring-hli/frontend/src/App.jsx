@@ -94,6 +94,12 @@ const saveFilterState = (pageKey, state) => {
 // pending update here. On reconnect we replay them in order. Mirrors Google
 // Sheets: edits never disappear, they sync when the connection is back.
 const OFFLINE_QUEUE_KEY = 'po-monitoring:offline-queue';
+// FIX V14: dead-letter queue for items that exhausted all retries (max 50
+// attempts) atau sudah lebih dari 14 hari. Tetap disimpan (tidak dibuang)
+// supaya admin bisa audit, tapi tidak akan di-replay otomatis lagi.
+const OFFLINE_DEAD_QUEUE_KEY = 'po-monitoring:offline-queue-dead';
+const OFFLINE_QUEUE_MAX_ATTEMPTS = 50;      // ≈ 50 retry ≈ 25 menit periodic timer (30s)
+const OFFLINE_QUEUE_TTL_MS = 14 * 24 * 60 * 60 * 1000;  // 14 hari
 
 const loadOfflineQueue = () => {
   if (typeof window === 'undefined') return [];
@@ -104,6 +110,28 @@ const loadOfflineQueue = () => {
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
+  }
+};
+
+const loadDeadQueue = () => {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(OFFLINE_DEAD_QUEUE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+const saveDeadQueue = (queue) => {
+  if (typeof window === 'undefined') return true;
+  try {
+    window.localStorage.setItem(OFFLINE_DEAD_QUEUE_KEY, JSON.stringify(queue));
+    return true;
+  } catch {
+    return false;
   }
 };
 
@@ -132,16 +160,52 @@ const saveOfflineQueue = (queue) => {
   }
 };
 
+// FIX V14: dedup key — untuk jenis edit single-cell, kita dedup by
+// (kind, row_key/endpoint/itemId, field). Kalau user edit cell yang sama
+// berkali-kali saat offline, hanya nilai terbaru yang disimpan. Ini mencegah
+// queue bengkak dan quota localStorage cepat penuh.
+const _dedupKeyFor = (kind, payload) => {
+  if (kind === 'import-cell') return `import-cell|${payload?.row_key || ''}|${payload?.field || ''}`;
+  if (kind === 'rfq-cell')    return `rfq-cell|${payload?.row_key || ''}|${payload?.field || ''}`;
+  if (kind === 'item-registration-cell') return `item-reg|${payload?.itemId || ''}|${payload?.field || ''}`;
+  if (kind === 'so-cell')     return `so-cell|${payload?.endpoint || ''}|${payload?.field || ''}`;
+  // Batch kinds tidak di-dedup (sulit di-merge dengan benar).
+  return null;
+};
+
 const enqueueOfflineUpdate = (kind, payload) => {
   const queue = loadOfflineQueue();
-  queue.push({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`, kind, payload, queuedAt: Date.now() });
-  return saveOfflineQueue(queue);
+  // FIX V14: dedup — drop entry lama dengan key yang sama, keep new value.
+  const dedupKey = _dedupKeyFor(kind, payload);
+  let effectiveQueue = queue;
+  if (dedupKey) {
+    effectiveQueue = queue.filter(item => _dedupKeyFor(item.kind, item.payload) !== dedupKey);
+  }
+  effectiveQueue.push({
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+    kind, payload,
+    queuedAt: Date.now(),
+    attemptCount: 0,
+    lastAttemptAt: null,
+  });
+  return saveOfflineQueue(effectiveQueue);
 };
 
 const removeFromOfflineQueueById = (id) => {
   const queue = loadOfflineQueue();
   const next = queue.filter(item => item.id !== id);
   saveOfflineQueue(next);
+};
+
+// FIX V14: pindahkan item ke dead-letter queue kalau sudah exceed max attempts
+// atau sudah expired (>14 hari). Tidak di-drop begitu saja supaya admin bisa
+// audit dan user bisa di-restored manual kalau perlu.
+const moveToDeadQueue = (item, reason) => {
+  try {
+    const dead = loadDeadQueue();
+    dead.push({ ...item, movedToDeadAt: Date.now(), deadReason: reason });
+    saveDeadQueue(dead);
+  } catch {}
 };
 
 const normalizeDashboardCacheQuery = (qs = '') => {
@@ -2319,58 +2383,147 @@ const App = () => {
   // queue and the connection is up), drain the queue and replay every
   // pending edit in order. On success the entry is removed; on failure it
   // stays in the queue for the next attempt.
+  //
+  // FIX V14 (per-error-class strategy):
+  //   - 4xx (400/404/403) → permanent failure untuk item ini. Pindahkan ke
+  //     dead-letter queue dan CONTINUE ke item berikutnya. Sebelumnya, 1
+  //     item 404 (row terhapus) bisa block semua edit di belakangnya
+  //     forever (head-of-line blocking).
+  //   - 5xx (500/502/503) → server bermasalah, BREAK loop (coba nanti).
+  //   - Network error / e.response == null → BREAK loop (coba nanti).
+  // FIX V14 (TTL + max attempts): item yang sudah retry 50× atau sudah
+  //   lebih dari 14 hari dipindahkan ke dead-letter queue.
+  // FIX V14 (skipped_missing/fuzzy_matched): kalau backend return
+  //   skipped_missing > 0, surface warning ke user supaya dia tahu ada
+  //   edit yang tidak bisa di-apply.
   const replayOfflineQueue = useCallback(async () => {
     const queue = loadOfflineQueue();
     if (!queue.length) return;
     const succeededIds = new Set();
+    const deadIds = new Set();
+    const deadReasons = [];
+    let skippedMissingTotal = 0;
+    let fuzzyMatchedTotal = 0;
+    let stoppedDueToServerError = false;
+    const now = Date.now();
     for (const item of queue) {
+      // FIX V14: TTL check — expired item dipindahkan ke dead-letter.
+      if (item.queuedAt && (now - item.queuedAt) > OFFLINE_QUEUE_TTL_MS) {
+        deadIds.add(item.id);
+        deadReasons.push({ id: item.id, reason: `expired after ${Math.round((now - item.queuedAt) / 86400000)}d` });
+        continue;
+      }
+      // FIX V14: max-attempts check.
+      if ((item.attemptCount || 0) >= OFFLINE_QUEUE_MAX_ATTEMPTS) {
+        deadIds.add(item.id);
+        deadReasons.push({ id: item.id, reason: `max attempts (${OFFLINE_QUEUE_MAX_ATTEMPTS}) exceeded` });
+        continue;
+      }
+      // FIX V14: bump attemptCount di snapshot lokal (tidak persist sampai
+      // loop selesai — kalau crash mid-loop, attempt count tetap naik).
+      item.attemptCount = (item.attemptCount || 0) + 1;
+      item.lastAttemptAt = now;
       try {
+        let resp = null;
         if (item.kind === 'import-cell') {
-          await api.put('/api/import/cell', item.payload);
+          resp = await api.put('/api/import/cell', item.payload);
         } else if (item.kind === 'import-cells') {
-          await api.put('/api/import/cells', item.payload);
+          resp = await api.put('/api/import/cells', item.payload);
         } else if (item.kind === 'rfq-cell') {
-          await api.put(`/api/rfq/${encodeURIComponent(item.payload.row_key)}`, { field: item.payload.field, value: item.payload.value });
+          resp = await api.put(`/api/rfq/${encodeURIComponent(item.payload.row_key)}`, { field: item.payload.field, value: item.payload.value });
         } else if (item.kind === 'rfq-cells') {
-          await api.put('/api/rfq/batch-cells', item.payload);
+          resp = await api.put('/api/rfq/batch-cells', item.payload);
         } else if (item.kind === 'item-registration-cell') {
-          await api.put(`/api/item-registration/${item.payload.itemId}`, { [item.payload.field]: item.payload.value });
+          resp = await api.put(`/api/item-registration/${item.payload.itemId}`, { [item.payload.field]: item.payload.value });
         } else if (item.kind === 'so-cell') {
-          await api.put(item.payload.endpoint, { [item.payload.field]: item.payload.value });
+          resp = await api.put(item.payload.endpoint, { [item.payload.field]: item.payload.value });
         } else {
-          // Unknown/legacy kind — drop it so we don't loop forever on
-          // something this app version no longer supports.
-          succeededIds.add(item.id);
+          // Unknown/legacy kind — pindahkan ke dead-letter supaya tidak
+          // loop forever. Sebelumnya ini di-silent-drop.
+          deadIds.add(item.id);
+          deadReasons.push({ id: item.id, reason: `unknown kind: ${item.kind}` });
           continue;
+        }
+        // FIX V14: cek skipped_missing dari response batch import.
+        if (resp?.data && typeof resp.data.skipped_missing === 'number') {
+          skippedMissingTotal += resp.data.skipped_missing;
+        }
+        if (resp?.data && typeof resp.data.fuzzy_matched === 'number') {
+          fuzzyMatchedTotal += resp.data.fuzzy_matched;
         }
         succeededIds.add(item.id);
       } catch (e) {
-        // Stop replaying further entries — connection is likely still bad.
-        // Everything from here on (including this failed item) stays
-        // queued, in original order, for the next `online` event.
+        const status = e?.response?.status;
+        if (status && status >= 400 && status < 500) {
+          // 4xx = permanent failure untuk item ini (row terhapus, field
+          // tidak editable, dll). Pindahkan ke dead-letter dan CONTINUE.
+          // Sebelumnya: break → semua edit di belakangnya stuck forever.
+          deadIds.add(item.id);
+          deadReasons.push({
+            id: item.id,
+            reason: `HTTP ${status}: ${e?.response?.data?.error || e.message}`,
+          });
+          continue;
+        }
+        // 5xx atau network error → server bermasalah, break loop.
+        stoppedDueToServerError = true;
         break;
       }
     }
-    if (succeededIds.size === 0) return;
-    // Remove only the entries that actually synced. Anything queued by the
-    // user *during* this replay (race with a new edit) is preserved because
-    // we filter the freshest copy of the queue, not the stale snapshot.
-    const remaining = loadOfflineQueue().filter(item => !succeededIds.has(item.id));
+    // Apply removals + dead-letter moves.
+    if (succeededIds.size === 0 && deadIds.size === 0) {
+      // Tidak ada yang berubah — mungkin karena break di item pertama.
+      // Tetap persist attemptCount yang sudah di-bump.
+      saveOfflineQueue(queue);
+      return;
+    }
+    const remaining = loadOfflineQueue().filter(item => !succeededIds.has(item.id) && !deadIds.has(item.id));
     saveOfflineQueue(remaining);
-    if (remaining.length === 0) {
-      addToast(`Offline edits synced successfully`, 'success');
-    } else {
+    // Pindahkan dead items ke dead-letter queue.
+    for (const reason of deadReasons) {
+      const item = queue.find(i => i.id === reason.id);
+      if (item) moveToDeadQueue(item, reason.reason);
+    }
+    // Toasts.
+    if (succeededIds.size > 0 && remaining.length === 0 && !stoppedDueToServerError) {
+      let msg = `Offline edits synced successfully (${succeededIds.size} edit)`;
+      if (fuzzyMatchedTotal > 0) msg += ` · ${fuzzyMatchedTotal} fuzzy-matched`;
+      addToast(msg, 'success');
+    } else if (stoppedDueToServerError) {
+      addToast(`${remaining.length} edit(s) still pending — server error, will retry in 30s`, 'warning');
+    } else if (remaining.length > 0) {
       addToast(`${remaining.length} edit(s) still pending — will retry`, 'warning');
+    }
+    if (deadReasons.length > 0) {
+      addToast(`${deadReasons.length} edit(s) tidak bisa di-apply dan dipindahkan ke dead-letter (cek console untuk detail)`, 'error');
+      // eslint-disable-next-line no-console
+      console.warn('[offline-queue] Dead-letter items:', deadReasons);
+    }
+    if (skippedMissingTotal > 0) {
+      addToast(`${skippedMissingTotal} edit(s) skipped karena row tidak ditemukan (mungkin terhapus di backend)`, 'warning');
     }
   }, [addToast]);
 
   // Replay on mount (if online) + whenever `online` event fires.
+  // FIX V14: tambah periodic replay timer (30s) supaya queue tetap diproses
+  // walau user tidak trigger event online (mis. tetap online tapi backend
+  // sempat 5xx lalu recover). Sebelumnya, kalau mount replay gagal dan user
+  // tidak pernah offline→online lagi, queue stuck sampai tab di-refresh.
   useEffect(() => {
     if (typeof window === 'undefined') return;
     if (typeof navigator !== 'undefined' && navigator.onLine) {
       // Slight delay so React state (rfqData, importData) has time to mount.
       const t = setTimeout(replayOfflineQueue, 1500);
-      return () => clearTimeout(t);
+      // FIX V14: periodic replay every 30s kalau online.
+      const interval = setInterval(() => {
+        if (typeof navigator === 'undefined' || navigator.onLine) {
+          replayOfflineQueue();
+        }
+      }, 30_000);
+      return () => {
+        clearTimeout(t);
+        clearInterval(interval);
+      };
     }
     const onOnline = () => {
       addToast(`Connection restored — syncing offline edits...`, 'success');
@@ -2829,36 +2982,59 @@ const App = () => {
       : [rowKey];
     // OPTIMISTIC: update UI immediately for ALL rows in the group.
     setImportData(prev => prev.map(row => groupRowKeys.includes(row._row_key) ? { ...row, [field]: value } : row));
+    // FIX V14: Capture biz-key fields dari editedRow supaya bisa dipakai untuk
+    // fuzzy re-match di backend kalau row_key sudah berubah karena daily sync.
+    const bizKeyContext = editedRow ? {
+      po_yupi: editedRow.po_yupi || editedRow.yupi_po || '',
+      item_yupi: editedRow.item_yupi || '',
+      po_sementara: editedRow.po_sementara || '',
+    } : {};
     try {
       // Send batch update to backend so all rows in the group get persisted.
       if (isGroupSync && groupRowKeys.length > 1) {
         const res = await api.put('/api/import/cells', {
-          updates: groupRowKeys.map(rk => ({ row_key: rk, field, value })),
+          updates: groupRowKeys.map(rk => ({ row_key: rk, field, value, ...bizKeyContext })),
         });
         if (Array.isArray(res.data?.rows)) {
           const byKey = new Map(res.data.rows.map(r => [r._row_key, r]));
           setImportData(prev => prev.map(row => byKey.has(row._row_key) ? { ...row, ...byKey.get(row._row_key) } : row));
         }
       } else {
-        const res = await api.put('/api/import/cell', { row_key: rowKey, field, value });
+        const res = await api.put('/api/import/cell', { row_key: rowKey, field, value, ...bizKeyContext });
         if (res.data?.row) {
-          setImportData(prev => prev.map(row => row._row_key === rowKey ? { ...row, ...res.data.row } : row));
+          // FIX V14: kalau backend return row_key berbeda (fuzzy match),
+          // update row_key di local state supaya edit berikutnya pakai key baru.
+          const newRowKey = res.data.row_key || res.data.row?._row_key || rowKey;
+          setImportData(prev => prev.map(row => {
+            if (row._row_key === rowKey && newRowKey !== rowKey) {
+              return { ...row, _row_key: newRowKey, ...res.data.row };
+            }
+            return row._row_key === rowKey ? { ...row, ...res.data.row } : row;
+          }));
         }
       }
       return true;
     } catch (e) {
-      // Network/HTTP failure → queue for replay when online. DO NOT revert
-      // the local edit (user input is preserved).
-      if (typeof navigator === 'undefined' || !navigator.onLine || e.message?.includes('Network') || e.code === 'ERR_NETWORK' || e.response == null) {
+      // FIX V14: Extend offline detection — 5xx juga di-queue (server down).
+      const isRetryable = typeof navigator === 'undefined' || !navigator.onLine
+        || e.message?.includes('Network') || e.code === 'ERR_NETWORK'
+        || e.response == null
+        || (e.response && e.response.status >= 500);
+      if (isRetryable) {
         const queued = (isGroupSync && groupRowKeys.length > 1)
-          ? enqueueOfflineUpdate('import-cells', { updates: groupRowKeys.map(rk => ({ row_key: rk, field, value })) })
-          : enqueueOfflineUpdate('import-cell', { row_key: rowKey, field, value });
+          ? enqueueOfflineUpdate('import-cells', { updates: groupRowKeys.map(rk => ({ row_key: rk, field, value, ...bizKeyContext })) })
+          : enqueueOfflineUpdate('import-cell', { row_key: rowKey, field, value, ...bizKeyContext });
         if (queued) {
           addToast(`Saved offline — will sync when connection returns`, 'warning');
         } else {
+          // FIX V14: rollback optimistic UI kalau enqueue gagal (storage full),
+          // supaya user tidak tertipu melihat nilai yang sebenarnya tidak tersimpan.
+          setImportData(previousRows);
           addToast(`Offline storage is full — this edit could not be saved. Please reconnect and retry.`, 'error');
         }
       } else {
+        // 4xx — permanent failure (row terhapus, field tidak editable). Rollback.
+        setImportData(previousRows);
         addToast(`Failed to update Import data: ${e.response?.data?.error || e.message}`, 'error');
       }
       return false;
@@ -2879,24 +3055,46 @@ const App = () => {
       }
       return next;
     });
+    // FIX V14: enrich each update dengan biz-key context untuk fuzzy match.
+    const enrichedUpdates = safeUpdates.map(u => {
+      const editedRow = importData.find(r => r._row_key === u.row_key);
+      if (!editedRow) return u;
+      return {
+        ...u,
+        po_yupi: editedRow.po_yupi || editedRow.yupi_po || '',
+        item_yupi: editedRow.item_yupi || '',
+        po_sementara: editedRow.po_sementara || '',
+      };
+    });
     try {
-      const res = await api.put('/api/import/cells', { updates: safeUpdates });
+      const res = await api.put('/api/import/cells', { updates: enrichedUpdates });
       const updatedRows = Array.isArray(res.data?.rows) ? res.data.rows : [];
       if (updatedRows.length) {
         const byKey = new Map(updatedRows.map(row => [row._row_key, row]));
         setImportData(prev => prev.map(row => byKey.has(row._row_key) ? { ...row, ...byKey.get(row._row_key) } : row));
       }
+      // FIX V14: surface skipped_missing dari backend.
+      if (res.data?.skipped_missing > 0) {
+        addToast(`${res.data.skipped_missing} edit(s) tidak bisa di-apply (row tidak ditemukan di backend)`, 'warning');
+      }
       return true;
     } catch (e) {
-      // Network/HTTP failure → queue for replay. Keep local edits intact.
-      if (typeof navigator === 'undefined' || !navigator.onLine || e.message?.includes('Network') || e.code === 'ERR_NETWORK' || e.response == null) {
-        const queued = enqueueOfflineUpdate('import-cells', { updates: safeUpdates });
+      // FIX V14: Extend offline detection — 5xx juga di-queue.
+      const isRetryable = typeof navigator === 'undefined' || !navigator.onLine
+        || e.message?.includes('Network') || e.code === 'ERR_NETWORK'
+        || e.response == null
+        || (e.response && e.response.status >= 500);
+      if (isRetryable) {
+        const queued = enqueueOfflineUpdate('import-cells', { updates: enrichedUpdates });
         if (queued) {
           addToast(`Saved offline — will sync when connection returns`, 'warning');
         } else {
+          // FIX V14: rollback optimistic UI kalau enqueue gagal.
+          setImportData(previousRows);
           addToast(`Offline storage is full — these edits could not be saved. Please reconnect and retry.`, 'error');
         }
       } else {
+        setImportData(previousRows);
         addToast(`Failed to update Import data: ${e.response?.data?.error || e.message}`, 'error');
       }
       return false;
@@ -3463,39 +3661,64 @@ const App = () => {
     // plan date) is never lost, even if the network call below fails.
     setAllSOData(prev => prev.map(s => matches(s) ? { ...s, [field]: value } : s));
     setModal(prev => prev ? { ...prev, data: (prev.data || []).map(s => matches(s) ? { ...s, [field]: value } : s) } : prev);
+    // FIX V14: capture previous state untuk rollback kalau enqueue gagal.
+    const previousAllSOData = allSOData;
     try {
       await api.put(endpoint, { [field]: value });
     } catch (e) {
-      if (typeof navigator === 'undefined' || !navigator.onLine || e.message?.includes('Network') || e.code === 'ERR_NETWORK' || e.response == null) {
+      // FIX V14: Extend offline detection — 5xx juga di-queue (server down).
+      const isRetryable = typeof navigator === 'undefined' || !navigator.onLine
+        || e.message?.includes('Network') || e.code === 'ERR_NETWORK'
+        || e.response == null
+        || (e.response && e.response.status >= 500);
+      if (isRetryable) {
         const queued = enqueueOfflineUpdate('so-cell', { endpoint, field, value });
         if (queued) {
           addToast(`Saved offline — will sync when connection returns`, 'warning');
         } else {
+          // FIX V14: rollback optimistic UI kalau enqueue gagal (storage full).
+          setAllSOData(previousAllSOData);
+          setModal(prev => prev ? { ...prev, data: previousAllSOData } : prev);
           addToast(`Offline storage is full — this edit could not be saved. Please reconnect and retry.`, 'error');
         }
       } else {
-        addToast(`❌ Failed to update: ${e.message}`, 'error');
+        // 4xx — permanent failure (row terhapus). Rollback supaya user tidak
+        // tertipu melihat nilai yang sebenarnya tidak tersimpan.
+        setAllSOData(previousAllSOData);
+        setModal(prev => prev ? { ...prev, data: previousAllSOData } : prev);
+        addToast(`❌ Failed to update (row may have been deleted): ${e.response?.data?.error || e.message}`, 'error');
       }
     }
   };
 
   const updateItemRegistrationCell = async (itemId, field, value) => {
     setEditingCell(null);
+    // FIX V14: capture previous state untuk rollback kalau enqueue gagal.
+    const previousItemRegData = itemRegData;
     // OPTIMISTIC: apply locally first so the input is never lost, even if
     // the network call below fails and the edit has to be queued.
     setItemRegData(prev => prev.map(row => row.id === itemId ? { ...row, [field]: value } : row));
     try {
       await api.put(`/api/item-registration/${itemId}`, { [field]: value });
     } catch (e) {
-      if (typeof navigator === 'undefined' || !navigator.onLine || e.message?.includes('Network') || e.code === 'ERR_NETWORK' || e.response == null) {
+      // FIX V14: Extend offline detection — 5xx juga di-queue (server down).
+      const isRetryable = typeof navigator === 'undefined' || !navigator.onLine
+        || e.message?.includes('Network') || e.code === 'ERR_NETWORK'
+        || e.response == null
+        || (e.response && e.response.status >= 500);
+      if (isRetryable) {
         const queued = enqueueOfflineUpdate('item-registration-cell', { itemId, field, value });
         if (queued) {
           addToast(`Saved offline — will sync when connection returns`, 'warning');
         } else {
+          // FIX V14: rollback optimistic UI kalau enqueue gagal.
+          setItemRegData(previousItemRegData);
           addToast(`Offline storage is full — this edit could not be saved. Please reconnect and retry.`, 'error');
         }
       } else {
-        addToast(`Failed to update Item Registration: ${e.response?.data?.error || e.message}`, 'error');
+        // 4xx — permanent failure (row terhapus saat admin upload). Rollback.
+        setItemRegData(previousItemRegData);
+        addToast(`Failed to update Item Registration (row may have been deleted): ${e.response?.data?.error || e.message}`, 'error');
       }
     }
   };
@@ -3597,18 +3820,25 @@ const App = () => {
       }).filter(row => !rfqPicFilter || rfqEditedRowKeys.has(row.row_key) || (row.purchase_pic === rfqPicFilter && row.check === 'open' && row.unit_price_missing && !row.product_id)));
       return true;
     } catch (e) {
-      // Network/HTTP failure → queue for replay. KEEP the optimistic local
-      // edit (don't revert) so user input is preserved, Google-Sheets-style.
-      if (typeof navigator === 'undefined' || !navigator.onLine || e.message?.includes('Network') || e.code === 'ERR_NETWORK' || e.response == null) {
+      // FIX V14: Extend offline detection — 5xx juga di-queue (server down).
+      const isRetryable = typeof navigator === 'undefined' || !navigator.onLine
+        || e.message?.includes('Network') || e.code === 'ERR_NETWORK'
+        || e.response == null
+        || (e.response && e.response.status >= 500);
+      if (isRetryable) {
         const queued = enqueueOfflineUpdate('rfq-cell', { row_key: rowKey, field, value });
         if (!quiet) {
           if (queued) {
             addToast(`Saved offline — will sync when connection returns`, 'warning');
           } else {
+            // FIX V14: rollback optimistic UI kalau enqueue gagal.
+            setRfqData(previousRows);
             addToast(`Offline storage is full — this edit could not be saved. Please reconnect and retry.`, 'error');
           }
         }
       } else {
+        // 4xx — permanent failure. Rollback.
+        setRfqData(previousRows);
         if (!quiet) addToast(`Failed to update RFQ: ${e.response?.data?.error || e.message}`, 'error');
       }
       return false;
@@ -3632,15 +3862,23 @@ const App = () => {
       }
       return true;
     } catch (e) {
-      // Offline / network failure → queue. Keep local edits intact.
-      if (typeof navigator === 'undefined' || !navigator.onLine || e.message?.includes('Network') || e.code === 'ERR_NETWORK' || e.response == null) {
+      // FIX V14: Extend offline detection — 5xx juga di-queue (server down).
+      const isRetryable = typeof navigator === 'undefined' || !navigator.onLine
+        || e.message?.includes('Network') || e.code === 'ERR_NETWORK'
+        || e.response == null
+        || (e.response && e.response.status >= 500);
+      if (isRetryable) {
         const queued = enqueueOfflineUpdate('rfq-cells', { updates: cleanUpdates });
         if (queued) {
           addToast(`Saved offline — will sync when connection returns`, 'warning');
         } else {
+          // FIX V14: rollback optimistic UI kalau enqueue gagal.
+          setRfqData(previousRows);
           addToast(`Offline storage is full — these edits could not be saved. Please reconnect and retry.`, 'error');
         }
       } else {
+        // 4xx — permanent failure. Rollback.
+        setRfqData(previousRows);
         addToast(`Failed to update RFQ batch: ${e.response?.data?.error || e.message}`, 'error');
       }
       return false;
