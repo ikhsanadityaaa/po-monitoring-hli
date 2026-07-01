@@ -569,7 +569,11 @@ const importCheckboxChecked = (value) => IMPORT_CHECKLIST_TRUE.has(String(value 
 
 const importStatusClass = (status, darkMode = false) => {
   const s = String(status || '').trim().toUpperCase();
-  if (s === 'NEW') return darkMode ? 'bg-blue-950/55 text-blue-100 border-blue-600' : 'bg-blue-50 text-blue-700 border-blue-200';
+  // FIX V19: NEW ganti dari blue ke purple supaya tidak sama dengan ON PROCESS.
+  // User spec: "ganti warna status new jangan biru agar tidak sama dengan on process".
+  // Purple = distinct dari blue (ON PROCESS), amber (ON DELIVERY), green (DELIVERED),
+  // red (CANCELED). Sambil menandakan "new/unprocessed" urgency.
+  if (s === 'NEW') return darkMode ? 'bg-purple-950/55 text-purple-100 border-purple-600' : 'bg-purple-50 text-purple-700 border-purple-200';
   if (s === 'DELIVERED') return darkMode ? 'bg-green-900/45 text-green-100 border-green-700' : 'bg-green-50 text-green-700 border-green-200';
   // SWAP per user request: ON DELIVERY → yellow, ON PROCESS → blue.
   if (s === 'ON DELIVERY') return darkMode ? 'bg-amber-900/45 text-amber-100 border-amber-700' : 'bg-amber-50 text-amber-700 border-amber-200';
@@ -580,7 +584,8 @@ const importStatusClass = (status, darkMode = false) => {
 
 const importStatusOptionStyle = (status) => {
   const s = String(status || '').trim().toUpperCase();
-  if (s === 'NEW') return { backgroundColor: '#DBEAFE', color: '#1D4ED8', fontWeight: '700' };
+  // FIX V19: NEW ganti dari blue ke purple (konsisten dengan importStatusClass).
+  if (s === 'NEW') return { backgroundColor: '#F3E8FF', color: '#7E22CE', fontWeight: '700' };
   if (s === 'DELIVERED') return { backgroundColor: '#DCFCE7', color: '#166534' };
   // SWAP per user request: ON DELIVERY → yellow, ON PROCESS → blue.
   if (s === 'ON DELIVERY') return { backgroundColor: '#FEF3C7', color: '#92400E' };
@@ -6077,6 +6082,15 @@ const App = () => {
               className="hidden group-hover/req:inline-flex flex-shrink-0 rounded-md bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold text-white hover:bg-amber-600"
             >Update</button>
           </div>
+        );
+      }
+      // FIX V18: kalau req_dlv_date sudah di-reschedule user (flag
+      // _req_dlv_date_manual='1' dari backend), tunjukkan cell dengan warna
+      // amber supaya user tahu tanggal ini sudah di-reschedule dan akan
+      // bertahan walau sync dijalankan lagi.
+      if (col.field === 'req_dlv_date' && String(row._req_dlv_date_manual || '') === '1') {
+        return (
+          <button type="button" className={`block w-full ${cellInnerClass} text-amber-600 dark:text-amber-400 font-semibold hover:underline decoration-dotted`} title={`${display} (rescheduled)`} onClick={() => startImportEdit(row, col)}>{display}</button>
         );
       }
       return <button type="button" className={`block w-full ${cellInnerClass} hover:underline decoration-dotted`} title={display} onClick={() => startImportEdit(row, col)}>{display}</button>;
