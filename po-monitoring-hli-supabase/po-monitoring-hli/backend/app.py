@@ -7991,8 +7991,69 @@ def get_import_data():
         else:
             filtered_items.sort(key=_import_req_date_key)
 
-        total = len(filtered_items)
-        page_items = filtered_items[(page - 1) * per_page: page * per_page]
+        # ── FIX V16: Paginate by YUPI PO GROUP, not by raw row ──────────
+        # User spec: "1 Yupi PO (termasuk yang di-merge) itu dihitung 1 data,
+        # artinya kalau dipilih 10 maka harusnya ada 10 yupi PO."
+        #
+        # Frontend (App_v15.jsx:5660 IMPORT_MERGE_KEY_FIELDS) merges adjacent
+        # rows sharing (yupi_po + req_dlv_date) via rowSpan. Untuk membuat
+        # per_page=N menghasilkan tepat N visual Yupi PO:
+        #   1. Group filtered_items by (yupi_po, req_dlv_date).
+        #   2. total = jumlah GROUP, bukan jumlah row.
+        #   3. Slice GROUPS list, lalu flatten ke rows untuk response `data`.
+        #
+        # Row dengan yupi_po kosong diperlakukan sebagai 1-item group
+        # (mirip hasMergeKey di App_v15.jsx:5667 dan export logic di
+        # app_v15.py:9069-9094).
+        #
+        # Stability: filtered_items sudah di-sort (by req_dlv_date, atau by
+        # yupi_po kalau yupi_po_sort set) — lihat line 7985-7992. Kita lakukan
+        # stable secondary sort by group_key supaya item-item dengan group key
+        # sama menjadi contiguous. Python sort bersifat stable, jadi ordering
+        # sebelumnya (req_dlv_date / yupi_po) tetap preserved di level group.
+        def _import_group_key(item):
+            yupi = str(item.get('yupi_po') or '').strip()
+            data = item.get('data') or {}
+            req_dlv = import_nonblank(data.get('req_dlv_date')) or import_nonblank(data.get('source_req_dlv_date')) or ''
+            return f"{yupi}|{str(req_dlv).strip()}"
+
+        # Stable secondary sort: kelompokkan item dengan group key sama jadi
+        # contiguous, preserve urutan sebelumnya sebagai tie-breaker.
+        indexed = list(enumerate(filtered_items))
+        indexed.sort(key=lambda pair: (_import_group_key(pair[1]), pair[0]))
+        sorted_items = [item for _, item in indexed]
+
+        # Build groups of consecutive same-key items (setelah sort di atas,
+        # item dengan group key sama sudah contiguous).
+        groups = []
+        current_group = []
+        current_key = None
+        for item in sorted_items:
+            yupi = str(item.get('yupi_po') or '').strip()
+            if not yupi:
+                # Blank yupi_po → standalone 1-row group (tidak di-merge).
+                if current_group:
+                    groups.append(current_group)
+                groups.append([item])
+                current_group = []
+                current_key = None
+                continue
+            key = _import_group_key(item)
+            if current_key is None or key != current_key:
+                if current_group:
+                    groups.append(current_group)
+                current_group = [item]
+                current_key = key
+            else:
+                current_group.append(item)
+        if current_group:
+            groups.append(current_group)
+
+        # FIX V16: total = jumlah Yupi PO group, BUKAN jumlah raw row.
+        total = len(groups)
+        # Slice by group, lalu flatten ke rows. per_page=10 → 10 Yupi PO groups.
+        page_groups = groups[(page - 1) * per_page : page * per_page]
+        page_items = [item for group in page_groups for item in group]
         # FIX V10: gunakan _vendor_attrs_map_cached + pre_parsed_data dari item
         # supaya import_dashboard_row_to_dict tidak panggil apply_import_formula_columns
         # lagi (data sudah di-parse di loop parsed atas).
