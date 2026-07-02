@@ -6071,6 +6071,22 @@ def get_item_registration_data():
             q = q.filter(db.or_(ItemRegistration.prod_id.is_(None), ItemRegistration.prod_id == '', ItemRegistration.prod_id == '-'))
 
         total = q.count()
+        # FIX V21: Debug logging untuk diagnose empty page issue. Kalau total=0
+        # padahal DB punya rows, log filter context supaya user/admin bisa lihat
+        # filter mana yang exclude semua rows.
+        if total == 0:
+            try:
+                _dbg_total_db = ItemRegistration.query.count()
+                if _dbg_total_db > 0:
+                    print(f"[item-reg-debug] total=0 padahal DB punya {_dbg_total_db} rows. "
+                          f"Filters: date=({date_year!r},{date_from!r},{date_to!r}) "
+                          f"clients={clients} global_pics={global_pics} "
+                          f"item_clients={item_clients} categories={categories} "
+                          f"proc_statuses={proc_statuses} mfr_names={mfr_names} "
+                          f"pics={pics} kpi_pic={kpi_pic!r} req_numbers={req_numbers} "
+                          f"search={search!r} op_units={op_units} bid_types={bid_types}")
+            except Exception:
+                pass
         rows = q.order_by(ItemRegistration.uploaded_at.desc(), ItemRegistration.id.asc()).offset((page-1)*per_page).limit(per_page).all()
         
         option_q = apply_item_registration_visible_status_filter(apply_item_registration_date_filter(ItemRegistration.query, date_year, date_from, date_to))
