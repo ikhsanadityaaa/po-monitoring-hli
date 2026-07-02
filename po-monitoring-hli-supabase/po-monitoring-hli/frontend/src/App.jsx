@@ -2880,6 +2880,31 @@ const App = () => {
         proc_statuses: res.data.proc_status_options || [],
         mfr_names: res.data.mfr_name_options || []
       });
+      // FIX V21: Toast informatif kalau 0 rows padahal ada filter aktif.
+      // User spec: "cek kenapa page item registration tidak menampilkan data apapun".
+      // Penyebab paling umum: globalDateFilter (today/week/month) dari Dashboard
+      // ikut ter-apply ke Item Registration padahal req_date-nya bisa tanggal lama,
+      // ATAU globalPicFilter/globalClientFilter yang tidak match.
+      // Toast ini supaya user tahu kenapa kosong + cara fix.
+      if (rows.length === 0) {
+        const hasGlobalDateFilter = globalDateFilter && globalDateFilter.mode && globalDateFilter.mode !== 'all';
+        const hasGlobalClientFilter = Array.isArray(globalClientFilter) && globalClientFilter.length > 0;
+        const hasGlobalPicFilter = Array.isArray(globalPicFilter) && globalPicFilter.length > 0;
+        const hasItemRegFilters = (itemRegFilters && (
+          (itemRegFilters.clients && itemRegFilters.clients.length > 0) ||
+          (itemRegFilters.categories && itemRegFilters.categories.length > 0) ||
+          (itemRegFilters.pics && itemRegFilters.pics.length > 0) ||
+          (itemRegFilters.proc_statuses && itemRegFilters.proc_statuses.length > 0) ||
+          (itemRegFilters.mfr_names && itemRegFilters.mfr_names.length > 0)
+        ));
+        if (hasGlobalDateFilter || hasGlobalClientFilter || hasGlobalPicFilter || hasItemRegFilters || (Array.isArray(search) ? search.length > 0 : search) || kpiPic) {
+          let hint = 'No Item Registration rows match current filters.';
+          if (hasGlobalDateFilter) hint += ' Try clearing the global date filter (Dashboard → "All Time").';
+          else if (hasGlobalClientFilter || hasGlobalPicFilter) hint += ' Try clearing the global Client/PIC filter.';
+          else hint += ' Try clearing the Item Registration filters.';
+          addToast(hint, 'info');
+        }
+      }
     } catch (e) {
       addToast(`Failed to load Item Registration: ${e.response?.data?.error || e.message}`, 'error');
     } finally { setLoading(false); }
@@ -6664,6 +6689,41 @@ const App = () => {
             <span className={`text-sm ${txt2}`}>({fmtNum(itemRegTotal)} records)</span>
             {/* FIX V8: "Last update" dihapus karena membingungkan (beda source dengan header badge).
                 Last update yang akurat ada di header badge "Reg" yang pakai stats.last_updated_item_registration. */}
+            {/* FIX V21: Quick "Clear all filters" button untuk resolve empty-page issue.
+                Kalau user lihat "0 records" padahal DB punya data, klik button ini
+                untuk reset semua filter (global + item-reg-specific) + reload. */}
+            {itemRegTotal === 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  // Reset global filters
+                  setGlobalDateFilter({ mode: 'all' });
+                  setGlobalClientFilter([]);
+                  setGlobalPicFilter([]);
+                  // Reset Item Registration specific filters
+                  setItemRegFilters({ clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] });
+                  setItemRegAppliedSearch([]);
+                  setItemRegPicHighlight(null);
+                  setItemRegPage(1);
+                  // Clear saved filter state di localStorage supaya tidak re-apply on reload
+                  try {
+                    if (typeof window !== 'undefined') {
+                      window.localStorage.removeItem('po-monitoring:filter-state:item-registration');
+                      window.localStorage.removeItem('po-monitoring:filter-state:dashboard');
+                    }
+                  } catch {}
+                  addToast('All filters cleared. Reloading Item Registration...', 'success');
+                  // Trigger fetch dengan filter kosong
+                  setTimeout(() => {
+                    fetchItemRegistration(1, itemRegPerPage, [], { clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] }, null, { mode: 'all' });
+                  }, 100);
+                }}
+                className={`ml-2 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold ${darkMode ? 'bg-amber-900/45 text-amber-100 hover:bg-amber-900/60 border border-amber-700' : 'bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200'}`}
+                title="Clear all filters (global date/client/PIC + Item Registration specific) and reload"
+              >
+                <X className="w-3.5 h-3.5" /> Clear all filters
+              </button>
+            )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <button onClick={downloadItemRegistrationTemplate} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
