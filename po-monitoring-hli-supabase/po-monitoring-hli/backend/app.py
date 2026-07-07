@@ -3819,6 +3819,25 @@ def apply_so_pic_filter(query, pics):
         return query.filter(empty_pic)
     return query.filter(SOData.pic_name.in_(pics))
 
+# ─── SO search — RFQ-style multi-field, multi-term substring matching ──────
+# Each entered term (one per line in the UI) is matched as a case-insensitive
+# substring against any of SO_SEARCH_FIELDS; a row matches if ANY term is
+# found in ANY field (same semantics as RFQ_SEARCH_FIELDS matching).
+SO_SEARCH_FIELDS = (
+    SOData.so_item, SOData.so_number, SOData.product_id, SOData.product_name,
+    SOData.specification, SOData.vendor_name, SOData.customer_po_number,
+    SOData.delivery_memo, SOData.matched_po_number,
+)
+
+def apply_so_search_filter(query, terms):
+    terms = [t.strip() for t in (terms or []) if t and t.strip()]
+    if not terms: return query
+    term_clauses = []
+    for term in terms:
+        pattern = f'%{term}%'
+        term_clauses.append(db.or_(*[field.ilike(pattern) for field in SO_SEARCH_FIELDS]))
+    return query.filter(db.or_(*term_clauses))
+
 def canonical_pending_pic(pic, client_or_op_unit=None):
     # PIC is now fully controlled by Master PIC (by category, client ID, and
     # vendor ID). The old "Yupi → Andre" auto-assignment is removed.
@@ -4625,7 +4644,7 @@ def get_all_so():
         if vendors: q = q.filter(SOData.vendor_name.in_(vendors))
         if manufacturers: q = q.filter(SOData.manufacturer_name.in_(manufacturers))
         if statuses: q = q.filter(SOData.so_status.in_(statuses))
-        if so_items: q = q.filter(SOData.so_item.in_(so_items))
+        q = apply_so_search_filter(q, so_items)
 
         q = apply_so_create_date_filter(q, date_year, date_from, date_to)
 
@@ -4696,7 +4715,7 @@ def get_all_so():
         if vendors: approval_q = approval_q.filter(SOData.vendor_name.in_(vendors))
         if manufacturers: approval_q = approval_q.filter(SOData.manufacturer_name.in_(manufacturers))
         if statuses: approval_q = approval_q.filter(SOData.so_status.in_(statuses))
-        if so_items: approval_q = approval_q.filter(SOData.so_item.in_(so_items))
+        approval_q = apply_so_search_filter(approval_q, so_items)
         approval_q = apply_so_create_date_filter(approval_q, date_year, date_from, date_to)
         # Apply the same SQL-side pic filters to approval_q so we don't have to
         # load every approval row into Python just to filter by pic_name.
@@ -5521,7 +5540,7 @@ def download_so_batch_template():
         if vendors: q = q.filter(SOData.vendor_name.in_(vendors))
         if manufacturers: q = q.filter(SOData.manufacturer_name.in_(manufacturers))
         if statuses: q = q.filter(SOData.so_status.in_(statuses))
-        if so_items: q = q.filter(SOData.so_item.in_(so_items))
+        q = apply_so_search_filter(q, so_items)
         q = apply_so_pic_filter(q, pics)
         q = apply_so_create_date_filter(q, date_year, date_from, date_to)
         all_sos = q.order_by(SOData.so_create_date.asc()).all()
@@ -5621,7 +5640,7 @@ def export_all_so():
         if vendors: q = q.filter(SOData.vendor_name.in_(vendors))
         if manufacturers: q = q.filter(SOData.manufacturer_name.in_(manufacturers))
         if statuses: q = q.filter(SOData.so_status.in_(statuses))
-        if so_items: q = q.filter(SOData.so_item.in_(so_items))
+        q = apply_so_search_filter(q, so_items)
         q = apply_so_pic_filter(q, pics)
         q = apply_so_create_date_filter(q, date_year, date_from, date_to)
         if sort_order == 'newest': sos = q.order_by(SOData.so_create_date.desc(), SOData.so_item.asc()).all()
