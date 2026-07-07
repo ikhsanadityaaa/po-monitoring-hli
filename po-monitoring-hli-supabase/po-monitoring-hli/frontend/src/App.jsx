@@ -1115,13 +1115,13 @@ const SearchInput = ({ placeholder, onSearch, darkMode, txt2, label }) => {
       <button
         ref={float.triggerRef}
         onClick={() => setOpen(o => !o)}
-        title={`Search ${label}`}
+        title="Search"
         className={`w-full h-10 flex items-center justify-between gap-1.5 px-3 py-2 rounded-lg text-sm border font-medium transition-all
           ${darkMode ? 'bg-gray-600 border-gray-500 text-white hover:bg-gray-500' : 'bg-white border-gray-300 text-gray-700 hover:bg-blue-50 hover:border-blue-400'}`}
       >
         <span className="flex items-center gap-1.5 min-w-0">
           <Search className="w-4 h-4 flex-shrink-0"/>
-          <span className="truncate">Search {label}</span>
+          <span className="truncate">Search</span>
         </span>
         <ChevronDown className="w-3.5 h-3.5 opacity-60 flex-shrink-0"/>
       </button>
@@ -1870,6 +1870,7 @@ const App = () => {
   // (savedSoFilters is already declared above from loadFilterState('all-so'))
   const [soFilters, setSoFilters] = useState(() => savedSoFilters.filters || { op_units: [], vendors: [], manufacturers: [], statuses: [], aging: [], pics: [] });
   const [soSearchNums, setSoSearchNums] = useState(() => savedSoFilters.searchNums || []); // search SO Item
+  const [soSearchText, setSoSearchText] = useState(() => savedSoFilters.searchText ?? (savedSoFilters.searchNums || []).join('\n')); // raw multiline text for the search box (RFQ-style)
   const [soMarginFilter, setSoMarginFilter] = useState(() => savedSoFilters.marginFilter || 'all'); // 'all' | 'positive' | 'negative'
   const [soSortOrder, setSoSortOrder] = useState(() => savedSoFilters.sortOrder || 'oldest'); // 'oldest' | 'newest'
   const [soPage, setSoPage] = useState(() => savedSoFilters.page || 1);
@@ -2338,9 +2339,9 @@ const App = () => {
   useEffect(() => {
     saveFilterState('all-so', {
       page: soPage, perPage: soPerPage,
-      searchNums: soSearchNums, filters: soFilters, marginFilter: soMarginFilter, sortOrder: soSortOrder,
+      searchNums: soSearchNums, searchText: soSearchText, filters: soFilters, marginFilter: soMarginFilter, sortOrder: soSortOrder,
     });
-  }, [soPage, soPerPage, soSearchNums, soFilters, soMarginFilter, soSortOrder]);
+  }, [soPage, soPerPage, soSearchNums, soSearchText, soFilters, soMarginFilter, soSortOrder]);
 
   useEffect(() => {
     saveFilterState('dashboard', {
@@ -4742,7 +4743,7 @@ const App = () => {
         <FilterPanel darkMode={darkMode}>
           <div className="grid grid-cols-1 md:grid-cols-[minmax(260px,1fr)_110px_90px] gap-2 items-end">
             <div className="min-w-0 relative">
-              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Vendor</label>
+              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search</label>
               <input
                 ref={vendorControlSuggestFloat.triggerRef}
                 value={vendorControlSearch}
@@ -4940,7 +4941,7 @@ const App = () => {
               <RFQMultiSearch value={registeredItemsSearch} onChange={setRegisteredItemsSearch} onSearch={(next) => { setRegisteredItemsAppliedSearch(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, next, registeredItemsAppliedProdIds, registeredItemsFilters, registeredItemsAppliedPicFilter); }} darkMode={darkMode} txt2={txt2} label="Search" description="Enter Product ID, Product Name, Specification, or Manufacturer per line. Results match any entered value." placeholder={'8381684\nBearing SKF\nJTC'} />
             </div>
             <div className="min-w-0">
-              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Prod ID</label>
+              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search</label>
               <SearchInput key={`registered-prod-id-${registeredItemsProdIds.join('|')}`} placeholder={'8381684\n8382076'} label="Prod ID" darkMode={darkMode} txt2={txt2} onSearch={(nums) => { setRegisteredItemsProdIds(nums); setRegisteredItemsAppliedProdIds(nums); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, nums, registeredItemsFilters, registeredItemsAppliedPicFilter); }} />
             </div>
             {/* PIC dropdown — resolved server-side using MasterPIC by category_id
@@ -6446,7 +6447,7 @@ const App = () => {
                 <option value="desc">Z-A ↓</option>
               </select>
             </div>
-            <div className="min-w-[180px] flex-1"><label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Import</label><input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/></div>
+            <div className="min-w-[180px] flex-1"><label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search</label><input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/></div>
             <div className="min-w-[130px] flex-shrink-0">
               <MultiSelect
                 label="Status"
@@ -6784,7 +6785,7 @@ const App = () => {
         <FilterPanel darkMode={darkMode}>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[170px_repeat(5,minmax(150px,1fr))_120px] items-end">
             <div className="min-w-0">
-              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search Req No.</label>
+              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search</label>
               <SearchInput
                 key={`item-req-no-${itemRegSearch.join('|')}`}
                 placeholder={'REQ001\nREQ002'}
@@ -7313,16 +7314,19 @@ const App = () => {
               </select>
             </div>
             <div className="min-w-0">
-              <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>Search SO Item</label>
-              <SearchInput
-                label="SO Item"
-                placeholder={"e.g.\n1234-10\n1234-20"}
-                onSearch={(nums) => {
+              <RFQMultiSearch
+                value={soSearchText}
+                onChange={setSoSearchText}
+                onSearch={(searchValue) => {
+                  const nums = searchValue.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
                   setSoSearchNums(nums);
                   setSoPage(1);
                   fetchSOData(soFilters, 1, soPerPage, nums, soMarginFilter, soDateFilter);
                 }}
-                darkMode={darkMode} txt2={txt2}
+                darkMode={darkMode}
+                txt2={txt2}
+                description="Enter SO Item, SO Number, PO Number, Product ID, Product Name, Specification, or Vendor per line. Results match any entered value."
+                placeholder={'1234-10\n8381684\nBearing SKF'}
               />
             </div>
             <div className="min-w-0">
