@@ -8347,12 +8347,27 @@ def get_import_data():
             # week_start / week_end sudah dihitung di atas (dipakai juga oleh
             # filter this_week_arrival di passes()). Pakai variabel yang sama
             # supaya KPI counter dan filter selalu konsisten.
+            #
+            # FIX V23: "This Week Arrival" dan "SAP not input" dihitung per
+            # UNIQUE YUPI PO (bukan per row/line item) supaya:
+            #   - PO dengan multiple line items dihitung 1x (sebelumnya 2 baris
+            #     untuk PO yang sama → this_week_arrival over-count).
+            #   - "SAP not input" dihitung sebagai PO yang TIDAK punya SATU
+            #     PUN line item dengan SAP INPUT checked. Sebelumnya, line item
+            #     dengan SAP INPUT='FALSE' (explicit string) tidak dihitung
+            #     sebagai "no SAP" — hanya empty string yang dihitung. Bug ini
+            #     menyebabkan "SAP not input" under-count (mis. 1 padahal
+            #     seharusnya 3).
             total_po = 0
             this_week_arrival = 0
             this_week_no_sap = 0
             sales_amount_total = 0.0
             po_amount_idr_total = 0.0
             seen_yupi_pos = set()
+            # Track unique YUPI POs arriving this week, and which of them have
+            # at least one line item with SAP INPUT checked.
+            this_week_arrival_pos = set()
+            this_week_pos_with_sap = set()
             # Pre-collect ETA dates per row for FX rate prefetching.
             eta_dates_usd_eur = set()
             for item in filtered_items:
@@ -8362,11 +8377,14 @@ def get_import_data():
                     seen_yupi_pos.add(str(yupi).strip().lower())
                 eta_date = import_date_from_value(data.get('eta'))
                 if eta_date and week_start <= eta_date <= week_end:
-                    this_week_arrival += 1
-                    # SAP INPUT checkbox — if not checked, count as "no SAP input"
-                    sap_val = import_nonblank(data.get('sap_input'))
-                    if not import_normalize_checkbox(sap_val):
-                        this_week_no_sap += 1
+                    if yupi:
+                        yupi_key = str(yupi).strip().lower()
+                        this_week_arrival_pos.add(yupi_key)
+                        # SAP INPUT checkbox — 'TRUE' = checked, anything else
+                        # (including 'FALSE' and empty) = not checked.
+                        sap_normalized = import_normalize_checkbox(import_nonblank(data.get('sap_input')))
+                        if sap_normalized == 'TRUE':
+                            this_week_pos_with_sap.add(yupi_key)
                 # Sales Amount = AMOUNT column
                 amt = import_float_value(data.get('amount'))
                 if amt is not None:
@@ -8399,6 +8417,11 @@ def get_import_data():
                     rate = get_currency_to_idr(cur, eta_date, cache_only=True)
                     po_amount_idr_total += pa * rate
             total_po = len(seen_yupi_pos)
+            # FIX V23: this_week_arrival = jumlah UNIQUE YUPI PO yang arrive
+            # minggu ini. this_week_no_sap = jumlah PO yang arrive minggu ini
+            # DAN TIDAK punya satu pun line item dengan SAP INPUT checked.
+            this_week_arrival = len(this_week_arrival_pos)
+            this_week_no_sap = len(this_week_arrival_pos - this_week_pos_with_sap)
             gross_margin = sales_amount_total - po_amount_idr_total
             kpis = {
                 'total_po': total_po,
