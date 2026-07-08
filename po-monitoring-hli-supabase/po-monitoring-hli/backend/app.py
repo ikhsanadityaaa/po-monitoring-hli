@@ -2235,6 +2235,32 @@ def sync_import_sheet_to_dashboard():
         # of the vendor filter for both source-sheet sync and purge.
         filter_vendors = import_uploaded_vendor_names()
         vendor_source = 'vendor_import' if filter_vendors else 'none'
+        # FIX V28: Filter layout sheet rows by uploaded vendor set — SAME as
+        # source sheets. Sebelumnya, layout sheet rows masuk dashboard TANPA
+        # vendor filter, sehingga PULUHAN RIBU row dari layout sheet (semua PO
+        # dari semua vendor) masuk DB. Itulah penyebab count "52.140 Yupi POs".
+        # Sekarang: kalau vendor list uploaded, hanya row dengan vendor yang
+        # match (fuzzy) yang dipertahankan. Kalau vendor list kosong, layout
+        # sheet rows juga di-skip entirely (tidak ada gunanya menarik 52k row
+        # tanpa filter — user harus upload Vendor Import dulu).
+        if filter_vendors:
+            _layout_vendor_set = {v.strip().lower() for v in filter_vendors if v and v.strip()}
+            _before_layout = len(sheet_rows)
+            sheet_rows = [
+                sr for sr in sheet_rows
+                if import_vendor_match(
+                    import_nonblank(sr.get('vendor')) or import_nonblank(sr.get('vendor_name')) or import_nonblank(sr.get('_vendor_name')),
+                    _layout_vendor_set
+                )
+            ]
+            _after_layout = len(sheet_rows)
+            print(f"[sync_import_sheet_to_dashboard] FIX V28: layout sheet vendor filter: {_before_layout} → {_after_layout} rows", file=__import__('sys').stderr)
+        else:
+            # No uploaded vendors → skip layout sheet entirely (would import
+            # tens of thousands of rows unfiltered, same issue as source sheets).
+            _before_layout = len(sheet_rows)
+            sheet_rows = []
+            print(f"[sync_import_sheet_to_dashboard] FIX V28: no uploaded vendors → layout sheet rows skipped ({_before_layout} rows)", file=__import__('sys').stderr)
     except:
         import traceback; traceback.print_exc()
         return {'added': 0, 'updated': 0, 'seen': 0, 'sheet_rows': 0, 'vendor_count': vendor_count, 'vendor_filter_count': 0, 'vendor_filter_source': 'none', 'purged_legacy': purged_legacy, 'copy_only': True, 'columns': columns, 'error': 'Failed to read the live Import tracker sheet.', 'source_sheet_url': f'https://docs.google.com/spreadsheets/d/{IMPORT_LAYOUT_SHEET_ID}/edit#gid={IMPORT_LAYOUT_GID}'}
@@ -9326,19 +9352,50 @@ def update_import_cell():
                             break
         if not row:
             return jsonify({'error': 'Import dashboard row not found'}), 404
-        try:
-            data = json.loads(row.data_json or '{}')
-        except (TypeError, json.JSONDecodeError):
-            data = {}
-        data = set_import_payload_field_aliases(data, field, value)
-        data = apply_import_formula_columns(data)
-        row.data_json = json.dumps(data, ensure_ascii=False)
-        row.updated_at = datetime.utcnow()
+        # FIX V28: Untuk group-level fields, propagate edit ke SEMUA row dengan
+        # YUPI PO yang sama (sama dengan logic di /api/import/cells). Ini
+        # menyelesaikan bug "PO yang sama menampilkan 2 data berbeda" untuk
+        # single-cell edits (klik cell → edit → blur).
+        GROUP_LEVEL_FIELDS = {
+            'po_send_date', 'status', 'req_dlv_date', 'etd', 'eta',
+            'import_remarks', 'incoterm', 'forwarder', 'bl_number', 'inv_no',
+            'sap_input', 'payment', 'payment_date', 'soft_copy_doc', 'non_ski',
+        }
+        target_rows = [row]
+        if field in GROUP_LEVEL_FIELDS:
+            try: row_data_for_yupi = json.loads(row.data_json or '{}')
+            except: row_data_for_yupi = {}
+            row_yupi = import_nonblank(row_data_for_yupi.get('yupi_po')) or import_nonblank(row_data_for_yupi.get('po_yupi'))
+            if row_yupi:
+                _yupi_key = row_yupi.strip().lower()
+                _po_rows = ImportDashboardRow.query.filter(
+                    ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
+                ).all()
+                target_rows = []
+                for _r in _po_rows:
+                    try: _d = json.loads(_r.data_json or '{}')
+                    except: _d = {}
+                    _yp = import_nonblank(_d.get('yupi_po')) or import_nonblank(_d.get('po_yupi'))
+                    if _yp and _yp.strip().lower() == _yupi_key:
+                        target_rows.append(_r)
+                if not target_rows:
+                    target_rows = [row]
+                print(f"[import/cell] FIX V28: propagating field={field} to {len(target_rows)} rows with YUPI PO={row_yupi}", file=__import__('sys').stderr)
+        sync_items = []
+        for target_row in target_rows:
+            try:
+                data = json.loads(target_row.data_json or '{}')
+            except (TypeError, json.JSONDecodeError):
+                data = {}
+            data = set_import_payload_field_aliases(data, field, value)
+            data = apply_import_formula_columns(data)
+            target_row.data_json = json.dumps(data, ensure_ascii=False)
+            target_row.updated_at = datetime.utcnow()
+            sync_items.append({'row': target_row, 'field': field, 'value': value})
+            if field in ('purchase_price', 'ord_qty') and clean(data.get('purchase_amount')):
+                sync_items.append({'row': target_row, 'field': 'purchase_amount', 'value': data.get('purchase_amount')})
         sheet_sync = {'synced': False, 'reason': 'Not attempted'}
         try:
-            sync_items = [{'row': row, 'field': field, 'value': value}]
-            if field in ('purchase_price', 'ord_qty') and clean(data.get('purchase_amount')):
-                sync_items.append({'row': row, 'field': 'purchase_amount', 'value': data.get('purchase_amount')})
             sheet_sync = sync_import_cells_to_google_sheet(sync_items)
         except Exception as sync_exc:
             sheet_sync = {'synced': False, 'reason': str(sync_exc)}
@@ -9346,7 +9403,7 @@ def update_import_cell():
         clear_runtime_caches()
         columns = import_layout_columns()
         updated_row = import_dashboard_row_to_dict(row, columns, vendor_attrs_map=import_vendor_attrs_map())
-        return jsonify({'success': True, 'row_key': row.row_key, 'original_row_key': row_key, 'field': field, 'value': value, 'row': updated_row, 'sheet_sync': sheet_sync, 'fuzzy_matched': fuzzy_matched})
+        return jsonify({'success': True, 'row_key': row.row_key, 'original_row_key': row_key, 'field': field, 'value': value, 'row': updated_row, 'sheet_sync': sheet_sync, 'fuzzy_matched': fuzzy_matched, 'propagated_to': len(target_rows)})
     except Exception as e:
         db.session.rollback()
         import traceback; traceback.print_exc()
@@ -9609,11 +9666,7 @@ def update_import_cells_batch():
         rows = ImportDashboardRow.query.filter(ImportDashboardRow.row_key.in_(row_keys)).all() if row_keys else []
         row_by_key = {r.row_key: r for r in rows}
         # FIX V14: Pre-build biz-key index supaya bisa fuzzy re-match row_key yang
-        # sudah berubah karena daily sync identity drift. Sebelumnya, kalau user
-        # edit offline lalu sync harian mengubah row_key (karena SHA1 uid drift),
-        # replay PUT /api/import/cells akan silent-skip (continue) tanpa warning.
-        # Sekarang kita fuzzy match by business key (po_yupi+item_yupi+po_sementara)
-        # supaya edit tetap sampai ke row yang benar.
+        # sudah berubah karena daily sync identity drift.
         all_import_rows = ImportDashboardRow.query.filter(
             ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
         ).all() if row_keys else []
@@ -9625,6 +9678,27 @@ def update_import_cells_batch():
             except: _bk = None
             if _bk and _bk not in biz_key_to_row:
                 biz_key_to_row[_bk] = _r
+        # FIX V28: Pre-build YUPI PO index supaya edit ke 1 row propagate ke
+        # SEMUA row dengan YUPI PO yang sama (regardless of item_yupi /
+        # po_sementara / req_dlv_date). Ini menyelesaikan bug "PO yang sama
+        # menampilkan 2 data berbeda" — sekarang edit ke field group-level
+        # (eta, sap_input, status, dll.) update semua duplikat row PO tersebut.
+        yupi_po_to_rows = {}
+        for _r in all_import_rows:
+            try: _d = json.loads(_r.data_json or '{}')
+            except: _d = {}
+            _yp = import_nonblank(_d.get('yupi_po')) or import_nonblank(_d.get('po_yupi'))
+            if _yp:
+                yupi_po_to_rows.setdefault(_yp.strip().lower(), []).append(_r)
+        # Group-level fields yang harus propagate ke semua row PO yang sama.
+        # Per-item fields (item_yupi, item_name, spec, ord_qty, unit_price,
+        # amount, purchase_price, currency, purchase_amount, dll) TIDAK di-
+        # propagate karena mereka unique per line item.
+        GROUP_LEVEL_FIELDS = {
+            'po_send_date', 'status', 'req_dlv_date', 'etd', 'eta',
+            'import_remarks', 'incoterm', 'forwarder', 'bl_number', 'inv_no',
+            'sap_input', 'payment', 'payment_date', 'soft_copy_doc', 'non_ski',
+        }
         sheet_items = []
         updated_keys = set()
         skipped_missing = 0
@@ -9637,9 +9711,6 @@ def update_import_cells_batch():
                 continue
             row = row_by_key.get(row_key)
             # FIX V14: kalau row_key tidak ketemu, coba fuzzy match by biz key.
-            # Frontend harus kirim po_yupi/item_yupi/po_sementara di item payload
-            # supaya ini jalan. Kalau tidak ada, fallback ke row_key string match
-            # (sudah dilakukan di atas) dan skip.
             if not row:
                 biz_key_from_payload = None
                 po_yupi_p = clean(item.get('po_yupi'))
@@ -9657,18 +9728,33 @@ def update_import_cells_batch():
                 skipped_missing += 1
                 print(f"[import/cells] SKIP row_key={row_key} field={field} — not found (and no fuzzy match)")
                 continue
-            try:
-                data = json.loads(row.data_json or '{}')
-            except (TypeError, json.JSONDecodeError):
-                data = {}
-            data = set_import_payload_field_aliases(data, field, value)
-            data = apply_import_formula_columns(data)
-            row.data_json = json.dumps(data, ensure_ascii=False)
-            row.updated_at = datetime.utcnow()
-            sheet_items.append({'row': row, 'field': field, 'value': value})
-            if field in ('purchase_price', 'ord_qty') and clean(data.get('purchase_amount')):
-                sheet_items.append({'row': row, 'field': 'purchase_amount', 'value': data.get('purchase_amount')})
-            updated_keys.add(row.row_key)
+            # FIX V28: Untuk group-level fields, collect SEMUA row dengan YUPI
+            # PO yang sama (bukan hanya row yang di-edit). Edit akan di-apply
+            # ke semua duplikat row PO tersebut, sehingga KPI dan filter views
+            # selalu menampilkan data konsisten untuk PO yang sama.
+            try: row_data_for_yupi = json.loads(row.data_json or '{}')
+            except: row_data_for_yupi = {}
+            row_yupi = import_nonblank(row_data_for_yupi.get('yupi_po')) or import_nonblank(row_data_for_yupi.get('po_yupi'))
+            target_rows = [row]
+            if field in GROUP_LEVEL_FIELDS and row_yupi:
+                _yupi_key = row_yupi.strip().lower()
+                _po_rows = yupi_po_to_rows.get(_yupi_key, [])
+                if len(_po_rows) > 1:
+                    target_rows = _po_rows
+                    print(f"[import/cells] FIX V28: propagating field={field} to {len(target_rows)} rows with YUPI PO={row_yupi}", file=__import__('sys').stderr)
+            for target_row in target_rows:
+                try:
+                    data = json.loads(target_row.data_json or '{}')
+                except (TypeError, json.JSONDecodeError):
+                    data = {}
+                data = set_import_payload_field_aliases(data, field, value)
+                data = apply_import_formula_columns(data)
+                target_row.data_json = json.dumps(data, ensure_ascii=False)
+                target_row.updated_at = datetime.utcnow()
+                sheet_items.append({'row': target_row, 'field': field, 'value': value})
+                if field in ('purchase_price', 'ord_qty') and clean(data.get('purchase_amount')):
+                    sheet_items.append({'row': target_row, 'field': 'purchase_amount', 'value': data.get('purchase_amount')})
+                updated_keys.add(target_row.row_key)
         sheet_sync = {'synced': False, 'reason': 'No mapped Import sheet cells to sync'}
         if sheet_items:
             try:
@@ -9679,8 +9765,6 @@ def update_import_cells_batch():
         clear_runtime_caches()
         _v_attrs_map = import_vendor_attrs_map()
         updated_rows = [import_dashboard_row_to_dict(row_by_key[k] if k in row_by_key else next((r for r in all_import_rows if r.row_key == k), None), columns, vendor_attrs_map=_v_attrs_map) for k in updated_keys]
-        # FIX V14: surface skipped_missing + fuzzy_matched count supaya frontend
-        # bisa warning user kalau ada edit yang tidak bisa di-apply.
         return jsonify({
             'success': True,
             'updated': len(sheet_items),
@@ -9693,6 +9777,55 @@ def update_import_cells_batch():
         db.session.rollback()
         import traceback; traceback.print_exc()
         return jsonify({'error': str(e), 'sheet_sync': {'synced': False, 'reason': str(e)}}), 500
+
+# FIX V28: Admin endpoint untuk hard-purge SEMUA Import dashboard rows yang
+# vendornya TIDAK match dengan uploaded Vendor Import list. Ini menyelesaikan
+# masalah "52.140 Yupi POs" — setelah deploy fix V28 (layout sheet vendor
+# filter), user perlu membersihkan 52k row lama yang sudah terlanjur masuk DB.
+# Panggil endpoint ini SEKALI setelah deploy, lalu klik Copy Sheet untuk
+# re-sync dengan vendor filter yang aktif.
+@app.route('/api/admin/purge-non-vendor-import-rows', methods=['POST'])
+def purge_non_vendor_import_rows():
+    try:
+        uploaded_vendor_names = import_uploaded_vendor_names()
+        uploaded_vendor_set = {v.strip().lower() for v in uploaded_vendor_names if v and v.strip()}
+        all_rows = ImportDashboardRow.query.filter(
+            ImportDashboardRow.source_key.in_(_IMPORT_VISIBLE_SOURCE_KEYS)
+        ).all()
+        rows_to_purge = []
+        for row in all_rows:
+            try: data = json.loads(row.data_json or '{}')
+            except: data = {}
+            vendor = import_nonblank(data.get('vendor')) or import_nonblank(data.get('vendor_name')) or import_nonblank(row.vendor_name)
+            if not vendor:
+                # No vendor → purge (stale leftover)
+                rows_to_purge.append(row)
+                continue
+            if uploaded_vendor_set and not import_vendor_match(vendor, uploaded_vendor_set):
+                # Vendor doesn't match uploaded list → purge
+                rows_to_purge.append(row)
+            elif not uploaded_vendor_set:
+                # No uploaded vendor list → purge ALL rows (user must upload
+                # vendor list first before re-sync). This is intentional —
+                # without a vendor list, the dashboard would re-import 52k
+                # rows on next Copy Sheet.
+                rows_to_purge.append(row)
+        purged_count = len(rows_to_purge)
+        for row in rows_to_purge:
+            db.session.delete(row)
+        db.session.commit()
+        clear_runtime_caches()
+        return jsonify({
+            'success': True,
+            'purged': purged_count,
+            'remaining': len(all_rows) - purged_count,
+            'uploaded_vendor_count': len(uploaded_vendor_set),
+            'message': f'Purged {purged_count} non-vendor Import rows. {len(all_rows) - purged_count} rows remain.'
+        })
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/import/cleanup', methods=['POST'])
 def import_cleanup_duplicates():
