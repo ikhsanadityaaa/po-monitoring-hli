@@ -923,7 +923,7 @@ IMPORT_LAYOUT_VENDOR_COLUMNS = (5, 28)
 
 IMPORT_STATUS_OPTIONS = ['NEW', 'ON PROCESS', 'ON DELIVERY', 'DELIVERED', 'CANCELED']
 IMPORT_CHECKBOX_FIELDS = {'sap_input', 'bl_awb', 'invoice', 'pl', 'hc', 'msds', 'coa', 'coo'}
-IMPORT_FORMULA_FIELDS = {'days_left', 'site', 'vendor', 'arrival_check', 'purchase_amount', 'lt_days'}
+IMPORT_FORMULA_FIELDS = {'days_left', 'site', 'vendor', 'arrival_check', 'purchase_amount', 'total_purchase_amount', 'lt_days'}
 IMPORT_HYPERLINK_FIELDS = {'soft_copy_doc'}
 IMPORT_PAYMENT_DROPDOWN_FIELDS = {'payment'}
 IMPORT_PAYMENT_DATE_FIELDS = {'payment_date'}
@@ -1038,7 +1038,7 @@ IMPORT_REFERENCE_VISIBLE_COLUMNS = [
     {'sheet_col': 'T',  'source_sheet_col': 'H',  'field': 'item_name',           'label': 'Item name',              'width': 200, 'group_per_item': True},
     {'sheet_col': 'U',  'source_sheet_col': 'I',  'field': 'spec',                'label': 'Spec',                   'width': 340, 'group_per_item': True},
     {'sheet_col': 'V',  'source_sheet_col': 'J',  'field': 'remark_yupi',         'label': 'REMARK YUPI',            'width': 260},
-    {'sheet_col': 'X',  'source_sheet_col': 'L',  'field': 'reschedule',          'label': 'RESCHEDULE',             'width': 96,  'group_per_item': True},
+    {'sheet_col': 'X',  'source_sheet_col': 'L',  'field': 'reschedule',          'label': 'RESCHEDULE',             'width': 120, 'group_per_item': True},
     {'sheet_col': 'Y',  'source_sheet_col': 'M',  'field': 'ord_qty',             'label': "Ord. Q'ty",             'width': 76,  'number': True, 'group_per_item': True},
     {'sheet_col': 'Z',  'source_sheet_col': 'N',  'field': 'unit',                'label': 'Unit',                   'width': 56,  'group_per_item': True},
     {'sheet_col': 'AA', 'source_sheet_col': 'O',  'field': 'unit_price',          'label': 'Unit Price',             'width': 90,  'number': True, 'group_per_item': True},
@@ -1046,7 +1046,15 @@ IMPORT_REFERENCE_VISIBLE_COLUMNS = [
     # Vendor Name column removed — Vendor column on the left already covers it.
     {'sheet_col': 'AG', 'source_sheet_col': 'U',  'field': 'purchase_price',      'label': 'PURCHASE PRICE',         'width': 96,  'number': True, 'group_per_item': True},
     {'sheet_col': 'AH', 'source_sheet_col': 'V',  'field': 'currency',            'label': 'CURRENCY',               'width': 72,  'group_per_item': True},
-    {'sheet_col': 'AJ', 'source_sheet_col': 'X',  'field': 'purchase_amount',     'label': 'PURCHASE\nAMOUNT',       'width': 100, 'formula': True, 'number': True, 'group_per_item': True},
+    {'sheet_col': 'AJ', 'source_sheet_col': 'X',  'field': 'purchase_amount',     'label': 'PURCHASE\nAMOUNT',       'width': 130, 'formula': True, 'number': True, 'group_per_item': True},
+    # FIX V24: TOTAL PUR AMT — merged per YUPI PO group (group_per_item=False).
+    # Holds the SUM of purchase_amount across all line items in the same
+    # YUPI PO + req_dlv_date group. Computed server-side per response and
+    # injected into each row's data dict. Merged visually like other group
+    # columns (status, vendor, dates, ...). Value is formatted with the same
+    # import_format_number helper used for purchase_amount so it stays
+    # consistent with the rest of the table.
+    {'sheet_col': '',   'field': 'total_purchase_amount', 'label': 'TOTAL\nPUR AMT', 'width': 110, 'formula': True, 'number': True, 'group_per_item': False, 'bold_text': True},
     {'sheet_col': 'DB', 'field': 'bl_awb',              'label': 'BL / AWB',               'width': 76,  'checkbox': True},
     {'sheet_col': 'DC', 'field': 'invoice',             'label': 'INVOICE',                'width': 76,  'checkbox': True},
     {'sheet_col': 'DD', 'field': 'pl',                  'label': 'PL',                     'width': 56,  'checkbox': True},
@@ -1714,8 +1722,11 @@ def import_format_number(value):
     if value is None: return ''
     try: f = float(value)
     except: return str(value)
-    if abs(f - round(f)) < 0.000001: return str(int(round(f)))
-    return f'{f:.2f}'.rstrip('0').rstrip('.')
+    # FIX V25: Accounting format — thousand separators (comma) supaya angka
+    # besar mudah dibaca. Contoh: 1234567 → "1,234,567", 1234.5 → "1,234.50".
+    # Sebelumnya pakai str(int) tanpa separator → "1234567" (sulit dibaca).
+    if abs(f - round(f)) < 0.000001: return f'{int(round(f)):,}'
+    return f'{f:,.2f}'
 
 def apply_import_formula_columns(row):
     if not isinstance(row, dict): return row
@@ -8084,11 +8095,20 @@ def get_import_data():
             yupi = import_nonblank(data.get('yupi_po')) or import_nonblank(data.get('po_yupi'))
             vendor = import_nonblank(data.get('vendor_name')) or import_nonblank(data.get('vendor')) or import_nonblank(row.vendor_name)
             # Apply uploaded-vendor filter at the parse level — non-matching
-            # rows never enter `parsed`, so they don't show up in the table
-            # or in any filter dropdown options. Rows with no vendor are also
-            # excluded when an uploaded vendor list exists.
+            # rows never enter `parsed`, so they don't show up in the table,
+            # filter dropdown options, or the PO count. Rows with no vendor
+            # are also excluded when an uploaded vendor list exists.
+            #
+            # FIX V25: Pakai import_vendor_match() (fuzzy matching) bukan
+            # exact match. Sebelumnya, exact match case-insensitive dipakai
+            # di display filter, tapi sync_import_sheet_to_dashboard() pakai
+            # fuzzy match. Akibatnya, row dengan vendor yang slightly beda
+            # penulisan (mis. "CURT GEORGI GMBH & CO" vs "CURT GEORGI GMBH &
+            # CO. KG") lolos sync tapi di-exclude di display → KPI dan total
+            # count jadi tidak akurat. Sekarang keduanya pakai fuzzy match
+            # yang sama, jadi count dan KPI konsisten.
             if uploaded_vendor_set_for_display:
-                if not vendor or vendor.strip().lower() not in uploaded_vendor_set_for_display:
+                if not vendor or not import_vendor_match(vendor, uploaded_vendor_set_for_display):
                     continue
             parsed.append({'row': row, 'data': data, 'yupi_po': yupi, 'vendor': vendor})
 
@@ -8333,6 +8353,47 @@ def get_import_data():
                                               vendor_attrs_map=_vendor_attrs_map_cached,
                                               pre_parsed_data=item['data'])
                 for item in page_items]
+
+        # FIX V24: Inject "total_purchase_amount" (sum of purchase_amount per
+        # YUPI PO + req_dlv_date group) into each row's data dict. Computed
+        # across ALL filtered_items (not just this page) supaya angka total
+        # stabil walau user pindah halaman — walau dalam prakteknya, semua
+        # item dari satu group selalu berada di halaman yang sama karena
+        # pagination di group level (lihat FIX V16 di atas).
+        #
+        # Algoritma:
+        #   1. Group filtered_items by (yupi_po + req_dlv_date) — sama dengan
+        #      merge key frontend.
+        #   2. Untuk tiap group, sum semua item['data']['purchase_amount'].
+        #   3. Format angka dengan import_format_number (sama dengan format
+        #      cell purchase_amount supaya konsisten).
+        #   4. Inject nilai total ke setiap row di group tersebut (jadi cell
+        #      merged akan menampilkan total yang sama di seluruh baris group).
+        try:
+            _group_totals = {}
+            for item in filtered_items:
+                yupi = str((item.get('data') or {}).get('yupi_po') or item.get('yupi_po') or '').strip()
+                if not yupi:
+                    continue
+                req_dlv = import_nonblank((item.get('data') or {}).get('req_dlv_date')) or import_nonblank((item.get('data') or {}).get('source_req_dlv_date')) or ''
+                group_key = f"{yupi.lower()}|{str(req_dlv).strip().lower()}"
+                pa = import_float_value((item.get('data') or {}).get('purchase_amount'))
+                if pa is not None:
+                    _group_totals[group_key] = _group_totals.get(group_key, 0.0) + pa
+            # Inject into rows
+            for row in rows:
+                yupi = str(row.get('yupi_po') or '').strip()
+                if not yupi:
+                    row['total_purchase_amount'] = ''
+                    continue
+                req_dlv = import_nonblank(row.get('req_dlv_date')) or import_nonblank(row.get('source_req_dlv_date')) or ''
+                group_key = f"{yupi.lower()}|{str(req_dlv).strip().lower()}"
+                total = _group_totals.get(group_key)
+                row['total_purchase_amount'] = import_format_number(total) if total is not None else ''
+        except Exception as _tota_exc:
+            import traceback; traceback.print_exc()
+            for row in rows:
+                row['total_purchase_amount'] = ''
 
         # ── KPIs ───────────────────────────────────────────────────────────
         # Computed across ALL filtered rows (not just the current page):
@@ -9335,9 +9396,10 @@ def export_import_data():
             yupi = import_nonblank(data.get('yupi_po')) or import_nonblank(data.get('po_yupi'))
             vendor = import_nonblank(data.get('vendor_name')) or import_nonblank(data.get('vendor')) or import_nonblank(row.vendor_name)
             # Uploaded-vendor filter — skip rows whose vendor is not in the
-            # uploaded list (or has no vendor at all).
+            # uploaded list (or has no vendor at all). Uses fuzzy matching
+            # (import_vendor_match) to stay consistent with sync + display.
             if uploaded_vendor_set_for_export:
-                if not vendor or vendor.strip().lower() not in uploaded_vendor_set_for_export:
+                if not vendor or not import_vendor_match(vendor, uploaded_vendor_set_for_export):
                     continue
             if none_yupi_po or none_vendor:
                 continue
@@ -9451,6 +9513,25 @@ def export_import_data():
         # Untuk setiap group, collect nilai non-empty per field, lalu apply ke semua row
         processed_rows = []
         for group in groups:
+            # FIX V24: Compute total_purchase_amount = sum of purchase_amount
+            # across all items in the group. Inject into every row in the
+            # group so the merged cell shows the same total (same behavior as
+            # the dashboard table).
+            try:
+                _grp_total = 0.0
+                _has_amount = False
+                for _db_row, _data in group:
+                    _pa = import_float_value(_data.get('purchase_amount'))
+                    if _pa is not None:
+                        _grp_total += _pa
+                        _has_amount = True
+                _grp_total_str = import_format_number(_grp_total) if _has_amount else ''
+                for _db_row, _data in group:
+                    _data['total_purchase_amount'] = _grp_total_str
+            except Exception:
+                for _db_row, _data in group:
+                    _data['total_purchase_amount'] = ''
+
             if len(group) == 1:
                 # Single row group, tidak perlu carry-over
                 processed_rows.append(group[0])
