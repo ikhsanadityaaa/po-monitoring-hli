@@ -1279,6 +1279,26 @@ const FilterPanel = ({ children, darkMode, className = '' }) => (
   </div>
 );
 
+// ─── Collapsible "Filters" toggle — keeps advanced filter grids (aging
+// chips, multi-selects, etc.) tucked away by default so the table is
+// visible without scrolling; `count` shows how many filters are active
+// even while the panel is collapsed.
+const FiltersToggleButton = ({ open, onClick, darkMode, count = 0 }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm border transition-all ${
+      open || count > 0
+        ? (darkMode ? 'bg-blue-900/30 border-blue-500 text-blue-200' : 'bg-blue-50 border-blue-300 text-blue-700')
+        : (darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600 border-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border-gray-200')
+    }`}
+  >
+    <Filter className="w-4 h-4"/>
+    Filters{count > 0 ? ` (${count})` : ''}
+    <ChevronDown className={`w-3.5 h-3.5 transition-transform ${open ? 'rotate-180' : ''}`}/>
+  </button>
+);
+
 const PagePagination = ({ darkMode, txt2, page, totalPages, total, perPage, onPageChange, onPerPageChange, unitLabel = 'Rows' }) => {
   const from = total ? (page - 1) * perPage + 1 : 0;
   const to = Math.min(page * perPage, total);
@@ -1871,6 +1891,7 @@ const App = () => {
   const [soFilters, setSoFilters] = useState(() => savedSoFilters.filters || { op_units: [], vendors: [], manufacturers: [], statuses: [], aging: [], pics: [] });
   const [soSearchNums, setSoSearchNums] = useState(() => savedSoFilters.searchNums || []); // search SO Item
   const [soSearchText, setSoSearchText] = useState(() => savedSoFilters.searchText ?? (savedSoFilters.searchNums || []).join('\n')); // raw multiline text for the search box (RFQ-style)
+  const [soFiltersOpen, setSoFiltersOpen] = useState(false); // collapsible advanced filters (aging + filter grid)
   const [soMarginFilter, setSoMarginFilter] = useState(() => savedSoFilters.marginFilter || 'all'); // 'all' | 'positive' | 'negative'
   const [soSortOrder, setSoSortOrder] = useState(() => savedSoFilters.sortOrder || 'oldest'); // 'oldest' | 'newest'
   const [soPage, setSoPage] = useState(() => savedSoFilters.page || 1);
@@ -1889,6 +1910,7 @@ const App = () => {
   const [itemRegPage, setItemRegPage] = useState(() => savedItemRegFilters.page || 1);
   const [itemRegPerPage, setItemRegPerPage] = useState(() => savedItemRegFilters.perPage || 10);
   const [itemRegSearch, setItemRegSearch] = useState(() => savedItemRegFilters.search || []);
+  const [itemRegFiltersOpen, setItemRegFiltersOpen] = useState(false); // collapsible advanced filters
   const [itemRegAppliedSearch, setItemRegAppliedSearch] = useState(() => savedItemRegFilters.appliedSearch || []);
   const [itemRegLastUpdated, setItemRegLastUpdated] = useState(null);
   const [itemRegFilters, setItemRegFilters] = useState(() => savedItemRegFilters.filters || { clients: [], categories: [], pics: [], proc_statuses: [], mfr_names: [] });
@@ -1908,6 +1930,7 @@ const App = () => {
   const [rfqPage, setRfqPage] = useState(() => savedRfqFilters.page || 1);
   const [rfqPerPage, setRfqPerPage] = useState(() => savedRfqFilters.perPage || 10);
   const [rfqSearch, setRfqSearch] = useState(() => savedRfqFilters.search || '');
+  const [rfqFiltersOpen, setRfqFiltersOpen] = useState(false); // collapsible advanced filters
   const [rfqAppliedSearch, setRfqAppliedSearch] = useState(() => savedRfqFilters.appliedSearch || '');
   const [rfqColumns, setRfqColumns] = useState([]);
   const [rfqSimilarityColumns, setRfqSimilarityColumns] = useState([]);
@@ -1932,6 +1955,7 @@ const App = () => {
   const [importPage, setImportPage] = useState(() => savedImportFilters.page || 1);
   const [importPerPage, setImportPerPage] = useState(() => savedImportFilters.perPage || 10);
   const [importSearch, setImportSearch] = useState(() => savedImportFilters.search || '');
+  const [importFiltersOpen, setImportFiltersOpen] = useState(false); // collapsible advanced filters
   const [importAppliedSearch, setImportAppliedSearch] = useState(() => savedImportFilters.appliedSearch || '');
   const [importVendorCount, setImportVendorCount] = useState(0);
   const [importLastCopyAt, setImportLastCopyAt] = useState('');
@@ -2004,6 +2028,7 @@ const App = () => {
   const [registeredItemsPage, setRegisteredItemsPage] = useState(() => savedRegisteredItemsFilters.page || 1);
   const [registeredItemsPerPage, setRegisteredItemsPerPage] = useState(() => savedRegisteredItemsFilters.perPage || 10);
   const [registeredItemsSearch, setRegisteredItemsSearch] = useState(() => savedRegisteredItemsFilters.search || '');
+  const [registeredItemsFiltersOpen, setRegisteredItemsFiltersOpen] = useState(false); // collapsible advanced filters
   const [registeredItemsAppliedSearch, setRegisteredItemsAppliedSearch] = useState(() => savedRegisteredItemsFilters.appliedSearch || '');
   const [registeredItemsProdIds, setRegisteredItemsProdIds] = useState(() => savedRegisteredItemsFilters.prodIds || []);
   const [registeredItemsAppliedProdIds, setRegisteredItemsAppliedProdIds] = useState(() => savedRegisteredItemsFilters.appliedProdIds || []);
@@ -4928,18 +4953,25 @@ const App = () => {
             <h2 className={`text-lg font-bold ${txt}`}>All Registered Items</h2>
             <span className={`text-sm ${txt2}`}>({fmtNum(registeredItemsTotal)} records)</span>
           </div>
-          <DownloadButton onClick={downloadRegisteredExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
-            <Download className="w-4 h-4"/>Download Excel
-          </DownloadButton>
+          <div className="flex flex-wrap items-center gap-2">
+            <RFQMultiSearch value={registeredItemsSearch} onChange={setRegisteredItemsSearch} onSearch={(next) => { setRegisteredItemsAppliedSearch(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, next, registeredItemsAppliedProdIds, registeredItemsFilters, registeredItemsAppliedPicFilter); }} darkMode={darkMode} txt2={txt2} description="Enter Product ID, Product Name, Specification, or Manufacturer per line. Results match any entered value." placeholder={'8381684\nBearing SKF\nJTC'} />
+            <DownloadButton onClick={downloadRegisteredExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
+              <Download className="w-4 h-4"/>Download Excel
+            </DownloadButton>
+            <FiltersToggleButton
+              open={registeredItemsFiltersOpen}
+              onClick={()=>setRegisteredItemsFiltersOpen(o=>!o)}
+              darkMode={darkMode}
+              count={registeredItemsProdIds.length + filterValues(registeredItemsFilters.mfr_names).length + (registeredItemsPicFilter?1:0)}
+            />
+          </div>
         </div>
 
+        {registeredItemsFiltersOpen && (
         <FilterPanel darkMode={darkMode}>
-          {/* Grid: Search | Prod ID | PIC | Mfr Name | Search btn | Clear btn
+          {/* Grid: Prod ID | PIC | Mfr Name | Search btn | Clear btn
               Vendor Name filter removed — source has no Vendor column. */}
-          <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-[minmax(240px,1fr)_170px_180px_minmax(180px,1fr)_90px_110px] items-end">
-            <div className="min-w-0">
-              <RFQMultiSearch value={registeredItemsSearch} onChange={setRegisteredItemsSearch} onSearch={(next) => { setRegisteredItemsAppliedSearch(next); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, next, registeredItemsAppliedProdIds, registeredItemsFilters, registeredItemsAppliedPicFilter); }} darkMode={darkMode} txt2={txt2} label="Search" description="Enter Product ID, Product Name, Specification, or Manufacturer per line. Results match any entered value." placeholder={'8381684\nBearing SKF\nJTC'} />
-            </div>
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-[170px_180px_minmax(180px,1fr)_90px_110px] items-end">
             <div className="min-w-0">
               <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search</label>
               <SearchInput key={`registered-prod-id-${registeredItemsProdIds.join('|')}`} placeholder={'8381684\n8382076'} label="Prod ID" darkMode={darkMode} txt2={txt2} onSearch={(nums) => { setRegisteredItemsProdIds(nums); setRegisteredItemsAppliedProdIds(nums); setRegisteredItemsPage(1); fetchRegisteredItems(1, registeredItemsPerPage, registeredItemsAppliedSearch, nums, registeredItemsFilters, registeredItemsAppliedPicFilter); }} />
@@ -4964,6 +4996,7 @@ const App = () => {
             <button onClick={handleClear} className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
         </FilterPanel>
+        )}
 
         <DataTableScroll darkMode={darkMode}>
           <table className="freeze-table-all-registered-items w-full text-xs">
@@ -5334,6 +5367,17 @@ const App = () => {
             {rfqLastUpdated && <span className={`text-xs ${txt2}`}>Last sync: {fmtDate(rfqLastUpdated)}</span>}
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <RFQMultiSearch
+              value={rfqSearch}
+              onChange={setRfqSearch}
+              onSearch={(searchValue) => {
+                setRfqAppliedSearch(searchValue);
+                setRfqPage(1);
+                fetchRFQData(1, rfqPerPage, searchValue, false, rfqFilters, rfqPicFilter, rfqShowSimilarity);
+              }}
+              darkMode={darkMode}
+              txt2={txt2}
+            />
             <button onClick={downloadRFQTemplate} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
               <Download className="w-4 h-4"/>Template
             </button>
@@ -5350,6 +5394,12 @@ const App = () => {
             <button onClick={() => fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, true, rfqFilters, rfqPicFilter)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
               <RotateCcw className="w-4 h-4"/>Refresh Sheet
             </button>
+            <FiltersToggleButton
+              open={rfqFiltersOpen}
+              onClick={()=>setRfqFiltersOpen(o=>!o)}
+              darkMode={darkMode}
+              count={filterValues(rfqFilters.checks).length + filterValues(rfqFilters.clients).length + filterValues(rfqFilters.rfq_numbers).length + filterValues(rfqFilters.brands).length + filterValues(rfqFilters.purchase_pics).length + filterValues(rfqFilters.vendors).length}
+            />
           </div>
         </div>
 
@@ -5384,21 +5434,9 @@ const App = () => {
           </div>
         </div>
 
+        {rfqFiltersOpen && (
         <FilterPanel darkMode={darkMode}>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[minmax(160px,1fr)_105px_minmax(130px,0.95fr)_minmax(130px,0.95fr)_repeat(3,minmax(115px,0.9fr))_84px] items-end">
-            <div className="min-w-0">
-              <RFQMultiSearch
-                value={rfqSearch}
-                onChange={setRfqSearch}
-                onSearch={(searchValue) => {
-                  setRfqAppliedSearch(searchValue);
-                  setRfqPage(1);
-                  fetchRFQData(1, rfqPerPage, searchValue, false, rfqFilters, rfqPicFilter, rfqShowSimilarity);
-                }}
-                darkMode={darkMode}
-                txt2={txt2}
-              />
-            </div>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[105px_minmax(130px,0.95fr)_minmax(130px,0.95fr)_repeat(3,minmax(115px,0.9fr))_84px] items-end">
             <div className="min-w-0">
               <MultiSelect label="Check" options={rfqOptions.checks || []} selected={rfqFilters.checks}
                 onChange={v=>{ const next={...rfqFilters, checks:v}; setRfqFilters(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, next, rfqPicFilter, rfqShowSimilarity); }} darkMode={darkMode} txt2={txt2}/>
@@ -5428,6 +5466,7 @@ const App = () => {
             </button>
           </div>
         </FilterPanel>
+        )}
 
         <DataTableScroll darkMode={darkMode}>
           <table className="freeze-table-rfq table-fixed text-xs border-collapse" style={{ width: `${rfqTableWidth}px`, minWidth: `${rfqTableWidth}px` }}>
@@ -6274,6 +6313,13 @@ const App = () => {
               `flex-nowrap` keeps the buttons themselves on one line (with
               horizontal scroll if needed) so they never "menumpuk" (stack). */}
           <div className="flex flex-nowrap items-center justify-end gap-2 ml-auto overflow-x-auto max-w-full -mx-1 px-1">
+            {/* Search — always visible, left of the action buttons. */}
+            <div className="flex-shrink-0 flex items-center gap-1.5">
+              <input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-48 h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/>
+              <button onClick={()=>{ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); }} className="h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm flex-shrink-0 flex items-center gap-1.5">
+                <Search className="w-4 h-4"/>Search
+              </button>
+            </div>
             {/* Vendor Import — single dropdown combining Template + Upload.
                 Keeps the header tidy and matches the "1 menu per logical
                 action" pattern used in other tables (RFQ, Item Registration). */}
@@ -6337,6 +6383,14 @@ const App = () => {
             <DownloadButton onClick={downloadImportExcel} className="flex-shrink-0 flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm whitespace-nowrap">
               <Download className="w-4 h-4"/>Download Excel
             </DownloadButton>
+            <div className="flex-shrink-0">
+              <FiltersToggleButton
+                open={importFiltersOpen}
+                onClick={()=>setImportFiltersOpen(o=>!o)}
+                darkMode={darkMode}
+                count={filterValues(importFilters.statuses).length + (Array.isArray(importFilters.daysLeft)?importFilters.daysLeft.length:0) + filterValues(importFilters.yupi_po).length + filterValues(importFilters.vendors).length}
+              />
+            </div>
           </div>
         </div>
 
@@ -6420,6 +6474,7 @@ const App = () => {
           </div>
         </div>
 
+        {importFiltersOpen && (
         <FilterPanel darkMode={darkMode}>
           <div className="flex flex-wrap items-end gap-2">
             <div className="min-w-[110px] flex-shrink-0">
@@ -6447,7 +6502,6 @@ const App = () => {
                 <option value="desc">Z-A ↓</option>
               </select>
             </div>
-            <div className="min-w-[180px] flex-1"><label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search</label><input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-full h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/></div>
             <div className="min-w-[130px] flex-shrink-0">
               <MultiSelect
                 label="Status"
@@ -6514,10 +6568,10 @@ const App = () => {
               <MultiSelect label="Vendor" options={importOptions.vendors || []} selected={importFilters.vendors}
                 onChange={v=>{ const next={...importFilters, vendors:v}; setImportFilters(next); setImportPage(1); fetchImportData(1, importPerPage, importAppliedSearch, false, next, importReqDlvSort, importYupiPoSort); }} darkMode={darkMode} txt2={txt2}/>
             </div>
-            <button onClick={()=>{ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); }} className="h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm flex-shrink-0">Search</button>
             <button onClick={()=>{ const next={ yupi_po: [], vendors: [], statuses: [], daysLeft: [] }; const nextSort='oldest'; const nextYupiSort=''; setImportSearch(''); setImportAppliedSearch(''); setImportFilters(next); setImportReqDlvSort(nextSort); setImportYupiPoSort(nextYupiSort); setImportPage(1); fetchImportData(1, importPerPage, '', false, next, nextSort, nextYupiSort); }} className={`h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap flex-shrink-0 ${darkMode ? 'bg-gray-500 text-gray-100 hover:bg-gray-400' : 'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
         </FilterPanel>
+        )}
 
         <DataTableScroll darkMode={darkMode}>
           <table className={`freeze-table-import table-fixed text-xs border-collapse border ${showImportDetail ? '' : 'import-detail-hidden'}`} style={{ width: `${tableWidth}px`, minWidth: `${tableWidth}px` }}>
@@ -6727,6 +6781,19 @@ const App = () => {
             )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <SearchInput
+              key={`item-req-no-${itemRegSearch.join('|')}`}
+              placeholder={'REQ001\nREQ002'}
+              label="Req No."
+              darkMode={darkMode}
+              txt2={txt2}
+              onSearch={(nums) => {
+                setItemRegSearch(nums);
+                setItemRegAppliedSearch(nums);
+                setItemRegPage(1);
+                fetchItemRegistration(1, itemRegPerPage, nums, itemRegFilters);
+              }}
+            />
             <button onClick={downloadItemRegistrationTemplate} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
               <Download className="w-4 h-4"/>Template
             </button>
@@ -6749,6 +6816,12 @@ const App = () => {
             <DownloadButton onClick={downloadItemRegistrationExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
               <Download className="w-4 h-4"/>Download Excel
             </DownloadButton>
+            <FiltersToggleButton
+              open={itemRegFiltersOpen}
+              onClick={()=>setItemRegFiltersOpen(o=>!o)}
+              darkMode={darkMode}
+              count={filterValues(itemRegFilters.proc_statuses).length + filterValues(itemRegFilters.clients).length + filterValues(itemRegFilters.categories).length + filterValues(itemRegFilters.pics).length + filterValues(itemRegFilters.mfr_names).length}
+            />
           </div>
         </div>
 
@@ -6782,24 +6855,9 @@ const App = () => {
           </div>
         </div>
 
+        {itemRegFiltersOpen && (
         <FilterPanel darkMode={darkMode}>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[170px_repeat(5,minmax(150px,1fr))_120px] items-end">
-            <div className="min-w-0">
-              <label className={`block text-xs font-semibold mb-1 ${txt2}`}>Search</label>
-              <SearchInput
-                key={`item-req-no-${itemRegSearch.join('|')}`}
-                placeholder={'REQ001\nREQ002'}
-                label="Req No."
-                darkMode={darkMode}
-                txt2={txt2}
-                onSearch={(nums) => {
-                  setItemRegSearch(nums);
-                  setItemRegAppliedSearch(nums);
-                  setItemRegPage(1);
-                  fetchItemRegistration(1, itemRegPerPage, nums, itemRegFilters);
-                }}
-              />
-            </div>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[repeat(5,minmax(150px,1fr))_120px] items-end">
             <div className="min-w-0">
               <MultiSelect label="Proc. Status" options={itemRegOptions.proc_statuses} selected={itemRegFilters.proc_statuses}
                 onChange={v=>{ const next={...itemRegFilters, proc_statuses:v}; setItemRegFilters(next); setItemRegPage(1); fetchItemRegistration(1,itemRegPerPage,itemRegAppliedSearch,next); }} darkMode={darkMode} txt2={txt2}/>
@@ -6824,6 +6882,7 @@ const App = () => {
               className={`w-full h-10 px-3 py-2 rounded-lg text-sm font-medium shadow-sm flex items-center justify-center whitespace-nowrap ${darkMode?'bg-gray-500 text-gray-100 hover:bg-gray-400':'bg-gray-400 text-white hover:bg-gray-500'}`}>Clear</button>
           </div>
         </FilterPanel>
+        )}
 
         <DataTableScroll darkMode={darkMode}>
           <table className="freeze-table-item-registration table-fixed text-xs" style={{ width: `${itemRegTableWidth}px`, minWidth: `${itemRegTableWidth}px` }}>
@@ -7265,6 +7324,20 @@ const App = () => {
             <p className={`text-sm ${txt2}`}>{fmtNum(soTotal)} total records — page {soPage} of {soTotalPages}</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <RFQMultiSearch
+              value={soSearchText}
+              onChange={setSoSearchText}
+              onSearch={(searchValue) => {
+                const nums = searchValue.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+                setSoSearchNums(nums);
+                setSoPage(1);
+                fetchSOData(soFilters, 1, soPerPage, nums, soMarginFilter, soDateFilter);
+              }}
+              darkMode={darkMode}
+              txt2={txt2}
+              description="Enter SO Item, SO Number, PO Number, Product ID, Product Name, Specification, or Vendor per line. Results match any entered value."
+              placeholder={'1234-10\n8381684\nBearing SKF'}
+            />
             <DownloadButton onClick={downloadSOTemplate} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
               <Download className="w-4 h-4"/>Template
             </DownloadButton>
@@ -7275,6 +7348,12 @@ const App = () => {
             <DownloadButton onClick={downloadSOExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
               <Download className="w-4 h-4"/>Download Excel
             </DownloadButton>
+            <FiltersToggleButton
+              open={soFiltersOpen}
+              onClick={()=>setSoFiltersOpen(o=>!o)}
+              darkMode={darkMode}
+              count={soFilters.aging.length + filterValues(soFilters.op_units).length + filterValues(soFilters.vendors).length + filterValues(soFilters.manufacturers).length + filterValues(soFilters.statuses).length + filterValues(soFilters.pics).length + (soMarginFilter!=='all'?1:0)}
+            />
           </div>
         </div>
         {/* PIC upload feedback */}
@@ -7284,6 +7363,8 @@ const App = () => {
             <button onClick={()=>setPicUploadMsg('')} className="opacity-60 hover:opacity-100 font-bold text-lg leading-none">×</button>
           </div>
         )}
+        {soFiltersOpen && (
+        <>
         <div className="mb-2 flex flex-wrap gap-2 items-center">
           <span className={`text-xs font-medium ${txt2}`}>Filter by Aging:</span>
           {AGING_LABELS.map(label => {
@@ -7304,7 +7385,7 @@ const App = () => {
 
         {/* Multi-select filters */}
         <FilterPanel darkMode={darkMode} className="mx-0 my-3">
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[105px_150px_repeat(6,minmax(105px,1fr))_105px] items-end">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[105px_repeat(6,minmax(105px,1fr))_105px] items-end">
             <div className="min-w-0">
               <label className={`block text-xs font-medium mb-0.5 ${txt2}`}>↕ SO Date</label>
               <select className={`w-full h-10 px-2 py-2 rounded-lg text-sm border ${darkMode?'bg-gray-600 border-gray-500 text-white':'bg-white border-gray-300'}`}
@@ -7312,22 +7393,6 @@ const App = () => {
                 <option value="oldest">Oldest ↑</option>
                 <option value="newest">Newest ↓</option>
               </select>
-            </div>
-            <div className="min-w-0">
-              <RFQMultiSearch
-                value={soSearchText}
-                onChange={setSoSearchText}
-                onSearch={(searchValue) => {
-                  const nums = searchValue.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-                  setSoSearchNums(nums);
-                  setSoPage(1);
-                  fetchSOData(soFilters, 1, soPerPage, nums, soMarginFilter, soDateFilter);
-                }}
-                darkMode={darkMode}
-                txt2={txt2}
-                description="Enter SO Item, SO Number, PO Number, Product ID, Product Name, Specification, or Vendor per line. Results match any entered value."
-                placeholder={'1234-10\n8381684\nBearing SKF'}
-              />
             </div>
             <div className="min-w-0">
               <MultiSelect label="PIC" options={soFilterOptions.pics || []}
@@ -7437,6 +7502,8 @@ const App = () => {
             </div>
           )}
         </FilterPanel>
+        </>
+        )}
 
         {/* Detail Pending Delivery table follows the downloadable Excel layout. */}
         <DataTableScroll darkMode={darkMode} className="rounded-lg border border-gray-200">
