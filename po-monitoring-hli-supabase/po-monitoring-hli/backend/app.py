@@ -2249,20 +2249,28 @@ def sync_import_sheet_to_dashboard():
     uploaded_vendor_set = {v.strip().lower() for v in uploaded_vendor_names if v and v.strip()}
     source_rows_added = 0
     source_errors = []
-    if uploaded_vendor_set:
-        for source in IMPORT_SOURCE_SHEETS:
-            try:
-                # vendor_set filter → only rows with matching vendors are returned
-                src_rows = import_source_rows_fast(source, columns, uploaded_vendor_set)
-                sheet_rows.extend(src_rows)
-                source_rows_added += len(src_rows)
-            except Exception as src_exc:
-                import traceback; traceback.print_exc()
-                source_errors.append({'source': source.get('key'), 'label': source.get('label'), 'error': str(src_exc)})
-    else:
-        # No uploaded vendors → don't pull from source sheets at all (would
-        # import the entire sheet unfiltered, which is not what the user wants).
-        source_errors.append({'source': 'all', 'label': 'All sources', 'error': 'No uploaded vendor list — source sheet sync skipped. Upload vendors via Vendor Import first.'})
+    # FIX V22: ALWAYS pull from source sheets (RM + SP) supaya PO baru di sheet
+    # langsung di-copy ke dashboard dengan status "NEW". Sebelumnya, saat user
+    # BELUM upload Vendor Import list, source sheets di-skip entirely → PO baru
+    # di sheet (mis. 410100434) tidak pernah masuk dashboard walau sudah klik
+    # "Copy Sheet". Sekarang:
+    #   - Vendor list uploaded → pakai vendor_set filter (hanya vendor di list
+    #     yang di-copy, behavior lama).
+    #   - Vendor list empty → tarik SEMUA row dari source sheets tanpa filter.
+    #     Ini memastikan setiap PO baru muncul di dashboard sebagai NEW, sesuai
+    #     ekspektasi user. Orphan purge juga di-skip saat vendor list kosong
+    #     (sudah gated oleh `if uploaded_vendor_set` di bawah), jadi row tidak
+    #     akan hilang di sync berikutnya.
+    for source in IMPORT_SOURCE_SHEETS:
+        try:
+            # vendor_set kosong → import_source_rows_fast melewatkan filter dan
+            # mengembalikan semua row. vendor_set terisi → hanya vendor match.
+            src_rows = import_source_rows_fast(source, columns, uploaded_vendor_set)
+            sheet_rows.extend(src_rows)
+            source_rows_added += len(src_rows)
+        except Exception as src_exc:
+            import traceback; traceback.print_exc()
+            source_errors.append({'source': source.get('key'), 'label': source.get('label'), 'error': str(src_exc)})
 
     # ── FIX V13: Deduplikasi sheet_rows berdasarkan source_uid SEBELUM upsert loop.
     #
@@ -7993,6 +8001,10 @@ def get_import_data():
         # NEW: days_left color filter (red / yellow / green / today) — supports
         # multiple values via getlist so the user can filter by 2+ zones.
         selected_days_left = [clean(v).lower() for v in request.args.getlist('days_left') if clean(v)]
+        # NEW: "This Week Arrival" filter — when '1', only show rows whose ETA
+        # falls within the current ISO week (Mon–Sun, WIB timezone). Triggered
+        # by clicking the "This Week Arrival" KPI card on the Import page.
+        this_week_arrival_filter = str(request.args.get('this_week_arrival', '')).lower() in ('1', 'true', 'yes')
         req_dlv_sort = str(clean(request.args.get('req_dlv_sort')) or '').lower() or 'oldest'
         if req_dlv_sort not in ('oldest', 'newest'):
             req_dlv_sort = 'oldest'
@@ -8006,6 +8018,12 @@ def get_import_data():
         selected_vendors = {v.strip().lower() for v in selected_vendors if v != '__NONE_PLACEHOLDER__'}
         # Normalize selected statuses (uppercase) for case-insensitive comparison.
         selected_status_set = {str(v).strip().upper() for v in selected_statuses if v}
+        # Pre-compute the current ISO week (Mon–Sun) in WIB timezone. Used by
+        # BOTH the "This Week Arrival" filter (in passes()) and the KPI counter
+        # below. Computed once here so the filter and KPI use the SAME window.
+        _today_wib_for_week = (datetime.utcnow() + timedelta(hours=7)).date()
+        week_start = _today_wib_for_week - timedelta(days=_today_wib_for_week.weekday())  # Monday
+        week_end = week_start + timedelta(days=6)  # Sunday
         sync_info = None
 
         if force:
@@ -8081,6 +8099,13 @@ def get_import_data():
                 return False
             if ignore != 'vendor' and selected_vendors and str(item.get('vendor') or '').strip().lower() not in selected_vendors:
                 return False
+            # NEW: "This Week Arrival" filter — only show rows whose ETA falls
+            # within the current ISO week (Mon–Sun, WIB timezone). Same week
+            # boundaries as the KPI counter in this endpoint.
+            if ignore != 'this_week_arrival' and this_week_arrival_filter:
+                eta_date = import_date_from_value((item.get('data') or {}).get('eta'))
+                if not eta_date or not (week_start <= eta_date <= week_end):
+                    return False
             # NEW: status filter. Status is computed by apply_import_formula_columns
             # and stored at item['data']['status'].
             if ignore != 'status' and selected_status_set:
@@ -8319,10 +8344,9 @@ def get_import_data():
         #    the exchange rate for the row's ETA date.
         #  - Gross Margin       : Sales Amount − PO Amount (IDR).
         try:
-            today_wib = (datetime.utcnow() + timedelta(hours=7)).date()
-            # ISO week: Monday is the start.
-            week_start = today_wib - timedelta(days=today_wib.weekday())  # Monday 00:00
-            week_end = week_start + timedelta(days=6)  # Sunday
+            # week_start / week_end sudah dihitung di atas (dipakai juga oleh
+            # filter this_week_arrival di passes()). Pakai variabel yang sama
+            # supaya KPI counter dan filter selalu konsisten.
             total_po = 0
             this_week_arrival = 0
             this_week_no_sap = 0
