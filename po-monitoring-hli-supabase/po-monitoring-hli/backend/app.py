@@ -2260,28 +2260,34 @@ def sync_import_sheet_to_dashboard():
     uploaded_vendor_set = {v.strip().lower() for v in uploaded_vendor_names if v and v.strip()}
     source_rows_added = 0
     source_errors = []
-    # FIX V22: ALWAYS pull from source sheets (RM + SP) supaya PO baru di sheet
-    # langsung di-copy ke dashboard dengan status "NEW". Sebelumnya, saat user
-    # BELUM upload Vendor Import list, source sheets di-skip entirely → PO baru
-    # di sheet (mis. 410100434) tidak pernah masuk dashboard walau sudah klik
-    # "Copy Sheet". Sekarang:
-    #   - Vendor list uploaded → pakai vendor_set filter (hanya vendor di list
-    #     yang di-copy, behavior lama).
-    #   - Vendor list empty → tarik SEMUA row dari source sheets tanpa filter.
-    #     Ini memastikan setiap PO baru muncul di dashboard sebagai NEW, sesuai
-    #     ekspektasi user. Orphan purge juga di-skip saat vendor list kosong
-    #     (sudah gated oleh `if uploaded_vendor_set` di bawah), jadi row tidak
-    #     akan hilang di sync berikutnya.
-    for source in IMPORT_SOURCE_SHEETS:
-        try:
-            # vendor_set kosong → import_source_rows_fast melewatkan filter dan
-            # mengembalikan semua row. vendor_set terisi → hanya vendor match.
-            src_rows = import_source_rows_fast(source, columns, uploaded_vendor_set)
-            sheet_rows.extend(src_rows)
-            source_rows_added += len(src_rows)
-        except Exception as src_exc:
-            import traceback; traceback.print_exc()
-            source_errors.append({'source': source.get('key'), 'label': source.get('label'), 'error': str(src_exc)})
+    # FIX V26 (revert V22): Source sheets (RM + SP) HANYA di-pull kalau user
+    # SUDAH upload Vendor Import list. Sebelumnya (V22) selalu di-pull walau
+    # vendor list kosong, dengan asumsi "PO baru otomatis muncul sebagai NEW".
+    # Tapi itu salah — source sheets berisi PULUHAN RIBU baris (semua PO dari
+    # semua vendor di sheet RM + SP). Tanpa vendor filter, SEMUA row masuk
+    # dashboard → total count jadi 52.000+ padahal seharusnya hanya puluhan.
+    #
+    # Sekarang:
+    #   - Vendor list uploaded → tarik HANYA row dengan vendor yang match
+    #     (fuzzy match via import_vendor_match). Inilah "total PO unik vendor
+    #     import" yang user maksud — hanya PO dari vendor yang di-import.
+    #   - Vendor list empty → SKIP source sheets entirely. Dashboard hanya
+    #     menampilkan row yang SUDAH ada di DB (dari sync sebelumnya).
+    #     User harus upload Vendor Import list dulu supaya PO baru di-copy.
+    if uploaded_vendor_set:
+        for source in IMPORT_SOURCE_SHEETS:
+            try:
+                # vendor_set terisi → hanya vendor match yang di-copy.
+                src_rows = import_source_rows_fast(source, columns, uploaded_vendor_set)
+                sheet_rows.extend(src_rows)
+                source_rows_added += len(src_rows)
+            except Exception as src_exc:
+                import traceback; traceback.print_exc()
+                source_errors.append({'source': source.get('key'), 'label': source.get('label'), 'error': str(src_exc)})
+    else:
+        # No uploaded vendors → don't pull from source sheets (would
+        # import the entire sheet unfiltered — tens of thousands of rows).
+        source_errors.append({'source': 'all', 'label': 'All sources', 'error': 'No uploaded vendor list — source sheet sync skipped. Upload vendors via Vendor Import first.'})
 
     # ── FIX V13: Deduplikasi sheet_rows berdasarkan source_uid SEBELUM upsert loop.
     #
