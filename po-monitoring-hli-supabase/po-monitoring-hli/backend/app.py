@@ -1743,8 +1743,18 @@ def apply_import_formula_columns(row):
             row['po_send_date'] = ''; po_send_date_raw = ''
     po_send_date = po_send_date_raw
     status = (clean(row.get('status')) or '').upper()
-    if has_business_data and not po_send_date: status = 'NEW'
-    elif has_business_data and (not status or status == 'NEW'): status = 'ON PROCESS'
+    # FIX V29: JANGAN overwrite status yang sudah di-set user. Sebelumnya:
+    #   if has_business_data and not po_send_date: status = 'NEW'
+    # Ini memaksa status='NEW' walau user sudah set 'DELIVERED'/'ON DELIVERY'/
+    # 'CANCELED' — asal po_send_date kosong. Akibatnya setiap Copy Sheet,
+    # status manual user hilang (reset ke NEW).
+    #
+    # Sekarang: hanya auto-set status kalau status masih KOSONG atau 'NEW'
+    # (belum di-set user ke nilai spesifik).
+    if has_business_data and not po_send_date and (not status or status == 'NEW'):
+        status = 'NEW'
+    elif has_business_data and po_send_date and (not status or status == 'NEW'):
+        status = 'ON PROCESS'
     if status:
         status = next((opt for opt in IMPORT_STATUS_OPTIONS if opt == status), status)
         row['status'] = status
@@ -2068,6 +2078,12 @@ def import_layout_tracker_visible_rows(columns=None):
     rows = []
     last_po_yupi = ''
     last_po_sementara_prefix = ''
+    # FIX V30: Vendor carry-over — layout sheet kadang punya merged cells untuk
+    # vendor name (hanya row pertama per PO yang diisi, row lanjutan kosong).
+    # Tanpa carry-over, row lanjutan akan di-filter keluar oleh V28 vendor
+    # filter → hilang dari dashboard. Pakai pola yang sama dengan
+    # import_source_rows_fast (line 1591-1605).
+    last_known_vendor = ''
     for row_offset, row_values in enumerate(values[header_idx + 1:], start=header_idx + 2):
         payload = {'_source_key': IMPORT_LAYOUT_SOURCE_KEY, '_source_label': 'Import Tracker', '_sheet_row': row_offset}
         any_value = False
@@ -2076,6 +2092,20 @@ def import_layout_tracker_visible_rows(columns=None):
             payload[field] = val
             if import_nonblank(val): any_value = True
         if not any_value: continue
+        # FIX V30: vendor carry-over. Kalau row ini tidak punya vendor tapi
+        # punya PO/item data, pakai vendor dari row sebelumnya.
+        row_vendor_now = import_nonblank(payload.get('vendor')) or import_nonblank(payload.get('vendor_name'))
+        if row_vendor_now:
+            last_known_vendor = row_vendor_now
+        elif last_known_vendor:
+            # Cek apakah row ini punya konten PO/item (bukan row blank/subtotal)
+            po_yupi_val = import_nonblank(payload.get('po_yupi')) or import_nonblank(payload.get('yupi_po'))
+            item_name_val = import_nonblank(payload.get('item_name'))
+            if po_yupi_val or item_name_val:
+                if not import_nonblank(payload.get('vendor')):
+                    payload['vendor'] = last_known_vendor
+                if not import_nonblank(payload.get('vendor_name')):
+                    payload['vendor_name'] = last_known_vendor
         po_yupi_now = import_nonblank(payload.get('po_yupi')) or import_nonblank(payload.get('yupi_po'))
         po_sementara_now = import_nonblank(payload.get('po_sementara'))
         if po_yupi_now:
@@ -9356,8 +9386,10 @@ def update_import_cell():
         # YUPI PO yang sama (sama dengan logic di /api/import/cells). Ini
         # menyelesaikan bug "PO yang sama menampilkan 2 data berbeda" untuk
         # single-cell edits (klik cell → edit → blur).
+        # FIX V30: req_dlv_date dihapus — adalah merge key, propagating akan
+        # break delivery group identity. Lihat komentar di /api/import/cells.
         GROUP_LEVEL_FIELDS = {
-            'po_send_date', 'status', 'req_dlv_date', 'etd', 'eta',
+            'po_send_date', 'status', 'etd', 'eta',
             'import_remarks', 'incoterm', 'forwarder', 'bl_number', 'inv_no',
             'sap_input', 'payment', 'payment_date', 'soft_copy_doc', 'non_ski',
         }
@@ -9694,8 +9726,13 @@ def update_import_cells_batch():
         # Per-item fields (item_yupi, item_name, spec, ord_qty, unit_price,
         # amount, purchase_price, currency, purchase_amount, dll) TIDAK di-
         # propagate karena mereka unique per line item.
+        # FIX V30: req_dlv_date DIHAPUS dari GROUP_LEVEL_FIELDS. req_dlv_date
+        # adalah merge key (yupi_po + req_dlv_date). Propagating req_dlv_date
+        # ke semua row PO yang sama akan merge grup pengiriman berbeda →
+        # break identity hash + dedup logic. User harus edit req_dlv_date
+        # per-row (per delivery group).
         GROUP_LEVEL_FIELDS = {
-            'po_send_date', 'status', 'req_dlv_date', 'etd', 'eta',
+            'po_send_date', 'status', 'etd', 'eta',
             'import_remarks', 'incoterm', 'forwarder', 'bl_number', 'inv_no',
             'sap_input', 'payment', 'payment_date', 'soft_copy_doc', 'non_ski',
         }
