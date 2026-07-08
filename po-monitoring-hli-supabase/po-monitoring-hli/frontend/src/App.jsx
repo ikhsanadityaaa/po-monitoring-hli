@@ -1273,6 +1273,66 @@ const RFQMultiSearch = ({
   );
 };
 
+// ─── Import search — single-line free text (vendor, PO, item, BL, invoice),
+// styled as a trigger button + small panel to match RFQMultiSearch /
+// SearchInput used on every other table page, instead of a permanently
+// visible input + separate Search button.
+const ImportSearch = ({ value, onChange, onSearch, darkMode, txt2 }) => {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  const float = useFloatingDropdown(open, 320, 380, 160);
+
+  useEffect(() => {
+    const handler = (event) => {
+      if (ref.current && !ref.current.contains(event.target) && !float.triggerRef.current?.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const applySearch = () => { onSearch(value); setOpen(false); };
+  const clearSearch = () => { onChange(''); onSearch(''); setOpen(false); };
+
+  return (
+    <div className="relative flex-shrink-0" ref={ref}>
+      <button
+        ref={float.triggerRef}
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className={`h-10 px-3 py-2 rounded-xl text-sm border font-medium flex items-center gap-2 transition-colors ${
+          darkMode
+            ? value ? 'bg-amber-900/30 border-amber-500 text-amber-100 hover:bg-amber-900/40' : 'bg-gray-700 border-gray-600 text-white hover:bg-gray-600'
+            : value ? 'bg-amber-50 border-amber-300 text-amber-800 hover:bg-amber-100' : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50'
+        }`}
+      >
+        <Search className="w-4 h-4 flex-shrink-0"/>
+        <span className="truncate max-w-[9rem]">{value ? value : 'Search'}</span>
+        <ChevronDown className={`w-3.5 h-3.5 opacity-60 flex-shrink-0 transition-transform ${open ? 'rotate-180' : ''}`}/>
+      </button>
+      {open && (
+        <div
+          style={float.menuPos.style}
+          className={`rounded-xl border p-3 shadow-2xl ${darkMode ? 'bg-gray-800 border-gray-600' : 'bg-white border-gray-200'}`}
+        >
+          <p className={`mb-2 text-xs leading-relaxed ${txt2}`}>Search vendor, PO, item, BL, invoice...</p>
+          <input
+            value={value}
+            onChange={e => onChange(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') applySearch(); if (e.key === 'Escape') setOpen(false); }}
+            placeholder="Search vendor, PO, item, BL, invoice..."
+            className={`w-full h-10 px-3 py-2 rounded-lg border text-sm ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-gray-50 border-gray-300 text-gray-800 placeholder:text-gray-400'}`}
+            autoFocus
+          />
+          <div className="mt-3 flex gap-2">
+            <button type="button" onClick={applySearch} className="flex-1 rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold text-white hover:bg-blue-700">Search</button>
+            <button type="button" onClick={clearSearch} className={`flex-1 rounded-lg px-3 py-2 text-xs font-semibold ${darkMode ? 'bg-gray-600 text-gray-100 hover:bg-gray-500' : 'border border-gray-300 bg-white text-gray-700 hover:bg-gray-100'}`}>Clear Search</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const FilterPanel = ({ children, darkMode, className = '' }) => (
   <div className={`relative z-[70] overflow-visible mx-5 my-3 rounded-xl border p-3 ${darkMode ? 'border-gray-700 bg-gray-800/70' : 'border-gray-100 bg-[#f6f6f4]'} ${className}`}>
     {children}
@@ -1986,6 +2046,11 @@ const App = () => {
   // to silently fail. The dropdown's "Upload Vendor Import" button calls
   // importVendorFileRef.current.click() to open the file picker.
   const importVendorFileRef = useRef(null);
+  // "View" dropdown — combines the Checklist and Detail visibility toggles
+  // into a single menu (matches the "1 menu per logical action" pattern
+  // used for Vendor Import) so the toolbar fits on one line.
+  const [importViewMenuOpen, setImportViewMenuOpen] = useState(false);
+  const importViewDropdown = useFloatingDropdown(importViewMenuOpen, 224, 280, 200);
   const [importFilters, setImportFilters] = useState(() => {
     // Coerce daysLeft to array — previously it was a string, and old
     // localStorage entries may still contain a string. Guard against
@@ -5359,14 +5424,14 @@ const App = () => {
 
     return (
       <div className={`rounded-2xl overflow-hidden ${card}`}>
-        <div className={`px-5 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap justify-between items-center gap-3`}>
-          <div className="flex items-center gap-2 min-w-0">
+        <div className={`px-5 py-4 border-b ${darkMode?'border-gray-700':'border-gray-100'} flex flex-wrap items-center gap-3`}>
+          <div className="flex items-center gap-2 min-w-0 flex-shrink-0">
             <Mail className="w-5 h-5 text-blue-500 flex-shrink-0" />
             <h2 className={`text-lg font-bold ${txt}`}>RFQ</h2>
             <span className={`text-sm ${txt2}`}>({fmtNum(rfqTotal)} records)</span>
             {rfqLastUpdated && <span className={`text-xs ${txt2}`}>Last sync: {fmtDate(rfqLastUpdated)}</span>}
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-nowrap items-center justify-end gap-2 ml-auto overflow-x-auto max-w-full -mx-1 px-1">
             <RFQMultiSearch
               value={rfqSearch}
               onChange={setRfqSearch}
@@ -5378,28 +5443,30 @@ const App = () => {
               darkMode={darkMode}
               txt2={txt2}
             />
-            <button onClick={downloadRFQTemplate} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
+            <button onClick={downloadRFQTemplate} className={`flex-shrink-0 flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm whitespace-nowrap ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
               <Download className="w-4 h-4"/>Template
             </button>
-            <label className="flex items-center gap-2 px-3 py-2.5 bg-slate-600 hover:bg-slate-700 text-white rounded-xl text-sm font-semibold shadow-sm cursor-pointer">
+            <label className="flex-shrink-0 flex items-center gap-2 px-3 py-2.5 bg-slate-600 hover:bg-slate-700 text-white rounded-xl text-sm font-semibold shadow-sm cursor-pointer whitespace-nowrap">
               <FileSpreadsheet className="w-4 h-4"/>Batch Upload
               <input type="file" accept=".xlsx,.xls" multiple onChange={handleRFQBatchUpload} className="hidden"/>
             </label>
-            <DownloadButton onClick={downloadRFQExcel} className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm">
+            <DownloadButton onClick={downloadRFQExcel} className="flex-shrink-0 flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm whitespace-nowrap">
               <Download className="w-4 h-4"/>Download Excel
             </DownloadButton>
-            <button onClick={() => { const next = !rfqShowSimilarity; setRfqShowSimilarity(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter, next); }} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${rfqShowSimilarity ? 'bg-amber-100 text-amber-700 border border-amber-200 hover:bg-amber-200' : darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
+            <button onClick={() => { const next = !rfqShowSimilarity; setRfqShowSimilarity(next); setRfqPage(1); fetchRFQData(1, rfqPerPage, rfqAppliedSearch, false, rfqFilters, rfqPicFilter, next); }} className={`flex-shrink-0 flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm whitespace-nowrap ${rfqShowSimilarity ? 'bg-amber-100 text-amber-700 border border-amber-200 hover:bg-amber-200' : darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
               {rfqShowSimilarity ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}{rfqShowSimilarity ? 'Hide Similarity' : 'Show Similarity'}
             </button>
-            <button onClick={() => fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, true, rfqFilters, rfqPicFilter)} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
+            <button onClick={() => fetchRFQData(rfqPage, rfqPerPage, rfqAppliedSearch, true, rfqFilters, rfqPicFilter)} className={`flex-shrink-0 flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm whitespace-nowrap ${darkMode?'bg-gray-700 text-gray-100 hover:bg-gray-600':'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
               <RotateCcw className="w-4 h-4"/>Refresh Sheet
             </button>
-            <FiltersToggleButton
-              open={rfqFiltersOpen}
-              onClick={()=>setRfqFiltersOpen(o=>!o)}
-              darkMode={darkMode}
-              count={filterValues(rfqFilters.checks).length + filterValues(rfqFilters.clients).length + filterValues(rfqFilters.rfq_numbers).length + filterValues(rfqFilters.brands).length + filterValues(rfqFilters.purchase_pics).length + filterValues(rfqFilters.vendors).length}
-            />
+            <div className="flex-shrink-0">
+              <FiltersToggleButton
+                open={rfqFiltersOpen}
+                onClick={()=>setRfqFiltersOpen(o=>!o)}
+                darkMode={darkMode}
+                count={filterValues(rfqFilters.checks).length + filterValues(rfqFilters.clients).length + filterValues(rfqFilters.rfq_numbers).length + filterValues(rfqFilters.brands).length + filterValues(rfqFilters.purchase_pics).length + filterValues(rfqFilters.vendors).length}
+              />
+            </div>
           </div>
         </div>
 
@@ -6313,13 +6380,17 @@ const App = () => {
               `flex-nowrap` keeps the buttons themselves on one line (with
               horizontal scroll if needed) so they never "menumpuk" (stack). */}
           <div className="flex flex-nowrap items-center justify-end gap-2 ml-auto overflow-x-auto max-w-full -mx-1 px-1">
-            {/* Search — always visible, left of the action buttons. */}
-            <div className="flex-shrink-0 flex items-center gap-1.5">
-              <input value={importSearch} onChange={e=>setImportSearch(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter'){ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); } }} placeholder="Search vendor, PO, item, BL, invoice..." className={`w-48 h-10 px-3 py-2 rounded-xl text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder:text-gray-400' : 'bg-white border-gray-200 text-gray-800 placeholder:text-gray-400'}`}/>
-              <button onClick={()=>{ setImportAppliedSearch(importSearch); setImportPage(1); fetchImportData(1, importPerPage, importSearch, false, importFilters, importReqDlvSort, importYupiPoSort); }} className="h-10 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm flex-shrink-0 flex items-center gap-1.5">
-                <Search className="w-4 h-4"/>Search
-              </button>
-            </div>
+            {/* Search — trigger-button style to match RFQMultiSearch/SearchInput
+                used on every other table page (icon + label + chevron button
+                that opens a small panel), instead of a permanently-open
+                input + separate Search button. */}
+            <ImportSearch
+              value={importSearch}
+              onChange={setImportSearch}
+              onSearch={(searchValue) => { setImportAppliedSearch(searchValue); setImportPage(1); fetchImportData(1, importPerPage, searchValue, false, importFilters, importReqDlvSort, importYupiPoSort); }}
+              darkMode={darkMode}
+              txt2={txt2}
+            />
             {/* Vendor Import — single dropdown combining Template + Upload.
                 Keeps the header tidy and matches the "1 menu per logical
                 action" pattern used in other tables (RFQ, Item Registration). */}
@@ -6358,22 +6429,49 @@ const App = () => {
             </div>
             {/* Copy Sheet — triggers a fresh sync from the live Import tracker sheet. */}
             <button onClick={() => fetchImportData(importPage, importPerPage, importAppliedSearch, true, importFilters, importReqDlvSort, importYupiPoSort)} className={`flex-shrink-0 flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm whitespace-nowrap ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}><RotateCcw className="w-4 h-4"/>Copy Sheet</button>
-            {/* Hide/Show Checklist — toggle visibility of the 8 checklist columns (SAP INPUT, BL/AWB, …, COO). */}
-            {checklistCount > 0 && (
-              <button onClick={() => setShowImportChecklist(v => !v)} className={`flex-shrink-0 flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm whitespace-nowrap ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
-                {showImportChecklist ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}
-                {showImportChecklist ? 'Hide Checklist' : 'Show Checklist'}
-              </button>
-            )}
-            {/* Show/Hide Detail — toggles the per-item block (SO through
-                PURCHASE AMOUNT). When hidden, the table collapses to one
-                line per row (much narrower) for a quick overview without
-                the long Spec / Item Name / Remark columns. */}
-            {detailCount > 0 && (
-              <button onClick={() => setShowImportDetail(v => !v)} className={`flex-shrink-0 flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm whitespace-nowrap ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
-                {showImportDetail ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}
-                {showImportDetail ? 'Hide Detail' : 'Show Detail'}
-              </button>
+            {/* View — single dropdown combining the Checklist and Detail
+                visibility toggles. Replaces two separate wide buttons so the
+                toolbar fits on one line, matching the "Vendor Import" pattern. */}
+            {(checklistCount > 0 || detailCount > 0) && (
+              <div className="relative flex-shrink-0">
+                <button
+                  ref={importViewDropdown.triggerRef}
+                  type="button"
+                  onClick={() => setImportViewMenuOpen(v => !v)}
+                  onBlur={() => setTimeout(() => setImportViewMenuOpen(false), 150)}
+                  className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm whitespace-nowrap ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}
+                >
+                  <Eye className="w-4 h-4"/>View
+                  <svg className={`w-3 h-3 transition-transform ${importViewMenuOpen ? 'rotate-180' : ''}`} viewBox="0 0 12 12" fill="none"><path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                </button>
+                {importViewMenuOpen && (
+                  <div
+                    style={{ ...importViewDropdown.menuPos.style, zIndex: 9999 }}
+                    className={`rounded-xl border shadow-2xl overflow-hidden ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}
+                  >
+                    {checklistCount > 0 && (
+                      <button
+                        type="button"
+                        onMouseDown={(e) => { e.preventDefault(); setShowImportChecklist(v => !v); setImportViewMenuOpen(false); }}
+                        className={`flex items-center gap-2 w-full px-3 py-2.5 text-left text-sm font-medium ${darkMode ? 'text-gray-100 hover:bg-gray-700' : 'text-gray-700 hover:bg-blue-50'}`}
+                      >
+                        {showImportChecklist ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}
+                        {showImportChecklist ? 'Hide Checklist' : 'Show Checklist'}
+                      </button>
+                    )}
+                    {detailCount > 0 && (
+                      <button
+                        type="button"
+                        onMouseDown={(e) => { e.preventDefault(); setShowImportDetail(v => !v); setImportViewMenuOpen(false); }}
+                        className={`flex items-center gap-2 w-full px-3 py-2.5 text-left text-sm font-medium ${darkMode ? 'text-gray-100 hover:bg-gray-700' : 'text-gray-700 hover:bg-blue-50'}`}
+                      >
+                        {showImportDetail ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}
+                        {showImportDetail ? 'Hide Detail' : 'Show Detail'}
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
             )}
             {/* Print PO — opens the Serveone PO printing tool in a new tab. */}
             <a href="https://serveone.streamlit.app/" target="_blank" rel="noopener noreferrer" className={`flex-shrink-0 flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-semibold shadow-sm whitespace-nowrap ${darkMode ? 'bg-gray-700 text-gray-100 hover:bg-gray-600' : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'}`}>
@@ -6427,7 +6525,7 @@ const App = () => {
                     SAP not input: {fmtNum(importKpis.this_week_no_sap)}
                   </p>
                 </div>
-                <div className={`p-1.5 rounded-lg flex-shrink-0 ${darkMode ? 'bg-amber-900/40 text-amber-200' : 'bg-amber-100 text-amber-700'}`}>
+                <div className={`p-1.5 rounded-lg flex-shrink-0 ${darkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-100 text-gray-600'}`}>
                   <Calendar className="w-3.5 h-3.5" />
                 </div>
               </div>
@@ -6440,7 +6538,7 @@ const App = () => {
                   <h3 className={`text-xl font-bold leading-tight ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>{fmtCurShort(importKpis.sales_amount)}</h3>
                   <p className={`text-[11px] leading-tight ${txt2}`} title="Sum of AMOUNT column">{fmtCur(importKpis.sales_amount)}</p>
                 </div>
-                <div className={`p-1.5 rounded-lg flex-shrink-0 ${darkMode ? 'bg-emerald-900/40 text-emerald-200' : 'bg-emerald-100 text-emerald-700'}`}>
+                <div className={`p-1.5 rounded-lg flex-shrink-0 ${darkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-100 text-gray-600'}`}>
                   <DollarSign className="w-3.5 h-3.5" />
                 </div>
               </div>
@@ -6453,7 +6551,7 @@ const App = () => {
                   <h3 className={`text-xl font-bold leading-tight ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}>{fmtCurShort(importKpis.po_amount_idr)}</h3>
                   <p className={`text-[11px] leading-tight ${txt2}`} title="Converted using ETA-date exchange rate">{fmtCur(importKpis.po_amount_idr)}</p>
                 </div>
-                <div className={`p-1.5 rounded-lg flex-shrink-0 ${darkMode ? 'bg-blue-900/40 text-blue-200' : 'bg-blue-100 text-blue-700'}`}>
+                <div className={`p-1.5 rounded-lg flex-shrink-0 ${darkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-100 text-gray-600'}`}>
                   <Wallet className="w-3.5 h-3.5" />
                 </div>
               </div>
@@ -6466,7 +6564,7 @@ const App = () => {
                   <h3 className={`text-xl font-bold leading-tight ${importKpis.gross_margin < 0 ? 'text-red-500' : (darkMode ? 'text-gray-100' : 'text-gray-800')}`}>{fmtCurShort(importKpis.gross_margin)}</h3>
                   <p className={`text-[11px] leading-tight ${txt2}`}>{fmtCur(importKpis.gross_margin)}</p>
                 </div>
-                <div className={`p-1.5 rounded-lg flex-shrink-0 ${importKpis.gross_margin < 0 ? (darkMode ? 'bg-red-900/50 text-red-200' : 'bg-red-100 text-red-700') : (darkMode ? 'bg-emerald-900/40 text-emerald-200' : 'bg-emerald-100 text-emerald-700')}`}>
+                <div className={`p-1.5 rounded-lg flex-shrink-0 ${darkMode ? 'bg-gray-700 text-gray-200' : 'bg-gray-100 text-gray-600'}`}>
                   <TrendingUp className="w-3.5 h-3.5" />
                 </div>
               </div>
