@@ -9784,6 +9784,55 @@ def update_import_cells_batch():
 # filter), user perlu membersihkan 52k row lama yang sudah terlanjur masuk DB.
 # Panggil endpoint ini SEKALI setelah deploy, lalu klik Copy Sheet untuk
 # re-sync dengan vendor filter yang aktif.
+@app.route('/api/admin/import-diagnostics', methods=['GET'])
+def import_diagnostics():
+    """Diagnostic endpoint untuk audit Import dashboard DB state.
+    Returns: total row count, breakdown by source_key, vendor match analysis,
+    sample row keys. Dipakai untuk debug "count masih 28k padahal purge 0"."""
+    try:
+        uploaded_vendor_names = import_uploaded_vendor_names()
+        uploaded_vendor_set = {v.strip().lower() for v in uploaded_vendor_names if v and v.strip()}
+        all_rows = ImportDashboardRow.query.all()
+        by_source_key = {}
+        vendor_match_count = 0
+        vendor_no_match_count = 0
+        no_vendor_count = 0
+        sample_no_match_vendors = []
+        sample_no_vendor_keys = []
+        for row in all_rows:
+            sk = row.source_key or '(empty)'
+            by_source_key[sk] = by_source_key.get(sk, 0) + 1
+            try: data = json.loads(row.data_json or '{}')
+            except: data = {}
+            vendor = import_nonblank(data.get('vendor')) or import_nonblank(data.get('vendor_name')) or import_nonblank(row.vendor_name)
+            if not vendor:
+                no_vendor_count += 1
+                if len(sample_no_vendor_keys) < 5:
+                    sample_no_vendor_keys.append(row.row_key)
+            elif uploaded_vendor_set and import_vendor_match(vendor, uploaded_vendor_set):
+                vendor_match_count += 1
+            else:
+                vendor_no_match_count += 1
+                if len(sample_no_match_vendors) < 10:
+                    sample_no_match_vendors.append({'row_key': row.row_key, 'vendor': vendor, 'source_key': sk})
+        return jsonify({
+            'success': True,
+            'total_rows_in_db': len(all_rows),
+            'breakdown_by_source_key': by_source_key,
+            'uploaded_vendor_count': len(uploaded_vendor_set),
+            'uploaded_vendor_names': list(uploaded_vendor_set)[:20],
+            'vendor_match_count': vendor_match_count,
+            'vendor_no_match_count': vendor_no_match_count,
+            'no_vendor_count': no_vendor_count,
+            'sample_no_match_vendors': sample_no_match_vendors,
+            'sample_no_vendor_keys': sample_no_vendor_keys,
+            '_IMPORT_VISIBLE_SOURCE_KEYS': list(_IMPORT_VISIBLE_SOURCE_KEYS),
+            '_LEGACY_IMPORT_SOURCE_KEYS': list(_LEGACY_IMPORT_SOURCE_KEYS),
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/admin/purge-non-vendor-import-rows', methods=['POST'])
 def purge_non_vendor_import_rows():
     try:
@@ -9821,6 +9870,31 @@ def purge_non_vendor_import_rows():
             'remaining': len(all_rows) - purged_count,
             'uploaded_vendor_count': len(uploaded_vendor_set),
             'message': f'Purged {purged_count} non-vendor Import rows. {len(all_rows) - purged_count} rows remain.'
+        })
+    except Exception as e:
+        db.session.rollback()
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+# FIX V28b: Admin endpoint untuk hard-purge SEMUA Import dashboard rows (tanpa
+# mempedulikan vendor match). Dipakai kalau /api/admin/purge-non-vendor-import-rows
+# tidak berhasil (mis. karena vendor di ImportVendor list terlalu luas/fuzzy
+# match terlalu permisif). Setelah purge all, user harus upload Vendor Import
+# list + klik Copy Sheet untuk re-sync dari awal dengan vendor filter aktif.
+@app.route('/api/admin/purge-all-import-rows', methods=['POST'])
+def purge_all_import_rows():
+    try:
+        all_rows = ImportDashboardRow.query.all()
+        purged_count = len(all_rows)
+        for row in all_rows:
+            db.session.delete(row)
+        db.session.commit()
+        clear_runtime_caches()
+        return jsonify({
+            'success': True,
+            'purged': purged_count,
+            'remaining': 0,
+            'message': f'Purged ALL {purged_count} Import dashboard rows. DB is now empty. Upload Vendor Import list + click Copy Sheet to re-sync.'
         })
     except Exception as e:
         db.session.rollback()
